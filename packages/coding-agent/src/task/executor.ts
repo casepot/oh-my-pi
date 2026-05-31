@@ -1150,18 +1150,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					: { ...resolveModelOverride(modelPatterns, modelRegistry, settings), authFallbackUsed: false };
 			let resolvedModelOverride = await resolveAgainstAvailable();
 			if (!resolvedModelOverride.model && modelPatterns.length > 0) {
-				const allModelRegistry = Object.create(modelRegistry) as ModelRegistry;
-				allModelRegistry.getAvailable = () => modelRegistry.getAll();
+				const allModels = modelRegistry.getAll();
 				resolvedModelOverride = allowParentModelAuthFallback
 					? await awaitAbortable(
 							resolveModelOverrideWithAuthFallback(
 								modelPatterns,
 								options.parentActiveModelPattern,
-								allModelRegistry,
+								modelRegistry,
 								settings,
+								allModels,
 							),
 						)
-					: { ...resolveModelOverride(modelPatterns, allModelRegistry, settings), authFallbackUsed: false };
+					: {
+							...resolveModelOverride(modelPatterns, modelRegistry, settings, allModels),
+							authFallbackUsed: false,
+						};
 			}
 			const {
 				model,

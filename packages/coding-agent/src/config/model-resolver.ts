@@ -717,9 +717,10 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
+	candidateModels?: Model<Api>[],
 ): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
-	const availableModels = modelRegistry.getAvailable();
+	const availableModels = candidateModels ?? modelRegistry.getAvailable();
 	const matchPreferences = { usageOrder: settings?.getStorage()?.getModelUsageOrder() };
 	for (const pattern of modelPatterns) {
 		const { model, thinkingLevel, explicitThinkingLevel } = resolveModelRoleValue(pattern, availableModels, {
@@ -760,13 +761,14 @@ export async function resolveModelOverrideWithAuthFallback(
 	parentActiveModelPattern: string | undefined,
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
+	candidateModels?: Model<Api>[],
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
 	authFallbackUsed: boolean;
 }> {
-	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
+	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings, candidateModels);
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}
@@ -776,7 +778,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 
-	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
+	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings, candidateModels);
 	if (!fallback.model) {
 		return { ...primary, authFallbackUsed: false };
 	}

@@ -588,6 +588,40 @@ describe("resolveModelOverride", () => {
 		expect(result.thinkingLevel).toBe(Effort.High);
 		expect(result.explicitThinkingLevel).toBe(true);
 	});
+
+	test("resolves exact canonical ids against explicit candidate models without wrapping the registry", () => {
+		class PrivateCanonicalRegistry {
+			#models = canonicalVariantModels;
+
+			getAvailable(): Model<"anthropic-messages">[] {
+				return [];
+			}
+
+			resolveCanonicalModel(canonicalId: string, options?: { candidates?: Model<"anthropic-messages">[] }) {
+				if (canonicalId !== "claude-sonnet-4-5") return undefined;
+				const fallbackModels = this.#models;
+				const candidates = options?.candidates ?? fallbackModels;
+				return (
+					candidates.find(model => model.provider === "github-copilot") ??
+					candidates.find(model => model.provider === "anthropic")
+				);
+			}
+
+			getCanonicalId(): string {
+				return "claude-sonnet-4-5";
+			}
+		}
+
+		const result = resolveModelOverride(
+			["claude-sonnet-4-5"],
+			new PrivateCanonicalRegistry() as unknown as Parameters<typeof resolveModelOverride>[1],
+			undefined,
+			canonicalVariantModels,
+		);
+
+		expect(result.model?.provider).toBe("github-copilot");
+		expect(result.model?.id).toBe("anthropic/claude-sonnet-4.5");
+	});
 });
 describe("resolveCliModel", () => {
 	test("resolves exact canonical ids to the preferred concrete provider", () => {

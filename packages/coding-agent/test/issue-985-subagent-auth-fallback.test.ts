@@ -172,4 +172,43 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 		expect(result.model?.provider).toBe("opencode-zen");
 		expect(result.model?.id).toBe("qwen3.6-plus-free");
 	});
+
+	test("resolves explicit all-model candidates without wrapping private-field registries", async () => {
+		class PrivateFieldRegistry {
+			#models = [parentModel, unauthedTaskModel];
+			canonicalCalls = 0;
+
+			getAvailable(): Model<Api>[] {
+				return [];
+			}
+
+			async getApiKey(model: Model<Api>): Promise<string | undefined> {
+				return model.provider === "deepseek" ? "sk-test-token" : undefined;
+			}
+
+			resolveCanonicalModel(canonicalId: string, options?: { candidates?: Model<Api>[] }): Model<Api> | undefined {
+				this.canonicalCalls += 1;
+				const fallbackModels = this.#models;
+				const candidates = options?.candidates ?? fallbackModels;
+				return candidates.find(model => model.id === canonicalId);
+			}
+		}
+
+		const registry = new PrivateFieldRegistry();
+		const typedRegistry = registry as unknown as ModelLookupRegistry & {
+			getApiKey(model: Model<Api>): Promise<string | undefined>;
+		};
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free"],
+			"deepseek/deepseek-v4-pro",
+			typedRegistry,
+			undefined,
+			[parentModel, unauthedTaskModel],
+		);
+
+		expect(registry.canonicalCalls).toBeGreaterThan(0);
+		expect(result.authFallbackUsed).toBe(true);
+		expect(result.model?.provider).toBe("deepseek");
+		expect(result.model?.id).toBe("deepseek-v4-pro");
+	});
 });
