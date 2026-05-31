@@ -2,17 +2,19 @@
 set -e
 
 # OMP Coding Agent Installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.sh | sh
 #
 # Options:
-#   --source       Install via bun (installs bun if needed)
-#   --binary       Always install prebuilt binary
-#   --ref <ref>    Install specific tag/commit/branch
+#   --source       Install via bun from the fork source checkout (installs bun if needed)
+#   --binary       Always install prebuilt binary from fork releases
+#   --ref <ref>    Install specific tag/commit/branch from the fork source checkout
 #   -r <ref>       Shorthand for --ref
 
-REPO="can1357/oh-my-pi"
-PACKAGE="@oh-my-pi/pi-coding-agent"
+REPO="casepot/oh-my-pi"
+UPSTREAM_REPO="can1357/oh-my-pi"
 INSTALL_DIR="${PI_INSTALL_DIR:-$HOME/.local/bin}"
+DEFAULT_REF="main"
+SOURCE_DIR="${OMP_SOURCE_DIR:-${PI_SOURCE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omp/source/oh-my-pi}}"
 MIN_BUN_VERSION="1.3.14"
 
 # Parse arguments
@@ -139,47 +141,96 @@ has_git_lfs() {
     command -v git-lfs >/dev/null 2>&1
 }
 
-# Install via bun
-install_via_bun() {
-    echo "Installing via bun..."
-    if [ -n "$REF" ]; then
-        if ! has_git; then
-            echo "git is required for --ref when installing from source"
-            exit 1
-        fi
-
-        TMP_DIR="$(mktemp -d)"
-        trap 'rm -rf "$TMP_DIR"' EXIT
-
-        if git clone --depth 1 --branch "$REF" "https://github.com/${REPO}.git" "$TMP_DIR" >/dev/null 2>&1; then
-            :
-        else
-            git clone "https://github.com/${REPO}.git" "$TMP_DIR"
-            (cd "$TMP_DIR" && git checkout "$REF")
-        fi
-
-        # Pull LFS files
-        if has_git_lfs; then
-            (cd "$TMP_DIR" && git lfs pull)
-        fi
-
-        if [ ! -d "$TMP_DIR/packages/coding-agent" ]; then
-            echo "Expected package at ${TMP_DIR}/packages/coding-agent"
-            exit 1
-        fi
-
-        bun install -g "$TMP_DIR/packages/coding-agent" || {
-            echo "Failed to install from source"
-            exit 1
-        }
-    else
-        bun install -g "$PACKAGE" || {
-            echo "Failed to install $PACKAGE"
-            exit 1
-        }
+# Install via fork source checkout and bun link
+ensure_clean_source_checkout() {
+    if [ -n "$(git -C "$SOURCE_DIR" status --porcelain)" ]; then
+        echo "Source checkout has local changes: $SOURCE_DIR"
+        echo "Commit or stash them before updating."
+        exit 1
     fi
+}
+
+ensure_remote() {
+    name="$1"
+    url="$2"
+    if git -C "$SOURCE_DIR" remote get-url "$name" >/dev/null 2>&1; then
+        git -C "$SOURCE_DIR" remote set-url "$name" "$url"
+    else
+        git -C "$SOURCE_DIR" remote add "$name" "$url"
+    fi
+}
+
+checkout_source_ref() {
+    ref="$1"
+    if git -C "$SOURCE_DIR" show-ref --verify --quiet "refs/remotes/origin/$ref"; then
+        git -C "$SOURCE_DIR" checkout -B "$ref" "origin/$ref"
+    else
+        git -C "$SOURCE_DIR" checkout "$ref"
+    fi
+}
+
+prepare_source_checkout() {
+    ref="$1"
+    repo_url="https://github.com/${REPO}.git"
+    upstream_url="https://github.com/${UPSTREAM_REPO}.git"
+
+    if [ -d "$SOURCE_DIR/.git" ] || [ -f "$SOURCE_DIR/.git" ]; then
+        ensure_clean_source_checkout
+        ensure_remote origin "$repo_url"
+        ensure_remote upstream "$upstream_url"
+    else
+        if [ -e "$SOURCE_DIR" ] && [ -n "$(ls -A "$SOURCE_DIR" 2>/dev/null)" ]; then
+            echo "Cannot install source checkout into non-empty directory: $SOURCE_DIR"
+            exit 1
+        fi
+        mkdir -p "$(dirname "$SOURCE_DIR")"
+        git clone "$repo_url" "$SOURCE_DIR"
+        git -C "$SOURCE_DIR" remote add upstream "$upstream_url"
+    fi
+
+    git -C "$SOURCE_DIR" fetch --tags origin
+    git -C "$SOURCE_DIR" fetch --tags upstream || true
+    checkout_source_ref "$ref"
+
+    if has_git_lfs; then
+        git -C "$SOURCE_DIR" lfs pull
+    fi
+
+    if [ ! -d "$SOURCE_DIR/packages/coding-agent" ]; then
+        echo "Expected package at ${SOURCE_DIR}/packages/coding-agent"
+        exit 1
+    fi
+}
+
+install_source_links() {
+    (cd "$SOURCE_DIR" && bun install) || {
+        echo "Failed to install source dependencies"
+        exit 1
+    }
+    (cd "$SOURCE_DIR/packages/coding-agent" && bun link) || {
+        echo "Failed to link coding-agent package"
+        exit 1
+    }
+    (cd "$SOURCE_DIR/packages/ai" && bun link) || {
+        echo "Failed to link ai package"
+        exit 1
+    }
+}
+
+install_via_bun() {
+    echo "Installing via fork source checkout..."
+    if ! has_git; then
+        echo "git is required for source installs"
+        exit 1
+    fi
+
+    ref="${REF:-$DEFAULT_REF}"
+    prepare_source_checkout "$ref"
+    install_source_links
+
     echo ""
-    echo "✓ Installed omp via bun"
+    echo "✓ Installed omp via fork source checkout"
+    echo "Source: $SOURCE_DIR"
     echo "Run 'omp' to get started!"
 }
 

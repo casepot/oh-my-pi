@@ -1,12 +1,12 @@
 # OMP Coding Agent Installer for Windows
-# Usage: irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.ps1 | iex
 #
 # Or with options:
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Source
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Binary
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Source -Ref v3.20.1
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Source -Ref main
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/can1357/oh-my-pi/main/scripts/install.ps1))) -Binary -Ref v3.20.1
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.ps1))) -Source
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.ps1))) -Binary
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.ps1))) -Source -Ref v3.20.1
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.ps1))) -Source -Ref main
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.ps1))) -Binary -Ref v3.20.1
 
 param(
     [switch]$Source,
@@ -16,10 +16,18 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "can1357/oh-my-pi"
-$Package = "@oh-my-pi/pi-coding-agent"
+$Repo = "casepot/oh-my-pi"
+$UpstreamRepo = "can1357/oh-my-pi"
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\omp" }
+$SourceDir = if ($env:OMP_SOURCE_DIR) {
+    $env:OMP_SOURCE_DIR
+} elseif ($env:PI_SOURCE_DIR) {
+    $env:PI_SOURCE_DIR
+} else {
+    Join-Path $env:LOCALAPPDATA "omp\source\oh-my-pi"
+}
 $BinaryName = "omp-windows-x64.exe"
+$DefaultRef = "main"
 $MinimumBunVersion = "1.3.14"
 
 function Test-BunInstalled {
@@ -168,67 +176,154 @@ function Install-Bun {
     Assert-BunVersion $MinimumBunVersion
 }
 
-function Install-ViaBun {
-    Write-Host "Installing via bun..."
-    if ($Ref) {
-        if (-not (Test-GitInstalled)) {
-            throw "git is required for -Ref when installing from source"
+function Assert-CleanSourceCheckout {
+    Push-Location $SourceDir
+    try {
+        $status = git status --porcelain
+        if ($status) {
+            throw "Source checkout has local changes: $SourceDir`nCommit or stash them before updating."
         }
+    } finally {
+        Pop-Location
+    }
+}
 
-        $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("omp-install-" + [System.Guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+function Ensure-Remote {
+    param(
+        [string]$Name,
+        [string]$Url
+    )
 
+    Push-Location $SourceDir
+    try {
+        $current = $null
         try {
-            $repoUrl = "https://github.com/$Repo.git"
-            $cloneOk = $false
-            try {
-                git clone --depth 1 --branch $Ref $repoUrl $tmpRoot | Out-Null
-                $cloneOk = $true
-            } catch {
-                $cloneOk = $false
-            }
-
-            if (-not $cloneOk) {
-                git clone $repoUrl $tmpRoot | Out-Null
-                Push-Location $tmpRoot
-                try {
-                    git checkout $Ref | Out-Null
-                } finally {
-                    Pop-Location
-                }
-            }
-
-            # Pull LFS files
-            if (Test-GitLfsInstalled) {
-                Push-Location $tmpRoot
-                try {
-                    git lfs pull | Out-Null
-                } finally {
-                    Pop-Location
-                }
-            }
-
-            $packagePath = Join-Path $tmpRoot "packages\coding-agent"
-            if (-not (Test-Path $packagePath)) {
-                throw "Expected package at $packagePath"
-            }
-
-            bun install -g $packagePath
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to install from $packagePath via bun"
-            }
-        } finally {
-            Remove-Item -Recurse -Force $tmpRoot -ErrorAction SilentlyContinue
+            $current = git remote get-url $Name 2>$null
+        } catch {
+            $current = $null
         }
+
+        if ($current) {
+            git remote set-url $Name $Url
+        } else {
+            git remote add $Name $Url
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Checkout-SourceRef {
+    param([string]$RefToCheckout)
+
+    Push-Location $SourceDir
+    try {
+        git show-ref --verify --quiet "refs/remotes/origin/$RefToCheckout"
+        if ($LASTEXITCODE -eq 0) {
+            git checkout -B $RefToCheckout "origin/$RefToCheckout"
+        } else {
+            git checkout $RefToCheckout
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Prepare-SourceCheckout {
+    param([string]$RefToCheckout)
+
+    $repoUrl = "https://github.com/$Repo.git"
+    $upstreamUrl = "https://github.com/$UpstreamRepo.git"
+    $gitPath = Join-Path $SourceDir ".git"
+
+    if (Test-Path $gitPath) {
+        Assert-CleanSourceCheckout
+        Ensure-Remote -Name "origin" -Url $repoUrl
+        Ensure-Remote -Name "upstream" -Url $upstreamUrl
     } else {
-        bun install -g $Package
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to install $Package via bun"
+        if (Test-Path $SourceDir) {
+            $firstEntry = Get-ChildItem -LiteralPath $SourceDir -Force | Select-Object -First 1
+            if ($firstEntry) {
+                throw "Cannot install source checkout into non-empty directory: $SourceDir"
+            }
+        }
+
+        $parent = Split-Path -Parent $SourceDir
+        if ($parent) {
+            New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        }
+        git clone $repoUrl $SourceDir
+        Push-Location $SourceDir
+        try {
+            git remote add upstream $upstreamUrl
+        } finally {
+            Pop-Location
         }
     }
 
+    Push-Location $SourceDir
+    try {
+        git fetch --tags origin
+        try {
+            git fetch --tags upstream
+        } catch {
+        }
+    } finally {
+        Pop-Location
+    }
+
+    Checkout-SourceRef $RefToCheckout
+
+    if (Test-GitLfsInstalled) {
+        Push-Location $SourceDir
+        try {
+            git lfs pull | Out-Null
+        } finally {
+            Pop-Location
+        }
+    }
+
+    $packagePath = Join-Path $SourceDir "packages\coding-agent"
+    if (-not (Test-Path $packagePath)) {
+        throw "Expected package at $packagePath"
+    }
+}
+
+function Install-SourceLinks {
+    Push-Location $SourceDir
+    try {
+        bun install
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install source dependencies"
+        }
+
+        bun --cwd=packages/coding-agent link
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to link coding-agent package"
+        }
+
+        bun --cwd=packages/ai link
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to link ai package"
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function Install-ViaBun {
+    Write-Host "Installing via fork source checkout..."
+    if (-not (Test-GitInstalled)) {
+        throw "git is required for source installs"
+    }
+
+    $refToCheckout = if ($Ref) { $Ref } else { $DefaultRef }
+    Prepare-SourceCheckout $refToCheckout
+    Install-SourceLinks
+
     Write-Host ""
-    Write-Host "✓ Installed omp via bun" -ForegroundColor Green
+    Write-Host "✓ Installed omp via fork source checkout" -ForegroundColor Green
+    Write-Host "Source: $SourceDir"
 
     Configure-BashShell
 

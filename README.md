@@ -28,31 +28,33 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 
 ## Install
 
-**macOS · Linux**
+**macOS · Linux (fork source, recommended)**
 
 ```sh
-curl -fsSL https://omp.sh/install | sh
+curl -fsSL https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.sh | sh
 ```
 
-**Bun (recommended)**
+This keeps a durable fork checkout at `${XDG_DATA_HOME:-~/.local/share}/omp/source/oh-my-pi` and links `omp` from that source tree, so future `omp update` pulls from `casepot/oh-my-pi`.
 
-```sh
-bun install -g @oh-my-pi/pi-coding-agent
-```
-
-**Windows (PowerShell)**
+**Windows (PowerShell, fork source)**
 
 ```powershell
-irm https://omp.sh/install.ps1 | iex
+irm https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.ps1 | iex
 ```
 
-**Pinned versions (mise)**
+**Pinned fork refs**
 
 ```sh
-mise use -g github:can1357/oh-my-pi
+curl -fsSL https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.sh | sh -s -- --ref main
 ```
 
-macOS · Linux · Windows · bun ≥ 1.3.14
+**Prebuilt binaries**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/casepot/oh-my-pi/main/scripts/install.sh | sh -s -- --binary
+```
+
+macOS · Linux · Windows · bun ≥ 1.3.14 for source installs
 
 ### Shell completions
 
