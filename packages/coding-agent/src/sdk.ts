@@ -22,7 +22,6 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
-	$env,
 	$flag,
 	extractRetryHint,
 	getAgentDbPath,
@@ -462,7 +461,7 @@ export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsRe
 export async function discoverSkills(
 	cwd?: string,
 	_agentDir?: string,
-	settings?: SkillsSettings,
+	settings?: SkillsSettings & { includeUserSources?: boolean },
 ): Promise<{ skills: Skill[]; warnings: SkillWarning[] }> {
 	return await loadSkillsInternal({
 		...settings,
@@ -888,6 +887,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
 					...skillsSettings,
 					disabledExtensions: disabledExtensionIds,
+					includeUserSources: settings.get("discovery.enableUserSources") === true,
 				})
 			: undefined;
 	discoveredSkillsPromise?.catch(() => {});
@@ -953,6 +953,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const allowedModels = await logger.time("resolveAllowedModels", () =>
 		resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
 	);
+	const allowedModelKeys = new Set(allowedModels.map(candidate => `${candidate.provider}/${candidate.id}`));
 	const defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 		resolveModelRoleValue(settings.getModelRole("default"), allowedModels, {
 			settings,
@@ -970,7 +971,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const parsedModel = parseModelString(defaultModelStr);
 			if (parsedModel) {
 				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && (await hasModelApiKey(restoredModel))) {
+				const restoredKey = restoredModel ? `${restoredModel.provider}/${restoredModel.id}` : undefined;
+				if (
+					restoredModel &&
+					restoredKey &&
+					allowedModelKeys.has(restoredKey) &&
+					(await hasModelApiKey(restoredModel))
+				) {
 					model = restoredModel;
 				}
 			}
@@ -1282,6 +1289,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 				},
 				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
+				enableUserConfig: settings.get("mcp.enableUserConfig") ?? false,
 				// Always filter Exa - we have native integration
 				filterExa: true,
 				// Filter browser MCP servers when builtin browser tool is active
@@ -1289,14 +1297,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				cacheStorage: settings.getStorage(),
 				authStorage,
 			});
+			mcpResult.manager.setExaApiKey(mcpResult.exaApiKeys[0] ?? null);
 			mcpManager = mcpResult.manager;
 
 			if (settings.get("mcp.notifications")) {
 				mcpManager.setNotificationsEnabled(true);
-			}
-			// If we extracted Exa API keys from MCP configs and EXA_API_KEY isn't set, use the first one
-			if (mcpResult.exaApiKeys.length > 0 && !$env.EXA_API_KEY) {
-				Bun.env.EXA_API_KEY = mcpResult.exaApiKeys[0];
 			}
 
 			// Log MCP errors
@@ -1961,6 +1966,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
+		const scopedModels =
+			options.scopedModels ??
+			(settings.get("enabledModels").length > 0
+				? allowedModels.map(candidate => ({ model: candidate }))
+				: undefined);
 		session = new AgentSession({
 			agent,
 			thinkingLevel,
@@ -1972,7 +1982,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// AsyncJobManager on teardown; subagents inherit the parent's and
 			// **MUST NOT** tear it down.
 			ownedAsyncJobManager: asyncJobManager,
-			scopedModels: options.scopedModels,
+			scopedModels,
 			promptTemplates,
 			slashCommands,
 			extensionRunner,

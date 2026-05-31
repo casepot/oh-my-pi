@@ -67,9 +67,9 @@ describe("issue #849: explicit default model survives later assistant-message in
 
 	it("preserves explicit user-selected default when a later assistant message reports a downgraded model", () => {
 		// User explicitly picks gpt-5.5 as default.
-		// Then a temporary fallback (retry / context promotion) appends a
-		// model_change with role="temporary" pointing at gpt-5.4, and the
-		// next assistant message is produced under that temporary model.
+		// Then a temporary retry fallback appends a model_change with
+		// role="temporary" pointing at gpt-5.4, and the next assistant message
+		// is produced under that temporary model.
 		const entries: SessionEntry[] = [
 			makeModelChange("a1", null, "openai-codex/gpt-5.5", "default"),
 			makeAssistantEntry("a2", "a1", "openai-codex", "gpt-5.5"),

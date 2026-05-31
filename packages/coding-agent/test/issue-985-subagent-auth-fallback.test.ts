@@ -7,17 +7,14 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 /**
- * Regression test for #985.
+ * Regression coverage for the opt-in parent-model auth fallback introduced
+ * after #985.
  *
  * Reporter screenshot showed parent session on DeepSeek V4 Pro dispatching a
  * task subagent that resolved to `qwen3.6-plus-free` — an opencode-zen model
- * the user has no working credentials for. The dispatch hit a provider that
- * could not serve the model and surfaced a confusing API rejection instead of
- * silently using the parent's already-authenticated model.
- *
- * The fix: at dispatch time, if the resolved subagent model has no working
- * credentials, fall back to the parent session's active model (which by
- * definition has working auth — the parent turn is using it).
+ * the user has no working credentials for. The strict default is now a visible
+ * dispatch error; this helper remains for configurations that explicitly allow
+ * parent-model substitution.
  */
 
 const parentModel: Model<Api> = {

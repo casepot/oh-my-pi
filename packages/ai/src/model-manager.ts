@@ -327,7 +327,6 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
 		headers: dynamicModel.headers ? { ...existingModel.headers, ...dynamicModel.headers } : existingModel.headers,
 		compat: dynamicModel.compat ?? existingModel.compat,
-		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
 	});
 }
 

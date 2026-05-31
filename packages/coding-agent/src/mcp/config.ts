@@ -16,6 +16,8 @@ import type { MCPServerConfig } from "./types";
 export interface LoadMCPConfigsOptions {
 	/** Whether to load project-level config (default: true) */
 	enableProjectConfig?: boolean;
+	/** Whether to load user/global config (default: false) */
+	enableUserConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
@@ -93,19 +95,26 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
  * @param options Load options
  */
 export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOptions): Promise<LoadMCPConfigsResult> {
+	const enableUserConfig = options?.enableUserConfig ?? false;
 	const enableProjectConfig = options?.enableProjectConfig ?? true;
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
 
-	// Load MCP servers via capability system
-	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd });
+	// Load MCP servers via capability system. User/global sources stay off unless
+	// explicitly enabled for this call.
+	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd, includeUserSources: enableUserConfig });
 
-	// Filter out project-level configs if disabled
-	const servers = enableProjectConfig
-		? result.items
-		: result.items.filter(server => server._source.level !== "project");
+	// Filter source levels according to the active config profile. Default OMP
+	// behavior is project-explicit MCP only; user/global MCP servers are too
+	// broad to connect automatically.
+	const servers = result.items.filter(server => {
+		if (server._source.level === "project") return enableProjectConfig;
+		if (server._source.level === "user") return enableUserConfig;
+		return true;
+	});
 
-	// Load user-level disabled servers list
+	// User-level denylist is an explicit OMP control and still applies even
+	// when user/global MCP discovery is otherwise disabled.
 	const disabledServers = new Set(await readDisabledServers(getMCPConfigPath("user", cwd)));
 	// Convert to legacy format and preserve source metadata
 	let configs: Record<string, MCPServerConfig> = {};

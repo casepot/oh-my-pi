@@ -1759,8 +1759,6 @@
 
 ### Added
 
-- Added `contextPromotionTarget` model property to specify preferred fallback model when context promotion is triggered
-- Added automatic context promotion target assignment for Spark models to their base model equivalents
 - Added support for Brave search provider with BRAVE_API_KEY environment variable
 
 ### Changed

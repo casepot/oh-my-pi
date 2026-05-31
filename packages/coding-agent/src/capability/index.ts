@@ -110,6 +110,7 @@ async function loadImpl<T>(
 	const disabledExtensionIds = options.includeDisabled
 		? new Set<string>()
 		: new Set<string>(options.disabledExtensions ?? settings?.get("disabledExtensions") ?? []);
+	const includeUserSources = options.includeUserSources ?? settings?.get("discovery.enableUserSources") === true;
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -154,6 +155,9 @@ async function loadImpl<T>(
 				continue;
 			}
 
+			if (itemWithSource._source.level === "user" && !includeUserSources) {
+				continue;
+			}
 			itemWithSource._source.providerName = provider.displayName;
 			allItems.push(itemWithSource as T & { _source: SourceMeta; _shadowed?: boolean });
 			contributedItemCount += 1;

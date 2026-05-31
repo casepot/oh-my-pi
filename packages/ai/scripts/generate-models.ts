@@ -13,11 +13,7 @@ import * as path from "node:path";
 import { $env } from "@oh-my-pi/pi-utils";
 import { AuthStorage, type OAuthAccess, SqliteAuthCredentialStore } from "../src/auth-storage";
 import { createModelManager } from "../src/model-manager";
-import {
-	applyGeneratedModelPolicies,
-	CLOUDFLARE_FALLBACK_MODEL,
-	linkOpenAIPromotionTargets,
-} from "../src/model-thinking";
+import { applyGeneratedModelPolicies, CLOUDFLARE_FALLBACK_MODEL } from "../src/model-thinking";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import {
 	allowsUnauthenticatedCatalogDiscovery,
@@ -384,7 +380,6 @@ async function generateModels() {
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
 	applyGeneratedModelPolicies(allModels);
-	linkOpenAIPromotionTargets(allModels);
 
 	// Group by provider and sort each provider's models
 	const providers: Record<string, Record<string, Model>> = {};

@@ -15,6 +15,10 @@
 - Changed setup onboarding to a tabbed `Set up your providers` scene with dedicated `Sign in` and `Web search` panels
 - Changed the glyph mode picker to preselect the currently configured symbol preset instead of always defaulting to Unicode and to show live glyph samples in the picker rows
 - Changed OAuth sign-in flow in the setup wizard so users can authenticate multiple providers before leaving with Escape
+- Changed default capability discovery to a lean OMP profile: project-level provider configs remain discoverable, but user/home capability sources stay off unless `discovery.enableUserSources` is enabled.
+- Changed MCP startup to load project `.omp/mcp.json` by default but skip user/global MCP configs unless `mcp.enableUserConfig` is enabled.
+- Changed compaction to use the active session model by default; `compaction.allowModelFallbacks` restores role/large-context fallback candidates when explicitly enabled.
+- Changed subagent model auth handling so parent-model substitution requires `task.fallbackToParentModelOnAuthFailure`; otherwise an unauthenticated configured subagent model fails visibly.
 
 ### Fixed
 
@@ -55,6 +59,7 @@
 - Removed the standalone `ask`, `task`, and `yield` tools along with their obsolete prompts, docs, and tests; delegation now routes through persistent `delegate` agents plus IRC coordination.
 - Removed the `/orchestrate` slash command; orchestration is now triggered by the `orchestrate` keyword (see Added) so the contract rides alongside the user's own prompt instead of replacing it.
 - Removed the sticky Todos panel all-done drop/collapse animation; completed todo state now stays visible until the next explicit todo update changes it.
+- Removed context promotion; context overflow now stays on the selected model and uses compaction/handoff recovery instead of switching models.
 
 ### Fixed
 
@@ -192,7 +197,7 @@
 
 ### Fixed
 
-- Fixed agent yielding silently on `response.incomplete` (OpenAI Responses / Codex `stopReason: "length"`). The agent now treats output-side incompletion as a recovery case: drops the truncated/reasoning-only assistant turn, attempts context promotion to a larger model, and falls back to compaction or handoff. `AutoCompactionStartEvent.reason` and the custom-tool `auto_compaction_start.trigger` discriminator gain an `"incomplete"` value. The handoff strategy is honored for `"incomplete"` (unlike `"overflow"`, where the input is broken and handoff would hit the same wall).
+- Fixed agent yielding silently on `response.incomplete` (OpenAI Responses / Codex `stopReason: "length"`). The agent now treats output-side incompletion as a recovery case: drops the truncated/reasoning-only assistant turn, and falls back to compaction or handoff. `AutoCompactionStartEvent.reason` and the custom-tool `auto_compaction_start.trigger` discriminator gain an `"incomplete"` value. The handoff strategy is honored for `"incomplete"` (unlike `"overflow"`, where the input is broken and handoff would hit the same wall).
 - Fixed `eval` tool to resize large displayed images and append dimension notes to text output
 - Fixed `write` tool to strip malformed or loose hashline section headers before writing file content
 - Fixed `eval` tool image rendering to resize displayed images before returning them and append image-dimension notes to text output
@@ -3119,7 +3124,7 @@
 - Moved Exa settings to the Providers tab
 - Moved secret handling settings to the Providers tab
 - Moved speech-to-text settings to the Interaction tab
-- Moved context promotion, compaction, branch summary, memories, and TTSR settings to the Context tab
+- Moved compaction, branch summary, memories, and TTSR settings to the Context tab
 - Updated tab icon symbols across unicode, nerd, and ASCII presets to match new tab structure
 - Changed default agent model from `default` to `pi/task` to enable independent model configuration for subtasks
 - Changed agent model resolution to support single-pattern inheritance fallback, allowing `pi/task` agents to inherit the active session model when the task role is unconfigured
@@ -3474,7 +3479,6 @@
 ### Changed
 
 - Changed edit tool response to include diff summary with line counts (+added -removed) and a compact diff preview instead of warnings-only output
-- Limited auto context promotion to models with explicit `contextPromotionTarget`; models without a configured target now compact on overflow instead of switching to arbitrary larger models ([#282](https://github.com/can1357/oh-my-pi/issues/282))
 
 ### Fixed
 
@@ -3778,7 +3782,7 @@
 - Added source code context display (3 lines) for definition, type definition, and implementation results
 - Added context display for first 50 references with remaining references shown location-only to balance detail and performance
 - Added support for glob patterns in `file` parameter for diagnostics action (e.g., `src/**/*.ts`)
-- Added `waitForIdle()` method to ensure prompt completion waits for all deferred recovery work (TTSR continuations, context promotions, compaction retries) to fully settle
+- Added `waitForIdle()` method to ensure prompt completion waits for all deferred recovery work (TTSR continuations, compaction retries) to fully settle
 - Added `getLastAssistantMessage()` method to retrieve the most recent assistant message from session state without manual array indexing
 - Implemented TTSR resume gate to ensure `prompt()` blocks until TTSR interrupt continuations complete, preventing race conditions between TTSR injections and subsequent prompts
 - Added `tools.maxTimeout` setting to enforce a global timeout ceiling across all tool calls
@@ -3832,7 +3836,7 @@
 ### Fixed
 
 - Fixed TTSR violations during subagent execution aborting the entire subagent run; `#waitForPostPromptRecovery()` now also awaits agent idle after TTSR/retry gates resolve, preventing `prompt()` from returning while a fire-and-forget `agent.continue()` is still streaming
-- Fixed deferred TTSR/context-promotion continuations still racing `prompt()` completion by tracking compaction checks and deferred `agent.continue()` tasks under a shared post-prompt recovery orchestrator
+- Fixed deferred TTSR continuations still racing `prompt()` completion by tracking compaction checks and deferred `agent.continue()` tasks under a shared post-prompt recovery orchestrator
 - Fixed subagent reminder/finalization sequencing to await session-level idle recovery between prompts before determining terminal assistant stop state
 - Fixed `code_actions` apply mode to execute command-based actions via `workspace/executeCommand`
 - Fixed diagnostics glob detection to recognize bracket character class patterns (e.g., `src/[ab].ts`)
@@ -4484,10 +4488,6 @@
 - Added abort signal support to LSP file operations (`ensureFileOpen`, `refreshFile`) for cancellable file synchronization
 - Added abort signal propagation through LSP request handlers (definition, references, hover, symbols, rename) enabling operation cancellation
 - Added `shouldBypassAutocompleteOnEscape` callback to custom editor for context-aware escape key handling during active operations
-- Added `contextPromotionTarget` model configuration option to specify a custom target model for context promotion
-- Added automatic context promotion feature that switches to a larger-context model when approaching context limits
-- Added `contextPromotion.enabled` setting to control automatic model promotion (enabled by default)
-- Added `contextPromotion.thresholdPercent` setting to configure the context usage threshold for triggering promotion (default 90%)
 - Added Brave web search provider as an alternative search option with recency filtering support
 - Added `BRAVE_API_KEY` environment variable support for Brave web search authentication
 - Added pagination support for fetching GitHub issue comments, allowing retrieval of all comments beyond the initial 50-comment limit
@@ -4498,14 +4498,11 @@
 
 ### Changed
 
-- Changed context promotion to trigger on context overflow instead of a configurable threshold, promoting to a larger model before attempting compaction
-- Changed context promotion behavior to retry immediately on the promoted model without compacting, providing faster recovery from context limits
 - Changed default grep context lines from 1 before/3 after to 0 before/0 after for more focused search results
 - Changed escape key handling in custom editor to allow bypassing autocomplete dismissal when specified by parent controller
 - Changed workspace diagnostics to support abort signals for cancellable diagnostic runs
 - Changed LSP request cancellation to send `$/cancelRequest` notification to language servers when operations are aborted
 - Changed input controller to bypass autocomplete on escape when loading animations, streaming, compacting, or running external processes
-- Changed context promotion logic to use configured `contextPromotionTarget` when available, allowing per-model promotion customization
 - Updated session compaction reserve token calculation to enforce a minimum 15% context window floor, ensuring more predictable compaction behavior regardless of configuration
 - Improved session compaction to limit file operation summaries to 20 files per category, with indication of omitted files when exceeded
 - Updated CLI update mechanism to support multiple native addon variants per platform, enabling fallback to baseline versions when modern variants are unavailable
@@ -4515,7 +4512,6 @@
 
 ### Removed
 
-- Removed `contextPromotion.thresholdPercent` setting as context promotion now triggers only on overflow
 
 ### Fixed
 

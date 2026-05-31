@@ -574,9 +574,8 @@ export function buildSessionContext(
 	// Track whether an explicit `model_change` with role="default" has been
 	// seen on this path. Once a user (or the agent itself) records an
 	// explicit default, later assistant-message inference must NOT overwrite
-	// it: temporary fallbacks (retry fallback, context promotion) and
-	// server-side model downgrades both produce assistant messages tagged
-	// with the wrong model id, which previously clobbered the user's pick on
+	// it: temporary retry fallbacks and server-side model downgrades both
+	// produce assistant messages tagged with the wrong model id, which
 	// resume (issue #849).
 	let hasExplicitDefaultModel = false;
 

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { hookFetch } from "@oh-my-pi/pi-utils";
+import { MCPManager } from "../../src/mcp/manager";
 import { runSearchQuery } from "../../src/web/search";
 import {
 	buildExaRequestBody,
@@ -202,11 +203,13 @@ describe("searchExa", () => {
 	beforeEach(() => {
 		capturedRequestBody = null;
 		process.env.EXA_API_KEY = "test-key-123";
+		MCPManager.setInstance(undefined);
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
 		delete process.env.EXA_API_KEY;
+		MCPManager.setInstance(undefined);
 	});
 
 	function mockFetch(responseBody: unknown, status = 200): Disposable {
@@ -369,6 +372,26 @@ describe("searchExa", () => {
 		expect(calledUrl).toContain("https://mcp.exa.ai/mcp");
 		expect(calledUrl).toContain("tools=web_search_exa");
 		expect(calledUrl).not.toContain("exaApiKey=");
+	});
+
+	it("uses runtime Exa key from filtered MCP config when env is missing", async () => {
+		delete process.env.EXA_API_KEY;
+		const manager = new MCPManager(process.cwd());
+		manager.setExaApiKey("runtime-exa-key");
+		MCPManager.setInstance(manager);
+		const fetchSpy = vi.fn(async (_input, _init, _next) => {
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: "mcp-1", result: makeMockExaResponse() }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+		using _hook = hookFetch(fetchSpy);
+
+		await searchExa({ query: "runtime key query" });
+
+		const calledUrl = String(fetchSpy.mock.calls[0]?.[0]);
+		expect(calledUrl).toContain("https://mcp.exa.ai/mcp");
+		expect(calledUrl).toContain("exaApiKey=runtime-exa-key");
 	});
 
 	it("accepts MCP structuredContent search payloads when API key is missing", async () => {

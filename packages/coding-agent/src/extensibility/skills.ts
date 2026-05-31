@@ -92,6 +92,8 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+	/** Permit user-level sources for providers without explicit per-source toggles. */
+	includeUserSources?: boolean;
 }
 
 /**
@@ -102,15 +104,16 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const {
 		cwd = getProjectDir(),
 		enabled = true,
-		enableCodexUser = true,
-		enableClaudeUser = true,
-		enableClaudeProject = true,
-		enablePiUser = true,
+		enableCodexUser = false,
+		enableClaudeUser = false,
+		enableClaudeProject = false,
+		enablePiUser = false,
 		enablePiProject = true,
 		customDirectories = [],
 		ignoredSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
+		includeUserSources: includeAllUserSources = false,
 	} = options;
 
 	// Early return if skills are disabled
@@ -118,9 +121,9 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		return { skills: [], warnings: [] };
 	}
 
+	const includeUserSources = includeAllUserSources || enableCodexUser || enableClaudeUser || enablePiUser;
 	const anyBuiltInSkillSourceEnabled =
 		enableCodexUser || enableClaudeUser || enableClaudeProject || enablePiUser || enablePiProject;
-	// Helper to check if a source is enabled
 	function isSourceEnabled(source: SourceMeta): boolean {
 		const { provider, level } = source;
 		if (provider === "codex" && level === "user") return enableCodexUser;
@@ -128,12 +131,18 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		if (provider === "claude" && level === "project") return enableClaudeProject;
 		if (provider === "native" && level === "user") return enablePiUser;
 		if (provider === "native" && level === "project") return enablePiProject;
-		// For other providers (agents, claude-plugins, etc.), treat them as built-in skill sources.
+		if (level === "user") return includeAllUserSources;
+		// For project/native sources without explicit toggles, keep the historical
+		// project-level capability behavior.
 		return anyBuiltInSkillSourceEnabled;
 	}
 
 	// Use capability API to load all skills
-	const result = await loadCapability<CapabilitySkill>(skillCapability.id, { cwd, disabledExtensions });
+	const result = await loadCapability<CapabilitySkill>(skillCapability.id, {
+		cwd,
+		disabledExtensions,
+		includeUserSources,
+	});
 
 	const skillMap = new Map<string, Skill>();
 	const realPathSet = new Set<string>();

@@ -898,8 +898,6 @@ export interface Model<TApi extends Api = any> {
 	transport?: "pi-native";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
-	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */
-	contextPromotionTarget?: string;
 	/** Provider-assigned priority value (lower = higher priority). */
 	priority?: number;
 	/** Canonical thinking capability metadata for this model. */

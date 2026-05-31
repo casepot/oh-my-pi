@@ -70,6 +70,8 @@ export interface LoadOptions {
 	includeInvalid?: boolean;
 	/** Include items disabled via settings. Default: false */
 	includeDisabled?: boolean;
+	/** Include user-level capability sources. Default: false unless explicitly enabled. */
+	includeUserSources?: boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
 }

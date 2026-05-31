@@ -118,6 +118,8 @@ export interface MCPLoadResult {
 export interface MCPDiscoverOptions {
 	/** Whether to load project-level config (default: true) */
 	enableProjectConfig?: boolean;
+	/** Whether to load user/global config (default: false) */
+	enableUserConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
@@ -155,6 +157,7 @@ export class MCPManager {
 	#pendingToolLoads = new Map<string, Promise<ToolLoadResult>>();
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
+	#exaApiKey: string | null = null;
 	#onNotification?: (serverName: string, method: string, params: unknown) => void;
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void;
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
@@ -166,6 +169,8 @@ export class MCPManager {
 	#pendingReconnections = new Map<string, Promise<MCPServerConnection | null>>();
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
+	/** Sticky config-source policy reused by reloads unless explicitly overridden. */
+	#discoverOptions: Omit<MCPDiscoverOptions, "onConnecting"> = {};
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
 
@@ -173,6 +178,14 @@ export class MCPManager {
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
 	) {}
+
+	setExaApiKey(apiKey: string | null): void {
+		this.#exaApiKey = apiKey;
+	}
+
+	getExaApiKey(): string | null {
+		return this.#exaApiKey;
+	}
 
 	/**
 	 * Set a callback to receive all server notifications.
@@ -278,11 +291,15 @@ export class MCPManager {
 	 * Returns tools and any connection errors.
 	 */
 	async discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
-		const { configs, exaApiKeys, sources } = await loadAllMCPConfigs(this.cwd, {
-			enableProjectConfig: options?.enableProjectConfig,
-			filterExa: options?.filterExa,
-			filterBrowser: options?.filterBrowser,
-		});
+		const resolvedOptions = {
+			enableProjectConfig: options?.enableProjectConfig ?? this.#discoverOptions.enableProjectConfig,
+			enableUserConfig: options?.enableUserConfig ?? this.#discoverOptions.enableUserConfig,
+			filterExa: options?.filterExa ?? this.#discoverOptions.filterExa,
+			filterBrowser: options?.filterBrowser ?? this.#discoverOptions.filterBrowser,
+		};
+		this.#discoverOptions = resolvedOptions;
+		const { configs, exaApiKeys, sources } = await loadAllMCPConfigs(this.cwd, resolvedOptions);
+		this.setExaApiKey(exaApiKeys[0] ?? null);
 		const result = await this.connectServers(configs, sources, options?.onConnecting);
 		result.exaApiKeys = exaApiKeys;
 		return result;

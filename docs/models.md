@@ -229,7 +229,7 @@ Provider defaults vs per-model overrides:
 
 - Provider `headers` are baseline.
 - Model `headers` override provider header keys.
-- `modelOverrides` can override model metadata (`name`, `reasoning`, `input`, `cost`, `contextWindow`, `maxTokens`, `headers`, `compat`, `contextPromotionTarget`).
+- `modelOverrides` can override model metadata (`name`, `reasoning`, `input`, `cost`, `contextWindow`, `maxTokens`, `headers`, `compat`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`, `extraBody`).
 
 ## Runtime discovery integration
@@ -449,58 +449,6 @@ They now also expose canonical/coalesced models:
 
 Selecting a canonical entry stores the canonical selector. Selecting a provider row stores the explicit `provider/modelId`.
 
-## Context promotion (model-level fallback chains)
-
-Context promotion is an overflow recovery mechanism for small-context variants (for example `*-spark`) that automatically promotes to a larger-context sibling when the API rejects a request with a context length error.
-
-### Trigger and order
-
-When a turn fails with a context overflow error (e.g. `context_length_exceeded`), `AgentSession` attempts promotion **before** falling back to compaction:
-
-1. If `contextPromotion.enabled` is true, resolve a promotion target (see below).
-2. If a target is found, switch to it and retry the request — no compaction needed.
-3. If no target is available, fall through to auto-compaction on the current model.
-
-### Target selection
-
-Selection is model-driven, not role-driven:
-
-1. `currentModel.contextPromotionTarget` (if configured)
-2. smallest larger-context model on the same provider + API
-
-Candidates are ignored unless credentials resolve (`ModelRegistry.getApiKey(...)`).
-
-### OpenAI Codex websocket handoff
-
-If switching from/to `openai-codex-responses`, session provider state key `openai-codex-responses` is closed before model switch. This drops websocket transport state so the next turn starts clean on the promoted model.
-
-### Persistence behavior
-
-Promotion uses temporary switching (`setModelTemporary`):
-
-- recorded as a temporary `model_change` in session history
-- does not rewrite saved role mapping
-
-### Configuring explicit fallback chains
-
-Configure fallback directly in model metadata via `contextPromotionTarget`.
-
-`contextPromotionTarget` accepts either:
-
-- `provider/model-id` (explicit)
-- `model-id` (resolved within current provider)
-
-Example (`models.yml`) for Spark -> non-Spark on the same provider:
-
-```yaml
-providers:
-  openai-codex:
-    modelOverrides:
-      gpt-5.3-codex-spark:
-        contextPromotionTarget: openai-codex/gpt-5.3-codex
-```
-
-The built-in model generator also assigns this automatically for `*-spark` models when a same-provider base model exists.
 
 ## Compatibility and routing fields
 

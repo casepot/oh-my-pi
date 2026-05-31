@@ -23,7 +23,7 @@ This document describes how MCP servers are discovered, connected, exposed as to
 `createAgentSession()` in `src/sdk.ts` performs MCP startup when `enableMCP` is true (default):
 
 - calls `discoverAndLoadMCPTools(cwd, { ... })`,
-- passes `authStorage`, cache storage, and `mcp.enableProjectConfig` setting,
+- passes `authStorage`, cache storage, and `mcp.enableProjectConfig` / `mcp.enableUserConfig` settings,
 - always sets `filterExa: true`,
 - logs per-server load/connect errors,
 - stores returned manager in `toolSession.mcpManager` and session result.

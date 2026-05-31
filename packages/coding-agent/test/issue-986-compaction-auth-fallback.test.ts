@@ -30,14 +30,21 @@ describe("issue #986 compaction auth fallback", () => {
 		tempDir.removeSync();
 	});
 
-	async function createSession(options?: { fallbackModelRole?: string; configureFallbackAuth?: boolean }) {
+	async function createSession(options?: {
+		fallbackModelRole?: string;
+		configureFallbackAuth?: boolean;
+		allowModelFallbacks?: boolean;
+	}) {
 		const currentModel = getBundledModel("openai-codex", "gpt-5.4-mini");
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!currentModel || !fallbackModel) {
 			throw new Error("Expected bundled test models to exist");
 		}
 
-		const settings = Settings.isolated({ "compaction.keepRecentTokens": 1 });
+		const settings = Settings.isolated({
+			"compaction.keepRecentTokens": 1,
+			"compaction.allowModelFallbacks": options?.allowModelFallbacks === true,
+		});
 		if (options?.fallbackModelRole) {
 			settings.setModelRole(options.fallbackModelRole, `${fallbackModel.provider}/${fallbackModel.id}`);
 		}
@@ -81,8 +88,11 @@ describe("issue #986 compaction auth fallback", () => {
 		return { currentModel, fallbackModel };
 	}
 
-	it("falls back to an authenticated role model when the current provider returns auth_unavailable", async () => {
-		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
+	it("uses an authenticated role model when compaction model fallbacks are enabled", async () => {
+		const { currentModel, fallbackModel } = await createSession({
+			fallbackModelRole: "smol",
+			allowModelFallbacks: true,
+		});
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			if (model.provider === currentModel.provider && model.id === currentModel.id) {
 				throw new Error(
@@ -116,6 +126,37 @@ describe("issue #986 compaction auth fallback", () => {
 		]);
 	});
 
+	it("does not use configured role fallbacks unless compaction model fallbacks are enabled", async () => {
+		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, model) => {
+			if (model.provider === currentModel.provider && model.id === currentModel.id) {
+				throw new Error(
+					"Turn prefix summarization failed: 503 auth_unavailable: no auth available (providers=codex, model=gpt-5.4-mini)",
+				);
+			}
+			if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) {
+				throw new Error("Fallback model should not be used without compaction.allowModelFallbacks");
+			}
+			throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+		});
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
+			if (model.provider === currentModel.provider && model.id === currentModel.id) return "codex-token";
+			if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) return "anthropic-token";
+			return undefined;
+		});
+
+		const error = await session.compact().catch(err => err);
+
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain(
+			`Compaction requires usable credentials for ${currentModel.provider}/${currentModel.id}`,
+		);
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${currentModel.provider}/${currentModel.id}`,
+		]);
+	});
+
 	it("fails fast with a clear provider-specific error when no authenticated fallback exists", async () => {
 		const { currentModel } = await createSession({ configureFallbackAuth: false });
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, model) => {
@@ -139,15 +180,15 @@ describe("issue #986 compaction auth fallback", () => {
 		expect((error as Error).message).not.toMatch(/auth_unavailable/i);
 	});
 
-	it("falls back when the current provider returns a real HTTP 401 from the compaction call", async () => {
-		// Companion to the auth_unavailable test above: that case exercises the
-		// pi-native gateway synthetic ("no credential configured"), this one
-		// exercises a configured-but-rejected credential (rotated/revoked
-		// Anthropic key, expired OAuth token, wrong workspace). Before the
-		// status-aware detector landed, only the synthetic was caught — a real
-		// 401 from the provider bypassed the fallback and dumped the raw HTTP
-		// body into the UI as "Compaction failed: 401 {...}".
-		const { currentModel, fallbackModel } = await createSession({ fallbackModelRole: "smol" });
+	it("uses fallback mode when the current provider returns a real HTTP 401 from the compaction call", async () => {
+		// Companion to the auth_unavailable test above: this exercises a
+		// configured-but-rejected credential (rotated/revoked key, expired OAuth
+		// token, wrong workspace). Fallbacks are opt-in because compaction rewrites
+		// user context and provider/model substitution is a trust-boundary change.
+		const { currentModel, fallbackModel } = await createSession({
+			fallbackModelRole: "smol",
+			allowModelFallbacks: true,
+		});
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
 			if (model.provider === currentModel.provider && model.id === currentModel.id) {
 				throw Object.assign(

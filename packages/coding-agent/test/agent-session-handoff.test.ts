@@ -109,7 +109,6 @@ describe("AgentSession handoff", () => {
 	it("does not run auto maintenance after final yield", async () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
 
 		const model = session.model;
 		if (!model) {
@@ -207,7 +206,6 @@ describe("AgentSession handoff", () => {
 	it("does not run auto maintenance when strategy is off", async () => {
 		session.settings.set("compaction.strategy", "off");
 		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
 
 		const model = session.model;
 		if (!model) {
@@ -254,7 +252,6 @@ describe("AgentSession handoff", () => {
 
 	it("falls back to context-full maintenance for overflow when strategy is handoff", async () => {
 		session.settings.set("compaction.strategy", "handoff");
-		session.settings.set("contextPromotion.enabled", false);
 
 		const model = session.model;
 		if (!model) {
@@ -299,7 +296,6 @@ describe("AgentSession handoff", () => {
 	it("uses handoff strategy for threshold-triggered auto maintenance", async () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
 
 		const model = session.model;
 		if (!model) {
@@ -410,7 +406,6 @@ describe("AgentSession handoff", () => {
 				"compaction.autoContinue": false,
 				"compaction.strategy": "handoff",
 				"compaction.thresholdPercent": 1,
-				"contextPromotion.enabled": false,
 			}),
 			modelRegistry,
 		});
@@ -439,7 +434,7 @@ describe("AgentSession handoff", () => {
 		// rendering as "Auto-handoff" loader + an assistant message still streaming.
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
+
 		session.settings.set("todo.enabled", true);
 		session.settings.set("todo.reminders", true);
 
@@ -490,7 +485,6 @@ describe("AgentSession handoff", () => {
 		// tasks, so Promise.allSettled() in #cancelPostPromptTasks can resolve.
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
 
 		const model = session.model;
 		if (!model) {
@@ -548,7 +542,6 @@ describe("AgentSession handoff", () => {
 	it("falls back to context-full when handoff strategy returns no document", async () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
 
 		const model = session.model;
 		if (!model) {

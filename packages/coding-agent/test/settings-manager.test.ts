@@ -49,6 +49,22 @@ describe("Settings", () => {
 		}
 	});
 
+	it("defaults to lean project-local capability discovery", async () => {
+		const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+		expect(settings.get("disabledProviders")).toEqual([]);
+		expect(settings.get("discovery.enableUserSources")).toBe(false);
+		expect(settings.get("skills.enablePiUser")).toBe(false);
+		expect(settings.get("skills.enablePiProject")).toBe(true);
+		expect(settings.get("skills.enableCodexUser")).toBe(false);
+		expect(settings.get("skills.enableClaudeUser")).toBe(false);
+		expect(settings.get("skills.enableClaudeProject")).toBe(false);
+		expect(settings.get("mcp.enableProjectConfig")).toBe(true);
+		expect(settings.get("mcp.enableUserConfig")).toBe(false);
+		expect(settings.get("compaction.allowModelFallbacks")).toBe(false);
+		expect(settings.get("task.fallbackToParentModelOnAuthFailure")).toBe(false);
+	});
+
 	// Tests that SettingsManager merges with DB state on save rather than blindly overwriting.
 	// This ensures external edits (via AgentStorage directly) aren't lost when the app saves.
 	describe("preserves externally added settings", () => {

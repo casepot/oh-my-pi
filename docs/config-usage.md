@@ -241,6 +241,7 @@ Native provider (`id: native`) reads native config from:
 ## Settings subsystem
 
 - `Settings.init()` loads global `config.yml` + discovered project `settings.json` capability items.
+- Capability discovery defaults to project-local sources; user/home capability sources are skipped unless `discovery.enableUserSources` is enabled or a subsystem explicitly opts in.
 - Only capability items with `level === "project"` are merged into project layer.
 
 ## Skills subsystem
@@ -248,6 +249,7 @@ Native provider (`id: native`) reads native config from:
 - `extensibility/skills.ts` loads via `loadCapability(skillCapability.id, { cwd })`.
 - Applies source toggles and filters (`ignoredSkills`, `includeSkills`, custom dirs).
 - Legacy-named toggles still exist (`skills.enablePiUser`, `skills.enablePiProject`) but they gate the native provider (`provider === "native"`).
+- Defaults favor project-local native skills: user-level Pi/Codex/Claude skills and Claude project skills are disabled unless explicitly enabled.
 
 ## Hooks subsystem
 

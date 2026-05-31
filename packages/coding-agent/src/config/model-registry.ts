@@ -510,7 +510,6 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
-	if (override.contextPromotionTarget !== undefined) result.contextPromotionTarget = override.contextPromotionTarget;
 	if (override.premiumMultiplier !== undefined) result.premiumMultiplier = override.premiumMultiplier;
 	if (override.cost) {
 		result.cost = {
@@ -540,7 +539,6 @@ interface CustomModelDefinitionLike {
 	maxTokens?: number;
 	headers?: Record<string, string>;
 	compat?: Model<Api>["compat"];
-	contextPromotionTarget?: string;
 	premiumMultiplier?: number;
 }
 
@@ -562,7 +560,6 @@ type CustomModelOverlay = {
 	maxTokens?: number;
 	headers?: Record<string, string>;
 	compat?: Model<Api>["compat"];
-	contextPromotionTarget?: string;
 	premiumMultiplier?: number;
 	isOAuth?: boolean;
 };
@@ -632,7 +629,6 @@ function buildCustomModelOverlay(
 		maxTokens: modelDef.maxTokens,
 		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
 		compat: mergeCompat(providerCompat, modelDef.compat),
-		contextPromotionTarget: modelDef.contextPromotionTarget,
 		premiumMultiplier: modelDef.premiumMultiplier,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
@@ -787,7 +783,6 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : undefined),
 		headers: resolvedModel.headers,
 		compat: mergeCompat(reference?.compat, resolvedModel.compat),
-		contextPromotionTarget: resolvedModel.contextPromotionTarget,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
 	} as Model<Api>);
@@ -1086,7 +1081,6 @@ export class ModelRegistry {
 					// re-merge bundled transport metadata here.
 					headers: customModel.headers,
 					compat: customModel.compat,
-					contextPromotionTarget: customModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
 					premiumMultiplier: customModel.premiumMultiplier ?? existingModel.premiumMultiplier,
 				} as Model<Api>);
 			} else {
@@ -2542,7 +2536,6 @@ export interface ProviderConfigInput {
 		maxTokens: number;
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];
-		contextPromotionTarget?: string;
 		premiumMultiplier?: number;
 	}>;
 }

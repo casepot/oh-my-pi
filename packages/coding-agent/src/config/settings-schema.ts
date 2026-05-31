@@ -303,6 +303,16 @@ export const SETTINGS_SCHEMA = {
 
 	extensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
+	"discovery.enableUserSources": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "User Compatibility Sources",
+			description: "Load user/home capability sources from OMP and other coding tool directories",
+		},
+	},
+
 	"marketplace.autoUpdate": {
 		type: "enum",
 		values: ["off", "notify", "auto"] as const,
@@ -1096,17 +1106,6 @@ export const SETTINGS_SCHEMA = {
 	// Context
 	// ────────────────────────────────────────────────────────────────────────
 
-	// Context promotion
-	"contextPromotion.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "context",
-			label: "Auto-Promote Context",
-			description: "Promote to a larger-context model on context overflow instead of compacting",
-		},
-	},
-
 	// Compaction
 	"compaction.enabled": {
 		type: "boolean",
@@ -1139,6 +1138,17 @@ export const SETTINGS_SCHEMA = {
 					description: "Disable automatic context maintenance (same behavior as Auto-compact off)",
 				},
 			],
+		},
+	},
+
+	"compaction.allowModelFallbacks": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			label: "Compaction Model Fallbacks",
+			description:
+				"Allow compaction to use configured role/large-context fallback models when the active model cannot compact",
 		},
 	},
 
@@ -2447,7 +2457,21 @@ export const SETTINGS_SCHEMA = {
 	"mcp.enableProjectConfig": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "MCP Project Config", description: "Load .mcp.json/mcp.json from project root" },
+		ui: {
+			tab: "tools",
+			label: "MCP Project Config",
+			description: "Load project MCP configs (.omp/mcp.json, mcp.json, .mcp.json)",
+		},
+	},
+
+	"mcp.enableUserConfig": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "MCP User Config",
+			description: "Load user/global MCP servers from home or installed plugin sources",
+		},
 	},
 
 	"mcp.discoveryMode": {
@@ -2727,6 +2751,16 @@ export const SETTINGS_SCHEMA = {
 		default: {} as Record<string, string>,
 	},
 
+	"task.fallbackToParentModelOnAuthFailure": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			label: "Subagent Parent Model Fallback",
+			description: "Use the parent session model when a configured subagent model has no working credentials",
+		},
+	},
+
 	"tasks.todoClearDelay": {
 		type: "number",
 		default: 60,
@@ -2765,13 +2799,13 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "tasks", label: "Skill Commands", description: "Register skills as /skill:name commands" },
 	},
 
-	"skills.enableCodexUser": { type: "boolean", default: true },
+	"skills.enableCodexUser": { type: "boolean", default: false },
 
-	"skills.enableClaudeUser": { type: "boolean", default: true },
+	"skills.enableClaudeUser": { type: "boolean", default: false },
 
-	"skills.enableClaudeProject": { type: "boolean", default: true },
+	"skills.enableClaudeProject": { type: "boolean", default: false },
 
-	"skills.enablePiUser": { type: "boolean", default: true },
+	"skills.enablePiUser": { type: "boolean", default: false },
 
 	"skills.enablePiProject": { type: "boolean", default: true },
 
@@ -3229,6 +3263,7 @@ export type TreeFilterMode = SettingValue<"treeFilterMode">;
 export interface CompactionSettings {
 	enabled: boolean;
 	strategy: "context-full" | "handoff" | "off";
+	allowModelFallbacks: boolean;
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number;
@@ -3242,9 +3277,6 @@ export interface CompactionSettings {
 	idleTimeoutSeconds: number;
 }
 
-export interface ContextPromotionSettings {
-	enabled: boolean;
-}
 export interface RetrySettings {
 	enabled: boolean;
 	maxRetries: number;
@@ -3362,7 +3394,6 @@ export interface ShellMinimizerSettings {
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
-	contextPromotion: ContextPromotionSettings;
 	retry: RetrySettings;
 	memories: MemoriesSettings;
 	branchSummary: BranchSummarySettings;

@@ -101,15 +101,13 @@ The automatic paths are intentionally different:
 - **Overflow recovery**
   - Trigger: current-model assistant error is detected as context overflow and the error is not older than the latest compaction.
   - The failing assistant error message is removed from active agent state before retry.
-  - Context promotion is tried first; if a configured larger model is available, the agent switches model and retries without compacting.
-  - If promotion is unavailable and compaction is enabled, context-full compaction runs with `reason: "overflow"` and `willRetry: true`; handoff strategy is not used for overflow.
+  - If compaction is enabled, context-full compaction runs with `reason: "overflow"` and `willRetry: true`; handoff strategy is not used for overflow.
   - On success, agent auto-continues (`agent.continue()`) after compaction.
 
 - **Threshold maintenance**
   - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`.
   - Tool-output pruning can reduce the measured token count before threshold comparison.
-  - Context promotion is tried before compaction.
-  - If promotion is unavailable, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
+  - Auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
   - With `compaction.strategy: "handoff"`, threshold maintenance starts a new handoff session instead of writing a compaction entry; if handoff returns no document without aborting, it falls back to context-full compaction.
   - On success, if `compaction.autoContinue !== false`, schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`.
 
@@ -350,8 +348,8 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 - Manual compaction aborts current agent operation first.
 - `abortCompaction()` cancels both manual and auto-compaction controllers.
 - Auto compaction emits start/end session events for UI/state updates.
-- Auto compaction can try multiple model candidates and retry transient failures; long retry delays prefer the next candidate when one is available.
-- Overflow errors are excluded from generic retry path because they are handled by context promotion/compaction.
+- Auto compaction uses the active session model by default. Set `compaction.allowModelFallbacks: true` to allow role/large-context fallback models after active-model auth failures or long retry delays.
+- Overflow errors are excluded from generic retry path because they are handled by compaction.
 - If auto-compaction fails:
   - overflow path emits `Context overflow recovery failed: ...`
   - threshold path emits `Auto-compaction failed: ...`

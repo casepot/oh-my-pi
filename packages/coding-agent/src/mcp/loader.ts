@@ -30,6 +30,8 @@ export interface MCPToolsLoadOptions {
 	onConnecting?: (serverNames: string[]) => void;
 	/** Whether to load project-level config (default: true) */
 	enableProjectConfig?: boolean;
+	/** Whether to load user/global config (default: false) */
+	enableUserConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
@@ -70,6 +72,7 @@ export async function discoverAndLoadMCPTools(cwd: string, options?: MCPToolsLoa
 		result = await manager.discoverAndConnect({
 			onConnecting: options?.onConnecting,
 			enableProjectConfig: options?.enableProjectConfig,
+			enableUserConfig: options?.enableUserConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
 		});

@@ -94,7 +94,6 @@ const ModelDefinitionSchema = z.object({
 	maxTokens: z.number().optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	compat: OpenAICompatSchema.optional(),
-	contextPromotionTarget: z.string().min(1).optional(),
 });
 
 export const ModelOverrideSchema = z.object({
@@ -115,7 +114,6 @@ export const ModelOverrideSchema = z.object({
 	maxTokens: z.number().optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	compat: OpenAICompatSchema.optional(),
-	contextPromotionTarget: z.string().min(1).optional(),
 });
 
 export type ModelOverride = z.infer<typeof ModelOverrideSchema>;

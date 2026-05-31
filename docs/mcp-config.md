@@ -12,17 +12,18 @@ Source of truth in code:
 
 ## Preferred config locations
 
-OMP can discover MCP servers from multiple tools (`.claude/`, `.cursor/`, `.vscode/`, `opencode.json`, and more), but for OMP-native configuration you should usually use one of these files:
+OMP-native project configuration lives at:
 
 - Project: `.omp/mcp.json`
-- User: `~/.omp/agent/mcp.json`
 
-OMP also accepts fallback standalone files in the project root:
+User/global MCP files and compatibility imports from other tools are intentionally opt-in. Use `mcp.enableUserConfig: true` to load `~/.omp/agent/mcp.json`; enable the relevant discovery provider if you intentionally want OMP to import MCP servers from another tool.
+
+OMP can also read fallback standalone files in the project root when the `mcp-json` discovery provider is enabled:
 
 - `mcp.json`
 - `.mcp.json`
 
-Use `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want OMP to own the configuration. Use root `mcp.json` / `.mcp.json` only when you want a portable fallback file that other MCP clients may also read.
+Prefer `.omp/mcp.json` for project-owned configuration. Use root `mcp.json` / `.mcp.json` only when you explicitly want a portable fallback file that other MCP clients may also read.
 
 ## Add a schema reference
 
@@ -444,7 +445,7 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 
 ### The server exists in another tool's config but not in OMP
 
-Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
+That is expected by default. OMP loads project `.omp/mcp.json` automatically, but user/global MCP files require `mcp.enableUserConfig: true` and other-tool MCP imports require enabling the relevant discovery provider.
 
 ## References
 

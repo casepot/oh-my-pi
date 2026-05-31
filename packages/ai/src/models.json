@@ -6288,8 +6288,7 @@
 				"mode": "effort",
 				"minLevel": "low",
 				"maxLevel": "xhigh"
-			},
-			"contextPromotionTarget": "github-copilot/gpt-5.4"
+			}
 		},
 		"grok-code-fast-1": {
 			"id": "grok-code-fast-1",
@@ -26554,7 +26553,6 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 128000,
-			"contextPromotionTarget": "litellm/gpt-5.5",
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "low",
@@ -26659,8 +26657,7 @@
 				"mode": "effort",
 				"minLevel": "low",
 				"maxLevel": "xhigh"
-			},
-			"contextPromotionTarget": "litellm/gpt-5.4"
+			}
 		},
 		"gpt-image-2": {
 			"id": "gpt-image-2",
@@ -34095,8 +34092,7 @@
 				"mode": "effort",
 				"minLevel": "low",
 				"maxLevel": "xhigh"
-			},
-			"contextPromotionTarget": "litellm/gpt-5.4"
+			}
 		},
 		"openai/gpt-5.5-pro": {
 			"id": "openai/gpt-5.5-pro",
@@ -34121,8 +34117,7 @@
 				"mode": "effort",
 				"minLevel": "low",
 				"maxLevel": "xhigh"
-			},
-			"contextPromotionTarget": "litellm/gpt-5.4"
+			}
 		},
 		"openai/gpt-audio": {
 			"id": "openai/gpt-audio",
@@ -59881,8 +59876,7 @@
 				"minLevel": "low",
 				"maxLevel": "xhigh"
 			},
-			"applyPatchToolType": "freeform",
-			"contextPromotionTarget": "openai/gpt-5.5"
+			"applyPatchToolType": "freeform"
 		},
 		"gpt-5.4": {
 			"id": "gpt-5.4",
@@ -60012,8 +60006,7 @@
 				"minLevel": "low",
 				"maxLevel": "xhigh"
 			},
-			"applyPatchToolType": "freeform",
-			"contextPromotionTarget": "openai/gpt-5.4"
+			"applyPatchToolType": "freeform"
 		},
 		"gpt-5.5-pro": {
 			"id": "gpt-5.5-pro",
@@ -60039,8 +60032,7 @@
 				"minLevel": "low",
 				"maxLevel": "xhigh"
 			},
-			"applyPatchToolType": "freeform",
-			"contextPromotionTarget": "openai/gpt-5.4"
+			"applyPatchToolType": "freeform"
 		},
 		"o1": {
 			"id": "o1",
@@ -60569,7 +60561,6 @@
 			},
 			"contextWindow": 128000,
 			"maxTokens": 128000,
-			"contextPromotionTarget": "openai-codex/gpt-5.5",
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "low",
@@ -60687,8 +60678,7 @@
 				"minLevel": "low",
 				"maxLevel": "xhigh"
 			},
-			"applyPatchToolType": "freeform",
-			"contextPromotionTarget": "openai-codex/gpt-5.4"
+			"applyPatchToolType": "freeform"
 		}
 	},
 	"opencode": {
@@ -61964,8 +61954,7 @@
 				"mode": "effort",
 				"minLevel": "low",
 				"maxLevel": "xhigh"
-			},
-			"contextPromotionTarget": "opencode-zen/gpt-5.5"
+			}
 		},
 		"gpt-5.4": {
 			"id": "gpt-5.4",
@@ -62090,8 +62079,7 @@
 				"mode": "effort",
 				"minLevel": "low",
 				"maxLevel": "xhigh"
-			},
-			"contextPromotionTarget": "opencode-zen/gpt-5.4"
+			}
 		},
 		"gpt-5.5-pro": {
 			"id": "gpt-5.5-pro",
@@ -62116,8 +62104,7 @@
 				"mode": "effort",
 				"minLevel": "low",
 				"maxLevel": "xhigh"
-			},
-			"contextPromotionTarget": "opencode-zen/gpt-5.4"
+			}
 		},
 		"grok-build-0.1": {
 			"id": "grok-build-0.1",

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -33,7 +33,46 @@ describe("createAgentSession skills option", () => {
 		originalHome = process.env.HOME;
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-home-"));
 		process.env.HOME = tempHomeDir;
+		vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);
 		const nativeUserSkillsDir = path.join(tempHomeDir, ".omp", "agent", "skills");
+		const codexUserSkillsDir = path.join(tempHomeDir, ".codex", "skills", "codex-user-skill");
+		fs.mkdirSync(codexUserSkillsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(codexUserSkillsDir, "SKILL.md"),
+			`---
+name: codex-user-skill
+description: A codex user skill.
+---
+
+# Codex User Skill
+`,
+		);
+		const opencodeUserSkillsDir = path.join(tempHomeDir, ".config", "opencode", "skills", "opencode-user-skill");
+		fs.mkdirSync(opencodeUserSkillsDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(opencodeUserSkillsDir, "SKILL.md"),
+			`---
+name: opencode-user-skill
+description: An opencode user skill.
+---
+
+# OpenCode User Skill
+`,
+		);
+
+		const codexProjectSkillDir = path.join(tempDir, ".codex", "skills", "codex-project-skill");
+		fs.mkdirSync(codexProjectSkillDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(codexProjectSkillDir, "SKILL.md"),
+			`---
+name: codex-project-skill
+description: A codex project skill.
+---
+
+# Codex Project Skill
+`,
+		);
+
 		fs.mkdirSync(nativeUserSkillsDir, { recursive: true });
 
 		// Create a test skill in the pi skills directory
@@ -67,13 +106,17 @@ Loaded via symbolic link.
 		fs.symlinkSync(externalSkillDir, path.join(path.dirname(skillsDir), "symlinked-skill-link"), "dir");
 	});
 
-	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	afterEach(() => {
+		vi.restoreAllMocks();
+		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
+	});
 
 	it("should discover skills by default and expose them on session.skills", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
 			settings: createIsolatedSkillsSettings(),
 		});
 
@@ -82,11 +125,46 @@ Loaded via symbolic link.
 		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
 	});
 
+	it("loads project compatibility skills but not user compatibility skills by default", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
+			settings: createIsolatedSkillsSettings(),
+		});
+
+		expect(session.skills.some((s: Skill) => s.name === "codex-project-skill")).toBe(true);
+		expect(session.skills.some((s: Skill) => s.name === "codex-user-skill")).toBe(false);
+	});
+
+	it("re-enables user compatibility skills when explicitly opted in", async () => {
+		const settings = Settings.isolated({
+			"skills.enabled": true,
+			"skills.enableCodexUser": true,
+			"skills.enableClaudeUser": false,
+			"skills.enableClaudeProject": false,
+			"skills.enablePiUser": false,
+			"skills.enablePiProject": true,
+		});
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
+			settings,
+		});
+
+		expect(session.skills.some((s: Skill) => s.name === "codex-user-skill")).toBe(true);
+		expect(session.skills.some((s: Skill) => s.name === "opencode-user-skill")).toBe(false);
+	});
+
 	it("should discover skills when skill directory is a symlink", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
 			settings: createIsolatedSkillsSettings(),
 		});
 
@@ -102,6 +180,7 @@ Loaded via symbolic link.
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
 			settings: createIsolatedSkillsSettings(),
 		});
 
@@ -112,6 +191,7 @@ Loaded via symbolic link.
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
 			skills: [], // Explicitly empty - like --no-skills
 			settings: createIsolatedSkillsSettings(),
 		});
@@ -135,6 +215,7 @@ Loaded via symbolic link.
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
 			skills: [customSkill],
 			settings: createIsolatedSkillsSettings(),
 		});

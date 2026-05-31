@@ -647,7 +647,6 @@ class ModelInfo:
     headers: dict[str, str] | None = None
     premium_multiplier: float | None = None
     prefer_websockets: bool | None = None
-    context_promotion_target: str | None = None
     priority: int | None = None
     thinking: ThinkingConfig | None = None
     compat: JsonObject | None = None
@@ -1060,9 +1059,6 @@ def parse_model_info(payload: JsonObject | None) -> ModelInfo | None:
         headers=cast(dict[str, str] | None, _optional_json_object(headers_payload, field="model.headers")),
         premium_multiplier=float(payload["premiumMultiplier"]) if "premiumMultiplier" in payload else None,
         prefer_websockets=bool(payload["preferWebsockets"]) if "preferWebsockets" in payload else None,
-        context_promotion_target=(
-            str(payload["contextPromotionTarget"]) if "contextPromotionTarget" in payload else None
-        ),
         priority=int(payload["priority"]) if "priority" in payload else None,
         thinking=(
             ThinkingConfig(

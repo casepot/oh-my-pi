@@ -5839,17 +5839,16 @@ export class AgentSession {
 	}
 
 	/**
-	 * Check if context maintenance or promotion is needed and run it.
+	 * Check if context maintenance is needed and run it.
 	 * Called after agent_end and before prompt submission.
 	 *
-	 * Four cases (in order):
-	 * 1. Input overflow + promotion: promote to larger model, retry without maintenance.
-	 * 2. Input overflow + no promotion target: run context maintenance, auto-retry on same model.
-	 * 3. Output incomplete (stopReason === "length", e.g. `response.incomplete`): the
+	 * Three cases (in order):
+	 * 1. Input overflow: run context maintenance, auto-retry on same model.
+	 * 2. Output incomplete (stopReason === "length", e.g. `response.incomplete`): the
 	 *    model burned its output budget without producing an actionable deliverable
-	 *    (reasoning-only or truncated). Drop the dead turn, try promotion, otherwise
-	 *    run compaction/handoff and retry.
-	 * 4. Threshold: context over threshold, run context maintenance (no auto-retry).
+	 *    (reasoning-only or truncated). Drop the dead turn, run compaction/handoff,
+	 *    and retry.
+	 * 3. Threshold: context over threshold, run context maintenance (no auto-retry).
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
@@ -5871,7 +5870,6 @@ export class AgentSession {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
 		const contextWindow = this.model?.contextWindow ?? 0;
-		const generation = this.#promptGeneration;
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
@@ -5893,15 +5891,6 @@ export class AgentSession {
 				this.agent.replaceMessages(messages.slice(0, -1));
 			}
 
-			// Try context promotion first - switch to a larger model and retry without compacting
-			const promoted = await this.#tryContextPromotion(assistantMessage);
-			if (promoted) {
-				// Retry on the promoted (larger) model without compacting
-				this.#scheduleAgentContinue({ delayMs: 100, generation });
-				return false;
-			}
-
-			// No promotion target available fall through to compaction
 			const compactionSettings = this.settings.getGroup("compaction");
 			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
 				await this.#runAutoCompaction("overflow", true, false, allowDefer);
@@ -5912,35 +5901,26 @@ export class AgentSession {
 		// Case 3: Output-side incomplete — `response.incomplete` from OpenAI Responses
 		// (and Codex) maps to stopReason === "length". The model burned its
 		// `max_output_tokens` budget on reasoning/text and emitted no actionable
-		// deliverable. Same recovery class as overflow: promotion if available,
-		// otherwise compaction/handoff. Unlike overflow, the *input* is fine, so we
-		// allow the handoff strategy to actually run.
+		// deliverable. Same recovery class as overflow: compact or hand off. Unlike
+		// overflow, the *input* is fine, so we allow the handoff strategy to actually
+		// run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
 			const messages = this.agent.state.messages;
 			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
 				this.agent.replaceMessages(messages.slice(0, -1));
 			}
 
-			const promoted = await this.#tryContextPromotion(assistantMessage);
-			if (promoted) {
-				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
-					from: `${assistantMessage.provider}/${assistantMessage.model}`,
-				});
-				this.#scheduleAgentContinue({ delayMs: 100, generation });
-				return false;
-			}
-
 			const incompleteCompactionSettings = this.settings.getGroup("compaction");
 			if (incompleteCompactionSettings.enabled && incompleteCompactionSettings.strategy !== "off") {
-				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
+				logger.debug("Compaction triggered by response.incomplete (length stop)", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
 					strategy: incompleteCompactionSettings.strategy,
 				});
 				await this.#runAutoCompaction("incomplete", true, false, allowDefer);
 			} else {
-				// Neither promotion nor compaction is available — surface the dead-end so
-				// the user understands why the turn yielded with nothing.
-				logger.warn("response.incomplete with no recovery path (promotion + compaction both unavailable)", {
+				// No recovery path is available — surface the dead-end so the user
+				// understands why the turn yielded with nothing.
+				logger.warn("response.incomplete with no recovery path (compaction unavailable)", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
 				});
 			}
@@ -5959,11 +5939,7 @@ export class AgentSession {
 			contextTokens = Math.max(0, contextTokens - pruneResult.tokensSaved);
 		}
 		if (shouldCompact(contextTokens, contextWindow, compactionSettings)) {
-			// Try promotion first — if a larger model is available, switch instead of compacting
-			const promoted = await this.#tryContextPromotion(assistantMessage);
-			if (!promoted) {
-				return await this.#runAutoCompaction("threshold", false, false, allowDefer);
-			}
+			return await this.#runAutoCompaction("threshold", false, false, allowDefer);
 		}
 		return false;
 	}
@@ -6203,52 +6179,6 @@ export class AgentSession {
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 	}
 
-	/**
-	 * Attempt context promotion to a larger model.
-	 * Returns true if promotion succeeded (caller should retry without compacting).
-	 */
-	async #tryContextPromotion(assistantMessage: AssistantMessage): Promise<boolean> {
-		const promotionSettings = this.settings.getGroup("contextPromotion");
-		if (!promotionSettings.enabled) return false;
-		const currentModel = this.model;
-		if (!currentModel) return false;
-		if (assistantMessage.provider !== currentModel.provider || assistantMessage.model !== currentModel.id)
-			return false;
-		const contextWindow = currentModel.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
-		const targetModel = await this.#resolveContextPromotionTarget(currentModel, contextWindow);
-		if (!targetModel) return false;
-
-		try {
-			await this.setModelTemporary(targetModel);
-			logger.debug("Context promotion switched model on overflow", {
-				from: `${currentModel.provider}/${currentModel.id}`,
-				to: `${targetModel.provider}/${targetModel.id}`,
-			});
-			return true;
-		} catch (error) {
-			logger.warn("Context promotion failed", {
-				from: `${currentModel.provider}/${currentModel.id}`,
-				to: `${targetModel.provider}/${targetModel.id}`,
-				error: String(error),
-			});
-			return false;
-		}
-	}
-
-	async #resolveContextPromotionTarget(currentModel: Model, contextWindow: number): Promise<Model | undefined> {
-		const availableModels = this.#modelRegistry.getAvailable();
-		if (availableModels.length === 0) return undefined;
-
-		const candidate = this.#resolveContextPromotionConfiguredTarget(currentModel, availableModels);
-		if (!candidate) return undefined;
-		if (modelsAreEqual(candidate, currentModel)) return undefined;
-		if (candidate.contextWindow <= contextWindow) return undefined;
-		const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
-		if (!apiKey) return undefined;
-		return candidate;
-	}
-
 	#setModelWithProviderSessionReset(model: Model): void {
 		const currentModel = this.model;
 		if (currentModel) {
@@ -6481,18 +6411,6 @@ export class AgentSession {
 		const thinkingLevel = extractExplicitThinkingSelector(existingRoleValue, this.settings);
 		return formatModelSelectorValue(modelKey, thinkingLevel);
 	}
-	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
-		const configuredTarget = currentModel.contextPromotionTarget?.trim();
-		if (!configuredTarget) return undefined;
-
-		const parsed = parseModelString(configuredTarget);
-		if (parsed) {
-			const explicitModel = availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
-			if (explicitModel) return explicitModel;
-		}
-
-		return availableModels.find(m => m.provider === currentModel.provider && m.id === configuredTarget);
-	}
 
 	#resolveRoleModelFull(
 		role: string,
@@ -6529,12 +6447,15 @@ export class AgentSession {
 		};
 
 		const currentModel = this.model;
-		// Prefer the active session's model: it's what the user is actively using,
-		// and routing compaction to a different provider (e.g. an OpenAI default
-		// model while the chat is on Anthropic) changes provider-specific behavior
-		// like remote compaction endpoints. Role-based candidates only kick in
-		// as auth fallbacks when the current model has no usable credentials.
+		// Default to the active session model: compaction rewrites the user's
+		// live context, so changing provider/model is a trust-boundary change.
 		addCandidate(currentModel);
+		if (!this.settings.get("compaction.allowModelFallbacks")) {
+			return candidates;
+		}
+
+		// Explicitly enabled fallback mode keeps the historical resilience path:
+		// try configured role models, then one largest-context authenticated model.
 		for (const role of MODEL_ROLE_IDS) {
 			addCandidate(this.#resolveRoleModelFull(role, availableModels, currentModel).model);
 		}
@@ -6569,9 +6490,12 @@ export class AgentSession {
 				"Compaction requires a model with usable credentials, but no authenticated compaction model is available.",
 			);
 		}
+		const fallbackHint =
+			this.settings.get("compaction.allowModelFallbacks") === true
+				? `Configure ${currentModel.provider} credentials or verify that your configured fallback models also have working credentials.`
+				: `Configure ${currentModel.provider} credentials or enable compaction.allowModelFallbacks and assign an authenticated fallback role such as modelRoles.smol.`;
 		return new Error(
-			`Compaction requires usable credentials for ${currentModel.provider}/${currentModel.id}. ` +
-				`Configure ${currentModel.provider} credentials or assign an authenticated fallback role such as modelRoles.smol.`,
+			`Compaction requires usable credentials for ${currentModel.provider}/${currentModel.id}. ${fallbackHint}`,
 		);
 	}
 

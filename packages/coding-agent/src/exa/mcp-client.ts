@@ -2,6 +2,7 @@ import type { TSchema } from "@oh-my-pi/pi-ai";
 import { $env, logger } from "@oh-my-pi/pi-utils";
 import type { CustomTool, CustomToolResult } from "../extensibility/custom-tools/types";
 import { callMCP } from "../mcp/json-rpc";
+import { MCPManager } from "../mcp/manager";
 import type {
 	ExaRenderDetails,
 	ExaSearchResponse,
@@ -11,9 +12,9 @@ import type {
 	MCPToolWrapperConfig,
 } from "./types";
 
-/** Find EXA_API_KEY from Bun.env or .env files */
+/** Find EXA_API_KEY from the environment or the active MCP manager. */
 export function findApiKey(): string | null {
-	return $env.EXA_API_KEY;
+	return $env.EXA_API_KEY || MCPManager.instance()?.getExaApiKey() || null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

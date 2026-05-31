@@ -8,8 +8,8 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { ModelRegistry } from "../config/model-registry";
-import { resolveModelOverrideWithAuthFallback } from "../config/model-resolver";
+import { isAuthenticated, kNoAuth, ModelRegistry } from "../config/model-registry";
+import { resolveModelOverride, resolveModelOverrideWithAuthFallback } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
@@ -1136,19 +1136,47 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 
+			const allowParentModelAuthFallback = settings.get("task.fallbackToParentModelOnAuthFailure") ?? false;
+			const resolveAgainstAvailable = async () =>
+				allowParentModelAuthFallback
+					? await awaitAbortable(
+							resolveModelOverrideWithAuthFallback(
+								modelPatterns,
+								options.parentActiveModelPattern,
+								modelRegistry,
+								settings,
+							),
+						)
+					: { ...resolveModelOverride(modelPatterns, modelRegistry, settings), authFallbackUsed: false };
+			let resolvedModelOverride = await resolveAgainstAvailable();
+			if (!resolvedModelOverride.model && modelPatterns.length > 0) {
+				const allModelRegistry = Object.create(modelRegistry) as ModelRegistry;
+				allModelRegistry.getAvailable = () => modelRegistry.getAll();
+				resolvedModelOverride = allowParentModelAuthFallback
+					? await awaitAbortable(
+							resolveModelOverrideWithAuthFallback(
+								modelPatterns,
+								options.parentActiveModelPattern,
+								allModelRegistry,
+								settings,
+							),
+						)
+					: { ...resolveModelOverride(modelPatterns, allModelRegistry, settings), authFallbackUsed: false };
+			}
 			const {
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
-			} = await awaitAbortable(
-				resolveModelOverrideWithAuthFallback(
-					modelPatterns,
-					options.parentActiveModelPattern,
-					modelRegistry,
-					settings,
-				),
-			);
+			} = resolvedModelOverride;
+			if (model && !authFallbackUsed) {
+				const apiKey = await awaitAbortable(modelRegistry.getApiKey(model));
+				if (!(apiKey === kNoAuth || isAuthenticated(apiKey))) {
+					throw new Error(
+						`Subagent model ${model.provider}/${model.id} has no working credentials. Configure credentials for that model or set task.fallbackToParentModelOnAuthFailure=true to allow parent-model substitution.`,
+					);
+				}
+			}
 			if (authFallbackUsed && model) {
 				logger.warn("Subagent model has no working credentials; falling back to parent session model", {
 					requested: modelPatterns,
