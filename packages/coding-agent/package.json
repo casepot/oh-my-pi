@@ -335,6 +335,14 @@
 			"types": "./src/eval/py/*.ts",
 			"import": "./src/eval/py/*.ts"
 		},
+		"./project-detection": {
+			"types": "./src/project-detection/index.ts",
+			"import": "./src/project-detection/index.ts"
+		},
+		"./project-detection/*": {
+			"types": "./src/project-detection/*.ts",
+			"import": "./src/project-detection/*.ts"
+		},
 		"./lsp": {
 			"types": "./src/lsp/index.ts",
 			"import": "./src/lsp/index.ts"

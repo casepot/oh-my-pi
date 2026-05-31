@@ -17,6 +17,8 @@ When no LSP config file is present, OMP auto-detects servers by intersecting two
 
 No configuration is required for common setups. The built-in server list covers most popular languages; see [`defaults.json`](../packages/coding-agent/src/lsp/defaults.json) for the full set.
 
+The same project-marker philosophy is also used by [Skillsets](./skillsets.md), which activate knowledge packs instead of language-server processes.
+
 ## Config file locations
 
 OMP merges LSP config from multiple files, lowest to highest priority:

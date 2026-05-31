@@ -7,6 +7,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
+import type { SkillsetActivation } from "./capability/skillset";
 import { systemPromptCapability } from "./capability/system-prompt";
 import type { SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
@@ -74,6 +75,50 @@ function firstNonEmpty(...values: (string | undefined | null)[]): string | null 
 		if (trimmed) return trimmed;
 	}
 	return null;
+}
+
+export interface ActiveSkillsetPromptSummary {
+	id: string;
+	description: string;
+	root: string;
+	detectedFrom: string;
+	skills: string[];
+	promptSummary?: string;
+	toolHints: string[];
+}
+
+function summarizeSkillsetEvidence(activeSkillset: SkillsetActivation): string {
+	const evidence = activeSkillset.evidence[0];
+	if (!evidence) return activeSkillset.confidence;
+	const value = evidence.value ?? evidence.kind;
+	if (evidence.path) return `${value} at ${shortenPath(evidence.path.replace(/\\/g, "/"))}`;
+	return value;
+}
+
+function summarizeActiveSkillsets(
+	activeSkillsets: readonly SkillsetActivation[] | undefined,
+	visibleSkillNames: ReadonlySet<string>,
+): ActiveSkillsetPromptSummary[] {
+	if (!activeSkillsets || activeSkillsets.length === 0) return [];
+	return activeSkillsets
+		.map(activeSkillset => {
+			const skills = activeSkillset.effects.skills.filter(name => visibleSkillNames.has(name));
+			const hasConfiguredSkillEffects =
+				(activeSkillset.skillset.provides.skills?.length ?? 0) > 0 ||
+				(activeSkillset.skillset.provides.skillDirectories?.length ?? 0) > 0;
+			const promptSummary =
+				skills.length > 0 || !hasConfiguredSkillEffects ? activeSkillset.effects.promptSummary : undefined;
+			return {
+				id: activeSkillset.skillset.id,
+				description: activeSkillset.skillset.description,
+				root: shortenPath(activeSkillset.root.replace(/\\/g, "/")),
+				detectedFrom: summarizeSkillsetEvidence(activeSkillset),
+				skills,
+				...(promptSummary ? { promptSummary } : {}),
+				toolHints: activeSkillset.effects.toolHints,
+			};
+		})
+		.filter(summary => summary.skills.length > 0 || summary.promptSummary);
 }
 
 function parseWmicTable(output: string, header: string): string | null {
@@ -345,6 +390,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Skills provided directly to system prompt construction. */
 	skills?: Skill[];
+	/** Active project skillsets compiled by SDK. */
+	activeSkillsets?: SkillsetActivation[];
 	/** Pre-loaded rulebook rules (descriptions, excluding TTSR and always-apply). */
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
@@ -388,6 +435,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 		rules,
+		activeSkillsets,
 		alwaysApplyRules,
 		intentField,
 		mcpDiscoveryMode = false,
@@ -560,6 +608,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
+		activeSkillsets: summarizeActiveSkillsets(activeSkillsets, new Set(filteredSkills.map(skill => skill.name))),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,

@@ -24,6 +24,7 @@ export * from "./extensibility/extensions";
 // Hook system types (legacy re-export)
 // Skills
 export * from "./extensibility/skills";
+export * from "./extensibility/skillsets";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
 export type * from "./lsp";
@@ -34,6 +35,7 @@ export * from "./modes";
 export * from "./modes/components";
 // Theme utilities for custom tools
 export * from "./modes/theme/theme";
+export * from "./project-detection";
 // SDK for programmatic usage
 export * from "./sdk";
 export * from "./session/agent-session";

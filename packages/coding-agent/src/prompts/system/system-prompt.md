@@ -69,6 +69,14 @@ With most FS/bash-like tools, static references to them will automatically resol
 - `pr://<N>` (or `pr://<owner>/<repo>/<N>`): GitHub PR view; same cache. Append `?comments=0` to drop the comments section. Bare `pr://` (or `pr://<owner>/<repo>`) lists recent PRs; supports `?state=open|closed|merged|all&limit=&author=&label=`.
 - `omp://`: Harness documentation; AVOID reading unless user mentions the harness itself
 
+{{#if activeSkillsets.length}}
+# Active Project Skillsets
+{{#each activeSkillsets}}
+- {{id}}: detected from {{detectedFrom}} (root {{root}}).{{#if skills.length}} Skills: {{#list skills join=", "}}{{this}}{{/list}}. Read `skill://<name>` before using an activated skill.{{/if}}{{#if promptSummary}} {{promptSummary}}{{/if}}
+{{/each}}
+
+{{/if}}
+
 {{#if skills.length}}
 # Skills
 {{#each skills}}

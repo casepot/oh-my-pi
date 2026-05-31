@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added project-aware skillsets that detect project facets from markers/globs, load JSON/YAML skillset definitions, activate session-local skill directories, and render compact Active Project Skillsets prompt metadata.
 - Added a `Web search` setup tab that lets users choose the preferred `providers.webSearch` provider during onboarding
 - Added manual authorization-code/redirect URL prompts for OAuth providers that require non-callback login in the setup wizard
 - Added an `omp completions <bash|zsh|fish>` command that prints a shell completion script generated from the live command/flag metadata, so completions never drift from the actual CLI. Subcommands, flags, and enum values complete statically; `--model`/`--smol`/`--slow`/`--plan` resolve against the bundled model catalog and `--resume` against on-disk sessions via a hidden `__complete` helper.

@@ -28,6 +28,18 @@ Main branch: {{git.mainBranch}}
 {{/if}}
 </project>
 {{/ifAny}}
+{{#if activeSkillsets.length}}
+Active project skillsets are enabled. Read activated skills through `skill://<name>` before using them.
+<skillsets>
+{{#list activeSkillsets join="\n"}}
+<skillset name="{{id}}" root="{{root}}">
+Detected from {{detectedFrom}}.
+{{#if skills.length}}Skills: {{#list skills join=", "}}{{this}}{{/list}}.{{/if}}
+{{#if promptSummary}}{{promptSummary}}{{/if}}
+</skillset>
+{{/list}}
+</skillsets>
+{{/if}}
 {{#if skills.length}}
 Skills are specialized knowledge. Scan descriptions for your task domain.
 If a skill applies, you MUST read `skill://<name>` before proceeding.

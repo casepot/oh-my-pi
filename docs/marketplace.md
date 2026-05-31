@@ -15,7 +15,7 @@ Or just type `/marketplace` with no arguments to open the interactive plugin bro
 
 A **marketplace** is a Git repository (or local directory) containing a catalog file at `.claude-plugin/marketplace.json`. The catalog lists available plugins with their sources, descriptions, and metadata.
 
-A **plugin** is a directory containing skills, commands, hooks, MCP servers, or LSP servers. Plugins are identified by `name@marketplace` (e.g. `code-review@claude-plugins-official`).
+A **plugin** is a directory containing skills, skillsets, commands, hooks, MCP servers, or LSP servers. Plugins are identified by `name@marketplace` (e.g. `code-review@claude-plugins-official`).
 
 **Scopes**: plugins can be installed at two scopes:
 
@@ -130,6 +130,7 @@ A marketplace catalog lives at `.claude-plugin/marketplace.json` in the reposito
 | `hooks`       | no       | Hook definitions                                                 |
 | `mcpServers`  | no       | MCP server definitions                                           |
 | `lspServers`  | no       | LSP server definitions                                           |
+| `skillsets`   | no       | Skillset definitions or a relative path to a skillset config file |
 
 ### Plugin source formats
 
@@ -199,6 +200,8 @@ The `source` field supports several formats:
   plugins/
     installed_plugins.json       # Project-scoped installed plugins
 ```
+
+Installed plugin roots may include `skillsets.json` / `skillsets.yaml` files. Marketplace catalog entries may also expose `skillsets` inline or as a relative path inside the plugin root. See [Skillsets](./skillsets.md).
 
 ## Naming rules
 

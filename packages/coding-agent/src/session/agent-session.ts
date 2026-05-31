@@ -90,6 +90,7 @@ import {
 import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
+import type { SkillsetActivation } from "../capability/skillset";
 import { MODEL_ROLE_IDS, type ModelRegistry } from "../config/model-registry";
 import {
 	extractExplicitThinkingSelector,
@@ -276,6 +277,10 @@ export interface AgentSessionConfig {
 	skills?: Skill[];
 	/** Skill loading warnings (already captured by SDK) */
 	skillWarnings?: SkillWarning[];
+	/** Active project skillsets compiled by SDK */
+	skillsetActivations?: SkillsetActivation[];
+	/** Matching skillsets surfaced in suggest mode */
+	suggestedSkillsets?: SkillsetActivation[];
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
@@ -870,6 +875,8 @@ export class AgentSession {
 
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
+	#skillsetActivations: SkillsetActivation[];
+	#suggestedSkillsets: SkillsetActivation[];
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -1047,6 +1054,8 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#skills = config.skills ?? [];
 		this.#skillWarnings = config.skillWarnings ?? [];
+		this.#skillsetActivations = config.skillsetActivations ?? [];
+		this.#suggestedSkillsets = config.suggestedSkillsets ?? [];
 		this.#customCommands = config.customCommands ?? [];
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
@@ -4807,6 +4816,14 @@ export class AgentSession {
 	/** Skill loading warnings captured by SDK */
 	get skillWarnings(): readonly SkillWarning[] {
 		return this.#skillWarnings;
+	}
+
+	get skillsetActivations(): readonly SkillsetActivation[] {
+		return this.#skillsetActivations;
+	}
+
+	get suggestedSkillsets(): readonly SkillsetActivation[] {
+		return this.#suggestedSkillsets;
 	}
 
 	getTodoPhases(): TodoPhase[] {

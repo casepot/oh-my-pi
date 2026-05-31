@@ -37,6 +37,7 @@ import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled } from ".
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
+import type { SkillsetDefinition } from "./capability/skillset";
 import { ModelRegistry } from "./config/model-registry";
 import {
 	formatModelString,
@@ -46,7 +47,7 @@ import {
 	resolveModelRoleValue,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
-import { Settings, type SkillsSettings } from "./config/settings";
+import { Settings, type SkillsetsSettings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { resolveConfigValue } from "./config/resolve-config-value";
@@ -80,6 +81,11 @@ import {
 	type SkillWarning,
 	setActiveSkills,
 } from "./extensibility/skills";
+import {
+	type CompileSkillsetActivationResult,
+	compileSkillsetActivationPlan,
+	loadSkillsetDefinitions,
+} from "./extensibility/skillsets";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
@@ -87,6 +93,7 @@ import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-e
 import { discoverAndLoadMCPTools, MCPManager, type MCPToolsLoadResult } from "./mcp";
 import { resolveMemoryBackend } from "./memory-backend";
 import { getMnemosyneSessionState, type MnemosyneSessionState } from "./mnemosyne/state";
+import { detectProjectFacets, type ProjectFacet } from "./project-detection";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
@@ -372,8 +379,9 @@ export interface CreateAgentSessionResult {
 
 // Re-exports
 
+export type { SkillsetActivation, SkillsetDefinition } from "./capability/skillset";
 export type { PromptTemplate } from "./config/prompt-templates";
-export { Settings, type SkillsSettings } from "./config/settings";
+export { Settings, type SkillsetsSettings, type SkillsSettings } from "./config/settings";
 export type { CustomCommand, CustomCommandFactory } from "./extensibility/custom-commands/types";
 export type { CustomTool, CustomToolFactory } from "./extensibility/custom-tools/types";
 export type * from "./extensibility/extensions";
@@ -865,6 +873,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		: logger.time("buildWorkspaceTree", () => buildWorkspaceTree(cwd, { timeoutMs: STARTUP_SCAN_DEADLINE_MS }));
 	workspaceTreePromise.catch(() => {});
 
+	const withStartupDeadline = async <T>(name: string, work: Promise<T>, fallback: T): Promise<T> => {
+		let timedOut = false;
+		const result = await Promise.race([
+			work,
+			Bun.sleep(STARTUP_SCAN_DEADLINE_MS).then(() => {
+				timedOut = true;
+				return fallback;
+			}),
+		]);
+		if (timedOut) {
+			logger.warn("Startup scan exceeded deadline; using fallback", {
+				name,
+				timeoutMs: STARTUP_SCAN_DEADLINE_MS,
+				cwd,
+			});
+		}
+		return result;
+	};
+
 	// Independent discoveries that depend only on cwd/agentDir — kicked off in parallel and awaited
 	// at their respective consumer sites. Their work can overlap with model resolution, secret loading,
 	// session-context build, tool creation, MCP discovery, and extension discovery.
@@ -881,7 +908,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
 	slashCommandsPromise.catch(() => {});
 	const skillsSettings = settings.getGroup("skills");
+	const skillsetsSettings = settings.getGroup("skillsets");
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
+	const skillsetsEnabled =
+		options.skills === undefined && skillsetsSettings.enabled !== false && skillsetsSettings.mode !== "off";
+	const projectFacetsPromise: Promise<ProjectFacet[]> = skillsetsEnabled
+		? withStartupDeadline("detectProjectFacets", logger.time("detectProjectFacets", detectProjectFacets, { cwd }), [])
+		: Promise.resolve([]);
+	projectFacetsPromise.catch(() => {});
+	const skillsetDefinitionsPromise: Promise<{ definitions: SkillsetDefinition[]; warnings: string[] }> =
+		skillsetsEnabled
+			? withStartupDeadline(
+					"loadSkillsetDefinitions",
+					logger.time("loadSkillsetDefinitions", loadSkillsetDefinitions, {
+						...skillsetsSettings,
+						cwd,
+						disabledExtensions: disabledExtensionIds,
+					}),
+					{ definitions: [], warnings: [] },
+				)
+			: Promise.resolve({ definitions: [], warnings: [] });
+	skillsetDefinitionsPromise.catch(() => {});
 	const discoveredSkillsPromise =
 		options.skills === undefined
 			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
@@ -1035,13 +1082,38 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let skills: Skill[];
 	let skillWarnings: SkillWarning[];
+	let activeSkillsets: CompileSkillsetActivationResult["activations"] = [];
+	let suggestedSkillsets: CompileSkillsetActivationResult["suggestions"] = [];
+	let skillsetRuleNames = new Set<string>();
+	let skillsetAlwaysApplyRuleNames = new Set<string>();
 	if (options.skills !== undefined) {
 		skills = options.skills;
 		skillWarnings = [];
 	} else {
-		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
-		skills = discovered.skills;
-		skillWarnings = discovered.warnings;
+		const [discovered, facets, definitionResult] = await Promise.all([
+			discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }),
+			projectFacetsPromise,
+			skillsetDefinitionsPromise,
+		]);
+		const activationPlan = await logger.time("compileSkillsetActivationPlan", compileSkillsetActivationPlan, {
+			cwd,
+			facets,
+			definitions: definitionResult.definitions,
+			settings: skillsetsSettings as SkillsetsSettings,
+			baseSkills: discovered.skills,
+			baseWarnings: [
+				...discovered.warnings,
+				...definitionResult.warnings.map(message => ({ skillPath: "skillsets", message })),
+			],
+			disabledExtensions: disabledExtensionIds,
+			skillsSettings,
+		});
+		skills = activationPlan.skills;
+		skillWarnings = activationPlan.skillWarnings;
+		activeSkillsets = activationPlan.activations;
+		suggestedSkillsets = activationPlan.suggestions;
+		skillsetRuleNames = activationPlan.ruleNames;
+		skillsetAlwaysApplyRuleNames = activationPlan.alwaysApplyRuleNames;
 	}
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
@@ -1055,15 +1127,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const rulebookRules: Rule[] = [];
 		const alwaysApplyRules: Rule[] = [];
 		for (const rule of rulesResult.items) {
-			const isTtsrRule = rule.condition && rule.condition.length > 0 ? ttsrManager.addRule(rule) : false;
+			const forceAlwaysApply = skillsetAlwaysApplyRuleNames.has(rule.name);
+			const forceRulebook = skillsetRuleNames.has(rule.name);
+			const isTtsrRule =
+				!forceAlwaysApply && !forceRulebook && rule.condition && rule.condition.length > 0
+					? ttsrManager.addRule(rule)
+					: false;
 			if (isTtsrRule) {
 				continue;
 			}
-			if (rule.alwaysApply === true) {
+			if (forceAlwaysApply || rule.alwaysApply === true) {
 				alwaysApplyRules.push(rule);
 				continue;
 			}
-			if (rule.description) {
+			if (forceRulebook || rule.description) {
 				rulebookRules.push(rule);
 			}
 		}
@@ -1631,6 +1708,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				rules: rulebookRules,
 				alwaysApplyRules,
 				skillsSettings: settings.getGroup("skills"),
+				activeSkillsets: skillsetsSettings.showDetectedInPrompt ? activeSkillsets : [],
 				appendSystemPrompt: appendPrompt,
 				repeatToolDescriptions,
 				intentField,
@@ -1989,6 +2067,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			customCommands: customCommandsResult.commands,
 			skills,
 			skillWarnings,
+			skillsetActivations: activeSkillsets,
+			suggestedSkillsets,
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
 			toolRegistry,

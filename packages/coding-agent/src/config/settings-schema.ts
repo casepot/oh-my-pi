@@ -2815,6 +2815,25 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
+	// Skillsets
+	"skillsets.enabled": { type: "boolean", default: true },
+
+	"skillsets.mode": { type: "enum", values: ["off", "suggest", "auto"] as const, default: "auto" as const },
+
+	"skillsets.disabled": { type: "array", default: [] as string[] },
+
+	"skillsets.include": { type: "array", default: [] as string[] },
+
+	"skillsets.customFiles": { type: "array", default: [] as string[] },
+
+	"skillsets.customDirectories": { type: "array", default: [] as string[] },
+
+	"skillsets.maxAlwaysApplyChars": { type: "number", default: 12000 },
+
+	"skillsets.maxPromptSummaryChars": { type: "number", default: 3000 },
+
+	"skillsets.showDetectedInPrompt": { type: "boolean", default: true },
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -3326,6 +3345,18 @@ export interface SkillsSettings {
 	disabledExtensions?: string[];
 }
 
+export interface SkillsetsSettings {
+	enabled: boolean;
+	mode: "off" | "suggest" | "auto";
+	disabled: string[];
+	include: string[];
+	customFiles: string[];
+	customDirectories: string[];
+	maxAlwaysApplyChars: number;
+	maxPromptSummaryChars: number;
+	showDetectedInPrompt: boolean;
+}
+
 export interface CommitSettings {
 	mapReduceEnabled: boolean;
 	mapReduceMinFiles: number;
@@ -3398,6 +3429,7 @@ export interface GroupTypeMap {
 	memories: MemoriesSettings;
 	branchSummary: BranchSummarySettings;
 	skills: SkillsSettings;
+	skillsets: SkillsetsSettings;
 	commit: CommitSettings;
 	ttsr: TtsrSettings;
 	exa: ExaSettings;

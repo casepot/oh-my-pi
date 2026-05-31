@@ -74,6 +74,8 @@ Current runtime behavior:
 
 If `skills.enabled` is `false`, discovery returns no skills.
 
+Skillsets can add session-local skill directories after project detection. This does not mutate `skills.customDirectories`; the same non-recursive `*/SKILL.md` layout and collision rules apply. See [Skillsets](./skillsets.md).
+
 ### Built-in skill providers and precedence
 
 Provider ordering is priority-first (higher wins), then registration order for ties.
@@ -114,6 +116,7 @@ Filter order is:
   - emits collision warnings when a later skill name conflicts
   - keeps the convenience `discoverSkillsFromDir({ dir, source })` API as a thin adapter over `scanSkillsFromDir`
 - Custom-directory skills are merged after provider skills and follow the same collision behavior
+- Skillset-provided directories are merged after provider/custom skills, de-duplicated by `realpath`, and emit the same name-collision warnings.
 
 ## Runtime usage behavior
 
