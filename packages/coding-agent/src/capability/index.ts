@@ -42,6 +42,10 @@ const disabledProviders = new Set<string>();
 /** Settings manager for persistence (if set) */
 let settings: Settings | null = null;
 
+function isValidSourceLevel(level: unknown): level is SourceMeta["level"] {
+	return level === "user" || level === "project" || level === "native";
+}
+
 // =============================================================================
 // Registration API
 // =============================================================================
@@ -144,22 +148,30 @@ async function loadImpl<T>(
 
 		let contributedItemCount = 0;
 		for (const item of result.items) {
-			const itemWithSource = item as T & { _source: SourceMeta };
-			if (!itemWithSource._source) {
+			const itemWithSource = item as T & { _source?: SourceMeta };
+			const source = itemWithSource._source;
+			if (!source) {
 				allWarnings.push(`[${provider.displayName}] Item missing _source metadata, skipping`);
 				continue;
 			}
+			if (!isValidSourceLevel(source.level)) {
+				allWarnings.push(
+					`[${provider.displayName}] Item has invalid source level "${String(source.level)}" at ${source.path ?? "unknown"}, skipping`,
+				);
+				continue;
+			}
 
-			const extensionId = capability.toExtensionId?.(itemWithSource);
+			const itemWithValidatedSource = itemWithSource as T & { _source: SourceMeta; _shadowed?: boolean };
+			const extensionId = capability.toExtensionId?.(itemWithValidatedSource);
 			if (extensionId && disabledExtensionIds.has(extensionId)) {
 				continue;
 			}
 
-			if (itemWithSource._source.level === "user" && !includeUserSources) {
+			if (source.level === "user" && !includeUserSources) {
 				continue;
 			}
-			itemWithSource._source.providerName = provider.displayName;
-			allItems.push(itemWithSource as T & { _source: SourceMeta; _shadowed?: boolean });
+			source.providerName = provider.displayName;
+			allItems.push(itemWithValidatedSource);
 			contributedItemCount += 1;
 		}
 

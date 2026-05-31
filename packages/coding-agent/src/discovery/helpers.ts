@@ -624,9 +624,15 @@ export function buildExtensionModuleItems(
 
 /**
  * Entry for an installed Claude Code plugin.
+ *
+ * Claude's registry can contain `scope: "local"` entries tied to a
+ * `projectPath`. Those are normalized to project-scoped roots only when the
+ * active cwd is inside that project. Unknown scopes are ignored rather than
+ * promoted to project scope.
  */
 export interface ClaudePluginEntry {
-	scope: "user" | "project";
+	scope?: string;
+	projectPath?: string;
 	installPath: string;
 	version: string;
 	installedAt: string;
@@ -657,7 +663,7 @@ export interface ClaudePluginRoot {
 	version: string;
 	/** Absolute path to plugin root */
 	path: string;
-	/** Whether this is a user or project scope plugin */
+	/** Effective discovery scope after normalizing Claude local-project entries */
 	scope: "user" | "project";
 }
 
@@ -675,6 +681,37 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
 	)
 		return null;
 	return data;
+}
+
+function isPathWithinOrEqual(rootPath: string, candidatePath: string): boolean {
+	const relative = path.relative(rootPath, candidatePath);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function resolveClaudePluginEntryScope(
+	pluginId: string,
+	entry: ClaudePluginEntry,
+	cwd: string | undefined,
+	warnings: string[],
+): "user" | "project" | null {
+	const scope = entry.scope?.trim() || "user";
+	if (scope === "user" || scope === "project") return scope;
+
+	if (scope === "local") {
+		const projectPath = entry.projectPath?.trim();
+		if (!projectPath) {
+			warnings.push(`Plugin ${pluginId} local entry is missing projectPath`);
+			return null;
+		}
+		if (!cwd) return null;
+
+		const resolvedProjectPath = path.resolve(projectPath);
+		const resolvedCwd = path.resolve(cwd);
+		return isPathWithinOrEqual(resolvedProjectPath, resolvedCwd) ? "project" : null;
+	}
+
+	warnings.push(`Plugin ${pluginId} entry has unsupported scope: ${scope}`);
+	return null;
 }
 
 /**
@@ -754,14 +791,15 @@ const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: 
  * Reads ~/.claude/plugins/installed_plugins.json and ~/.omp/plugins/installed_plugins.json,
  * and optionally the nearest project-scoped registry resolved from `cwd`.
  *
- * Results are cached per `home:resolvedProjectPath` key to avoid repeated parsing.
+ * Results are cached per `home` plus active project context to avoid repeated parsing.
  */
 export async function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
-	const cacheKey = `${home}:${resolvedProjectPath ?? ""}`;
+	const activeProjectCacheKey = resolvedProjectPath ?? (cwd ? path.resolve(cwd) : "");
+	const cacheKey = `${home}:${activeProjectCacheKey}`;
 	const cached = pluginRootsCache.get(cacheKey);
 	if (cached) return cached;
 
@@ -799,6 +837,8 @@ export async function listClaudePluginRoots(
 						continue;
 					}
 					if (entry.enabled === false) continue;
+					const scope = resolveClaudePluginEntryScope(pluginId, entry, cwd, warnings);
+					if (scope === null) continue;
 
 					roots.push({
 						id: pluginId,
@@ -806,7 +846,7 @@ export async function listClaudePluginRoots(
 						plugin: pluginName,
 						version: entry.version || "unknown",
 						path: entry.installPath,
-						scope: entry.scope || "user",
+						scope,
 					});
 				}
 			}
@@ -845,6 +885,8 @@ export async function listClaudePluginRoots(
 						continue;
 					}
 					if (entry.enabled === false) continue;
+					const scope = resolveClaudePluginEntryScope(pluginId, entry, cwd, warnings);
+					if (scope === null) continue;
 					// Deduplicate by installPath within same ID
 					if (roots.some(r => r.id === pluginId && r.path === entry.installPath)) continue;
 
@@ -854,7 +896,7 @@ export async function listClaudePluginRoots(
 						plugin: pluginName,
 						version: entry.version || "unknown",
 						path: entry.installPath,
-						scope: entry.scope || "user",
+						scope,
 					});
 				}
 			}

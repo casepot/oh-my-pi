@@ -2,10 +2,46 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { defineCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initializeWithSettings, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
+import { initializeWithSettings, loadCapability, type SourceMeta } from "@oh-my-pi/pi-coding-agent/discovery";
 
+interface InvalidLevelFixture {
+	name: string;
+	_source: SourceMeta;
+}
+
+const invalidLevelCapabilityId = "test-invalid-source-level";
+
+defineCapability<InvalidLevelFixture>({
+	id: invalidLevelCapabilityId,
+	displayName: "Invalid Source Level Test",
+	description: "Exercises capability source metadata validation",
+	key: item => item.name,
+});
+
+registerProvider<InvalidLevelFixture>(invalidLevelCapabilityId, {
+	id: "invalid-source-level-provider",
+	displayName: "Invalid Source Level Provider",
+	description: "Emits invalid source metadata for regression coverage",
+	priority: 1,
+	async load() {
+		return {
+			items: [
+				{
+					name: "bad-local-scope",
+					_source: {
+						provider: "invalid-source-level-provider",
+						providerName: "",
+						path: "/tmp/bad-local-scope",
+						level: "local",
+					} as unknown as SourceMeta,
+				},
+			],
+		};
+	},
+});
 describe("disabledExtensions runtime filtering", () => {
 	let tempDir = "";
 	let tempHomeDir = "";
@@ -57,5 +93,17 @@ describe("disabledExtensions runtime filtering", () => {
 
 		expect(result.items).toHaveLength(1);
 		expect(path.basename(result.items[0]!.path)).toBe("AGENTS.md");
+	});
+
+	test("skips items whose provider emits an invalid source level", async () => {
+		const result = await loadCapability<InvalidLevelFixture>(invalidLevelCapabilityId, {
+			cwd: tempDir,
+			includeUserSources: true,
+		});
+
+		expect(result.items).toHaveLength(0);
+		expect(result.all).toHaveLength(0);
+		expect(result.providers).not.toContain("invalid-source-level-provider");
+		expect(result.warnings.some(warning => warning.includes('invalid source level "local"'))).toBe(true);
 	});
 });

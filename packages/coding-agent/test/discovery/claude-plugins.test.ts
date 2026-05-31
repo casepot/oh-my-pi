@@ -9,8 +9,10 @@ import {
 	listClaudePluginRoots,
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
+import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
 
@@ -315,6 +317,95 @@ describe("listClaudePluginRoots", () => {
 		expect(result.roots).toHaveLength(1);
 		expect(result.roots[0].scope).toBe("user");
 	});
+
+	test("scopes Claude local plugin skills to their projectPath", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "deploy-on-aws");
+		const pluginSkillDir = path.join(pluginPath, "skills", "deploy");
+		const projectDir = path.join(tempDir, "workspaces", "surge");
+		const projectChildDir = path.join(projectDir, "packages", "api");
+		const otherProjectDir = path.join(tempDir, "workspaces", "oh-my-pi");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(pluginSkillDir, { recursive: true });
+		await fs.mkdir(projectChildDir, { recursive: true });
+		await fs.mkdir(otherProjectDir, { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"deploy-on-aws@agent-plugins-for-aws": [
+					{
+						scope: "local",
+						projectPath: projectDir,
+						installPath: pluginPath,
+						version: "1.1.0",
+						installedAt: "2026-03-10T03:15:18.587Z",
+						lastUpdated: "2026-03-17T06:46:51.479Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(
+			path.join(pluginSkillDir, "SKILL.md"),
+			"---\nname: deploy\ndescription: Deploy applications to AWS.\n---\nBody\n",
+		);
+
+		const options = {
+			enableCodexUser: false,
+			enableClaudeUser: false,
+			enableClaudeProject: false,
+			enablePiUser: false,
+			enablePiProject: true,
+		};
+
+		const outside = await loadSkills({ ...options, cwd: otherProjectDir });
+		expect(outside.skills.map(skill => skill.name)).not.toContain("deploy-on-aws:deploy");
+
+		const inside = await loadSkills({ ...options, cwd: projectChildDir });
+		const found = inside.skills.find(skill => skill.name === "deploy-on-aws:deploy");
+		expect(found?.source).toBe("claude-plugins:project");
+	});
+
+	test("scopes Claude local plugin MCP servers to their projectPath", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "aws-mcp");
+		const projectDir = path.join(tempDir, "workspaces", "surge");
+		const projectChildDir = path.join(projectDir, "packages", "api");
+		const otherProjectDir = path.join(tempDir, "workspaces", "oh-my-pi");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(pluginPath, { recursive: true });
+		await fs.mkdir(projectChildDir, { recursive: true });
+		await fs.mkdir(otherProjectDir, { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"deploy-on-aws@agent-plugins-for-aws": [
+					{
+						scope: "local",
+						projectPath: projectDir,
+						installPath: pluginPath,
+						version: "1.1.0",
+						installedAt: "2026-03-10T03:15:18.587Z",
+						lastUpdated: "2026-03-17T06:46:51.479Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(
+			path.join(pluginPath, ".mcp.json"),
+			JSON.stringify({ awsknowledge: { command: "aws-knowledge-mcp-server" } }),
+		);
+
+		const outside = await loadCapability<MCPServer>("mcps", { cwd: otherProjectDir });
+		expect(outside.items.map(server => server.name)).not.toContain("deploy-on-aws:awsknowledge");
+
+		const inside = await loadCapability<MCPServer>("mcps", { cwd: projectChildDir });
+		const found = inside.items.find(server => server.name === "deploy-on-aws:awsknowledge");
+		expect(found?._source.level).toBe("project");
+	});
 	test("reads skills directory from plugin manifest skills field", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-skills");
@@ -347,7 +438,7 @@ describe("listClaudePluginRoots", () => {
 			"---\nname: manifest-skill\ndescription: Manifest skill\n---\nBody\n",
 		);
 
-		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings).toEqual([]);
 		expect(result.all.length).toBeGreaterThan(0);
 		const found = result.all.find(skill => skill.name === "manifest-skills:manifest-skill");
@@ -385,7 +476,7 @@ describe("listClaudePluginRoots", () => {
 		);
 		await fs.writeFile(path.join(pluginPath, ".claude", "commands", "ship.md"), "Ship it\n");
 
-		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir });
+		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings).toEqual([]);
 		expect(result.all.length).toBeGreaterThan(0);
 		const found = result.all.find(command => command.name === "manifest-commands:ship");
@@ -423,7 +514,7 @@ describe("listClaudePluginRoots", () => {
 		);
 		await fs.writeFile(path.join(pluginPath, ".claude", "commands", "plan.md"), "Plan it\n");
 
-		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir });
+		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings).toEqual([]);
 		const found = result.all.find(command => command.name === "manifest-commands-key:plan");
 
@@ -464,7 +555,7 @@ describe("listClaudePluginRoots", () => {
 		// This file exists only under the legacy dir — should NOT be found
 		await fs.writeFile(path.join(pluginPath, "legacy-commands", "old.md"), "Old\n");
 
-		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir });
+		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings).toEqual([]);
 		const found = result.all.find(command => command.name === "manifest-commands-precedence:ship");
 		const notFound = result.all.find(command => command.name === "manifest-commands-precedence:old");
@@ -505,7 +596,7 @@ describe("listClaudePluginRoots", () => {
 			"---\nname: outside-skill\ndescription: Outside skill\n---\nBody\n",
 		);
 
-		const result = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const result = await loadCapability<Skill>("skills", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings[0]).toContain("Ignoring skills path outside plugin root");
 		const found = result.all.find(skill => skill.name === "manifest-skills-outside:outside-skill");
 
@@ -542,7 +633,7 @@ describe("listClaudePluginRoots", () => {
 		);
 		await fs.writeFile(path.join(outsideDir, "ship.md"), "Ship it\n");
 
-		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir });
+		const result = await loadCapability<SlashCommand>("slash-commands", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings[0]).toContain("Ignoring slash-commands path outside plugin root");
 		const found = result.all.find(command => command.name === "manifest-commands-outside:ship");
 
