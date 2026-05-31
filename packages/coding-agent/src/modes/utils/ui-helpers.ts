@@ -28,6 +28,7 @@ import {
 } from "../../session/messages";
 import type { SessionContext } from "../../session/session-manager";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
+import type { StartupUpdateNotification } from "../../update/source-status";
 
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
@@ -532,19 +533,21 @@ export class UiHelpers {
 		this.ctx.ui.requestRender();
 	}
 
-	showNewVersionNotification(newVersion: string): void {
+	showNewVersionNotification(notification: string | StartupUpdateNotification): void {
+		const content =
+			typeof notification === "string"
+				? theme.bold(theme.fg("warning", "Update Available")) +
+					"\n" +
+					theme.fg("muted", `New version ${notification} is available. Run: `) +
+					theme.fg("accent", "omp update")
+				: [
+						theme.bold(theme.fg("warning", notification.title)),
+						...notification.lines.slice(0, 4).map(line => theme.fg("muted", line)),
+					].join("\n");
+
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new DynamicBorder(text => theme.fg("warning", text)));
-		this.ctx.chatContainer.addChild(
-			new Text(
-				theme.bold(theme.fg("warning", "Update Available")) +
-					"\n" +
-					theme.fg("muted", `New version ${newVersion} is available. Run: `) +
-					theme.fg("accent", "omp update"),
-				1,
-				0,
-			),
-		);
+		this.ctx.chatContainer.addChild(new Text(content, 1, 0));
 		this.ctx.chatContainer.addChild(new DynamicBorder(text => theme.fg("warning", text)));
 		this.ctx.ui.requestRender();
 	}

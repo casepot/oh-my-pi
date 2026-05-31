@@ -17,6 +17,7 @@ import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
 import type { LspStartupServerInfo } from "../tools";
+import type { StartupUpdateNotification } from "../update/source-status";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import type { CustomEditor } from "./components/custom-editor";
@@ -153,7 +154,7 @@ export interface InteractiveModeContext {
 	showStatus(message: string, options?: { dim?: boolean }): void;
 	showError(message: string): void;
 	showWarning(message: string): void;
-	showNewVersionNotification(newVersion: string): void;
+	showNewVersionNotification(notification: string | StartupUpdateNotification): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
 	queueCompactionMessage(text: string, mode: "steer" | "followUp"): void;

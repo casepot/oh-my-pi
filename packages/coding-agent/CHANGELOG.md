@@ -9,6 +9,7 @@
 - Added an `omp completions <bash|zsh|fish>` command that prints a shell completion script generated from the live command/flag metadata, so completions never drift from the actual CLI. Subcommands, flags, and enum values complete statically; `--model`/`--smol`/`--slow`/`--plan` resolve against the bundled model catalog and `--resume` against on-disk sessions via a hidden `__complete` helper.
 - Added a `/switch` slash command that opens the temporary model selector for the current session, mirroring the `alt+p` keybinding.
 - Added `replace block N:` and `delete block N` operators to the `edit` tool: they resolve the syntactic block beginning on line N via tree-sitter (native `blockRangeAt`) and replace or delete its full line span, so a construct can be rewritten or removed without counting its closing line. Unresolvable blocks (unsupported language, blank/closing-delimiter line, or a parse error) are rejected with guidance to use an explicit `replace N..M:` / `delete N..M` range.
+- Added compact startup update status for fork/source installs, including dirty checkout, local-vs-fork divergence, fork-vs-upstream divergence, and non-fork install migration hints.
 
 ### Changed
 
@@ -19,6 +20,7 @@
 - Changed MCP startup to load project `.omp/mcp.json` by default but skip user/global MCP configs unless `mcp.enableUserConfig` is enabled.
 - Changed compaction to use the active session model by default; `compaction.allowModelFallbacks` restores role/large-context fallback candidates when explicitly enabled.
 - Changed subagent model auth handling so parent-model substitution requires `task.fallbackToParentModelOnAuthFailure`; otherwise an unauthenticated configured subagent model fails visibly.
+- Changed `omp update` and fork installers to use the `casepot/oh-my-pi` source checkout channel instead of npm/upstream release metadata for Bun-capable installs.
 
 ### Fixed
 

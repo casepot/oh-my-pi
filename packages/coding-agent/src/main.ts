@@ -63,25 +63,16 @@ import type { AuthStorage } from "./session/auth-storage";
 import { resolveResumableSession, type SessionInfo, SessionManager } from "./session/session-manager";
 import { resolvePromptInput } from "./system-prompt";
 import type { LspStartupServerInfo } from "./tools";
+import { checkForInstallStatus, type StartupUpdateNotification } from "./update/source-status";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
 import type { EventBus } from "./utils/event-bus";
 
-async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
+async function checkForUpdateStatus(currentVersion: string): Promise<StartupUpdateNotification | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
 		return;
 	}
 	try {
-		const response = await fetch("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest");
-		if (!response.ok) return undefined;
-
-		const data = (await response.json()) as { version?: string };
-		const latestVersion = data.version;
-
-		if (latestVersion && Bun.semver.order(latestVersion, currentVersion) > 0) {
-			return latestVersion;
-		}
-
-		return undefined;
+		return await checkForInstallStatus(currentVersion);
 	} catch {
 		return undefined;
 	}
@@ -253,7 +244,7 @@ async function runInteractiveMode(
 	version: string,
 	changelogMarkdown: string | undefined,
 	notifs: (InteractiveModeNotify | null)[],
-	versionCheckPromise: Promise<string | undefined>,
+	updateStatusPromise: Promise<StartupUpdateNotification | undefined>,
 	initialMessages: string[],
 	setExtensionUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	lspServers: LspStartupServerInfo[] | undefined,
@@ -287,13 +278,13 @@ async function runInteractiveMode(
 		await runSetupWizard(mode, setupScenes);
 	}
 
-	versionCheckPromise
-		.then(newVersion => {
+	updateStatusPromise
+		.then(notification => {
 			if (!settings.get("startup.checkUpdate")) {
 				return;
 			}
-			if (newVersion) {
-				mode.showNewVersionNotification(newVersion);
+			if (notification) {
+				mode.showNewVersionNotification(notification);
 			}
 		})
 		.catch(() => {});
@@ -1011,7 +1002,7 @@ export async function runRootCommand(
 		if (mode === "rpc" || mode === "rpc-ui") {
 			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined);
 		} else if (isInteractive) {
-			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
+			const updateStatusPromise = checkForUpdateStatus(VERSION).catch(() => undefined);
 			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);
 
 			const scopedModelsForDisplay = sessionOptions.scopedModels ?? scopedModels;
@@ -1038,7 +1029,7 @@ export async function runRootCommand(
 				VERSION,
 				changelogMarkdown,
 				notifs,
-				versionCheckPromise,
+				updateStatusPromise,
 				parsedArgs.messages,
 				setToolUIContext,
 				lspServers,
