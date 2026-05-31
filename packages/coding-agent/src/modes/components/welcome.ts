@@ -17,6 +17,68 @@ const TIPS: readonly string[] = tipsText
 	.map(line => line.trim())
 	.filter(line => line.length > 0);
 
+export const WELCOME_SHADER_PANEL_INNER_WIDTH = 12;
+export const WELCOME_SHADER_PANEL_INNER_HEIGHT = 6;
+
+const WELCOME_SHADER_PALETTE = " .:-=+*#%@";
+const WELCOME_SHADER_SETTLED_MS = 3000;
+const WELCOME_SHADER_RESET = "\x1b[0m";
+
+function fract(value: number): number {
+	return value - Math.floor(value);
+}
+
+function clamp01(value: number): number {
+	if (value <= 0) return 0;
+	if (value >= 1) return 1;
+	return value;
+}
+
+function shaderGlyph(intensity: number): string {
+	const scaled = Math.floor(clamp01(intensity) * WELCOME_SHADER_PALETTE.length);
+	const idx = Math.min(WELCOME_SHADER_PALETTE.length - 1, scaled);
+	return WELCOME_SHADER_PALETTE[idx];
+}
+
+export function renderWelcomeShaderPanel(elapsedMs = WELCOME_SHADER_SETTLED_MS): string[] {
+	const innerWidth = WELCOME_SHADER_PANEL_INNER_WIDTH;
+	const innerHeight = WELCOME_SHADER_PANEL_INNER_HEIGHT;
+	const border = theme.fg("dim", theme.boxRound.horizontal);
+	const left = theme.fg("dim", theme.boxRound.vertical);
+	const right = theme.fg("dim", theme.boxRound.vertical);
+	const t = elapsedMs / 1000;
+	const aspect = (innerWidth / innerHeight) * 0.48;
+	const top = `${theme.fg("dim", theme.boxRound.topLeft)}${border.repeat(innerWidth)}${theme.fg("dim", theme.boxRound.topRight)}`;
+	const bottom = `${theme.fg("dim", theme.boxRound.bottomLeft)}${border.repeat(innerWidth)}${theme.fg("dim", theme.boxRound.bottomRight)}`;
+	const rows = [top];
+
+	for (let y = 0; y < innerHeight; y++) {
+		let body = "";
+		const v = 1 - (2 * (y + 0.5)) / innerHeight;
+		for (let x = 0; x < innerWidth; x++) {
+			const u = ((2 * (x + 0.5)) / innerWidth - 1) * aspect;
+			const radius = Math.sqrt(u * u + v * v);
+			const angle = Math.atan2(v, u);
+			const z = fract(t * 0.58 + radius * 1.85) - 0.5;
+			const fold = Math.abs(z) * 2;
+			const ridge =
+				Math.sin(angle * 5.5 + z * 9.5 + t * 1.8) * 0.28 +
+				Math.sin(angle * 10 - z * 13 + t * 2.7) * 0.14 +
+				Math.sin((radius - t * 0.34) * 24) * 0.12;
+			const tunnel = 1 - Math.abs(radius - (0.45 + ridge));
+			const depth = 1 - fold * 0.62;
+			const centerGlow = Math.max(0, 0.5 - radius) * 0.7;
+			const intensity = clamp01(tunnel * depth + centerGlow);
+			const color = fract(0.63 + angle / (Math.PI * 2) + fold * 0.35 + t * 0.09);
+			body += `${gradientEscape(color)}${shaderGlyph(intensity)}${WELCOME_SHADER_RESET}`;
+		}
+		rows.push(`${left}${body}${right}`);
+	}
+
+	rows.push(bottom);
+	return rows;
+}
+
 export function renderWelcomeTip(tip: string, boxWidth: number): string[] {
 	const label = "Tip: ";
 	const labelWidth = visibleWidth(label);
@@ -52,9 +114,6 @@ export interface LspServerInfo {
 	fileTypes: string[];
 }
 
-/**
- * Premium welcome screen with block-based OMP logo and two-column layout.
- */
 export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: ReturnType<typeof setInterval> | null = null;
@@ -72,21 +131,17 @@ export class WelcomeComponent implements Component {
 	invalidate(): void {}
 
 	/**
-	 * Play a one-shot intro that sweeps the gradient through every phase
-	 * before settling on the resting frame. Safe to call multiple times —
-	 * subsequent calls reset and replay.
+	 * Start the welcome shader render loop. Safe to call multiple times —
+	 * subsequent calls reset the shader clock and reuse a single timer.
 	 */
 	playIntro(requestRender: () => void): void {
 		this.#stopAnimation();
 		this.#animStart = performance.now();
 		requestRender();
 		this.#animTimer = setInterval(() => {
-			const elapsed = performance.now() - (this.#animStart ?? 0);
-			if (elapsed >= INTRO_MS) {
-				this.#stopAnimation();
-			}
 			requestRender();
 		}, INTRO_TICK_MS);
+		this.#animTimer.unref?.();
 	}
 
 	#stopAnimation(): void {
@@ -95,6 +150,10 @@ export class WelcomeComponent implements Component {
 			this.#animTimer = null;
 		}
 		this.#animStart = null;
+	}
+
+	dispose(): void {
+		this.#stopAnimation();
 	}
 
 	setModel(modelName: string, providerName: string): void {
@@ -118,8 +177,9 @@ export class WelcomeComponent implements Component {
 			return [];
 		}
 		const dualContentWidth = boxWidth - 3; // 3 = │ + │ + │
+		const shaderPanelWidth = WELCOME_SHADER_PANEL_INNER_WIDTH + 2;
 		const preferredLeftCol = 26;
-		const minLeftCol = 12; // logo width
+		const minLeftCol = shaderPanelWidth;
 		const minRightCol = 20;
 		const leftMinContentWidth = Math.max(
 			minLeftCol,
@@ -137,15 +197,14 @@ export class WelcomeComponent implements Component {
 		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
 		const rightCol = showRightColumn ? dualRightCol : 0;
 
-		// Logo: pick a frame from the intro animation if active, else the resting frame.
-		const logoColored = this.#currentLogoFrame();
+		const shaderPanel = this.#currentShaderPanel();
 
 		// Left column - centered content
 		const leftLines = [
 			"",
 			this.#centerText(theme.bold("Welcome back!"), leftCol),
 			"",
-			...logoColored.map(l => this.#centerText(l, leftCol)),
+			...shaderPanel.map(l => this.#centerText(l, leftCol)),
 			"",
 			this.#centerText(theme.fg("muted", this.modelName), leftCol),
 			this.#centerText(theme.fg("borderMuted", this.providerName), leftCol),
@@ -305,23 +364,10 @@ export class WelcomeComponent implements Component {
 		return str + padding(width - visLen);
 	}
 
-	/** Pick the logo frame for the current intro phase, or the resting frame. */
-	#currentLogoFrame(): readonly string[] {
-		if (this.#animStart == null) return REST_FRAME;
-		const elapsed = performance.now() - this.#animStart;
-		if (elapsed >= INTRO_MS) return REST_FRAME;
-		// Ease-out cubic so the spin decelerates into the resting state.
-		const progress = elapsed / INTRO_MS;
-		const eased = 1 - (1 - progress) ** 3;
-		// Sweep backward through INTRO_SWEEPS full rotations so the gradient
-		// visibly spins multiple times. `eased == 1` → phase = 0 = resting frame.
-		const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
-		// Shine traverses the diagonal at a steady pace, decoupled from the
-		// gradient phase so the two layers parallax. Strength fades out with
-		// the same ease-out curve so the highlight is gone by the resting frame.
-		const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
-		const shineStrength = (1 - eased) ** 1.5;
-		return gradientLogo(PI_LOGO, phase, { strength: shineStrength, pos: shinePos });
+	/** Pick the shader frame for the active animation loop, or the resting frame. */
+	#currentShaderPanel(): string[] {
+		if (this.#animStart == null) return renderWelcomeShaderPanel();
+		return renderWelcomeShaderPanel(performance.now() - this.#animStart);
 	}
 }
 
@@ -422,14 +468,5 @@ export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineC
 	});
 }
 
-/** Total length of the intro animation. */
-const INTRO_MS = 3000;
-/** Render cadence during the intro (~30fps). */
+/** Render cadence for the welcome shader (~30fps). */
 const INTRO_TICK_MS = 33;
-/** Number of full gradient rotations the sweep performs before settling. */
-const INTRO_SWEEPS = 2.5;
-/** Number of times the shine highlight crosses the diagonal across the intro. */
-const INTRO_SHINE_TRAVERSALS = 3;
-
-/** Resting gradient frame, cached for re-renders outside of the intro. */
-const REST_FRAME = gradientLogo(PI_LOGO, 0);

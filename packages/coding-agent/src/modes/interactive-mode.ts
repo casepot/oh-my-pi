@@ -2161,6 +2161,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.#welcomeComponent?.dispose();
 		this.#cleanupMicAnimation();
 		this.#cancelGoalContinuation();
 		if (this.#sttController) {
