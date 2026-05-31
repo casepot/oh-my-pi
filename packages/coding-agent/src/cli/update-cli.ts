@@ -2,7 +2,7 @@
  * Update CLI command handler.
  *
  * Handles `omp update` to check for and install updates.
- * Uses bun if available, otherwise downloads binary from GitHub releases.
+ * Uses fork source checkouts when possible, otherwise downloads fork release binaries.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -11,12 +11,21 @@ import { $which, APP_NAME, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
-
-const REPO = "can1357/oh-my-pi";
-const PACKAGE = "@oh-my-pi/pi-coding-agent";
+import {
+	DEFAULT_SOURCE_BRANCH,
+	FORK_REPO,
+	FORK_REPO_URL,
+	getBunGlobalBinDir,
+	getDefaultSourceCheckoutDir,
+	isPathInDirectory,
+	readSourceCheckoutStatus,
+	remoteMatchesRepo,
+	resolveSourceRootFromOmpPath,
+	type SourceCheckoutStatus,
+	UPSTREAM_REPO_URL,
+} from "../update/source-status";
 
 interface ReleaseInfo {
-	tag: string;
 	version: string;
 }
 
@@ -51,56 +60,13 @@ export function parseUpdateArgs(args: string[]): { force: boolean; check: boolea
 	};
 }
 
-async function getBunGlobalBinDir(): Promise<string | undefined> {
-	if (!$which("bun")) return undefined;
-	try {
-		const result = await $`bun pm bin -g`.quiet().nothrow();
-		if (result.exitCode !== 0) return undefined;
-		const output = result.text().trim();
-		return output.length > 0 ? output : undefined;
-	} catch {
-		return undefined;
-	}
-}
+type UpdateTarget = { method: "source"; root: string; mode: "linked" | "migrate" } | { method: "binary"; path: string };
 
-function normalizePathForComparison(filePath: string): string {
-	const normalized = path.normalize(filePath);
-	if (process.platform === "win32") return normalized.toLowerCase();
-	return normalized;
+interface UpdateTargetResolutionInput {
+	ompPath?: string;
+	bunGlobalBinDir?: string;
+	defaultSourceRoot?: string;
 }
-
-function tryRealpath(p: string): string | undefined {
-	try {
-		return fs.realpathSync.native(p);
-	} catch {
-		return undefined;
-	}
-}
-
-function isPathInDirectoryLexical(filePath: string, directoryPath: string): boolean {
-	const normalizedPath = normalizePathForComparison(path.resolve(filePath));
-	const normalizedDirectory = normalizePathForComparison(path.resolve(directoryPath));
-	const relativePath = path.relative(normalizedDirectory, normalizedPath);
-	return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
-}
-
-function isPathInDirectory(filePath: string, directoryPath: string): boolean {
-	if (isPathInDirectoryLexical(filePath, directoryPath)) return true;
-	// Layer realpath resolution on top of the lexical guard. On Windows, ~/.bun
-	// is a junction when Bun is installed via Scoop, so `bun pm bin -g` and the
-	// PATH-resolved omp path can refer to the same directory through different
-	// strings. path.resolve does not traverse junctions/symlinks; realpath does.
-	// Resolve the file's parent directory to tolerate the file itself not yet
-	// existing (e.g. a fresh install path) while still catching link-traversed
-	// equality once the directory exists.
-	const fileDir = tryRealpath(path.dirname(path.resolve(filePath)));
-	const dirReal = tryRealpath(path.resolve(directoryPath));
-	if (!fileDir || !dirReal) return false;
-	const resolvedFile = path.join(fileDir, path.basename(filePath));
-	return isPathInDirectoryLexical(resolvedFile, dirReal);
-}
-
-type UpdateTarget = { method: "bun" } | { method: "binary"; path: string };
 
 function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
 	if (!bunBinDir) return "binary";
@@ -110,37 +76,56 @@ function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "b
 export function resolveUpdateMethodForTest(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
 	return resolveUpdateMethod(ompPath, bunBinDir);
 }
-async function resolveUpdateTarget(): Promise<UpdateTarget> {
-	const bunBinDir = await getBunGlobalBinDir();
-	const ompPath = resolveOmpPath();
 
-	if (ompPath) {
-		const method = resolveUpdateMethod(ompPath, bunBinDir);
-		if (method === "bun") return { method };
-		return { method, path: ompPath };
+function resolveUpdateTargetFromPaths(input: UpdateTargetResolutionInput): UpdateTarget | undefined {
+	const sourceRoot = resolveSourceRootFromOmpPath(input.ompPath);
+	if (sourceRoot) return { method: "source", root: sourceRoot, mode: "linked" };
+
+	if (input.ompPath && resolveUpdateMethod(input.ompPath, input.bunGlobalBinDir) === "binary") {
+		return { method: "binary", path: input.ompPath };
 	}
 
-	if (bunBinDir) return { method: "bun" };
+	if (input.bunGlobalBinDir) {
+		return {
+			method: "source",
+			root: input.defaultSourceRoot ?? getDefaultSourceCheckoutDir(),
+			mode: "migrate",
+		};
+	}
+
+	return undefined;
+}
+
+export function resolveUpdateTargetForTest(input: UpdateTargetResolutionInput): UpdateTarget | undefined {
+	return resolveUpdateTargetFromPaths(input);
+}
+
+async function resolveUpdateTarget(): Promise<UpdateTarget> {
+	const bunGlobalBinDir = await getBunGlobalBinDir();
+	const ompPath = resolveOmpPath();
+	const target = resolveUpdateTargetFromPaths({ ompPath, bunGlobalBinDir });
+	if (target) return target;
 
 	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
 }
 
 /**
- * Get the latest release info from the npm registry.
- * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
+ * Get the latest release info from the fork's GitHub releases.
  */
 async function getLatestRelease(): Promise<ReleaseInfo> {
-	const response = await fetch(`https://registry.npmjs.org/${PACKAGE}/latest`);
+	const response = await fetch(`https://api.github.com/repos/${FORK_REPO}/releases/latest`);
 	if (!response.ok) {
 		throw new Error(`Failed to fetch release info: ${response.statusText}`);
 	}
 
-	const data = (await response.json()) as { version: string };
-	const version = data.version;
-	const tag = `v${version}`;
+	const data = (await response.json()) as { tag_name?: string };
+	const tag = data.tag_name;
+	if (!tag) {
+		throw new Error("Latest release response did not include a tag");
+	}
+	const version = tag.replace(/^v/u, "");
 
 	return {
-		tag,
 		version,
 	};
 }
@@ -240,19 +225,6 @@ function formatVerificationFailure(result: InstalledVersionVerification, expecte
 	return `could not verify updated version${result.path ? ` at ${result.path}` : ""}`;
 }
 
-/**
- * Print post-update verification result.
- */
-async function printVerification(expectedVersion: string): Promise<void> {
-	const result = await verifyInstalledVersion(expectedVersion);
-	if (result.ok) {
-		printVerifiedVersion(expectedVersion);
-		return;
-	}
-	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
-	console.log(chalk.yellow(`You may need to reinstall: curl -fsSL https://omp.sh/install | sh`));
-}
-
 async function unlinkIfExists(filePath: string): Promise<void> {
 	try {
 		await fs.promises.unlink(filePath);
@@ -292,17 +264,186 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 	}
 }
 
-/**
- * Update via bun package manager.
- */
-async function updateViaBun(expectedVersion: string): Promise<void> {
-	console.log(chalk.dim("Updating via bun..."));
-	const result = await $`bun install -g ${PACKAGE}@${expectedVersion}`.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`bun install failed with exit code ${result.exitCode}`);
+async function runProcess(command: string, args: string[], cwd?: string): Promise<void> {
+	const proc = Bun.spawn([command, ...args], {
+		cwd,
+		stdin: "inherit",
+		stdout: "inherit",
+		stderr: "inherit",
+		windowsHide: true,
+	});
+	const exitCode = await proc.exited;
+	if (exitCode !== 0) {
+		throw new Error(`${command} ${args.join(" ")} failed with exit code ${exitCode}`);
+	}
+}
+
+async function pathExistsForUpdate(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.stat(filePath);
+		return true;
+	} catch (err) {
+		if (isEnoent(err)) return false;
+		throw err;
+	}
+}
+
+async function readDirectoryEntryCount(dir: string): Promise<number | undefined> {
+	try {
+		return (await fs.promises.readdir(dir)).length;
+	} catch (err) {
+		if (isEnoent(err)) return undefined;
+		throw err;
+	}
+}
+
+export async function ensureSourceCheckoutCleanForUpdate(root: string): Promise<SourceCheckoutStatus> {
+	const status = await readSourceCheckoutStatus(root, { fetchRemotes: false });
+	if (status.dirty) {
+		throw new Error(
+			`Source checkout has uncommitted changes at ${root}; commit or stash them before running ${APP_NAME} update.`,
+		);
+	}
+	return status;
+}
+
+function printForkDivergence(status: SourceCheckoutStatus): void {
+	if ((status.forkBehindUpstream ?? 0) > 0) {
+		console.log(chalk.yellow(`Fork is behind upstream by ${status.forkBehindUpstream} commits.`));
+	}
+}
+
+async function installSourceLinks(root: string): Promise<void> {
+	console.log(chalk.dim("Installing source dependencies and global links..."));
+	await runProcess("bun", ["install"], root);
+	await runProcess("bun", ["--cwd=packages/coding-agent", "link"], root);
+	await runProcess("bun", ["--cwd=packages/ai", "link"], root);
+}
+
+async function ensureRemoteUrl(
+	root: string,
+	name: string,
+	currentUrl: string | undefined,
+	expectedUrl: string,
+): Promise<void> {
+	if (currentUrl) {
+		if (currentUrl !== expectedUrl) {
+			await runProcess("git", ["remote", "set-url", name, expectedUrl], root);
+		}
+		return;
+	}
+	await runProcess("git", ["remote", "add", name, expectedUrl], root);
+}
+
+async function prepareForkSourceCheckout(root: string): Promise<SourceCheckoutStatus> {
+	const gitPath = path.join(root, ".git");
+	if (!(await pathExistsForUpdate(gitPath))) {
+		const entryCount = await readDirectoryEntryCount(root);
+		if (entryCount !== undefined && entryCount > 0) {
+			throw new Error(`Cannot install fork source into non-empty directory: ${root}`);
+		}
+		await fs.promises.mkdir(path.dirname(root), { recursive: true });
+		console.log(chalk.dim(`Cloning ${FORK_REPO} into ${root}...`));
+		await runProcess("git", ["clone", FORK_REPO_URL, root]);
+		await runProcess("git", ["remote", "add", "upstream", UPSTREAM_REPO_URL], root);
+	} else {
+		const status = await ensureSourceCheckoutCleanForUpdate(root);
+		await ensureRemoteUrl(root, "origin", status.originUrl, FORK_REPO_URL);
+		await ensureRemoteUrl(root, "upstream", status.upstreamUrl, UPSTREAM_REPO_URL);
 	}
 
-	await printVerification(expectedVersion);
+	await runProcess("git", ["fetch", "origin", DEFAULT_SOURCE_BRANCH], root);
+	await runProcess("git", ["checkout", "-B", DEFAULT_SOURCE_BRANCH, `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+	return readSourceCheckoutStatus(root, { fetchRemotes: true });
+}
+
+async function fastForwardSourceCheckout(root: string, status: SourceCheckoutStatus): Promise<void> {
+	const branch = status.branch ?? DEFAULT_SOURCE_BRANCH;
+	await runProcess("git", ["fetch", "origin", branch], root);
+	if (status.branch) {
+		await runProcess("git", ["merge", "--ff-only", `origin/${branch}`], root);
+	} else {
+		await runProcess("git", ["checkout", "-B", DEFAULT_SOURCE_BRANCH, `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+	}
+}
+
+async function updateViaSource(
+	target: Extract<UpdateTarget, { method: "source" }>,
+	opts: { force: boolean; check: boolean },
+): Promise<void> {
+	if (target.mode === "migrate") {
+		console.log(chalk.cyan(`Fork source install available at ${target.root}`));
+		if (opts.check) return;
+
+		const status = await prepareForkSourceCheckout(target.root);
+		await installSourceLinks(target.root);
+		console.log(
+			chalk.green(
+				`\n${theme.status.success} Installed fork source checkout ${status.branch ?? DEFAULT_SOURCE_BRANCH}@${status.head ?? "HEAD"}`,
+			),
+		);
+		printForkDivergence(status);
+		return;
+	}
+
+	const status = await readSourceCheckoutStatus(target.root, { fetchRemotes: true });
+	if (status.dirty) {
+		throw new Error(
+			`Source checkout has uncommitted changes at ${target.root}; commit or stash them before running ${APP_NAME} update.`,
+		);
+	}
+	if (!remoteMatchesRepo(status.originUrl, FORK_REPO)) {
+		const repo = status.originRepo ?? status.originUrl ?? "unknown";
+		throw new Error(`Source checkout tracks ${repo}; expected ${FORK_REPO}. Run the fork installer to migrate.`);
+	}
+
+	const ahead = status.localAheadOrigin ?? 0;
+	const behind = status.localBehindOrigin ?? 0;
+	if (ahead > 0 && behind > 0) {
+		throw new Error(
+			`Source checkout has diverged from fork ${status.branch ?? DEFAULT_SOURCE_BRANCH}; reconcile it before updating.`,
+		);
+	}
+
+	if (behind > 0) {
+		console.log(
+			chalk.cyan(`Source update available: fork ${status.branch ?? DEFAULT_SOURCE_BRANCH} +${behind} commits`),
+		);
+	} else if (ahead > 0) {
+		console.log(chalk.yellow(`Local branch is ahead of fork by ${ahead} commits; nothing to pull.`));
+	} else if (opts.force) {
+		console.log(chalk.yellow("Forcing source relink"));
+	} else {
+		console.log(chalk.green(`${theme.status.success} Already up to date`));
+		printForkDivergence(status);
+		return;
+	}
+
+	printForkDivergence(status);
+	if (opts.check) return;
+
+	if (behind > 0) {
+		await fastForwardSourceCheckout(target.root, status);
+	}
+	await installSourceLinks(target.root);
+	const updatedStatus = await readSourceCheckoutStatus(target.root, { fetchRemotes: false });
+	console.log(
+		chalk.green(
+			`\n${theme.status.success} Updated source checkout ${updatedStatus.branch ?? DEFAULT_SOURCE_BRANCH}@${updatedStatus.head ?? "HEAD"}`,
+		),
+	);
+}
+
+/**
+ * Build a fork release asset URL.
+ */
+function getReleaseAssetUrl(version: string, binaryName: string): string {
+	const tag = version.startsWith("v") ? version : `v${version}`;
+	return `https://github.com/${FORK_REPO}/releases/download/${tag}/${binaryName}`;
+}
+
+export function getReleaseAssetUrlForTest(version: string, binaryName: string): string {
+	return getReleaseAssetUrl(version, binaryName);
 }
 
 /**
@@ -310,8 +451,7 @@ async function updateViaBun(expectedVersion: string): Promise<void> {
  */
 async function updateViaBinaryAt(targetPath: string, expectedVersion: string): Promise<void> {
 	const binaryName = getBinaryName();
-	const tag = `v${expectedVersion}`;
-	const url = `https://github.com/${REPO}/releases/download/${tag}/${binaryName}`;
+	const url = getReleaseAssetUrl(expectedVersion, binaryName);
 
 	const tempPath = `${targetPath}.new`;
 	const backupPath = `${targetPath}.bak`;
@@ -342,7 +482,25 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
-	// Check for updates
+	let target: UpdateTarget;
+	try {
+		target = await resolveUpdateTarget();
+	} catch (err) {
+		console.error(chalk.red(`Update failed: ${err}`));
+		process.exit(1);
+	}
+
+	if (target.method === "source") {
+		try {
+			await updateViaSource(target, opts);
+		} catch (err) {
+			console.error(chalk.red(`Update failed: ${err}`));
+			process.exit(1);
+		}
+		return;
+	}
+
+	// Check for binary release updates
 	let release: ReleaseInfo;
 	try {
 		release = await getLatestRelease();
@@ -365,18 +523,11 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	}
 
 	if (opts.check) {
-		// Just check, don't install
 		return;
 	}
 
-	// Choose update method based on the prioritized omp binary in PATH
 	try {
-		const target = await resolveUpdateTarget();
-		if (target.method === "bun") {
-			await updateViaBun(release.version);
-		} else {
-			await updateViaBinaryAt(target.path, release.version);
-		}
+		await updateViaBinaryAt(target.path, release.version);
 	} catch (err) {
 		console.error(chalk.red(`Update failed: ${err}`));
 		process.exit(1);

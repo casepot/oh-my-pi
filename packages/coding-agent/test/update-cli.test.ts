@@ -2,7 +2,13 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { replaceBinaryForUpdate, resolveUpdateMethodForTest } from "../src/cli/update-cli";
+import {
+	ensureSourceCheckoutCleanForUpdate,
+	getReleaseAssetUrlForTest,
+	replaceBinaryForUpdate,
+	resolveUpdateMethodForTest,
+	resolveUpdateTargetForTest,
+} from "../src/cli/update-cli";
 
 const tempDirs: string[] = [];
 
@@ -10,6 +16,25 @@ async function makeTempDir(): Promise<string> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-update-test-"));
 	tempDirs.push(dir);
 	return dir;
+}
+
+async function makeGitRepo(): Promise<string> {
+	const dir = await makeTempDir();
+	await runGit(dir, ["init"]);
+	return dir;
+}
+
+async function runGit(cwd: string, args: string[]): Promise<void> {
+	const proc = Bun.spawn(["git", ...args], {
+		cwd,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
+	if (exitCode !== 0) {
+		throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+	}
 }
 
 afterEach(async () => {
@@ -32,6 +57,54 @@ describe("update-cli install target detection", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.local/bin/omp", undefined);
 
 		expect(method).toBe("binary");
+	});
+
+	it("migrates bun package installs to the fork source checkout", () => {
+		const target = resolveUpdateTargetForTest({
+			ompPath: "/Users/test/.bun/bin/omp",
+			bunGlobalBinDir: "/Users/test/.bun/bin",
+			defaultSourceRoot: "/Users/test/.local/share/omp/source/oh-my-pi",
+		});
+
+		expect(target).toEqual({
+			method: "source",
+			root: "/Users/test/.local/share/omp/source/oh-my-pi",
+			mode: "migrate",
+		});
+	});
+
+	it("uses source updates when the prioritized omp resolves inside a checkout", async () => {
+		const dir = await makeTempDir();
+		await fs.mkdir(path.join(dir, ".git"), { recursive: true });
+		const cliPath = path.join(dir, "packages", "coding-agent", "src", "cli.ts");
+		await Bun.write(path.join(dir, "packages", "coding-agent", "package.json"), "{}");
+		await Bun.write(cliPath, "");
+
+		const target = resolveUpdateTargetForTest({
+			ompPath: cliPath,
+			bunGlobalBinDir: "/Users/test/.bun/bin",
+			defaultSourceRoot: "/Users/test/.local/share/omp/source/oh-my-pi",
+		});
+
+		const realDir = await fs.realpath(dir);
+		expect(target).toEqual({ method: "source", root: realDir, mode: "linked" });
+	});
+});
+
+describe("update-cli source checkout safety", () => {
+	it("refuses to update dirty source checkouts", async () => {
+		const dir = await makeGitRepo();
+		await Bun.write(path.join(dir, "dirty.txt"), "local change");
+
+		await expect(ensureSourceCheckoutCleanForUpdate(dir)).rejects.toThrow("uncommitted changes");
+	});
+});
+
+describe("update-cli fork release URLs", () => {
+	it("downloads binary updates from the fork releases", () => {
+		expect(getReleaseAssetUrlForTest("15.7.0", "omp-darwin-arm64")).toBe(
+			"https://github.com/casepot/oh-my-pi/releases/download/v15.7.0/omp-darwin-arm64",
+		);
 	});
 });
 
