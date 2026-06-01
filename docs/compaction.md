@@ -53,12 +53,13 @@ Those custom roles are then transformed into LLM-facing user messages in `conver
 
 ### Triggers
 
-Compaction/context maintenance can run in four ways:
+Compaction/context maintenance can run in five ways:
 
 1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`.
 2. **Automatic overflow recovery**: after a same-model assistant error that matches context overflow.
-3. **Automatic threshold maintenance**: after a successful turn when context exceeds the resolved threshold.
-4. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
+3. **Automatic incomplete-output recovery**: after a same-model assistant message ends with `stopReason === "length"` (OpenAI/Codex `response.incomplete`).
+4. **Automatic threshold maintenance**: after a successful turn when context exceeds the resolved threshold.
+5. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
 
 ### Compaction shape (visual)
 
@@ -94,21 +95,30 @@ What the LLM sees:
     prompt   from cmp          messages from firstKeptEntryId
 ```
 
-### Overflow-retry vs threshold/idle maintenance
+### Overflow/incomplete recovery vs threshold/idle maintenance
 
 The automatic paths are intentionally different:
 
 - **Overflow recovery**
   - Trigger: current-model assistant error is detected as context overflow and the error is not older than the latest compaction.
   - The failing assistant error message is removed from active agent state before retry.
-  - If compaction is enabled, context-full compaction runs with `reason: "overflow"` and `willRetry: true`; handoff strategy is not used for overflow.
-  - On success, agent auto-continues (`agent.continue()`) after compaction.
+  - If `compaction.strategy: "shake"`, auto-shake runs first; on overflow, a no-op or failed shake falls back to context-full compaction so the oversized input still gets resolved.
+  - If compaction is enabled, context-full compaction runs with `reason: "overflow"` and `willRetry: true`; handoff strategy is not used for overflow because the handoff request would reuse the overflowing input.
+  - On success, `agent.continue()` is scheduled to retry the turn.
+
+- **Incomplete-output recovery**
+  - Trigger: same-model assistant message ends with `stopReason === "length"` and the message is not older than the latest compaction.
+  - The incomplete assistant message is removed from active agent state before recovery.
+  - If compaction is enabled, auto maintenance runs with `reason: "incomplete"` and `willRetry: true`.
+  - Unlike overflow, `compaction.strategy: "handoff"` is allowed for incomplete-output recovery because the input context is still usable; `compaction.strategy: "shake"` runs inline and retries after reducing eligible content.
+  - On context-full or shake success, `agent.continue()` is scheduled to retry the turn.
 
 - **Threshold maintenance**
   - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`.
   - Tool-output pruning can reduce the measured token count before threshold comparison.
-  - Auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
-  - With `compaction.strategy: "handoff"`, threshold maintenance starts a new handoff session instead of writing a compaction entry; if handoff returns no document without aborting, it falls back to context-full compaction.
+  - If compaction is enabled, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
+  - With `compaction.strategy: "handoff"`, threshold maintenance normally schedules a post-prompt auto-handoff task instead of writing a compaction entry; pre-prompt checks run it inline to avoid racing the next turn. If handoff returns no document without aborting, it falls back to context-full compaction.
+  - With `compaction.strategy: "shake"`, threshold maintenance runs an inline auto-shake pass instead of summary compaction.
   - On success, if `compaction.autoContinue !== false`, schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`.
 
 - **Idle maintenance**
@@ -130,6 +140,16 @@ Pruned tool results are replaced with:
 - `[Output truncated - N tokens]`
 
 If pruning changes entries, session storage is rewritten and agent message state is refreshed before compaction decisions.
+
+### Shake compaction
+
+`compaction.strategy: "shake"` is mechanical context reduction, not LLM summarization.
+
+- Auto-shake uses `DEFAULT_SHAKE_CONFIG`: protect the newest `16_000` estimated context tokens, require at least `4_000` estimated token savings, protect `skill`/skill-read tool results, and only elide fenced/XML blocks at least `400` estimated tokens.
+- Manual `/shake elide` uses the aggressive config: no protected recent-token window and no minimum savings threshold.
+- Eligible content is replaced in place with `[shaken ~N tokens — recover: artifact://... (region M)]` placeholders when artifact persistence succeeds, or `[shaken ~N tokens]` if artifact persistence fails.
+- Whole tool results and large fenced/XML blocks are eligible; image-only cleanup is handled separately by `/shake images`.
+- The session branch is rewritten and provider sessions are closed after a shake, matching other history-rewrite maintenance paths.
 
 ### Boundary and cut-point logic
 
@@ -186,7 +206,7 @@ Final stored summary is merged as:
 2. Serialize with `serializeConversation()`.
 3. Wrap in `<conversation>...</conversation>`.
 4. Optionally include `<previous-summary>...</previous-summary>`.
-5. Optionally inject hook context as `<additional-context>` list.
+5. Optionally inject extension hook context and active memory-backend compaction context as `<additional-context>` entries.
 6. Execute summarization prompt with `SUMMARIZATION_SYSTEM_PROMPT`.
 
 Prompt selection:
@@ -242,7 +262,8 @@ After summary generation (or hook-provided summary), agent session:
 1. Appends `CompactionEntry` with `appendCompaction(...)` for context-full maintenance; handoff strategy creates a new session and injects a handoff `custom_message` instead.
 2. Rebuilds display context from the active leaf via `buildDisplaySessionContext()`.
 3. Replaces live agent messages with rebuilt context.
-4. Emits `session_compact` hook event.
+4. Synchronizes active todo phases from the rebuilt branch and closes provider sessions whose history was rewritten.
+5. Emits `session_compact` hook event.
 
 ## Branch summarization pipeline
 
@@ -346,13 +367,14 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 ## Runtime behavior and failure semantics
 
 - Manual compaction aborts current agent operation first.
-- `abortCompaction()` cancels both manual and auto-compaction controllers.
+- `abortCompaction()` cancels manual compaction, auto-compaction, and handoff generation controllers.
 - Auto compaction emits start/end session events for UI/state updates.
 - Auto compaction uses the active session model by default. Set `compaction.allowModelFallbacks: true` to allow role/large-context fallback models after active-model auth failures or long retry delays.
 - Overflow errors are excluded from generic retry path because they are handled by compaction.
 - If auto-compaction fails:
   - overflow path emits `Context overflow recovery failed: ...`
-  - threshold path emits `Auto-compaction failed: ...`
+  - incomplete-output path emits `Incomplete response recovery failed: ...`
+  - threshold/idle paths emit `Auto-compaction failed: ...`
 - Branch summarization can be cancelled via abort signal (e.g., Escape), returning canceled/aborted navigation result.
 
 ## Settings and defaults
@@ -360,14 +382,16 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
-- `compaction.strategy` = `"context-full"` (`"handoff"` and `"off"` are also supported)
+- `compaction.strategy` = `"context-full"` (`"handoff"`, `"shake"`, and `"off"` are also supported)
 - `compaction.reserveTokens` = `16384`
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`
 - `compaction.remoteEnabled` = `true`
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`
-- `compaction.idleEnabled` = `true`
+- `compaction.idleEnabled` = `false`
+- `compaction.idleThresholdTokens` = `200000`
+- `compaction.idleTimeoutSeconds` = `300`
 - `branchSummary.enabled` = `false`
 - `branchSummary.reserveTokens` = `16384`
 

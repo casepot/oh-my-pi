@@ -12,18 +12,21 @@ Source of truth in code:
 
 ## Preferred config locations
 
-OMP-native project configuration lives at:
+OMP can discover MCP servers from OMP-native files and, when explicitly enabled, from other tools (`.claude/`, `.cursor/`, `.vscode/`, `opencode.json`, and more). For OMP-native configuration, use these primary files:
 
 - Project: `.omp/mcp.json`
+- User (opt-in): `~/.omp/agent/mcp.json`
 
-User/global MCP files and compatibility imports from other tools are intentionally opt-in. Use `mcp.enableUserConfig: true` to load `~/.omp/agent/mcp.json`; enable the relevant discovery provider if you intentionally want OMP to import MCP servers from another tool.
+User/global MCP files and compatibility imports from other tools are intentionally opt-in. Use `mcp.enableUserConfig: true` to load `~/.omp/agent/mcp.json` and `~/.omp/agent/.mcp.json`; enable the relevant discovery provider if you intentionally want OMP to import MCP servers from another tool.
+
+The native provider also reads project `.omp/.mcp.json` for compatibility, but OMP writes to the primary `.omp/mcp.json` path above.
 
 OMP can also read fallback standalone files in the project root when the `mcp-json` discovery provider is enabled:
 
 - `mcp.json`
 - `.mcp.json`
 
-Prefer `.omp/mcp.json` for project-owned configuration. Use root `mcp.json` / `.mcp.json` only when you explicitly want a portable fallback file that other MCP clients may also read.
+Prefer `.omp/mcp.json` for project-owned configuration. Use `~/.omp/agent/mcp.json` only when you have enabled user-level MCP config. Use root `mcp.json` / `.mcp.json` only when you explicitly want a portable fallback file that other MCP clients may also read.
 
 ## Add a schema reference
 
@@ -318,7 +321,27 @@ This matches GitHub's official local Docker image `ghcr.io/github/github-mcp-ser
 
 This is the part that usually trips people up.
 
-### In `.omp/mcp.json` and `~/.omp/agent/mcp.json`
+### Discovery-time `${...}` expansion
+
+OMP expands `${VAR}` and `${VAR:-default}` placeholders while discovering MCP configs from OMP-native files and standalone fallback files. Expansion applies recursively to string values in `command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, and `oauth`; unresolved placeholders remain literal strings.
+
+Example:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${GITHUB_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+### Pre-connect env/header resolution
 
 Before OMP launches a stdio server or makes an HTTP/SSE request, it resolves stdio `env` values and HTTP/SSE `headers` values like this:
 
@@ -345,28 +368,6 @@ That means this is valid and convenient for local secrets:
 - `"GITHUB_PERSONAL_ACCESS_TOKEN": "GITHUB_PERSONAL_ACCESS_TOKEN"` → copy from the current shell environment
 - `"Authorization": "Bearer hardcoded-token"` → use the literal value
 - `"Authorization": "!printf 'Bearer %s' \"$GITHUB_TOKEN\""` → build the header from a command
-
-### In root `mcp.json` and `.mcp.json`
-
-The standalone fallback loader also expands `${VAR}` and `${VAR:-default}` inside strings during discovery for `command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, and `oauth`.
-
-Example:
-
-```json
-{
-  "mcpServers": {
-    "github": {
-      "type": "http",
-      "url": "https://api.githubcopilot.com/mcp/",
-      "headers": {
-        "Authorization": "Bearer ${GITHUB_TOKEN}"
-      }
-    }
-  }
-}
-```
-
-If you want the least surprising OMP behavior, prefer `.omp/mcp.json` or `~/.omp/agent/mcp.json` and use explicit env/header values.
 
 ## `disabledServers`
 
@@ -420,7 +421,7 @@ OMP does not merge duplicate server definitions across files. Discovery provider
 
 In practice:
 
-- prefer `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want an OMP-specific override
+- prefer `.omp/mcp.json`, or `~/.omp/agent/mcp.json` with `mcp.enableUserConfig: true`, when you want an OMP-specific override
 - keep server names unique across tools when possible
 - use `disabledServers` in the user config when a third-party config keeps reintroducing a server you do not want
 

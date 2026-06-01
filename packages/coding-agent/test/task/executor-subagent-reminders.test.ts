@@ -354,6 +354,7 @@ describe("runSubprocess yield reminders", () => {
 		const modelRegistry = {
 			refresh: async () => {},
 			getAvailable: () => [{ provider: "openai", id: "gpt-4o", name: "GPT-4o" }],
+			getApiKey: async () => "test-key",
 		} as unknown as import("../../src/config/model-registry").ModelRegistry;
 
 		await runSubprocess({
@@ -373,6 +374,7 @@ describe("runSubprocess yield reminders", () => {
 		const modelRegistry = {
 			refresh: async () => {},
 			getAvailable: () => [{ provider: "openai", id: "gpt-4o", name: "GPT-4o" }],
+			getApiKey: async () => "test-key",
 		} as unknown as import("../../src/config/model-registry").ModelRegistry;
 
 		const cases = [

@@ -59,7 +59,7 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 			context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] },
 		});
 
-		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir });
+		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir, includeUserSources: true });
 		const found = result.all.find(s => s.name === "context7:context7");
 		expect(found).toBeDefined();
 		expect(found?.command).toBe("npx");
@@ -71,7 +71,7 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 			gitlab: { url: "https://gitlab.com/mcp", type: "http" },
 		});
 
-		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir });
+		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir, includeUserSources: true });
 		const found = result.all.find(s => s.name === "gitlab:gitlab");
 		expect(found).toBeDefined();
 		expect(found?.url).toBe("https://gitlab.com/mcp");
@@ -84,7 +84,7 @@ describe("issue-851: claude-plugins loads flat .mcp.json shape", () => {
 			bad: { description: "missing command and url" },
 		});
 
-		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir });
+		const result = await loadCapability<MCPServer>("mcps", { cwd: tempDir, includeUserSources: true });
 		expect(result.all.find(s => s.name === "mixed:good")).toBeDefined();
 		expect(result.all.find(s => s.name === "mixed:bad")).toBeUndefined();
 	});

@@ -55,7 +55,7 @@ providers:
       X-Team: platform
     authHeader: true
     auth: apiKey
-    disableStrictTools: false  # set true for Anthropic-compatible endpoints that reject the strict field
+    disableStrictTools: false # set true for Anthropic-compatible endpoints that reject the strict field
     discovery:
       type: ollama
     modelOverrides:
@@ -104,6 +104,7 @@ providers:
 
 - `auth`: `apiKey` (default), `none`, or `oauth`; for `models.yml` custom models, `oauth` is accepted by schema but does not waive the `apiKey` requirement
 - `discovery.type`: `ollama`, `llama.cpp`, `lm-studio`, `openai-models-list`, or `proxy`
+- `transport`: `pi-native` only. When set, every model under that provider is sent to an `omp auth-gateway` compatible `baseUrl` via `POST /v1/pi/stream`; `apiKey` is the gateway bearer.
 
 ## Validation rules (current)
 
@@ -120,6 +121,7 @@ Required:
 Must define at least one of:
 
 - `baseUrl`
+- `apiKey`
 - `headers`
 - `compat`
 - `disableStrictTools`
@@ -229,7 +231,7 @@ Provider defaults vs per-model overrides:
 
 - Provider `headers` are baseline.
 - Model `headers` override provider header keys.
-- `modelOverrides` can override model metadata (`name`, `reasoning`, `input`, `cost`, `contextWindow`, `maxTokens`, `headers`, `compat`).
+- `modelOverrides` can override model metadata (`name`, `reasoning`, `thinking`, `input`, `cost`, `premiumMultiplier`, `contextWindow`, `maxTokens`, `headers`, `compat`).
 - `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`, `extraBody`).
 
 ## Runtime discovery integration
@@ -296,8 +298,8 @@ host. Discovery hits `GET /v1/models` (10s timeout, OpenAI-style payload) and
 derives each model's `api` from the entry's `supported_endpoint_types`:
 
 - contains `"anthropic"` -> `api: anthropic-messages` (routes via `/v1/messages`)
-- contains `"openai"`    -> `api: openai-completions` (routes via `/v1/chat/completions`)
-- otherwise              -> falls back to provider-level `api` if set, else dropped
+- contains `"openai"` -> `api: openai-completions` (routes via `/v1/chat/completions`)
+- otherwise -> falls back to provider-level `api` if set, else dropped
 
 Provider-level `api` is **optional** with `discovery.type: proxy` because the
 per-model wire is auto-detected. The Anthropic SDK strips a trailing `/v1`
@@ -309,8 +311,8 @@ providers:
   newapi-reseller:
     baseUrl: https://api.example.com/v1
     apiKey: xxxx
-    authHeader: true            # injects Authorization: Bearer for openai models
-    disableStrictTools: true    # most anthropic-fronted proxies reject `strict`
+    authHeader: true # injects Authorization: Bearer for openai models
+    disableStrictTools: true # most anthropic-fronted proxies reject `strict`
     discovery:
       type: proxy
 ```
@@ -409,6 +411,10 @@ Related settings:
 - `modelProviderOrder` (global canonical-provider precedence)
 - `providers.kimiApiFormat` (`openai` or `anthropic` request format)
 - `providers.openaiWebsockets` (`auto|off|on` websocket preference for OpenAI Codex transport)
+- `defaultThinkingLevel` (`off|minimal|low|medium|high|xhigh|auto`)
+- `providers.autoThinkingModel` (difficulty classifier used when `defaultThinkingLevel: auto`)
+
+When `defaultThinkingLevel` is `auto`, the session starts with a provisional model-compatible thinking level, classifies each user turn with the configured auto-thinking model, clamps the result to the active model's supported range, and emits the resolved concrete level for that turn. CLI/model suffixes still accept only concrete thinking levels, not `auto`.
 
 `modelRoles` may store either:
 
@@ -448,11 +454,9 @@ They now also expose canonical/coalesced models:
 - `--list-models` prints a canonical section plus the concrete provider rows
 
 Selecting a canonical entry stores the canonical selector. Selecting a provider row stores the explicit `provider/modelId`.
-
-
 ## Compatibility and routing fields
 
-The `compat` block on a provider or model overrides the URL-based auto-detection in `packages/ai/src/providers/openai-completions-compat.ts`. It is validated by `OpenAICompatSchema` in `packages/coding-agent/src/config/model-registry.ts` and consumed by every `openai-completions` transport (`packages/ai/src/providers/openai-completions.ts`). The canonical type is `OpenAICompat` in `packages/ai/src/types.ts`.
+The `compat` block on a provider or model overrides the URL-based auto-detection in `packages/ai/src/providers/openai-completions-compat.ts`. It is validated by `OpenAICompatSchema` in `packages/coding-agent/src/config/models-config-schema.ts` and consumed by every `openai-completions` transport (`packages/ai/src/providers/openai-completions.ts`). The canonical type is `OpenAICompat` in `packages/ai/src/types.ts`.
 
 `models.yml` accepts the following keys (all optional; unset falls back to URL detection):
 
@@ -460,10 +464,12 @@ Request shaping:
 
 - `supportsStore` — emit `store: false` on requests. Default: auto (off for non-standard endpoints).
 - `supportsDeveloperRole` — use the `developer` system role for reasoning models instead of `system`. Default: auto.
+- `supportsMultipleSystemMessages` — preserve separate leading system/developer messages instead of coalescing them. Default: auto (known OpenAI-compatible hosted APIs preserve; strict-template/local hosts coalesce).
 - `supportsUsageInStreaming` — send `stream_options: { include_usage: true }` to receive token usage on streaming responses. Default: `true`.
 - `maxTokensField` — `"max_completion_tokens"` or `"max_tokens"`. Default: auto.
 - `supportsToolChoice` — emit the `tool_choice` parameter when the caller forces a specific tool. Default: `true`. Set `false` for endpoints that 400 on `tool_choice` (e.g. DeepSeek when reasoning is on).
 - `disableReasoningOnForcedToolChoice` — drop `reasoning_effort` / OpenRouter `reasoning` whenever `tool_choice` forces a call. Default: auto (Kimi/Anthropic-fronted endpoints).
+- `disableReasoningOnToolChoice` — drop reasoning fields whenever any `tool_choice` is sent. Default: auto (DeepSeek reasoning models).
 - `extraBody` — extra top-level fields merged into every request body (gateway hints, controller selectors, etc.).
 
 Reasoning / thinking:
@@ -473,6 +479,7 @@ Reasoning / thinking:
 - `thinkingFormat` — request shape for thinking: `"openai"` (`reasoning_effort`), `"openrouter"` (`reasoning: { effort }`), `"zai"` (`thinking: { type: "enabled" }`), `"qwen"` (top-level `enable_thinking`), or `"qwen-chat-template"` (`chat_template_kwargs.enable_thinking`). Default: `"openai"`.
 - `reasoningContentField` — assistant field carrying chain-of-thought: `"reasoning_content"`, `"reasoning"`, or `"reasoning_text"`. Default: auto.
 - `requiresReasoningContentForToolCalls` — assistant tool-call turns must round-trip the reasoning field (DeepSeek-R1, Kimi, OpenRouter when reasoning is on). Default: `false`.
+- `allowsSyntheticReasoningContentForToolCalls` — allow a placeholder reasoning field when a prior assistant tool-call turn lacks provider reasoning content. Default: `true`; set `false` for providers that validate the exact reasoning value.
 - `requiresAssistantContentForToolCalls` — assistant tool-call turns must include non-empty text content (Kimi). Default: `false`.
 
 Tool / message normalization:
@@ -493,7 +500,7 @@ Provider-level `compat` is the baseline; per-model `compat` is deep-merged on to
 
 ### Anthropic compatibility (`anthropic-messages`)
 
-For `anthropic-messages` models the runtime uses a separate `AnthropicCompat` shape (`packages/ai/src/types.ts`). The `models.yml` schema currently exposes only the strict-tools opt-out as a top-level provider field (see below); the remaining Anthropic-side knobs (`disableAdaptiveThinking`, `supportsEagerToolInputStreaming`, `supportsLongCacheRetention`) are set by built-in catalog metadata and are not user-configurable from `models.yml`.
+For `anthropic-messages` models the runtime uses a separate `AnthropicCompat` shape (`packages/ai/src/types.ts`). The `models.yml` schema currently exposes only the strict-tools opt-out as a top-level provider field (see below); the remaining Anthropic-side knobs (`disableAdaptiveThinking`, `supportsEagerToolInputStreaming`, `supportsLongCacheRetention`, `supportsMidConversationSystem`) are set by built-in catalog metadata and are not user-configurable from `models.yml`.
 
 ### Strict tool schemas (`disableStrictTools`)
 
@@ -530,6 +537,7 @@ plus the OpenAI strict-mode sanitize+enforce pipeline). See
 edge cases (local `$ref` inlining, single-item `allOf` collapse,
 `anyOf`-wrapper description hoist, enum/const primitive-type inference)
 and the per-provider dispatcher mapping.
+
 ## Practical examples
 
 ### Local OpenAI-compatible endpoint (no auth)
@@ -554,7 +562,7 @@ providers:
     apiKey: ANTHROPIC_PROXY_API_KEY
     api: anthropic-messages
     authHeader: true
-    disableStrictTools: true  # if the proxy doesn't support strict tool schemas
+    disableStrictTools: true # if the proxy doesn't support strict tool schemas
     models:
       - id: claude-sonnet-4-20250514
         name: Claude Sonnet 4 (Proxy)
