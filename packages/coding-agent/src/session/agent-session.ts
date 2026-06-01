@@ -124,6 +124,7 @@ import { defaultEvalSessionId } from "../eval/session-id";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import { exportSessionToHtml } from "../export/html";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
+import { extractTtsrFilePathsFromToolArgs } from "../export/ttsr-paths";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
@@ -2307,57 +2308,7 @@ export class AgentSession {
 
 	/** Extract path-like arguments from tool call payload for TTSR glob matching. */
 	#extractTtsrFilePathsFromArgs(args: unknown): string[] | undefined {
-		if (!args || typeof args !== "object" || Array.isArray(args)) {
-			return undefined;
-		}
-
-		const rawPaths: string[] = [];
-		for (const [key, value] of Object.entries(args)) {
-			const normalizedKey = key.toLowerCase();
-			if (typeof value === "string" && (normalizedKey === "path" || normalizedKey.endsWith("path"))) {
-				rawPaths.push(value);
-				continue;
-			}
-			if (Array.isArray(value) && (normalizedKey === "paths" || normalizedKey.endsWith("paths"))) {
-				for (const candidate of value) {
-					if (typeof candidate === "string") {
-						rawPaths.push(candidate);
-					}
-				}
-			}
-		}
-
-		const normalizedPaths = rawPaths.flatMap(pathValue => this.#normalizeTtsrPathCandidates(pathValue));
-		if (normalizedPaths.length === 0) {
-			return undefined;
-		}
-
-		return Array.from(new Set(normalizedPaths));
-	}
-
-	/** Convert a path argument into stable relative/absolute candidates for glob checks. */
-	#normalizeTtsrPathCandidates(rawPath: string): string[] {
-		const trimmed = rawPath.trim();
-		if (trimmed.length === 0) {
-			return [];
-		}
-
-		const normalizedInput = trimmed.replaceAll("\\", "/");
-		const candidates = new Set<string>([normalizedInput]);
-		if (normalizedInput.startsWith("./")) {
-			candidates.add(normalizedInput.slice(2));
-		}
-
-		const cwd = this.sessionManager.getCwd();
-		const absolutePath = path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(cwd, trimmed);
-		candidates.add(absolutePath.replaceAll("\\", "/"));
-
-		const relativePath = path.relative(cwd, absolutePath).replaceAll("\\", "/");
-		if (relativePath && relativePath !== "." && !relativePath.startsWith("../") && relativePath !== "..") {
-			candidates.add(relativePath);
-		}
-
-		return Array.from(candidates);
+		return extractTtsrFilePathsFromToolArgs(args, { cwd: this.sessionManager.getCwd() });
 	}
 	/** Extract text content from a message */
 	#getUserMessageText(message: Message): string {

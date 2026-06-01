@@ -2,6 +2,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, getProjectDir } from "@oh-my-pi/pi-utils";
+import type { Rule } from "../capability/rule";
+import { ruleNamesFromDisabledExtensions } from "../capability/rule-buckets";
 import type {
 	ProjectMatcher,
 	ResolvedSkillsetEffects,
@@ -13,7 +15,8 @@ import type {
 import { skillsetCapability } from "../capability/skillset";
 import type { SkillsetsSettings, SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, loadCapability } from "../discovery";
-import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
+import { getBuiltinSkillsetRules, isBuiltinSkillsetDefinition } from "../discovery/builtin-skillsets";
+import { compareSkillOrder, scanRulesFromDir, scanSkillsFromDir } from "../discovery/helpers";
 import { loadSkillsetDefinitionDirectory, loadSkillsetDefinitionFile } from "../discovery/skillsets";
 import {
 	detectFileGlobEvidence,
@@ -45,6 +48,7 @@ export interface CompileSkillsetActivationOptions {
 	baseWarnings?: readonly SkillWarning[];
 	disabledExtensions?: readonly string[];
 	skillsSettings?: SkillsSettings;
+	resolveSkills?: boolean;
 }
 
 export interface CompileSkillsetActivationResult extends SkillsetActivationPlan {
@@ -52,6 +56,7 @@ export interface CompileSkillsetActivationResult extends SkillsetActivationPlan 
 	skillWarnings: SkillWarning[];
 	alwaysApplyRuleNames: Set<string>;
 	ruleNames: Set<string>;
+	providedRules: Rule[];
 }
 
 function confidenceRank(confidence: ProjectFacetConfidence): number {
@@ -296,6 +301,19 @@ function createSkillNameFilter(
 	};
 }
 
+interface RuleNameFilter {
+	canUse(name: string): boolean;
+}
+
+function createRuleNameFilter(disabledExtensions: readonly string[] | undefined): RuleNameFilter {
+	const disabledRuleNames = new Set(ruleNamesFromDisabledExtensions(disabledExtensions));
+	return {
+		canUse(name: string): boolean {
+			return !disabledRuleNames.has(name);
+		},
+	};
+}
+
 function capabilitySkillToPromptSkill(skill: CapabilitySkill, source: string): Skill {
 	return {
 		name: skill.name,
@@ -417,6 +435,109 @@ async function scanSkillsetSkillDirectories(
 	return loadedNames;
 }
 
+function ruleSourceLabel(rule: Rule): string {
+	const provider = rule._source.providerName || rule._source.provider;
+	return `${provider}:${rule._source.path}`;
+}
+
+async function addRuleIfNew(
+	rule: Rule,
+	providedRules: Rule[],
+	realPathSet: Set<string>,
+	ruleNameMap: Map<string, Rule>,
+	warnings: SkillWarning[],
+): Promise<boolean> {
+	const resolvedPath = rule._source.level === "native" ? rule.path : await realPathOrSelf(rule.path);
+	if (realPathSet.has(resolvedPath)) return false;
+	const existing = ruleNameMap.get(rule.name);
+	if (existing) {
+		warnings.push({
+			skillPath: rule.path,
+			message: `rule name collision: "${rule.name}" already loaded from ${ruleSourceLabel(existing)}, skipping this one`,
+		});
+		return false;
+	}
+	providedRules.push(rule);
+	realPathSet.add(resolvedPath);
+	ruleNameMap.set(rule.name, rule);
+	return true;
+}
+
+async function scanSkillsetRuleDirectories(
+	activation: SkillsetActivation,
+	providedRules: Rule[],
+	realPathSet: Set<string>,
+	ruleNameMap: Map<string, Rule>,
+	warnings: SkillWarning[],
+	ruleFilter: RuleNameFilter,
+): Promise<void> {
+	if (isBuiltinSkillsetDefinition(activation.skillset)) {
+		for (const rule of getBuiltinSkillsetRules(activation.skillset.id)) {
+			if (!ruleFilter.canUse(rule.name)) continue;
+			await addRuleIfNew(rule, providedRules, realPathSet, ruleNameMap, warnings);
+		}
+	}
+
+	if (activation.skillset._source.level === "native") return;
+
+	const sourceLevel = activation.skillset._source.level === "user" ? "user" : "project";
+	const projectRealRoot =
+		activation.skillset._source.level === "project" ? await realPathOrSelf(activation.root) : null;
+	for (const rawDir of activation.effects.ruleDirectories) {
+		if (activation.skillset._source.level === "project" && (rawDir.startsWith("~") || path.isAbsolute(rawDir))) {
+			warnings.push({
+				skillPath: rawDir,
+				message: `project skillset "${activation.skillset.id}" rule directory must be relative to the project root`,
+			});
+			continue;
+		}
+		const dir =
+			activation.skillset._source.level === "project"
+				? path.resolve(activation.root, rawDir)
+				: path.resolve(expandTilde(rawDir));
+		if (!(await existingDirectory(dir))) {
+			warnings.push({
+				skillPath: dir,
+				message: `skillset "${activation.skillset.id}" rule directory does not exist`,
+			});
+			continue;
+		}
+		if (projectRealRoot) {
+			const realDir = await realPathOrSelf(dir);
+			if (!pathIsWithinOrEqual(projectRealRoot, realDir)) {
+				warnings.push({
+					skillPath: dir,
+					message: `project skillset "${activation.skillset.id}" rule directory escapes the project root`,
+				});
+				continue;
+			}
+		}
+		const result = await scanRulesFromDir(
+			{ cwd: activation.root, home: os.homedir(), repoRoot: null },
+			{
+				dir,
+				providerId: `skillset:${activation.skillset.id}`,
+				level: sourceLevel,
+			},
+		);
+		for (const message of result.warnings ?? []) warnings.push({ skillPath: dir, message });
+		for (const rule of result.items) {
+			if (projectRealRoot) {
+				const realRulePath = await realPathOrSelf(rule.path);
+				if (!pathIsWithinOrEqual(projectRealRoot, realRulePath)) {
+					warnings.push({
+						skillPath: rule.path,
+						message: `project skillset "${activation.skillset.id}" rule file escapes the project root`,
+					});
+					continue;
+				}
+			}
+			if (!ruleFilter.canUse(rule.name)) continue;
+			await addRuleIfNew(rule, providedRules, realPathSet, ruleNameMap, warnings);
+		}
+	}
+}
+
 async function resolveActivationEffects(
 	activation: SkillsetActivation,
 	skillMap: Map<string, Skill>,
@@ -511,6 +632,7 @@ export async function compileSkillsetActivationPlan(
 			skillWarnings: warnings,
 			alwaysApplyRuleNames: new Set<string>(),
 			ruleNames: new Set<string>(),
+			providedRules: [],
 		};
 	}
 
@@ -537,16 +659,29 @@ export async function compileSkillsetActivationPlan(
 		activations.push(activation);
 	}
 
-	const { skillMap, realPathSet } = await buildBaseSkillState(options.baseSkills);
+	const { skillMap, realPathSet: skillRealPathSet } = await buildBaseSkillState(options.baseSkills);
 	const skillFilter = createSkillNameFilter(options.skillsSettings, options.disabledExtensions);
+	if (options.resolveSkills !== false) {
+		for (const activation of activations) {
+			await resolveActivationEffects(activation, skillMap, skillRealPathSet, warnings, skillFilter);
+		}
+	}
+	const ruleFilter = createRuleNameFilter(options.disabledExtensions);
+	const providedRules: Rule[] = [];
+	const ruleRealPathSet = new Set<string>();
+	const ruleNameMap = new Map<string, Rule>();
 	for (const activation of activations) {
-		await resolveActivationEffects(activation, skillMap, realPathSet, warnings, skillFilter);
+		await scanSkillsetRuleDirectories(activation, providedRules, ruleRealPathSet, ruleNameMap, warnings, ruleFilter);
 	}
 	const alwaysApplyRuleNames = new Set<string>();
 	const ruleNames = new Set<string>();
 	for (const activation of activations) {
-		for (const name of activation.effects.alwaysApplyRules) alwaysApplyRuleNames.add(name);
-		for (const name of activation.effects.rules) ruleNames.add(name);
+		for (const name of activation.effects.alwaysApplyRules) {
+			if (ruleFilter.canUse(name)) alwaysApplyRuleNames.add(name);
+		}
+		for (const name of activation.effects.rules) {
+			if (ruleFilter.canUse(name)) ruleNames.add(name);
+		}
 	}
 	const skills = Array.from(skillMap.values()).sort((left, right) =>
 		compareSkillOrder(left.name, left.filePath, right.name, right.filePath),
@@ -561,5 +696,6 @@ export async function compileSkillsetActivationPlan(
 		skillWarnings: warnings,
 		alwaysApplyRuleNames,
 		ruleNames,
+		providedRules,
 	};
 }

@@ -7,6 +7,7 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 - [`../src/sdk.ts`](../packages/coding-agent/src/sdk.ts)
 - [`../src/export/ttsr.ts`](../packages/coding-agent/src/export/ttsr.ts)
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
+- [`../src/export/ttsr-paths.ts`](../packages/coding-agent/src/export/ttsr-paths.ts)
 - [`../src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
 - [`../src/prompts/system/ttsr-interrupt.md`](../packages/coding-agent/src/prompts/system/ttsr-interrupt.md)
 - [`../src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
@@ -17,23 +18,28 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 
 ## 1. Discovery feed and rule registration
 
-At session creation, `createAgentSession()` loads discovered rules, constructs a `TtsrManager`, and buckets rules through `bucketRules(...)`:
+At session creation, `createAgentSession()` loads normal discovered rules, merges active skillset-provided rules when `options.rules` was not supplied, constructs a `TtsrManager`, and buckets the merged list through `bucketRules(...)`:
 
 ```ts
 const ttsrSettings = settings.getGroup("ttsr");
 const ttsrManager = new TtsrManager(ttsrSettings);
-const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd });
-const { rulebookRules, alwaysApplyRules } = bucketRules(
-  rulesResult.items,
-  ttsrManager,
-  {
-    builtinRules: ttsrSettings.builtinRules,
-    disabledRules: ttsrSettings.disabledRules,
-  },
-);
+const disabledRuleNames = new Set([
+  ...ruleNamesFromDisabledExtensions(disabledExtensionIds),
+  ...(ttsrSettings.disabledRules ?? []),
+]);
+const baseRules = await loadCapability<Rule>(ruleCapability.id, { cwd, disabledExtensions });
+const merged = mergeRulesFirstWins(baseRules.items, activationPlan.providedRules, disabledRuleNames);
+const { rulebookRules, alwaysApplyRules } = bucketRules(merged.rules, ttsrManager, {
+  builtinRules: ttsrSettings.builtinRules,
+  disabledRules: disabledRuleNames,
+  forceRulebookNames: activationPlan.ruleNames,
+  forceAlwaysApplyNames: activationPlan.alwaysApplyRuleNames,
+});
 ```
 
-`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded `builtin-defaults` rules when `ttsr.builtinRules === false`, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+`bucketRules(...)` is the single rule funnel. It drops names listed in `ttsr.disabledRules` or `disabledExtensions: ["rule:<name>"]`, drops native embedded rules when `ttsr.builtinRules === false`, applies skillset force lists, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+
+Skillset-provided condition rules are TTSR by default. Built-in Rust guardrails are supplied as native skillset rules only when the built-in `rust` skillset activates from strong root-marker evidence.
 
 ### Pre-registration dedupe behavior
 
@@ -49,9 +55,9 @@ Registration is skipped when:
 
 Invalid regex conditions and unreachable scopes are logged as warnings and ignored; session startup continues. If a TTSR rule defines `globs`, those globs are compiled as a global file-path gate for matching.
 
-### Setting caveat
+### `ttsr.enabled`
 
-`TtsrSettings.enabled` is loaded into the manager but is not currently checked in runtime gating. If TTSR rules exist, matching still runs.
+`ttsr.enabled: false` is enforced before registration and matching. `bucketRules(...)` suppresses unforced condition rules instead of promoting them into the rulebook, `TtsrManager.addRule()` returns `false`, and `TtsrManager.checkDelta()` returns `[]` without appending to stream buffers.
 
 ## 2. Streaming monitor lifecycle
 
@@ -72,6 +78,8 @@ When assistant updates arrive and rules exist:
 - call `checkDelta(delta, matchContext)`
 
 `checkDelta()` iterates registered rules and returns all matching rules that pass scope, global path-glob, condition, and repeat policy checks.
+
+For tool-call deltas, `AgentSession` builds a `TtsrMatchContext` with normalized path candidates from structured `path`/`paths` arguments, edit entry arrays, apply-patch file headers, and hashline edit section headers such as `¶src/lib.rs#ABCD`. Scoped rules like `tool:edit(*.rs)` do not match until a path candidate is known; once a later argument delta reveals the path, already-buffered content for that tool call can match.
 
 ## 3. Trigger decision and immediate abort path
 
@@ -219,12 +227,13 @@ During the timer window, state can change (user interruption, mode actions, addi
 
 ## 9. Edge cases summary
 
-- Invalid `condition` regex: skipped with warning; other conditions/rules continue.
-- Duplicate rule names at capability layer: lower-priority duplicates are shadowed before registration.
+- Invalid `condition` regex: skipped with warning; other conditions/rules continue. If TTSR is enabled and a described user-authored condition rule fails registration, it can fall through to rulebook.
+- Duplicate rule names at capability or skillset merge layer: first wins; later duplicates are skipped before registration.
 - Duplicate names at manager layer: second registration is ignored.
-- `ttsr.disabledRules`: listed names are dropped before TTSR registration and are not surfaced through always-apply/rulebook buckets.
-- `ttsr.builtinRules: false`: embedded `builtin-defaults` rules are dropped before TTSR registration; user/project rules still load.
-- `globs` on a TTSR rule require the stream match context to include at least one matching file path.
+- `ttsr.enabled: false`: unforced condition rules are suppressed before registration and matching.
+- `ttsr.disabledRules` and `disabledExtensions: ["rule:<name>"]`: listed exact names are dropped before TTSR registration and are not surfaced through always-apply/rulebook buckets.
+- `ttsr.builtinRules: false`: native embedded rules are dropped before TTSR registration; user/project rules still load.
+- `globs` or scoped tool paths on a TTSR rule require the stream match context to include at least one matching file path.
 - `contextMode: "keep"`: partial violating output can remain in context before reminder retry.
 - `interruptMode: "never"`: prose-source matches queue a deferred hidden injection after a successful assistant message; tool-source matches fold an in-band `<system-reminder>` into the matched tool call's `toolResult` content via the `afterToolCall` hook (no mid-stream abort, no separate follow-up turn).
 - Tool-source non-interrupting buckets are cleared when the parent assistant message ends with `stopReason === "aborted"` or `"error"`, so rules whose target tool never produced a result remain eligible to re-trigger.

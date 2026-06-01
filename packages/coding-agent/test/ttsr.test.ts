@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { parseRuleConditionAndScope, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { extractTtsrFilePathsFromToolArgs } from "@oh-my-pi/pi-coding-agent/export/ttsr-paths";
 
 function makeRule(partial: Partial<Rule>): Rule {
 	return {
@@ -175,6 +176,30 @@ describe("TtsrManager scope matching", () => {
 		).toEqual([rule]);
 	});
 
+	it("does not register or match rules when disabled", () => {
+		const manager = new TtsrManager({ enabled: false });
+		const rule = makeRule({
+			name: "disabled",
+			condition: ["forbidden"],
+		});
+
+		expect(manager.addRule(rule)).toBe(false);
+		expect(manager.hasRules()).toBe(false);
+		expect(manager.checkDelta("forbidden", { source: "text" })).toEqual([]);
+	});
+
+	it("does not retain disabled deltas in stream buffers", () => {
+		const manager = new TtsrManager({ enabled: false });
+		const rule = makeRule({
+			name: "disabled-buffer",
+			condition: ["forbidden"],
+		});
+
+		expect(manager.addRule(rule)).toBe(false);
+		expect(manager.checkDelta("for", { source: "text" })).toEqual([]);
+		expect(manager.checkDelta("bidden", { source: "text" })).toEqual([]);
+	});
+
 	it("returns false when registering rules with only invalid condition regex", () => {
 		const manager = new TtsrManager();
 		const added = manager.addRule(
@@ -268,6 +293,62 @@ describe("TtsrManager scope matching", () => {
 				source: "tool",
 				toolName: "edit",
 				filePaths: [absolutePath],
+			}),
+		).toEqual([rule]);
+	});
+
+	it("extracts hashline edit paths for scoped tool matching", () => {
+		const cwd = path.resolve("/tmp/project");
+		const paths = extractTtsrFilePathsFromToolArgs(
+			{
+				input: "¶src/lib.rs#ABCD\nreplace 1..1:\n+impl Into<String> for Name {}\n",
+			},
+			{ cwd },
+		);
+
+		expect(paths).toContain("src/lib.rs");
+		expect(paths).toContain(path.join(cwd, "src/lib.rs").replaceAll("\\", "/"));
+	});
+
+	it("matches scoped rules with hashline edit path extraction", () => {
+		const manager = new TtsrManager();
+		const rule = makeRule({
+			name: "rs-into",
+			condition: ["impl\\s+Into"],
+			scope: ["tool:edit(*.rs)", "tool:write(*.rs)"],
+		});
+		manager.addRule(rule);
+
+		const rsPaths = extractTtsrFilePathsFromToolArgs(
+			{ input: "¶src/lib.rs#ABCD\nreplace 1..1:\n+impl Into<String> for Name {}\n" },
+			{ cwd: path.resolve("/tmp/project") },
+		);
+		const tsPaths = extractTtsrFilePathsFromToolArgs(
+			{ input: "¶src/lib.ts#ABCD\nreplace 1..1:\n+impl Into<String> for Name {}\n" },
+			{ cwd: path.resolve("/tmp/project") },
+		);
+
+		expect(
+			manager.checkDelta("impl Into<String> for Name {}", {
+				source: "tool",
+				toolName: "edit",
+				filePaths: rsPaths,
+			}),
+		).toEqual([rule]);
+		manager.resetBuffer();
+		expect(
+			manager.checkDelta("impl Into<String> for Name {}", {
+				source: "tool",
+				toolName: "edit",
+				filePaths: tsPaths,
+			}),
+		).toEqual([]);
+		manager.resetBuffer();
+		expect(
+			manager.checkDelta("impl Into<String> for Name {}", {
+				source: "tool",
+				toolName: "write",
+				filePaths: ["src/lib.rs"],
 			}),
 		).toEqual([rule]);
 	});

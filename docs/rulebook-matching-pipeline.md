@@ -5,7 +5,7 @@ This document describes how coding-agent discovers rules from supported config f
 - **Rulebook rules** (available to the model via system prompt + `rule://` URLs)
 - **TTSR rules** (time-travel stream interruption rules)
 
-It reflects the current implementation, including partial semantics and metadata that is parsed but not enforced.
+It reflects the current implementation.
 
 ## Implementation files
 
@@ -17,6 +17,7 @@ It reflects the current implementation, including partial semantics and metadata
 - [`packages/coding-agent/src/discovery/builtin.ts`](../packages/coding-agent/src/discovery/builtin.ts)
 - [`packages/coding-agent/src/discovery/builtin-defaults.ts`](../packages/coding-agent/src/discovery/builtin-defaults.ts)
 - [`packages/coding-agent/src/discovery/agents.ts`](../packages/coding-agent/src/discovery/agents.ts)
+- [`packages/coding-agent/src/discovery/builtin-skillsets.ts`](../packages/coding-agent/src/discovery/builtin-skillsets.ts)
 - [`packages/coding-agent/src/discovery/cursor.ts`](../packages/coding-agent/src/discovery/cursor.ts)
 - [`packages/coding-agent/src/discovery/windsurf.ts`](../packages/coding-agent/src/discovery/windsurf.ts)
 - [`packages/coding-agent/src/discovery/cline.ts`](../packages/coding-agent/src/discovery/cline.ts)
@@ -58,6 +59,7 @@ Consequence: precedence and deduplication are **name-based only**. Two different
 - `windsurf` (priority `50`)
 - `cline` (priority `40`)
 - `builtin-defaults` (priority `1`)
+- active skillsets via `providedRules` (merged after normal discovery)
 
 ### Native provider (`builtin.ts`)
 
@@ -163,6 +165,7 @@ Effective rule provider order is currently:
 4. `windsurf` (50)
 5. `cline` (40)
 6. `builtin-defaults` (1)
+7. active skillset-provided rules (merged later in SDK; normal discovery still wins by name)
 
 ### Intra-provider ordering caveat
 
@@ -175,25 +178,42 @@ Notable source-order differences:
 - `cursor` appends user then project results.
 - `windsurf` appends user `global_rules` first, then project rules.
 - `cline` loads only nearest `.clinerules` source.
-- `builtin-defaults` uses the embedded rule source order.
+- `builtin-defaults` uses the embedded global rule source order.
+- Skillset `ruleDirectories` are sorted by name case-insensitively, exact name, then path before activation-order merging.
 
-## 5. Split into Rulebook, Always-Apply, and TTSR buckets
+## 5. Merge skillset-provided rules, then bucket once
 
-After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` applies session-level filtering and bucket assignment:
+`createAgentSession` first loads normal discovered rules with `loadCapability("rules")`. Unless `options.rules` was supplied, it then appends active skillset-provided rules:
 
-1. Drop rules listed in `ttsr.disabledRules`.
-2. Drop rules from the `builtin-defaults` provider when `ttsr.builtinRules === false`.
-3. Register rules with non-empty `condition` into `TtsrManager`; if registration succeeds, the rule is TTSR-only.
-4. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
-5. Put remaining rules with `description` into `rulebookRules`.
+1. Normal discovered rules keep first-wins precedence by exact `rule.name`.
+2. Active skillset rules append in activation order (definition priority descending, id lexical).
+3. A skillset rule whose name is already present is skipped with a warning; force lists target the surviving rule by name.
+4. `options.rules`, when supplied, is authoritative and skips normal discovery plus skillset-provided rule objects.
+
+Built-in defaults are split by pack:
+
+- global bundled defaults load through `builtin-defaults`
+- project-gated native packs, currently the built-in Rust `rs-*` pack, enter as active skillset `providedRules`
+
+After that merge, `bucketRules(...)` is the single session bucket/filter path:
+
+1. Drop exact names from `ttsr.disabledRules` and `disabledExtensions: ["rule:<name>"]`.
+2. Drop native embedded rules when `ttsr.builtinRules === false` (global defaults and project-gated built-in packs).
+3. Drop later duplicate names defensively; first wins.
+4. Apply `provides.alwaysApplyRules` force names.
+5. Apply `provides.rules` force names.
+6. If TTSR is enabled, register unforced condition rules into `TtsrManager`; accepted rules are TTSR-only.
+7. If TTSR is disabled, suppress unforced condition rules instead of promoting them into the rulebook.
+8. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
+9. Put remaining rules with `description` into `rulebookRules`.
 
 ### Bucket behavior
 
-- **TTSR bucket**: any enabled rule with a non-empty parsed `condition` that `TtsrManager.addRule(...)` accepts. Takes priority over other buckets.
-- **Always-apply bucket**: `alwaysApply === true`, not TTSR. Full content injected into system prompt. Resolvable via `rule://`.
-- **Rulebook bucket**: must have description, must not be TTSR, must not be `alwaysApply`. Listed in system prompt by name+description; content read on demand via `rule://`.
-- A rule with both `condition` and `alwaysApply` goes to TTSR only if TTSR registration accepts it; otherwise it can fall through to always-apply.
-- A rule with both `alwaysApply` and `description` goes to always-apply only (not rulebook).
+- **TTSR bucket**: any unforced rule with a non-empty parsed `condition` that `TtsrManager.addRule(...)` accepts while `ttsr.enabled !== false`. TTSR-only rules are not visible through `rule://`.
+- **Always-apply bucket**: rules forced by `provides.alwaysApplyRules`, or non-TTSR `alwaysApply === true` rules. Full content is injected into the system prompt and resolvable via `rule://`.
+- **Rulebook bucket**: rules forced by `provides.rules`, or non-TTSR described rules. Listed in system prompt by name+description; content is read on demand via `rule://`.
+- Disabled names and disabled built-in packs win over force lists.
+- A condition rule with invalid TTSR metadata may fall through to rulebook only when TTSR is enabled and the rule has `description`; `ttsr.enabled: false` suppresses unforced condition rules.
 
 ## 6. How metadata affects runtime surfaces
 

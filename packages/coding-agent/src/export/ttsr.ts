@@ -72,7 +72,7 @@ export class TtsrManager {
 	readonly #buffers = new Map<string, string>();
 	#messageCount = 0;
 
-	constructor(settings?: TtsrSettings) {
+	constructor(settings?: Partial<TtsrSettings>) {
 		this.#settings = { ...DEFAULT_SETTINGS, ...settings };
 	}
 
@@ -294,6 +294,9 @@ export class TtsrManager {
 
 	/** Add a TTSR rule to be monitored. */
 	addRule(rule: Rule): boolean {
+		if (this.#settings.enabled === false) {
+			return false;
+		}
 		if (this.#rules.has(rule.name)) {
 			return false;
 		}
@@ -336,6 +339,9 @@ export class TtsrManager {
 	 * assistant prose, thinking text, and unrelated tool argument streams.
 	 */
 	checkDelta(delta: string, context: TtsrMatchContext): Rule[] {
+		if (this.#settings.enabled === false) {
+			return [];
+		}
 		const bufferKey = this.#bufferKey(context);
 		const nextBuffer = `${this.#buffers.get(bufferKey) ?? ""}${delta}`;
 		this.#buffers.set(bufferKey, nextBuffer);

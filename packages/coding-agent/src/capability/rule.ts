@@ -17,6 +17,11 @@ const CONDITION_GLOB_SCOPE_TOOLS = ["edit", "write"] as const;
  */
 export const BUILTIN_DEFAULTS_PROVIDER_ID = "builtin-defaults";
 
+/** True for embedded rules owned by OMP code rather than filesystem/user/project sources. */
+export function isBuiltinRule(rule: Rule): boolean {
+	return rule._source.level === "native";
+}
+
 /**
  * Parsed frontmatter from rule files.
  */

@@ -1,6 +1,6 @@
 # Skillsets
 
-Skillsets are project-aware activation recipes. They detect project facets (Rust, Node, Python, Go, Java, TypeScript, etc.) and then expose matching skills, rule names, and compact prompt summaries for the current session.
+Skillsets are project-aware activation recipes. They detect project facets (Rust, Node, Python, Go, Java, TypeScript, etc.) and then expose matching skills, rules, TTSR guardrails, and compact prompt summaries for the current session.
 
 They do **not** replace skills:
 
@@ -44,7 +44,7 @@ Supported locations, highest priority first:
 
 Project definitions shadow user definitions with the same id. Custom files/directories shadow both.
 
-Security boundary: project-sourced skillsets may only scan skill directories inside the detected project root, using relative paths. Absolute, `~`, env-expanded, or symlink-escaped external directories are allowed only from user skillset definitions such as `~/.omp/agent/skillsets.yaml`.
+Security boundary: project-sourced skillsets may only scan skill or rule directories inside the detected project root, using relative paths. Absolute, `~`, env-expanded, or symlink-escaped external directories are allowed only from user skillset definitions such as `~/.omp/agent/skillsets.yaml`.
 
 ## Definition format
 
@@ -62,6 +62,8 @@ skillsets:
     provides:
       skillDirectories:
         - /path/to/external-skills  # user/custom definitions only; project configs use relative in-project paths
+      ruleDirectories:
+        - .omp/rules               # flat *.md/*.mdc rule scan when the skillset activates
       skills:
         - rust-skills
       promptSummary: >
@@ -90,12 +92,29 @@ Supported effects:
 
 - `skillDirectories`: parent directories containing `<skill>/SKILL.md`
 - `skills`: skill names that should be available after activation
-- `rules`: existing rule names to surface in the rulebook
-- `alwaysApplyRules`: existing rule names to inject as always-apply for this session
+- `ruleDirectories`: flat directories of `*.md` / `*.mdc` rule files loaded only while the skillset is active
+- `rules`: surviving rule names to force into the rulebook bucket
+- `alwaysApplyRules`: surviving rule names to inject as always-apply for this session
 - `promptSummary`: compact text shown in the Active Project Skillsets prompt section
 - `toolHints`: metadata for future UI/tooling; not injected as tool instructions
 
-Rule directory ingestion is intentionally not part of the first implementation. Large rule packs should remain under the activated skill directory and be read via `skill://<skill>/...`.
+`ruleDirectories` use the same rule markdown/frontmatter parser as normal rule providers. Directory-loaded condition rules become TTSR rules by default; they enter `rule://` only if `provides.rules` forces the surviving rule name into the rulebook. Project, project-scoped plugin, and `skillsets.customFiles` / `customDirectories` definitions must use project-relative rule directories contained by the activation root, and every loaded rule file is realpath-checked to prevent symlink escapes. User-scoped definitions may use absolute and `~` paths.
+
+Disable controls are cumulative and exact-name based:
+
+- `disabledExtensions: ["skillset:<id>"]`, `skillsets.disabled`, `skillsets.include`, and `skillsets.mode` control activation.
+- `disabledExtensions: ["rule:<name>"]` and `ttsr.disabledRules: ["<name>"]` drop matching discovered, skillset-provided, and built-in rules before bucket assignment.
+- `ttsr.builtinRules: false` drops native embedded rule packs, including global bundled defaults and built-in project-gated packs.
+
+Normal discovered rules shadow skillset-provided rules by name. If `provides.rules` or `provides.alwaysApplyRules` names a shadowed rule, the force applies to the surviving discovered rule.
+
+## Built-in Rust skillset
+
+OMP ships a built-in `rust` skillset with a small native `rs-*` TTSR pack. It activates only from strong root-marker evidence (`Cargo.toml`, `Cargo.lock`, `rust-toolchain*`, `rustfmt.toml`, or `clippy.toml`), not from the weak standalone `**/*.rs` fallback. The pack is embedded; it does not depend on any external `rust-skills` checkout.
+
+The built-in Rust rules are scoped to generated Rust `edit`/`write` tool calls on `*.rs` paths. They are runtime guardrails, so they are not visible through `rule://` unless a same-named project/user rule or force list places a surviving rule in the rulebook. Disable them with `skillsets.disabled: [rust]`, `disabledExtensions: ["skillset:rust"]`, `disabledExtensions: ["rule:rs-from-not-into"]`, `ttsr.disabledRules`, `ttsr.builtinRules: false`, or `ttsr.enabled: false`.
+
+External Rust skills remain optional. Add them through a user/project skillset definition when you want deeper `skill://rust-skills` guidance.
 
 ## Rust external skill library
 
@@ -151,7 +170,7 @@ Active skillsets add a compact prompt section like:
 
 ```text
 # Active Project Skillsets
-- rust: detected from Cargo.toml (root ~/repo). Skills: rust-skills. Read skill://<name> before using an activated skill.
+- rust: detected from Cargo.toml (root ~/repo). Rust project context is active; enabled Rust TTSR guardrails apply to generated .rs edits. Skills: rust-skills.
 ```
 
-Full skill content is never injected automatically. The model must read `skill://rust-skills` before applying the skill.
+Full skill content is never injected automatically. The model must read `skill://rust-skills` before applying external Rust skill guidance; built-in Rust TTSR guardrails are separate active rules.

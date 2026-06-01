@@ -1,23 +1,16 @@
 /**
- * The bundled `builtin-defaults` rule provider ships a curated default rule set
- * embedded into the binary. These tests defend that the whole set loads and
- * parses, and that the provider sits at the lowest priority so any user/project
- * rule of the same name overrides a bundled default (first-wins dedup).
+ * The bundled `builtin-defaults` rule provider ships global embedded rules.
+ * Project-gated packs such as Rust live behind built-in skillsets instead.
  */
 import { describe, expect, it } from "bun:test";
 import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
 
 const EXPECTED_RULE_NAMES = [
-	"rs-box-leak",
-	"rs-future-prelude",
-	"rs-lazylock",
-	"rs-match-ergonomics",
-	"rs-parking-lot",
-	"rs-result-type",
 	"ts-bare-catch",
 	"ts-import-type",
 	"ts-no-any",
@@ -44,26 +37,22 @@ async function loadBuiltinRules(): Promise<Rule[]> {
 }
 
 describe("builtin-defaults rule provider", () => {
-	it("loads exactly the bundled default rule set, all attributed to the provider", async () => {
+	it("loads exactly the global bundled default rule set as native rules", async () => {
 		const rules = await loadBuiltinRules();
 		const names = rules.map(r => r.name).sort();
 		expect(names).toEqual(EXPECTED_RULE_NAMES);
 		expect(rules.every(r => r._source.provider === BUILTIN_DEFAULTS_PROVIDER_ID)).toBe(true);
+		expect(rules.every(r => r._source.level === "native")).toBe(true);
+		expect(rules.every(r => r._source.path.startsWith("builtin://rules/"))).toBe(true);
 	});
 
-	it("parses every bundled rule as a TTSR rule (non-empty condition and scope)", async () => {
+	it("parses every global bundled rule as a valid TTSR rule", async () => {
 		const rules = await loadBuiltinRules();
 		for (const rule of rules) {
 			expect(rule.condition?.length, `${rule.name} condition`).toBeGreaterThan(0);
 			expect(rule.scope?.length, `${rule.name} scope`).toBeGreaterThan(0);
+			expect(new TtsrManager({ enabled: true }).addRule(rule), `${rule.name} registers`).toBe(true);
 		}
-	});
-
-	it("parses YAML list-form conditions from the embedded text", async () => {
-		const rules = await loadBuiltinRules();
-		const lazylock = rules.find(r => r.name === "rs-lazylock");
-		// Frontmatter declares two condition patterns as a YAML sequence.
-		expect(lazylock?.condition).toHaveLength(2);
 	});
 
 	it("preserves a per-rule interruptMode override from frontmatter", async () => {

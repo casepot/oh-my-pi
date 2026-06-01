@@ -113,6 +113,16 @@ export function createSourceMeta(provider: string, filePath: string, level: "use
 	};
 }
 
+/** Create source metadata for embedded native items with virtual URI paths. */
+export function createNativeSourceMeta(provider: string, virtualPath: string, providerName = ""): SourceMeta {
+	return {
+		provider,
+		providerName,
+		path: virtualPath,
+		level: "native",
+	};
+}
+
 export function parseBoolean(value: unknown): boolean | undefined {
 	if (typeof value === "boolean") return value;
 	if (typeof value === "string") {
@@ -302,6 +312,14 @@ export function compareSkillOrder(aName: string, aPath: string, bName: string, b
 	return cmp(aPath, bPath);
 }
 
+export interface ScanRulesFromDirOptions {
+	dir: string;
+	providerId: string;
+	level: "user" | "project";
+	recursive?: boolean;
+	stripNamePattern?: RegExp;
+}
+
 export async function scanSkillsFromDir(
 	_ctx: LoadContext,
 	options: ScanSkillsFromDirOptions,
@@ -361,6 +379,30 @@ export async function scanSkillsFromDir(
 	items.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
 
 	return { items, warnings };
+}
+
+export async function scanRulesFromDir(ctx: LoadContext, options: ScanRulesFromDirOptions): Promise<LoadResult<Rule>> {
+	const { dir, providerId, level, recursive = false, stripNamePattern = /\.(md|mdc)$/ } = options;
+	try {
+		const stat = await fs.promises.stat(dir);
+		if (!stat.isDirectory()) {
+			return { items: [], warnings: [`Rule directory is not a directory: ${dir} (provider: ${providerId})`] };
+		}
+	} catch (error) {
+		return {
+			items: [],
+			warnings: [`Failed to read rules directory: ${dir} (provider: ${providerId}, ${String(error)})`],
+		};
+	}
+
+	const result = await loadFilesFromDir<Rule>(ctx, dir, providerId, level, {
+		extensions: ["md", "mdc"],
+		recursive,
+		transform: (name, content, filePath, source) =>
+			buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern }),
+	});
+	result.items.sort((a, b) => compareSkillOrder(a.name, a.path, b.name, b.path));
+	return result;
 }
 
 /**

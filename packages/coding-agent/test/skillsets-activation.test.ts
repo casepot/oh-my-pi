@@ -275,4 +275,118 @@ describe("skillset activation compiler", () => {
 
 		expect(plan.activations[0]?.effects.promptSummary).toBe("abcdefgh");
 	});
+
+	test("active skillset ruleDirectories load rule objects without forcing rulebook names", async () => {
+		const projectRules = path.join(repoRoot, ".omp", "rules");
+		fs.mkdirSync(projectRules, { recursive: true });
+		fs.writeFileSync(
+			path.join(projectRules, "no-into.md"),
+			'---\ndescription: Prefer From\ncondition: "impl\\\\s+Into"\nscope: tool:edit(*.rs)\n---\nUse From.\n',
+		);
+		const definition = rustDefinition(configPath, externalSkills, "project");
+		definition.provides = { ruleDirectories: [".omp/rules"] };
+
+		const plan = await compileSkillsetActivationPlan({
+			cwd: repoRoot,
+			facets: [rustFacet],
+			definitions: [definition],
+			settings: baseSettings(),
+			baseSkills: [],
+		});
+
+		expect(plan.providedRules.map(rule => rule.name)).toEqual(["no-into"]);
+		expect(plan.providedRules[0]?.condition).toEqual(["impl\\s+Into"]);
+		expect(plan.ruleNames.size).toBe(0);
+		expect(plan.alwaysApplyRuleNames.size).toBe(0);
+	});
+
+	test("suggest-mode skillsets do not scan ruleDirectories", async () => {
+		const projectRules = path.join(repoRoot, ".omp", "rules");
+		fs.mkdirSync(projectRules, { recursive: true });
+		fs.writeFileSync(path.join(projectRules, "no-into.md"), "# no into\n");
+		const definition = rustDefinition(configPath, externalSkills, "project");
+		definition.provides = { ruleDirectories: [".omp/rules"] };
+
+		const plan = await compileSkillsetActivationPlan({
+			cwd: repoRoot,
+			facets: [rustFacet],
+			definitions: [definition],
+			settings: baseSettings({ mode: "suggest" }),
+			baseSkills: [],
+		});
+
+		expect(plan.activations).toEqual([]);
+		expect(plan.suggestions.map(suggestion => suggestion.skillset.id)).toEqual(["rust"]);
+		expect(plan.providedRules).toEqual([]);
+	});
+
+	test("project skillsets cannot load absolute rule directories", async () => {
+		const projectRules = path.join(repoRoot, ".omp", "rules");
+		fs.mkdirSync(projectRules, { recursive: true });
+		fs.writeFileSync(path.join(projectRules, "no-into.md"), "# no into\n");
+		const definition = rustDefinition(configPath, externalSkills, "project");
+		definition.provides = { ruleDirectories: [projectRules] };
+
+		const plan = await compileSkillsetActivationPlan({
+			cwd: repoRoot,
+			facets: [rustFacet],
+			definitions: [definition],
+			settings: baseSettings(),
+			baseSkills: [],
+		});
+
+		expect(plan.providedRules).toEqual([]);
+		expect(plan.skillWarnings.some(warning => warning.message.includes("rule directory must be relative"))).toBe(
+			true,
+		);
+	});
+
+	test("project skillsets reject symlinked rule files escaping the project root", async () => {
+		const projectRules = path.join(repoRoot, ".omp", "rules");
+		const externalRules = path.join(tempDir, "external-rules");
+		fs.mkdirSync(projectRules, { recursive: true });
+		fs.mkdirSync(externalRules, { recursive: true });
+		fs.writeFileSync(path.join(externalRules, "escaped.md"), "# escaped\n");
+		fs.symlinkSync(path.join(externalRules, "escaped.md"), path.join(projectRules, "escaped.md"));
+		const definition = rustDefinition(configPath, externalSkills, "project");
+		definition.provides = { ruleDirectories: [".omp/rules"] };
+
+		const plan = await compileSkillsetActivationPlan({
+			cwd: repoRoot,
+			facets: [rustFacet],
+			definitions: [definition],
+			settings: baseSettings(),
+			baseSkills: [],
+		});
+
+		expect(plan.providedRules).toEqual([]);
+		expect(plan.skillWarnings.some(warning => warning.message.includes("rule file escapes the project root"))).toBe(
+			true,
+		);
+	});
+
+	test("rule disabledExtensions filter directory-loaded rules and force lists", async () => {
+		const projectRules = path.join(repoRoot, ".omp", "rules");
+		fs.mkdirSync(projectRules, { recursive: true });
+		fs.writeFileSync(path.join(projectRules, "no-into.md"), "# no into\n");
+		const definition = rustDefinition(configPath, externalSkills, "project");
+		definition.provides = {
+			ruleDirectories: [".omp/rules"],
+			rules: ["no-into"],
+			alwaysApplyRules: ["no-into"],
+		};
+
+		const plan = await compileSkillsetActivationPlan({
+			cwd: repoRoot,
+			facets: [rustFacet],
+			definitions: [definition],
+			settings: baseSettings(),
+			baseSkills: [],
+			disabledExtensions: ["rule:no-into"],
+		});
+
+		expect(plan.providedRules).toEqual([]);
+		expect(plan.ruleNames.size).toBe(0);
+		expect(plan.alwaysApplyRuleNames.size).toBe(0);
+	});
 });

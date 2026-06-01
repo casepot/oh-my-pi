@@ -117,8 +117,27 @@ describe("skillset config loading", () => {
 		fs.writeFileSync(configPath, "skillsets:\n  broken:\n    description: Missing provides and match\n");
 
 		const { definitions, warnings } = await loadSkillsetDefinitions({ cwd: repoRoot });
+		const nonBuiltinDefinitions = definitions.filter(
+			definition => definition._source.provider !== "builtin-skillsets",
+		);
 
-		expect(definitions).toEqual([]);
+		expect(nonBuiltinDefinitions).toEqual([]);
 		expect(warnings.some(warning => warning.includes("Invalid skillset definition"))).toBe(true);
+	});
+
+	test("loads provides ruleDirectories and force rule lists from YAML", async () => {
+		const filePath = path.join(repoRoot, ".omp", "skillsets.yaml");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(
+			filePath,
+			`skillsets:\n  rust:\n    description: Rust rules\n    mode: auto\n    match:\n      facets: [rust]\n    provides:\n      ruleDirectories: [.omp/rules]\n      rules: [rs-from-not-into]\n      alwaysApplyRules: [rust-always]\n`,
+		);
+
+		const result = await loadSkillsetDefinitions({ cwd: repoRoot });
+		const rust = result.definitions.find(definition => definition.id === "rust");
+
+		expect(rust?.provides.ruleDirectories).toEqual([".omp/rules"]);
+		expect(rust?.provides.rules).toEqual(["rs-from-not-into"]);
+		expect(rust?.provides.alwaysApplyRules).toEqual(["rust-always"]);
 	});
 });

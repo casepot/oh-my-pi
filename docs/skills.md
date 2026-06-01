@@ -75,7 +75,9 @@ Current runtime behavior:
 
 If `skills.enabled` is `false`, discovery returns no skills.
 
-Skillsets can add session-local skill directories after project detection. This does not mutate `skills.customDirectories`; the same non-recursive `*/SKILL.md` layout and collision rules apply. See [Skillsets](./skillsets.md).
+Skillsets can add session-local skill directories after project detection. This does not mutate `skills.customDirectories`; the same non-recursive `*/SKILL.md` layout and collision rules apply. Skillsets can also load active rule/TTSR packs through `ruleDirectories`, but those are `Rule` objects, not skills. See [Skillsets](./skillsets.md).
+
+Skills remain passive until read through `skill://`. For example, files under `skill://rust-skills/rules/...` are reference material inside the skill directory; they are not active OMP rules unless a skillset explicitly loads that directory through `provides.ruleDirectories` or a built-in skillset supplies an embedded rule pack.
 
 ### Built-in skill providers and precedence
 

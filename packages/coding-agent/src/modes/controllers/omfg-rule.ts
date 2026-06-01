@@ -4,6 +4,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../../capability/rule";
 import { buildRuleFromMarkdown, createSourceMeta } from "../../discovery/helpers";
 import { TtsrManager, type TtsrMatchContext } from "../../export/ttsr";
+import { extractTtsrFilePathsFromToolArgs } from "../../export/ttsr-paths";
 
 export interface ParsedGeneratedRule {
 	rule: Rule;
@@ -616,32 +617,5 @@ function stringifyToolArguments(args: unknown): string {
 }
 
 function extractArgPaths(args: unknown): string[] | undefined {
-	if (!args || typeof args !== "object" || Array.isArray(args)) {
-		return undefined;
-	}
-
-	const paths: string[] = [];
-	for (const key in args as Record<string, unknown>) {
-		const value = (args as Record<string, unknown>)[key];
-		const normalizedKey = key.toLowerCase();
-		if (typeof value === "string" && (normalizedKey === "path" || normalizedKey.endsWith("path"))) {
-			paths.push(value);
-			continue;
-		}
-		if (Array.isArray(value) && (normalizedKey === "paths" || normalizedKey.endsWith("paths"))) {
-			for (const candidate of value) {
-				if (typeof candidate === "string") {
-					paths.push(candidate);
-				}
-			}
-		}
-	}
-
-	const uniquePaths: string[] = [];
-	for (const candidate of paths) {
-		if (!uniquePaths.includes(candidate)) {
-			uniquePaths.push(candidate);
-		}
-	}
-	return uniquePaths.length > 0 ? uniquePaths : undefined;
+	return extractTtsrFilePathsFromToolArgs(args, { cwd: process.cwd() });
 }

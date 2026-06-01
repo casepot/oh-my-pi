@@ -5,18 +5,27 @@
 ### Added
 
 - Added project-aware skillsets that detect project facets from markers/globs, load JSON/YAML skillset definitions, activate session-local skill directories, and render compact Active Project Skillsets prompt metadata.
+- Added skillset `ruleDirectories` ingestion so active project skillsets can load flat `*.md` / `*.mdc` rule and TTSR packs with project/user path safety.
+- Added a built-in Rust skillset with a small project-gated native `rs-*` TTSR guardrail pack for generated Rust edits.
 - Added compact startup update status for fork/source installs, including dirty checkout, local-vs-fork divergence, fork-vs-upstream divergence, and non-fork install migration hints.
 
 ### Changed
 
 - Changed default capability discovery to a lean OMP profile: project-level provider configs remain discoverable, but user/home capability sources stay off unless `discovery.enableUserSources` is enabled.
+- Changed bundled default rules to use native source metadata and centralized `bucketRules` filtering.
+- Changed bundled Rust defaults from global interruptions into audited, strong-marker-gated Rust skillset rules.
 - Changed MCP startup to load project `.omp/mcp.json` by default but skip user/global MCP configs unless `mcp.enableUserConfig` is enabled.
 - Changed compaction to use the active session model by default; `compaction.allowModelFallbacks` restores role/large-context fallback candidates when explicitly enabled.
 - Changed subagent model auth handling so parent-model substitution requires `task.fallbackToParentModelOnAuthFailure`; otherwise an unauthenticated configured subagent model fails visibly.
 - Changed `omp update` and fork installers to use the `casepot/oh-my-pi` source checkout channel instead of npm/upstream release metadata for Bun-capable installs.
 
+### Fixed
+
+- Fixed `ttsr.enabled: false` so it prevents TTSR registration and matching instead of only being stored in settings.
+
 ### Removed
 
+- Removed unaudited broad Rust bundled TTSR defaults from the active default-rule bundle; the built-in Rust pack now ships only audited high-signal `rs-*` guardrails.
 - Removed context promotion; context overflow now stays on the selected model and uses compaction/handoff recovery instead of switching models.
 
 ## [15.7.4] - 2026-05-31

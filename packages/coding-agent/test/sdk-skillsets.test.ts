@@ -100,7 +100,7 @@ describe("createAgentSession skillsets", () => {
 		expect(session.suggestedSkillsets.map(activation => activation.skillset.id)).toEqual(["rust"]);
 	});
 
-	test("explicit skills option disables discovery-time skillset activation", async () => {
+	test("explicit skills option keeps prompt skills exact while preserving skillset activation", async () => {
 		const { session } = await createAgentSession({
 			cwd: projectRoot,
 			agentDir: homeDir,
@@ -111,6 +111,44 @@ describe("createAgentSession skillsets", () => {
 		});
 
 		expect(session.skills).toEqual([]);
-		expect(session.skillsetActivations).toEqual([]);
+		expect(session.skillsetActivations.map(activation => activation.skillset.id)).toEqual(["rust"]);
+	});
+
+	test("skillset ruleDirectories wire condition rules into session TTSR", async () => {
+		const ruleDir = path.join(projectRoot, ".omp", "rules");
+		fs.mkdirSync(ruleDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(ruleDir, "no-into.md"),
+			'---\ndescription: Prefer From\ncondition: "impl\\\\s+Into"\nscope: tool:edit(*.rs)\n---\nUse From.\n',
+		);
+		fs.writeFileSync(
+			path.join(homeDir, ".omp", "agent", "skillsets.yaml"),
+			`skillsets:\n  rust:\n    description: Rust TTSR rules.\n    mode: auto\n    match:\n      facets: [rust]\n    provides:\n      ruleDirectories:\n        - .omp/rules\n`,
+		);
+
+		const { session } = await createAgentSession({
+			cwd: projectRoot,
+			agentDir: homeDir,
+			sessionManager: SessionManager.inMemory(),
+			enableMCP: false,
+			settings: isolatedSettings(),
+		});
+
+		expect(
+			session.ttsrManager
+				?.checkDelta("impl Into<String> for Name {}", {
+					source: "tool",
+					toolName: "edit",
+					filePaths: ["src/lib.rs"],
+				})
+				.map(rule => rule.name),
+		).toEqual(["no-into"]);
+		expect(
+			session.ttsrManager?.checkDelta("impl Into<String> for Name {}", {
+				source: "tool",
+				toolName: "edit",
+				filePaths: ["src/lib.ts"],
+			}),
+		).toEqual([]);
 	});
 });

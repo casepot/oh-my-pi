@@ -36,7 +36,8 @@ import chalk from "chalk";
 import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled } from "./async";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability, setActiveRules } from "./capability/rule";
+import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
+import { bucketRules, ruleNamesFromDisabledExtensions } from "./capability/rule-buckets";
 import type { SkillsetDefinition } from "./capability/skillset";
 import { ModelRegistry } from "./config/model-registry";
 import {
@@ -191,6 +192,45 @@ type McpNotificationEntry = {
 	serverName: string;
 	uri: string;
 };
+
+interface RuleMergeResult {
+	rules: Rule[];
+	warnings: string[];
+}
+
+function ruleSourceLabel(rule: Rule): string {
+	const provider = rule._source.providerName || rule._source.provider;
+	return `${provider}:${rule._source.path}`;
+}
+
+function mergeRulesFirstWins(
+	baseRules: readonly Rule[],
+	providedRules: readonly Rule[],
+	disabledRuleNames: ReadonlySet<string>,
+): RuleMergeResult {
+	const rules: Rule[] = [];
+	const warnings: string[] = [];
+	const byName = new Map<string, Rule>();
+	for (const rule of baseRules) {
+		if (disabledRuleNames.has(rule.name)) continue;
+		if (byName.has(rule.name)) continue;
+		byName.set(rule.name, rule);
+		rules.push(rule);
+	}
+	for (const rule of providedRules) {
+		if (disabledRuleNames.has(rule.name)) continue;
+		const existing = byName.get(rule.name);
+		if (existing) {
+			warnings.push(
+				`Skillset-provided rule "${rule.name}" from ${ruleSourceLabel(rule)} skipped; existing rule from ${ruleSourceLabel(existing)} wins`,
+			);
+			continue;
+		}
+		byName.set(rule.name, rule);
+		rules.push(rule);
+	}
+	return { rules, warnings };
+}
 
 function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
@@ -955,8 +995,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const skillsSettings = settings.getGroup("skills");
 	const skillsetsSettings = settings.getGroup("skillsets");
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
-	const skillsetsEnabled =
-		options.skills === undefined && skillsetsSettings.enabled !== false && skillsetsSettings.mode !== "off";
+	const skillsetsEnabled = skillsetsSettings.enabled !== false && skillsetsSettings.mode !== "off";
 	const projectFacetsPromise: Promise<ProjectFacet[]> = skillsetsEnabled
 		? withStartupDeadline("detectProjectFacets", logger.time("detectProjectFacets", detectProjectFacets, { cwd }), [])
 		: Promise.resolve([]);
@@ -1138,84 +1177,69 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let suggestedSkillsets: CompileSkillsetActivationResult["suggestions"] = [];
 	let skillsetRuleNames = new Set<string>();
 	let skillsetAlwaysApplyRuleNames = new Set<string>();
-	if (options.skills !== undefined) {
-		skills = options.skills;
-		skillWarnings = [];
-	} else {
-		const [discovered, facets, definitionResult] = await Promise.all([
-			discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }),
-			projectFacetsPromise,
-			skillsetDefinitionsPromise,
-		]);
-		const activationPlan = await logger.time("compileSkillsetActivationPlan", compileSkillsetActivationPlan, {
-			cwd,
-			facets,
-			definitions: definitionResult.definitions,
-			settings: skillsetsSettings as SkillsetsSettings,
-			baseSkills: discovered.skills,
-			baseWarnings: [
-				...discovered.warnings,
-				...definitionResult.warnings.map(message => ({ skillPath: "skillsets", message })),
-			],
-			disabledExtensions: disabledExtensionIds,
-			skillsSettings,
-		});
-		skills = activationPlan.skills;
-		skillWarnings = activationPlan.skillWarnings;
-		activeSkillsets = activationPlan.activations;
-		suggestedSkillsets = activationPlan.suggestions;
-		skillsetRuleNames = activationPlan.ruleNames;
-		skillsetAlwaysApplyRuleNames = activationPlan.alwaysApplyRuleNames;
-	}
+	let skillsetProvidedRules: Rule[] = [];
+	const [discovered, facets, definitionResult] = await Promise.all([
+		discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }),
+		projectFacetsPromise,
+		skillsetDefinitionsPromise,
+	]);
+	const activationPlan = await logger.time("compileSkillsetActivationPlan", compileSkillsetActivationPlan, {
+		cwd,
+		facets,
+		definitions: definitionResult.definitions,
+		settings: skillsetsSettings as SkillsetsSettings,
+		baseSkills: options.skills ?? discovered.skills,
+		baseWarnings: [
+			...(options.skills === undefined ? discovered.warnings : []),
+			...definitionResult.warnings.map(message => ({ skillPath: "skillsets", message })),
+		],
+		disabledExtensions: disabledExtensionIds,
+		skillsSettings,
+		resolveSkills: options.skills === undefined,
+	});
+	skills = options.skills ?? activationPlan.skills;
+	skillWarnings = activationPlan.skillWarnings;
+	activeSkillsets = activationPlan.activations;
+	suggestedSkillsets = activationPlan.suggestions;
+	skillsetRuleNames = activationPlan.ruleNames;
+	skillsetAlwaysApplyRuleNames = activationPlan.alwaysApplyRuleNames;
+	skillsetProvidedRules = activationPlan.providedRules;
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
 	const { ttsrManager, rulebookRules, alwaysApplyRules } = await logger.time("discoverTtsrRules", async () => {
 		const ttsrSettings = settings.getGroup("ttsr");
 		const ttsrManager = new TtsrManager(ttsrSettings);
-		const rulesResult =
-			options.rules !== undefined
-				? { items: options.rules, warnings: undefined }
-				: await loadCapability<Rule>(ruleCapability.id, { cwd });
-		const includeBuiltinRules = ttsrSettings.builtinRules !== false;
-		const disabledRules = new Set<string>();
+		const disabledRuleNames = new Set<string>(ruleNamesFromDisabledExtensions(disabledExtensionIds));
 		for (const raw of ttsrSettings.disabledRules ?? []) {
 			const name = raw.trim();
-			if (name.length > 0) {
-				disabledRules.add(name);
-			}
+			if (name.length > 0) disabledRuleNames.add(name);
 		}
-		const rulebookRules: Rule[] = [];
-		const alwaysApplyRules: Rule[] = [];
-		for (const rule of rulesResult.items) {
-			if (disabledRules.has(rule.name)) {
-				continue;
-			}
-			if (!includeBuiltinRules && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) {
-				continue;
-			}
-			const forceAlwaysApply = skillsetAlwaysApplyRuleNames.has(rule.name);
-			const forceRulebook = skillsetRuleNames.has(rule.name);
-			const isTtsrRule =
-				!forceAlwaysApply && !forceRulebook && rule.condition && rule.condition.length > 0
-					? ttsrManager.addRule(rule)
-					: false;
-			if (isTtsrRule) {
-				continue;
-			}
-			if (forceAlwaysApply || rule.alwaysApply === true) {
-				alwaysApplyRules.push(rule);
-				continue;
-			}
-			if (forceRulebook || rule.description) {
-				rulebookRules.push(rule);
-			}
+		const rulesResult =
+			options.rules !== undefined
+				? { items: options.rules, warnings: [] as string[] }
+				: await loadCapability<Rule>(ruleCapability.id, { cwd, disabledExtensions: disabledExtensionIds });
+		const mergeResult =
+			options.rules !== undefined
+				? { rules: rulesResult.items, warnings: [] }
+				: mergeRulesFirstWins(rulesResult.items, skillsetProvidedRules, disabledRuleNames);
+		const bucketed = bucketRules(mergeResult.rules, ttsrManager, {
+			builtinRules: ttsrSettings.builtinRules,
+			disabledRules: disabledRuleNames,
+			forceRulebookNames: skillsetRuleNames,
+			forceAlwaysApplyNames: skillsetAlwaysApplyRuleNames,
+		});
+		for (const message of [...(rulesResult.warnings ?? []), ...mergeResult.warnings, ...bucketed.warnings]) {
+			skillWarnings.push({ skillPath: "rules", message });
 		}
 		if (existingSession.injectedTtsrRules.length > 0) {
 			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
 		}
-		return { ttsrManager, rulebookRules, alwaysApplyRules };
+		return {
+			ttsrManager,
+			rulebookRules: bucketed.rulebookRules,
+			alwaysApplyRules: bucketed.alwaysApplyRules,
+		};
 	});
-
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
 	// it. On timeout we forward `undefined` to ToolSession; buildSystemPromptInternal
