@@ -318,6 +318,43 @@ describe("listClaudePluginRoots", () => {
 		expect(result.roots[0].scope).toBe("user");
 	});
 
+	test("scopes Claude project plugin entries with projectPath to that project", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "focused-review");
+		const projectDir = path.join(tempDir, "workspaces", "subagents");
+		const projectChildDir = path.join(projectDir, "packages", "api");
+		const otherProjectDir = path.join(tempDir, "workspaces", "agent-gateway");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(projectChildDir, { recursive: true });
+		await fs.mkdir(otherProjectDir, { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"focused-review@case-marketplace": [
+					{
+						scope: "project",
+						projectPath: projectDir,
+						installPath: pluginPath,
+						version: "1.0.0",
+						installedAt: "2026-02-06T18:36:26.466Z",
+						lastUpdated: "2026-02-06T18:36:26.466Z",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+
+		const outside = await listClaudePluginRoots(tempDir, otherProjectDir);
+		expect(outside.roots).toEqual([]);
+
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		const inside = await listClaudePluginRoots(tempDir, projectChildDir);
+		expect(inside.roots).toHaveLength(1);
+		expect(inside.roots[0].id).toBe("focused-review@case-marketplace");
+		expect(inside.roots[0].scope).toBe("project");
+	});
 	test("scopes Claude local plugin skills to their projectPath", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "deploy-on-aws");

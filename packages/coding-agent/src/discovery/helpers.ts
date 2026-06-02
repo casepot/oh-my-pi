@@ -665,11 +665,9 @@ export function buildExtensionModuleItems(
 // =============================================================================
 
 /**
- * Entry for an installed Claude Code plugin.
- *
- * Claude's registry can contain `scope: "local"` entries tied to a
- * `projectPath`. Those are normalized to project-scoped roots only when the
- * active cwd is inside that project. Unknown scopes are ignored rather than
+ * Claude's registry can contain `scope: "local"` or `scope: "project"` entries
+ * tied to `projectPath`. Those are normalized to project-scoped roots only when
+ * the active cwd is inside that project. Unknown scopes are ignored rather than
  * promoted to project scope.
  */
 export interface ClaudePluginEntry {
@@ -737,11 +735,12 @@ function resolveClaudePluginEntryScope(
 	warnings: string[],
 ): "user" | "project" | null {
 	const scope = entry.scope?.trim() || "user";
-	if (scope === "user" || scope === "project") return scope;
+	if (scope === "user") return "user";
 
-	if (scope === "local") {
+	if (scope === "project" || scope === "local") {
 		const projectPath = entry.projectPath?.trim();
 		if (!projectPath) {
+			if (scope === "project") return "project";
 			warnings.push(`Plugin ${pluginId} local entry is missing projectPath`);
 			return null;
 		}
