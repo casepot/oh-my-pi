@@ -360,10 +360,10 @@ describe("listClaudePluginRoots", () => {
 		};
 
 		const outside = await loadSkills({ ...options, cwd: otherProjectDir });
-		expect(outside.skills.map(skill => skill.name)).not.toContain("deploy-on-aws:deploy");
+		expect(outside.skills.map(skill => skill.name)).not.toContain("deploy");
 
 		const inside = await loadSkills({ ...options, cwd: projectChildDir });
-		const found = inside.skills.find(skill => skill.name === "deploy-on-aws:deploy");
+		const found = inside.skills.find(skill => skill.name === "deploy");
 		expect(found?.source).toBe("claude-plugins:project");
 	});
 
@@ -441,7 +441,7 @@ describe("listClaudePluginRoots", () => {
 		const result = await loadCapability<Skill>("skills", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings).toEqual([]);
 		expect(result.all.length).toBeGreaterThan(0);
-		const found = result.all.find(skill => skill.name === "manifest-skills:manifest-skill");
+		const found = result.all.find(skill => skill.name === "manifest-skill");
 
 		expect(found).toBeDefined();
 		expect(found?.path).toContain(path.join(".claude", "skills", "manifest-skill", "SKILL.md"));
@@ -598,7 +598,7 @@ describe("listClaudePluginRoots", () => {
 
 		const result = await loadCapability<Skill>("skills", { cwd: tempDir, includeUserSources: true });
 		expect(result.warnings[0]).toContain("Ignoring skills path outside plugin root");
-		const found = result.all.find(skill => skill.name === "manifest-skills-outside:outside-skill");
+		const found = result.all.find(skill => skill.name === "outside-skill");
 
 		expect(found).toBeUndefined();
 	});

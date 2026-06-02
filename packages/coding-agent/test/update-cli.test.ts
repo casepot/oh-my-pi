@@ -41,7 +41,7 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 describe("update-cli install target detection", () => {
-	it("uses bun update when prioritized omp is inside bun global bin", () => {
+	it("detects when the prioritized omp is inside bun global bin", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.bun/bin/omp", "/Users/test/.bun/bin");
 
 		expect(method).toBe("bun");
