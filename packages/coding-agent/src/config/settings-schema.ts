@@ -1,4 +1,5 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { FORK_POLICY_DEFAULTS } from "../fork-policy";
 import { TASK_SIMPLE_MODES } from "../task/simple-mode";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
 import {
@@ -318,7 +319,7 @@ export const SETTINGS_SCHEMA = {
 
 	"discovery.enableUserSources": {
 		type: "boolean",
-		default: false,
+		default: FORK_POLICY_DEFAULTS.discoveryEnableUserSources,
 		ui: {
 			tab: "tools",
 			label: "User Compatibility Sources",
@@ -1165,7 +1166,7 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.allowModelFallbacks": {
 		type: "boolean",
-		default: false,
+		default: FORK_POLICY_DEFAULTS.compactionAllowModelFallbacks,
 		ui: {
 			tab: "context",
 			label: "Compaction Model Fallbacks",
@@ -2508,7 +2509,7 @@ export const SETTINGS_SCHEMA = {
 
 	"mcp.enableUserConfig": {
 		type: "boolean",
-		default: false,
+		default: FORK_POLICY_DEFAULTS.mcpEnableUserConfig,
 		ui: {
 			tab: "tools",
 			label: "MCP User Config",
@@ -2795,7 +2796,7 @@ export const SETTINGS_SCHEMA = {
 
 	"task.fallbackToParentModelOnAuthFailure": {
 		type: "boolean",
-		default: false,
+		default: FORK_POLICY_DEFAULTS.taskFallbackToParentModelOnAuthFailure,
 		ui: {
 			tab: "tasks",
 			label: "Subagent Parent Model Fallback",
@@ -2841,15 +2842,15 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "tasks", label: "Skill Commands", description: "Register skills as /skill:name commands" },
 	},
 
-	"skills.enableCodexUser": { type: "boolean", default: false },
+	"skills.enableCodexUser": { type: "boolean", default: FORK_POLICY_DEFAULTS.skillsEnableCodexUser },
 
-	"skills.enableClaudeUser": { type: "boolean", default: false },
+	"skills.enableClaudeUser": { type: "boolean", default: FORK_POLICY_DEFAULTS.skillsEnableClaudeUser },
 
-	"skills.enableClaudeProject": { type: "boolean", default: false },
+	"skills.enableClaudeProject": { type: "boolean", default: FORK_POLICY_DEFAULTS.skillsEnableClaudeProject },
 
-	"skills.enablePiUser": { type: "boolean", default: false },
+	"skills.enablePiUser": { type: "boolean", default: FORK_POLICY_DEFAULTS.skillsEnablePiUser },
 
-	"skills.enablePiProject": { type: "boolean", default: true },
+	"skills.enablePiProject": { type: "boolean", default: FORK_POLICY_DEFAULTS.skillsEnablePiProject },
 
 	"skills.customDirectories": { type: "array", default: [] as string[] },
 
@@ -2879,7 +2880,7 @@ export const SETTINGS_SCHEMA = {
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
-		default: false,
+		default: FORK_POLICY_DEFAULTS.commandsEnableClaudeUser,
 		ui: { tab: "tasks", label: "Claude User Commands", description: "Load commands from ~/.claude/commands/" },
 	},
 
@@ -2891,7 +2892,7 @@ export const SETTINGS_SCHEMA = {
 
 	"commands.enableOpencodeUser": {
 		type: "boolean",
-		default: false,
+		default: FORK_POLICY_DEFAULTS.commandsEnableOpencodeUser,
 		ui: {
 			tab: "tasks",
 			label: "OpenCode User Commands",

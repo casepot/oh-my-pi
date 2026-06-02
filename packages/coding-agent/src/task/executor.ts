@@ -17,6 +17,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
+import { FORK_POLICY_DEFAULTS } from "../fork-policy";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { callTool } from "../mcp/client";
@@ -1136,7 +1137,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 
-			const allowParentModelAuthFallback = settings.get("task.fallbackToParentModelOnAuthFailure") ?? false;
+			const allowParentModelAuthFallback =
+				settings.get("task.fallbackToParentModelOnAuthFailure") ??
+				FORK_POLICY_DEFAULTS.taskFallbackToParentModelOnAuthFailure;
 			const resolveAgainstAvailable = async () =>
 				allowParentModelAuthFallback
 					? await awaitAbortable(

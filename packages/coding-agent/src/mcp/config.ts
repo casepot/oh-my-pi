@@ -9,6 +9,7 @@ import { mcpCapability } from "../capability/mcp";
 import type { SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
+import { FORK_POLICY_DEFAULTS } from "../fork-policy";
 import { readDisabledServers } from "./config-writer";
 import type { MCPServerConfig } from "./types";
 
@@ -95,7 +96,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
  * @param options Load options
  */
 export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOptions): Promise<LoadMCPConfigsResult> {
-	const enableUserConfig = options?.enableUserConfig ?? false;
+	const enableUserConfig = options?.enableUserConfig ?? FORK_POLICY_DEFAULTS.mcpEnableUserConfig;
 	const enableProjectConfig = options?.enableProjectConfig ?? true;
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;

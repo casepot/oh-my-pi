@@ -35,10 +35,7 @@ import {
 import chalk from "chalk";
 import { type AsyncJob, AsyncJobManager, isBackgroundJobSupportEnabled } from "./async";
 import { createAutoresearchExtension } from "./autoresearch";
-import { loadCapability } from "./capability";
-import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
-import { bucketRules, ruleNamesFromDisabledExtensions } from "./capability/rule-buckets";
-import type { SkillsetDefinition } from "./capability/skillset";
+import { type Rule, setActiveRules } from "./capability/rule";
 import { ModelRegistry } from "./config/model-registry";
 import {
 	formatModelString,
@@ -48,14 +45,14 @@ import {
 	resolveModelRoleValue,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
-import { Settings, type SkillsetsSettings, type SkillsSettings } from "./config/settings";
+import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
+import { FORK_POLICY_DEFAULTS } from "./fork-policy";
 import "./discovery";
 import { resolveConfigValue } from "./config/resolve-config-value";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
-import { TtsrManager } from "./export/ttsr";
 import {
 	type CustomCommandsLoadResult,
 	type LoadedCustomCommand,
@@ -82,11 +79,6 @@ import {
 	type SkillWarning,
 	setActiveSkills,
 } from "./extensibility/skills";
-import {
-	type CompileSkillsetActivationResult,
-	compileSkillsetActivationPlan,
-	loadSkillsetDefinitions,
-} from "./extensibility/skillsets";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
@@ -94,7 +86,6 @@ import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-e
 import { discoverAndLoadMCPTools, MCPManager, type MCPToolsLoadResult } from "./mcp";
 import { resolveMemoryBackend } from "./memory-backend";
 import { getMnemopiSessionState, type MnemopiSessionState } from "./mnemopi/state";
-import { detectProjectFacets, type ProjectFacet } from "./project-detection";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
@@ -109,6 +100,7 @@ import { resolveAuthBrokerConfig } from "./session/auth-broker-config";
 import { AuthBrokerClient, AuthStorage, RemoteAuthCredentialStore } from "./session/auth-storage";
 import { type CustomMessage, convertToLlm } from "./session/messages";
 import { SessionManager } from "./session/session-manager";
+import { startSkillsetSessionIntegration } from "./skillsets/session-integration";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -192,45 +184,6 @@ type McpNotificationEntry = {
 	serverName: string;
 	uri: string;
 };
-
-interface RuleMergeResult {
-	rules: Rule[];
-	warnings: string[];
-}
-
-function ruleSourceLabel(rule: Rule): string {
-	const provider = rule._source.providerName || rule._source.provider;
-	return `${provider}:${rule._source.path}`;
-}
-
-function mergeRulesFirstWins(
-	baseRules: readonly Rule[],
-	providedRules: readonly Rule[],
-	disabledRuleNames: ReadonlySet<string>,
-): RuleMergeResult {
-	const rules: Rule[] = [];
-	const warnings: string[] = [];
-	const byName = new Map<string, Rule>();
-	for (const rule of baseRules) {
-		if (disabledRuleNames.has(rule.name)) continue;
-		if (byName.has(rule.name)) continue;
-		byName.set(rule.name, rule);
-		rules.push(rule);
-	}
-	for (const rule of providedRules) {
-		if (disabledRuleNames.has(rule.name)) continue;
-		const existing = byName.get(rule.name);
-		if (existing) {
-			warnings.push(
-				`Skillset-provided rule "${rule.name}" from ${ruleSourceLabel(rule)} skipped; existing rule from ${ruleSourceLabel(existing)} wins`,
-			);
-			continue;
-		}
-		byName.set(rule.name, rule);
-		rules.push(rule);
-	}
-	return { rules, warnings };
-}
 
 function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
@@ -995,33 +948,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const skillsSettings = settings.getGroup("skills");
 	const skillsetsSettings = settings.getGroup("skillsets");
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
-	const skillsetsEnabled = skillsetsSettings.enabled !== false && skillsetsSettings.mode !== "off";
-	const projectFacetsPromise: Promise<ProjectFacet[]> = skillsetsEnabled
-		? withStartupDeadline("detectProjectFacets", logger.time("detectProjectFacets", detectProjectFacets, { cwd }), [])
-		: Promise.resolve([]);
-	projectFacetsPromise.catch(() => {});
-	const skillsetDefinitionsPromise: Promise<{ definitions: SkillsetDefinition[]; warnings: string[] }> =
-		skillsetsEnabled
-			? withStartupDeadline(
-					"loadSkillsetDefinitions",
-					logger.time("loadSkillsetDefinitions", loadSkillsetDefinitions, {
-						...skillsetsSettings,
-						cwd,
-						disabledExtensions: disabledExtensionIds,
-					}),
-					{ definitions: [], warnings: [] },
-				)
-			: Promise.resolve({ definitions: [], warnings: [] });
-	skillsetDefinitionsPromise.catch(() => {});
-	const discoveredSkillsPromise =
-		options.skills === undefined
-			? logger.time("discoverSkills", discoverSkills, cwd, agentDir, {
-					...skillsSettings,
-					disabledExtensions: disabledExtensionIds,
-					includeUserSources: settings.get("discovery.enableUserSources") === true,
-				})
-			: undefined;
-	discoveredSkillsPromise?.catch(() => {});
+	const skillsetIntegration = startSkillsetSessionIntegration({
+		cwd,
+		settings,
+		skillsSettings,
+		skillsetsSettings,
+		disabledExtensionIds,
+		optionsSkills: options.skills,
+		withStartupDeadline,
+	});
 
 	// Initialize provider preferences from settings
 	const webSearchProvider = settings.get("providers.webSearch");
@@ -1171,75 +1106,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		preconnectModelHost(model.baseUrl);
 	}
 
-	let skills: Skill[];
-	let skillWarnings: SkillWarning[];
-	let activeSkillsets: CompileSkillsetActivationResult["activations"] = [];
-	let suggestedSkillsets: CompileSkillsetActivationResult["suggestions"] = [];
-	let skillsetRuleNames = new Set<string>();
-	let skillsetAlwaysApplyRuleNames = new Set<string>();
-	let skillsetProvidedRules: Rule[] = [];
-	const [discovered, facets, definitionResult] = await Promise.all([
-		discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }),
-		projectFacetsPromise,
-		skillsetDefinitionsPromise,
-	]);
-	const activationPlan = await logger.time("compileSkillsetActivationPlan", compileSkillsetActivationPlan, {
-		cwd,
-		facets,
-		definitions: definitionResult.definitions,
-		settings: skillsetsSettings as SkillsetsSettings,
-		baseSkills: options.skills ?? discovered.skills,
-		baseWarnings: [
-			...(options.skills === undefined ? discovered.warnings : []),
-			...definitionResult.warnings.map(message => ({ skillPath: "skillsets", message })),
-		],
-		disabledExtensions: disabledExtensionIds,
-		skillsSettings,
-		resolveSkills: options.skills === undefined,
-	});
-	skills = options.skills ?? activationPlan.skills;
-	skillWarnings = activationPlan.skillWarnings;
-	activeSkillsets = activationPlan.activations;
-	suggestedSkillsets = activationPlan.suggestions;
-	skillsetRuleNames = activationPlan.ruleNames;
-	skillsetAlwaysApplyRuleNames = activationPlan.alwaysApplyRuleNames;
-	skillsetProvidedRules = activationPlan.providedRules;
+	const { skills, skillWarnings, activeSkillsets, suggestedSkillsets, ttsrManager, rulebookRules, alwaysApplyRules } =
+		await logger.time("resolveSkillsetSessionIntegration", () =>
+			skillsetIntegration.resolve({
+				optionsRules: options.rules,
+				injectedTtsrRules: existingSession.injectedTtsrRules,
+			}),
+		);
 
-	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules } = await logger.time("discoverTtsrRules", async () => {
-		const ttsrSettings = settings.getGroup("ttsr");
-		const ttsrManager = new TtsrManager(ttsrSettings);
-		const disabledRuleNames = new Set<string>(ruleNamesFromDisabledExtensions(disabledExtensionIds));
-		for (const raw of ttsrSettings.disabledRules ?? []) {
-			const name = raw.trim();
-			if (name.length > 0) disabledRuleNames.add(name);
-		}
-		const rulesResult =
-			options.rules !== undefined
-				? { items: options.rules, warnings: [] as string[] }
-				: await loadCapability<Rule>(ruleCapability.id, { cwd, disabledExtensions: disabledExtensionIds });
-		const mergeResult =
-			options.rules !== undefined
-				? { rules: rulesResult.items, warnings: [] }
-				: mergeRulesFirstWins(rulesResult.items, skillsetProvidedRules, disabledRuleNames);
-		const bucketed = bucketRules(mergeResult.rules, ttsrManager, {
-			builtinRules: ttsrSettings.builtinRules,
-			disabledRules: disabledRuleNames,
-			forceRulebookNames: skillsetRuleNames,
-			forceAlwaysApplyNames: skillsetAlwaysApplyRuleNames,
-		});
-		for (const message of [...(rulesResult.warnings ?? []), ...mergeResult.warnings, ...bucketed.warnings]) {
-			skillWarnings.push({ skillPath: "rules", message });
-		}
-		if (existingSession.injectedTtsrRules.length > 0) {
-			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-		}
-		return {
-			ttsrManager,
-			rulebookRules: bucketed.rulebookRules,
-			alwaysApplyRules: bucketed.alwaysApplyRules,
-		};
-	});
 	// Resolve contextFiles up-front (it's needed before tool creation). The
 	// workspace tree scan is slow on large repos and we MUST NOT block startup on
 	// it. On timeout we forward `undefined` to ToolSession; buildSystemPromptInternal
@@ -1465,7 +1339,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 				},
 				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
-				enableUserConfig: settings.get("mcp.enableUserConfig") ?? false,
+				enableUserConfig: settings.get("mcp.enableUserConfig") ?? FORK_POLICY_DEFAULTS.mcpEnableUserConfig,
 				// Always filter Exa - we have native integration
 				filterExa: true,
 				// Filter browser MCP servers when builtin browser tool is active

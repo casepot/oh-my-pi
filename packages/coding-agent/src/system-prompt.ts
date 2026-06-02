@@ -16,6 +16,7 @@ import { hasObsidian } from "./internal-urls/vault-protocol";
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import { buildActiveSkillsetPromptSummaries } from "./skillsets/prompt";
 import { shortenPath } from "./tools/render-utils";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
@@ -75,50 +76,6 @@ function firstNonEmpty(...values: (string | undefined | null)[]): string | null 
 		if (trimmed) return trimmed;
 	}
 	return null;
-}
-
-export interface ActiveSkillsetPromptSummary {
-	id: string;
-	description: string;
-	root: string;
-	detectedFrom: string;
-	skills: string[];
-	promptSummary?: string;
-	toolHints: string[];
-}
-
-function summarizeSkillsetEvidence(activeSkillset: SkillsetActivation): string {
-	const evidence = activeSkillset.evidence[0];
-	if (!evidence) return activeSkillset.confidence;
-	const value = evidence.value ?? evidence.kind;
-	if (evidence.path) return `${value} at ${shortenPath(evidence.path.replace(/\\/g, "/"))}`;
-	return value;
-}
-
-function summarizeActiveSkillsets(
-	activeSkillsets: readonly SkillsetActivation[] | undefined,
-	visibleSkillNames: ReadonlySet<string>,
-): ActiveSkillsetPromptSummary[] {
-	if (!activeSkillsets || activeSkillsets.length === 0) return [];
-	return activeSkillsets
-		.map(activeSkillset => {
-			const skills = activeSkillset.effects.skills.filter(name => visibleSkillNames.has(name));
-			const hasConfiguredSkillEffects =
-				(activeSkillset.skillset.provides.skills?.length ?? 0) > 0 ||
-				(activeSkillset.skillset.provides.skillDirectories?.length ?? 0) > 0;
-			const promptSummary =
-				skills.length > 0 || !hasConfiguredSkillEffects ? activeSkillset.effects.promptSummary : undefined;
-			return {
-				id: activeSkillset.skillset.id,
-				description: activeSkillset.skillset.description,
-				root: shortenPath(activeSkillset.root.replace(/\\/g, "/")),
-				detectedFrom: summarizeSkillsetEvidence(activeSkillset),
-				skills,
-				...(promptSummary ? { promptSummary } : {}),
-				toolHints: activeSkillset.effects.toolHints,
-			};
-		})
-		.filter(summary => summary.skills.length > 0 || summary.promptSummary);
 }
 
 function parseWmicTable(output: string, header: string): string | null {
@@ -608,7 +565,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
-		activeSkillsets: summarizeActiveSkillsets(activeSkillsets, new Set(filteredSkills.map(skill => skill.name))),
+		activeSkillsets: buildActiveSkillsetPromptSummaries(
+			activeSkillsets,
+			new Set(filteredSkills.map(skill => skill.name)),
+		),
 		skills: filteredSkills,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,

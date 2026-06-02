@@ -3,12 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which, APP_NAME } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
+import { DEFAULT_SOURCE_BRANCH, FORK_REPO, FORK_REPO_URL, UPSTREAM_REPO, UPSTREAM_REPO_URL } from "../fork-policy";
 
-export const FORK_REPO = "casepot/oh-my-pi";
-export const UPSTREAM_REPO = "can1357/oh-my-pi";
-export const FORK_REPO_URL = `https://github.com/${FORK_REPO}.git`;
-export const UPSTREAM_REPO_URL = `https://github.com/${UPSTREAM_REPO}.git`;
-export const DEFAULT_SOURCE_BRANCH = "main";
+export { DEFAULT_SOURCE_BRANCH, FORK_REPO, FORK_REPO_URL, UPSTREAM_REPO, UPSTREAM_REPO_URL };
 
 type Environment = Record<string, string | undefined>;
 
