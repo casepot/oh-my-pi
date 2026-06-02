@@ -49,7 +49,7 @@ describe("source-status startup notifications", () => {
 				"Local changes: dirty checkout",
 				"Update available: fork main +2 commits",
 				"Local branch: ahead fork by 1 commits",
-				"Fork behind upstream by 3 commits",
+				"Fork behind upstream by 3 commits (/upstream-sync to get upstream changes)",
 			],
 		});
 	});

@@ -103,6 +103,120 @@ Interpret counts as `left right`:
 - `main...origin/main`: left = local-ahead, right = fork-ahead.
 - `origin/main...upstream/main`: left = fork-ahead, right = upstream-ahead.
 
+### Upstream sync workflow
+
+Use for `/upstream-sync` and maintainer fork catch-up.
+
+#### Preflight
+
+```sh
+git branch --show-current
+git remote get-url origin
+git remote get-url upstream
+git status --short
+git fetch origin main
+git fetch upstream main
+git rev-list --left-right --count main...origin/main
+git rev-list --left-right --count origin/main...upstream/main
+```
+
+- `origin` MUST normalize to `casepot/oh-my-pi`.
+- `upstream` MUST normalize to `can1357/oh-my-pi`.
+- Current branch MUST be `main`.
+- Refuse in-progress merge/rebase/cherry-pick.
+- Refuse local/remote divergence: `main...origin/main` MUST be `0 0`.
+- Refuse dirty tracked files unless explicitly unrelated user work.
+- Refuse when `origin/main...upstream/main` right count is `0`.
+
+#### Conflict forecast
+
+```sh
+git merge-tree --write-tree --name-only origin/main upstream/main
+```
+
+- List preview conflict files before merging.
+- Classify upstream changes by source core, session/UI, workflow, docs, tests/metadata.
+- Treat these surfaces as high risk:
+  - `.github/workflows/ci.yml`
+  - `packages/coding-agent/src/config/settings-schema.ts`
+  - `packages/coding-agent/src/main.ts`
+  - `packages/coding-agent/src/sdk.ts`
+  - `packages/coding-agent/src/task/executor.ts`
+  - docs and tests that encode fork policy
+
+#### Merge execution
+
+```sh
+git merge --no-commit upstream/main
+```
+
+- Preserve upstream by default.
+- Re-apply fork invariants explicitly.
+- Resolve semantically; NEVER suppress tests or conflict markers.
+- NEVER stash, reset, or discard unrelated user work.
+
+#### Fork invariant checklist
+
+- Source install/update topology remains fork-first.
+- Startup fork/source divergence uses existing update notification path.
+- npm publish remains guarded to `github.repository_owner == 'can1357'`.
+- User/home discovery default remains opt-in/false.
+- User MCP config default remains opt-in/false.
+- Subagent parent-model auth fallback default remains opt-in/false.
+- `contextPromotion` / `contextPromotionTarget` stay removed.
+- Project skillsets remain present.
+- Package names stay `@oh-my-pi/*`.
+
+#### Resolution strategy
+
+- Fan out disjoint surfaces with `task` subagents.
+- Suggested slices: source core, session/UI, workflow, docs, tests/metadata.
+- Subagents edit only assigned files.
+- Subagents NEVER verify, format, commit, or push.
+- Orchestrator runs all gates centrally.
+
+#### Verification gates
+
+```sh
+git diff --check
+git diff --name-only --diff-filter=U
+bun --cwd=packages/coding-agent test <focused affected tests>
+bun run check
+bun run test
+bun run ci:test:smoke
+```
+
+- No unmerged paths.
+- No conflict markers.
+- Focused affected tests pass first.
+- All required gates MUST pass before commit/push.
+- Abort if a required gate cannot run.
+
+#### Commit and push
+
+```sh
+git rev-list --left-right --count main...origin/main
+git rev-list --left-right --count origin/main...upstream/main
+git push origin main
+git rev-list --left-right --count main...origin/main
+git rev-list --left-right --count origin/main...upstream/main
+```
+
+- Stage only intended merge files.
+- Exclude unrelated user dirt.
+- Commit with a focused upstream-sync message.
+- Push `main` to `origin` only.
+- Final `main...origin/main` MUST be `0 0`.
+- Final `origin/main...upstream/main` MUST be `<fork-ahead> 0`.
+
+#### Recurring pitfalls
+
+- Keep `contextPromotion` removed.
+- User/home source tests must opt in explicitly.
+- Subagent fallback tests satisfy the fork credential gate.
+- Coding-agent tests use bounded non-parallel execution here.
+
+
 ### Commit and push
 
 - Preserve unrelated user work.

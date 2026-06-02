@@ -360,7 +360,10 @@ export function buildStartupUpdateNotification(
 			pushLine(lines, `Local branch: ahead fork by ${source.localAheadOrigin} commits`);
 		}
 		if ((source.forkBehindUpstream ?? 0) > 0) {
-			pushLine(lines, `Fork behind upstream by ${source.forkBehindUpstream} commits`);
+			pushLine(
+				lines,
+				`Fork behind upstream by ${source.forkBehindUpstream} commits (/upstream-sync to get upstream changes)`,
+			);
 		}
 	} else if (status.kind === "package" || status.kind === "binary") {
 		const installSource = status.kind === "package" ? "npm package" : "binary";
