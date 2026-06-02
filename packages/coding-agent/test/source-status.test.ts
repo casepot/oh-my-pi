@@ -62,7 +62,7 @@ describe("source-status startup notifications", () => {
 
 		expect(buildStartupUpdateNotification(status, "15.6.0")).toEqual({
 			title: "Update Status",
-			lines: ["Update available: fork release 15.7.0", "Install source: npm package; run fork installer to migrate"],
+			lines: ["Update available: fork release 15.7.0", "Install source: npm package; run omp update to migrate"],
 		});
 	});
 });

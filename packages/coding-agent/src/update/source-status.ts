@@ -366,11 +366,12 @@ export function buildStartupUpdateNotification(
 			);
 		}
 	} else if (status.kind === "package" || status.kind === "binary") {
-		const installSource = status.kind === "package" ? "npm package" : "binary";
 		if (status.latestReleaseVersion && Bun.semver.order(status.latestReleaseVersion, currentVersion) > 0) {
 			pushLine(lines, `Update available: fork release ${status.latestReleaseVersion}`);
 		}
-		pushLine(lines, `Install source: ${installSource}; run fork installer to migrate`);
+		const installSource = status.kind === "package" ? "npm package" : "binary";
+		const migrationCommand = status.kind === "package" ? `${APP_NAME} update` : "fork installer";
+		pushLine(lines, `Install source: ${installSource}; run ${migrationCommand} to migrate`);
 	}
 
 	if (lines.length === 0) return undefined;

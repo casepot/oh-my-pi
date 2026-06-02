@@ -364,6 +364,7 @@ describe("AuthStorage codex oauth ranking", () => {
 	test("times out slow usage ranking instead of blocking first account selection", async () => {
 		if (!store) throw new Error("test setup failed");
 
+		let aborts = 0;
 		const slowAuthStorage = new AuthStorage(store, {
 			usageProviderResolver: provider =>
 				provider === "openai-codex"
@@ -371,8 +372,15 @@ describe("AuthStorage codex oauth ranking", () => {
 							id: "openai-codex",
 							async fetchUsage(params) {
 								const { promise, resolve } = Promise.withResolvers<UsageReport | null>();
-								params.signal?.addEventListener("abort", () => resolve(null), { once: true });
-								return Promise.race([promise, Bun.sleep(200).then(() => null)]);
+								params.signal?.addEventListener(
+									"abort",
+									() => {
+										aborts += 1;
+										resolve(null);
+									},
+									{ once: true },
+								);
+								return Promise.race([promise, Bun.sleep(5000).then(() => null)]);
 							},
 						} satisfies UsageProvider)
 					: undefined,
@@ -389,7 +397,8 @@ describe("AuthStorage codex oauth ranking", () => {
 		const elapsedMs = Date.now() - startedAt;
 
 		expect(apiKey).toBe("api-acct-first");
-		expect(elapsedMs).toBeLessThan(100);
+		expect(aborts).toBeGreaterThan(0);
+		expect(elapsedMs).toBeLessThan(1000);
 	});
 
 	test("sorts 3 accounts by weekly drain rate", async () => {

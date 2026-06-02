@@ -61,6 +61,8 @@ describe("Settings", () => {
 		expect(settings.get("skills.enableClaudeProject")).toBe(false);
 		expect(settings.get("mcp.enableProjectConfig")).toBe(true);
 		expect(settings.get("mcp.enableUserConfig")).toBe(false);
+		expect(settings.get("commands.enableClaudeUser")).toBe(false);
+		expect(settings.get("commands.enableOpencodeUser")).toBe(false);
 		expect(settings.get("compaction.allowModelFallbacks")).toBe(false);
 		expect(settings.get("task.fallbackToParentModelOnAuthFailure")).toBe(false);
 	});

@@ -386,7 +386,7 @@ async function updateViaSource(
 		return;
 	}
 
-	const status = await readSourceCheckoutStatus(target.root, { fetchRemotes: true });
+	let status = await readSourceCheckoutStatus(target.root, { fetchRemotes: true });
 	if (status.dirty) {
 		throw new Error(
 			`Source checkout has uncommitted changes at ${target.root}; commit or stash them before running ${APP_NAME} update.`,
@@ -396,6 +396,9 @@ async function updateViaSource(
 		const repo = status.originRepo ?? status.originUrl ?? "unknown";
 		throw new Error(`Source checkout tracks ${repo}; expected ${FORK_REPO}. Run the fork installer to migrate.`);
 	}
+
+	await ensureRemoteUrl(target.root, "upstream", status.upstreamUrl, UPSTREAM_REPO_URL);
+	status = await readSourceCheckoutStatus(target.root, { fetchRemotes: true });
 
 	const ahead = status.localAheadOrigin ?? 0;
 	const behind = status.localBehindOrigin ?? 0;
