@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { disableProvider, enableProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { loadSkillsetDefinitions } from "@oh-my-pi/pi-coding-agent/extensibility/skillsets";
@@ -23,6 +24,7 @@ describe("skillset config loading", () => {
 	beforeEach(() => {
 		clearCache();
 		clearClaudePluginRootsCache();
+		enableProvider("claude-plugins");
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-skillsets-config-"));
 		homeDir = path.join(tempDir, "home");
 		repoRoot = path.join(tempDir, "repo");
@@ -36,6 +38,7 @@ describe("skillset config loading", () => {
 	afterEach(() => {
 		clearCache();
 		clearClaudePluginRootsCache();
+		enableProvider("claude-plugins");
 		vi.restoreAllMocks();
 		if (originalHome === undefined) {
 			delete process.env.HOME;
@@ -109,6 +112,40 @@ describe("skillset config loading", () => {
 
 		expect(rust?._source.level).toBe("project");
 		expect(rust?.provides.skillDirectories).toEqual([externalSkills]);
+	});
+
+	test("disabled claude-plugins provider skips marketplace plugin skillsets", async () => {
+		const pluginRoot = path.join(tempDir, "plugins", "docs-pack");
+		fs.mkdirSync(pluginRoot, { recursive: true });
+		fs.writeFileSync(
+			path.join(pluginRoot, "skillsets.yaml"),
+			`skillsets:\n  docs-pack:\n    description: Plugin docs skillset\n    mode: auto\n    match:\n      facets: [docs]\n    provides:\n      skills: [docs]\n`,
+		);
+		const registryPath = path.join(repoRoot, ".omp", "plugins", "installed_plugins.json");
+		fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+		fs.writeFileSync(
+			registryPath,
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"docs-pack@test": [
+						{
+							installPath: pluginRoot,
+							version: "1.0.0",
+							installedAt: "2026-06-02T00:00:00Z",
+							lastUpdated: "2026-06-02T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+
+		disableProvider("claude-plugins");
+		clearClaudePluginRootsCache();
+
+		const { definitions } = await loadSkillsetDefinitions({ cwd: repoRoot });
+
+		expect(definitions.some(definition => definition.id === "docs-pack")).toBe(false);
 	});
 
 	test("invalid definition produces a warning and does not crash", async () => {

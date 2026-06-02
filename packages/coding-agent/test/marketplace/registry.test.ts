@@ -271,7 +271,7 @@ describe("registry file I/O", () => {
 		expect(read).toEqual(reg);
 	});
 
-	it("written installed registry passes Claude Code registry validation", async () => {
+	it("written installed registry passes Claude-compatible registry validation", async () => {
 		const entry: InstalledPluginEntry = {
 			scope: "user",
 			installPath: path.join(tmpDir, "cache", "plugins", "mkt--plug--1.0.0"),

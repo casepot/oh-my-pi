@@ -1,6 +1,5 @@
 /**
- * Regression test for #1075:
- * discoverAgents() must skip Claude plugin roots when claude-plugins is disabled.
+ * discoverAgents() must skip OMP marketplace plugin roots when claude-plugins is disabled.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
@@ -14,7 +13,7 @@ import { discoverAgents } from "../../src/task/discovery";
 const PLUGIN_AGENT_MD = [
 	"---",
 	"name: simplifier",
-	"description: A code simplifier agent from a Claude plugin",
+	"description: A code simplifier agent from an OMP marketplace plugin",
 	"---",
 	"Simplify code.",
 ].join("\n");
@@ -25,17 +24,17 @@ describe("discoverAgents — claude-plugins disabled provider", () => {
 	beforeEach(() => {
 		tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-disco-home-"));
 
-		// Build a fake Claude plugin install with an agents/ subdirectory.
+		// Build a fake OMP marketplace plugin install with an agents/ subdirectory.
 		const pluginInstallPath = path.join(tempHome, "plugin-cache", "code-simplifier");
 		const agentsDir = path.join(pluginInstallPath, "agents");
 		fs.mkdirSync(agentsDir, { recursive: true });
 		fs.writeFileSync(path.join(agentsDir, "simplifier.md"), PLUGIN_AGENT_MD);
 
-		// Register the plugin in the Claude registry so listClaudePluginRoots picks it up.
-		const claudePluginsDir = path.join(tempHome, ".claude", "plugins");
-		fs.mkdirSync(claudePluginsDir, { recursive: true });
+		// Register the plugin in the OMP registry so listClaudePluginRoots picks it up.
+		const pluginsDir = path.join(tempHome, ".omp", "plugins");
+		fs.mkdirSync(pluginsDir, { recursive: true });
 		fs.writeFileSync(
-			path.join(claudePluginsDir, "installed_plugins.json"),
+			path.join(pluginsDir, "installed_plugins.json"),
 			JSON.stringify({
 				version: 2,
 				plugins: {

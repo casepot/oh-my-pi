@@ -661,13 +661,14 @@ export function buildExtensionModuleItems(
 }
 
 // =============================================================================
-// Claude Code Plugin Cache Helpers
+// Marketplace Plugin Registry Helpers
 // =============================================================================
 
 /**
- * Claude's registry can contain `scope: "local"` or `scope: "project"` entries
- * tied to `projectPath`. Those are normalized to project-scoped roots only when
- * the active cwd is inside that project. Unknown scopes are ignored rather than
+ * Installed plugin registries use a Claude-compatible shape. Imported or legacy
+ * entries can contain `scope: "local"` or `scope: "project"` entries tied to
+ * `projectPath`; those are normalized to project-scoped roots only when the
+ * active cwd is inside that project. Unknown scopes are ignored rather than
  * promoted to project scope.
  */
 export interface ClaudePluginEntry {
@@ -682,7 +683,7 @@ export interface ClaudePluginEntry {
 }
 
 /**
- * Claude Code installed_plugins.json registry format.
+ * Claude-compatible installed_plugins.json registry format.
  */
 export interface ClaudePluginsRegistry {
 	version: number;
@@ -703,12 +704,12 @@ export interface ClaudePluginRoot {
 	version: string;
 	/** Absolute path to plugin root */
 	path: string;
-	/** Effective discovery scope after normalizing Claude local-project entries */
+	/** Effective discovery scope after normalizing registry local/project entries */
 	scope: "user" | "project";
 }
 
 /**
- * Parse Claude Code installed_plugins.json content.
+ * Parse Claude-compatible installed_plugins.json content.
  */
 export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegistry | null {
 	const data = tryParseJson<ClaudePluginsRegistry>(content);
@@ -828,9 +829,13 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
 
 /**
- * List all installed Claude Code plugin roots from the plugin cache.
- * Reads ~/.claude/plugins/installed_plugins.json and ~/.omp/plugins/installed_plugins.json,
- * and optionally the nearest project-scoped registry resolved from `cwd`.
+ * List all OMP marketplace plugin roots.
+ *
+ * Reads the OMP user installed-plugin registry and optionally the nearest
+ * project-scoped OMP registry resolved from `cwd`. Explicit `--plugin-dir`
+ * roots are merged separately at highest precedence. Claude Code's own
+ * `~/.claude/plugins/installed_plugins.json` is intentionally not read:
+ * OMP only loads plugins installed into OMP or provided explicitly.
  *
  * Results are cached per `home` plus active project context to avoid repeated parsing.
  */
@@ -848,54 +853,7 @@ export async function listClaudePluginRoots(
 	const warnings: string[] = [];
 	const projectRoots: ClaudePluginRoot[] = [];
 
-	// ── Claude Code registry ──────────────────────────────────────────────────
-	const registryPath = path.join(home, ".claude", "plugins", "installed_plugins.json");
-	const content = await readFile(registryPath);
-
-	if (content) {
-		const registry = parseClaudePluginsRegistry(content);
-		if (!registry) {
-			warnings.push(`Failed to parse Claude Code plugin registry: ${registryPath}`);
-		} else {
-			for (const [pluginId, entries] of Object.entries(registry.plugins)) {
-				if (!Array.isArray(entries) || entries.length === 0) continue;
-
-				// Parse plugin ID format: "plugin-name@marketplace"
-				const atIndex = pluginId.lastIndexOf("@");
-				if (atIndex === -1) {
-					warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
-					continue;
-				}
-
-				const pluginName = pluginId.slice(0, atIndex);
-				const marketplace = pluginId.slice(atIndex + 1);
-
-				// Process all valid entries, not just the first one.
-				// This handles plugins with multiple installs (different scopes/versions).
-				for (const entry of entries) {
-					if (!entry.installPath || typeof entry.installPath !== "string") {
-						warnings.push(`Plugin ${pluginId} entry has no installPath`);
-						continue;
-					}
-					if (entry.enabled === false) continue;
-					const scope = resolveClaudePluginEntryScope(pluginId, entry, cwd, warnings);
-					if (scope === null) continue;
-
-					roots.push({
-						id: pluginId,
-						marketplace,
-						plugin: pluginName,
-						version: entry.version || "unknown",
-						path: entry.installPath,
-						scope,
-					});
-				}
-			}
-		}
-	}
-
-	// ── OMP installed plugins registry ───────────────────────────────────────
-	// OMP registry is authoritative: its entries replace Claude's entries for the same plugin ID.
+	// ── OMP user installed plugins registry ──────────────────────────────────
 	// In production `home` is `os.homedir()`, so `getPluginsDir(home)` resolves to the
 	// same XDG-aware path the marketplace writer uses (reads and writes always agree).
 	// Tests pass a temp dir, which short-circuits the resolver for deterministic isolation.
@@ -915,7 +873,7 @@ export async function listClaudePluginRoots(
 				const pluginName = pluginId.slice(0, atIndex);
 				const marketplace = pluginId.slice(atIndex + 1);
 
-				// OMP is authoritative: drop all Claude-sourced entries for this plugin ID
+				// If an earlier source accumulated this plugin ID, the OMP user registry wins.
 				const filtered = roots.filter(r => r.id !== pluginId);
 				roots.length = 0;
 				roots.push(...filtered);
@@ -1024,7 +982,6 @@ export function clearClaudePluginRootsCache(): void {
  * installing/uninstalling/enabling/disabling plugins.
  */
 export function clearPluginRootsAndCaches(extraPaths?: readonly string[]): void {
-	invalidateFsCache(path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json"));
 	invalidateFsCache(path.join(getPluginsDir(), "installed_plugins.json"));
 	for (const p of extraPaths ?? []) invalidateFsCache(p);
 	clearClaudePluginRootsCache();

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
+import { disableProvider, enableProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
@@ -40,6 +41,7 @@ import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 
 describe("lsp regressions", () => {
 	afterEach(() => {
+		enableProvider("claude-plugins");
 		vi.restoreAllMocks();
 	});
 
@@ -520,21 +522,22 @@ process.abort();
 		}
 	});
 
-	it("loads config-only marketplace LSP servers from Claude plugin cache", async () => {
+	it("loads config-only marketplace LSP servers from OMP plugin registry", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-marketplace-config-");
 		const home = path.join(tempDir.path(), "home");
 		const cwd = path.join(tempDir.path(), "repo");
 		const pluginRoot = path.join(
 			home,
-			".claude",
+			".omp",
 			"plugins",
 			"cache",
+			"plugins",
 			"claude-plugins-official",
 			"csharp-lsp",
 			"1.0.0",
 		);
 		const marketplaceRoot = path.dirname(path.dirname(pluginRoot));
-		const registryPath = path.join(home, ".claude", "plugins", "installed_plugins.json");
+		const registryPath = path.join(home, ".omp", "plugins", "installed_plugins.json");
 
 		await fs.promises.mkdir(pluginRoot, { recursive: true });
 		await fs.promises.mkdir(cwd, { recursive: true });
@@ -598,6 +601,10 @@ process.abort();
 			expect(config.servers["csharp-ls"]?.resolvedCommand).toBe("/usr/local/bin/csharp-ls");
 			expect(getServersForFile(config, path.join(cwd, "Program.cs")).map(([name]) => name)).toEqual(["csharp-ls"]);
 			expect(config.servers["csharp-ls"]?.rootMarkers).toEqual(["."]);
+
+			disableProvider("claude-plugins");
+			const disabledConfig = loadConfig(cwd);
+			expect(disabledConfig.servers["csharp-ls"]).toBeUndefined();
 			expect(whichSpy).toHaveBeenCalledWith("csharp-ls");
 		} finally {
 			await preloadPluginRoots(path.join(tempDir.path(), "empty-home"), cwd);

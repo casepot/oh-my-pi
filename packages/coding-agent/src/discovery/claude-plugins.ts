@@ -1,8 +1,9 @@
 /**
- * Claude Code Marketplace Plugin Provider
+ * OMP Marketplace Plugin Provider
  *
- * Loads configuration from ~/.claude/plugins/cache/ based on installed_plugins.json registry.
- * Priority: 70 (below claude.ts at 80, so user overrides in .claude/ take precedence)
+ * Loads capabilities from OMP-installed marketplace plugin roots. Plugin
+ * contents use Claude-compatible layouts, but OMP does not read Claude Code's
+ * own installed-plugin registry.
  */
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -24,8 +25,8 @@ import {
 
 import { substitutePluginRoot } from "./substitute-plugin-root";
 
-const PROVIDER_ID = "claude-plugins";
-const DISPLAY_NAME = "Claude Code Marketplace";
+const PROVIDER_ID = "claude-plugins"; // Stable id for disabledProviders/source metadata
+const DISPLAY_NAME = "OMP Marketplace Plugins";
 const PRIORITY = 70; // Below claude.ts (80) so user .claude/ overrides win
 
 interface ClaudePluginManifest {
@@ -279,7 +280,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 
 		// Two shapes are supported:
 		//   nested: { "mcpServers": { name: cfg, ... } }   (OMP/Claude Code project shape)
-		//   flat:   { name: cfg, ... }                      (Claude marketplace plugin shape)
+		//   flat:   { name: cfg, ... }                      (marketplace plugin shape)
 		// If "mcpServers" is present and an object, treat it as the canonical map.
 		// Otherwise, treat the whole object as the server map.
 		let servers: Record<string, unknown>;
@@ -311,7 +312,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				oauth?: MCPServer["oauth"];
 				type?: string;
 			};
-			// Require either command (stdio) or url (HTTP/SSE) — Claude marketplace plugins
+			// Require either command (stdio) or url (HTTP/SSE) — marketplace plugins
 			// occasionally ship .mcp.json entries with neither, which would register a useless
 			// server and surface as a connection error at runtime.
 			if (typeof raw.command !== "string" && typeof raw.url !== "string") {
@@ -348,7 +349,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 registerProvider<Skill>(skillCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load skills from Claude Code marketplace plugins (~/.claude/plugins/cache/)",
+	description: "Load skills from OMP marketplace plugins",
 	priority: PRIORITY,
 	load: loadSkills,
 });
@@ -356,7 +357,7 @@ registerProvider<Skill>(skillCapability.id, {
 registerProvider<SlashCommand>(slashCommandCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load slash commands from Claude Code marketplace plugins",
+	description: "Load slash commands from OMP marketplace plugins",
 	priority: PRIORITY,
 	load: loadSlashCommands,
 });
@@ -364,7 +365,7 @@ registerProvider<SlashCommand>(slashCommandCapability.id, {
 registerProvider<Hook>(hookCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load hooks from Claude Code marketplace plugins",
+	description: "Load hooks from OMP marketplace plugins",
 	priority: PRIORITY,
 	load: loadHooks,
 });
@@ -372,7 +373,7 @@ registerProvider<Hook>(hookCapability.id, {
 registerProvider<CustomTool>(toolCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load custom tools from Claude Code marketplace plugins",
+	description: "Load custom tools from OMP marketplace plugins",
 	priority: PRIORITY,
 	load: loadTools,
 });
@@ -380,7 +381,7 @@ registerProvider<CustomTool>(toolCapability.id, {
 registerProvider<MCPServer>(mcpCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load MCP servers from marketplace plugin .mcp.json files",
+	description: "Load MCP servers from OMP marketplace plugin .mcp.json files",
 	priority: PRIORITY,
 	load: loadMCPServers,
 });

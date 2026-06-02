@@ -97,9 +97,9 @@ Both sides are loaded then flattened in user-first order, so **user OpenCode com
 
 ## `claude-plugins` provider (`claude-plugins.ts`)
 
-Loads plugin command roots from `~/.claude/plugins/installed_plugins.json`, then scans `<pluginRoot>/commands/*.md`.
+Loads plugin command roots from OMP marketplace installed-plugin registries (`~/.omp/plugins/installed_plugins.json` and the nearest project `.omp/plugins/installed_plugins.json`) plus explicit `--plugin-dir` roots, then scans `<pluginRoot>/commands/*.md`. It intentionally does not read Claude Code's `~/.claude/plugins/installed_plugins.json`.
 
-Ordering follows registry iteration order and per-plugin entry order from that JSON data. There is no additional sort step.
+Ordering follows registry iteration order and per-plugin entry order from the OMP registry data. There is no additional sort step.
 
 ## 3) Materialization to runtime `FileSlashCommand`
 

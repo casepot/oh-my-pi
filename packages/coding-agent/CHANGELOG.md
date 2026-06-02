@@ -22,6 +22,8 @@
 ### Fixed
 
 - Fixed `ttsr.enabled: false` so it prevents TTSR registration and matching instead of only being stored in settings.
+- Fixed marketplace plugin discovery so OMP only loads plugins from OMP-owned registries or explicit `--plugin-dir` roots; Claude Code's `~/.claude/plugins/installed_plugins.json` is ignored.
+
 ## [15.8.1] - 2026-06-02
 
 ### Fixed

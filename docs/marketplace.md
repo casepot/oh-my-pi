@@ -1,6 +1,6 @@
 # Marketplace plugin system
 
-The marketplace system lets you discover, install, and manage plugins from Git, local, or direct-catalog sources. It is compatible with the Claude Code plugin registry format.
+The marketplace system lets you discover, install, and manage plugins from Git, local, or direct-catalog sources. It is compatible with Claude Code marketplace catalog and plugin formats; OMP stores installed plugin state in its own registries.
 
 ## Quick start
 

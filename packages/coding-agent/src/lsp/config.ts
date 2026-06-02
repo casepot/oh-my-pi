@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which, isRecord, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { isProviderEnabled } from "../capability";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
 import { BiomeClient } from "./clients/biome-client";
@@ -339,12 +340,14 @@ function getConfigSources(cwd: string): ConfigSource[] {
 	}
 
 	// Plugin LSP configs (from marketplace/--plugin-dir roots)
-	const pluginRoots = getPreloadedPluginRoots();
-	for (const root of pluginRoots) {
-		for (const filename of filenames) {
-			sources.push(fileConfigSource(path.join(root.path, filename)));
+	if (isProviderEnabled("claude-plugins")) {
+		const pluginRoots = getPreloadedPluginRoots();
+		for (const root of pluginRoots) {
+			for (const filename of filenames) {
+				sources.push(fileConfigSource(path.join(root.path, filename)));
+			}
+			sources.push(marketplaceConfigSource(root));
 		}
-		sources.push(marketplaceConfigSource(root));
 	}
 
 	// User home root files (lowest priority fallback)

@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { getPluginsDir, isRecord, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { registerProvider } from "../capability";
+import { isProviderEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type ProjectMatcher, type SkillsetDefinition, skillsetCapability } from "../capability/skillset";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
@@ -254,7 +254,9 @@ async function readMarketplaceSkillsetConfig(root: ClaudePluginRoot): Promise<Lo
 }
 
 async function loadSkillsets(ctx: LoadContext): Promise<LoadResult<SkillsetDefinition>> {
-	const pluginRootsResult = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const pluginRootsResult: { roots: ClaudePluginRoot[]; warnings: string[] } = isProviderEnabled("claude-plugins")
+		? await listClaudePluginRoots(ctx.home, ctx.cwd)
+		: { roots: [], warnings: [] };
 	const pathResult = await loadFromPaths([
 		...projectConfigFilePaths(ctx),
 		...userConfigFilePaths(ctx),

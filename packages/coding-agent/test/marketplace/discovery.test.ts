@@ -210,13 +210,13 @@ describe("OMP registry round-trip", () => {
 
 // ── Precedence contract (structural) ─────────────────────────────────────────
 //
-// listClaudePluginRoots must replace Claude entries with OMP entries when the same
-// plugin ID appears in both registries. We cannot call that function here, but we
-// can verify the data shapes that the replacement logic reads are correct.
+// listClaudePluginRoots reads OMP user and project registries. We cannot call
+// that function here, but we can verify the data shapes that the root-building
+// and deduplication logic reads are correct.
 
 describe("OMP precedence contract (registry structure)", () => {
-	it("same plugin ID in both registries — OMP entry has required fields for deduplication", () => {
-		// The replacement logic: roots.filter(r => r.id !== pluginId) keyed by id.
+	it("same plugin ID entries have required fields for deduplication", () => {
+		// The replacement logic is keyed by plugin id.
 		// OMP entries must have installPath so they can be added to roots[].
 		const id = buildPluginId("shared-plugin", "common-mkt");
 		const ompEntry = makeEntry("/omp/cached/path");

@@ -90,8 +90,55 @@ describe("listClaudePluginRoots", () => {
 		expect(result.warnings).toEqual([]);
 	});
 
+	test("ignores Claude Code installed plugin registry", async () => {
+		const claudePluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginPath = path.join(tempDir, "claude-cache", "leaked-plugin");
+		await fs.mkdir(path.join(pluginPath, "skills", "leaked-skill"), { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "agents"), { recursive: true });
+		await fs.mkdir(claudePluginsDir, { recursive: true });
+
+		await fs.writeFile(
+			path.join(claudePluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"leaked-plugin@claude-market": [
+						{
+							scope: "user",
+							installPath: pluginPath,
+							version: "1.0.0",
+							installedAt: "2026-06-02T00:00:00Z",
+							lastUpdated: "2026-06-02T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(pluginPath, "skills", "leaked-skill", "SKILL.md"),
+			"---\nname: leaked-skill\ndescription: Leaked skill\n---\nBody\n",
+		);
+		await fs.writeFile(
+			path.join(pluginPath, "agents", "leaked-agent.md"),
+			"---\nname: leaked-agent\ndescription: Leaked agent\n---\nBody\n",
+		);
+		await fs.writeFile(path.join(pluginPath, ".mcp.json"), JSON.stringify({ leaked: { command: "leaked-mcp" } }));
+
+		const roots = await listClaudePluginRoots(tempDir, tempDir);
+		expect(roots.roots).toEqual([]);
+
+		const skills = await loadCapability<Skill>("skills", { cwd: tempDir, includeUserSources: true });
+		expect(skills.all.map(skill => skill.name)).not.toContain("leaked-skill");
+
+		const mcpServers = await loadCapability<MCPServer>("mcps", { cwd: tempDir, includeUserSources: true });
+		expect(mcpServers.all.map(server => server.name)).not.toContain("leaked-plugin:leaked");
+
+		const agents = await discoverAgents(tempDir, tempDir);
+		expect(agents.agents.map(agent => agent.name)).not.toContain("leaked-agent");
+	});
+
 	test("parses plugin with user scope", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 
 		const registry = {
@@ -124,7 +171,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("parses plugin with project scope", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 
 		const registry = {
@@ -150,7 +197,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("handles multiple entries per plugin ID", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 
 		const registry = {
@@ -187,7 +234,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("warns on invalid plugin ID format", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 
 		const registry = {
@@ -214,7 +261,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("warns on entry without installPath", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 
 		const registry = {
@@ -240,7 +287,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("caches results for same home directory", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 
 		const registry: {
@@ -294,7 +341,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("defaults scope to user when not specified", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		await fs.mkdir(pluginsDir, { recursive: true });
 
 		const registry = {
@@ -318,8 +365,8 @@ describe("listClaudePluginRoots", () => {
 		expect(result.roots[0].scope).toBe("user");
 	});
 
-	test("scopes Claude project plugin entries with projectPath to that project", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+	test("scopes OMP registry project plugin entries with projectPath to that project", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "focused-review");
 		const projectDir = path.join(tempDir, "workspaces", "subagents");
 		const projectChildDir = path.join(projectDir, "packages", "api");
@@ -355,8 +402,8 @@ describe("listClaudePluginRoots", () => {
 		expect(inside.roots[0].id).toBe("focused-review@case-marketplace");
 		expect(inside.roots[0].scope).toBe("project");
 	});
-	test("scopes Claude local plugin skills to their projectPath", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+	test("scopes OMP registry local plugin skills to their projectPath", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "deploy-on-aws");
 		const pluginSkillDir = path.join(pluginPath, "skills", "deploy");
 		const projectDir = path.join(tempDir, "workspaces", "surge");
@@ -404,8 +451,8 @@ describe("listClaudePluginRoots", () => {
 		expect(found?.source).toBe("claude-plugins:project");
 	});
 
-	test("scopes Claude local plugin MCP servers to their projectPath", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+	test("scopes OMP registry local plugin MCP servers to their projectPath", async () => {
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "aws-mcp");
 		const projectDir = path.join(tempDir, "workspaces", "surge");
 		const projectChildDir = path.join(projectDir, "packages", "api");
@@ -444,7 +491,7 @@ describe("listClaudePluginRoots", () => {
 		expect(found?._source.level).toBe("project");
 	});
 	test("reads skills directory from plugin manifest skills field", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-skills");
 		await fs.mkdir(path.join(pluginsDir), { recursive: true });
 		await fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true });
@@ -485,7 +532,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("reads slash commands directory from plugin manifest slash-commands field", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-commands");
 		await fs.mkdir(path.join(pluginsDir), { recursive: true });
 		await fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true });
@@ -523,7 +570,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("reads slash commands directory from plugin manifest commands field (standard Claude plugin format)", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-commands-key");
 		await fs.mkdir(path.join(pluginsDir), { recursive: true });
 		await fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true });
@@ -560,7 +607,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("commands field takes precedence over slash-commands field when both are present", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-commands-precedence");
 		await fs.mkdir(path.join(pluginsDir), { recursive: true });
 		await fs.mkdir(path.join(pluginPath, ".claude-plugin"), { recursive: true });
@@ -601,7 +648,7 @@ describe("listClaudePluginRoots", () => {
 		expect(notFound).toBeUndefined();
 	});
 	test("ignores manifest skills directory that resolves outside plugin root", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-skills-outside");
 		const outsideDir = path.join(tempDir, "outside-skills", "outside-skill");
 		await fs.mkdir(path.join(pluginsDir), { recursive: true });
@@ -641,7 +688,7 @@ describe("listClaudePluginRoots", () => {
 	});
 
 	test("ignores manifest slash commands directory that resolves outside plugin root", async () => {
-		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const pluginsDir = path.join(tempDir, ".omp", "plugins");
 		const pluginPath = path.join(tempDir, "plugins", "manifest-commands-outside");
 		const outsideDir = path.join(tempDir, "outside-commands");
 		await fs.mkdir(path.join(pluginsDir), { recursive: true });
@@ -693,12 +740,16 @@ describe("discoverAgents plugin precedence", () => {
 	});
 
 	test("prefers project-scoped plugin agent over user-scoped plugin agent", async () => {
-		const pluginRegistryDir = path.join(tempDir, ".claude", "plugins");
+		const homeDir = path.join(tempDir, "home");
+		const projectDir = path.join(tempDir, "workspace");
+		const userRegistryDir = path.join(homeDir, ".omp", "plugins");
+		const projectRegistryDir = path.join(projectDir, ".omp", "plugins");
 		const projectPluginPath = path.join(tempDir, "plugins", "project");
 		const userPluginPath = path.join(tempDir, "plugins", "user");
 		const agentName = "plugin-precedence-test-agent";
 
-		await fs.mkdir(pluginRegistryDir, { recursive: true });
+		await fs.mkdir(userRegistryDir, { recursive: true });
+		await fs.mkdir(projectRegistryDir, { recursive: true });
 		await fs.mkdir(path.join(projectPluginPath, "agents"), { recursive: true });
 		await fs.mkdir(path.join(userPluginPath, "agents"), { recursive: true });
 
@@ -708,31 +759,42 @@ describe("discoverAgents plugin precedence", () => {
 		await fs.writeFile(path.join(projectPluginPath, "agents", "shared.md"), projectAgent);
 		await fs.writeFile(path.join(userPluginPath, "agents", "shared.md"), userAgent);
 
-		const registry = {
-			version: 2,
-			plugins: {
-				"shared-plugin@market": [
-					{
-						scope: "user",
-						installPath: userPluginPath,
-						version: "1.0.0",
-						installedAt: "2025-01-01T00:00:00Z",
-						lastUpdated: "2025-01-01T00:00:00Z",
-					},
-					{
-						scope: "project",
-						installPath: projectPluginPath,
-						version: "1.0.1",
-						installedAt: "2025-01-02T00:00:00Z",
-						lastUpdated: "2025-01-02T00:00:00Z",
-					},
-				],
-			},
-		};
+		await fs.writeFile(
+			path.join(userRegistryDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"shared-plugin@market": [
+						{
+							scope: "user",
+							installPath: userPluginPath,
+							version: "1.0.0",
+							installedAt: "2025-01-01T00:00:00Z",
+							lastUpdated: "2025-01-01T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
+		await fs.writeFile(
+			path.join(projectRegistryDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"shared-plugin@market": [
+						{
+							scope: "project",
+							installPath: projectPluginPath,
+							version: "1.0.1",
+							installedAt: "2025-01-02T00:00:00Z",
+							lastUpdated: "2025-01-02T00:00:00Z",
+						},
+					],
+				},
+			}),
+		);
 
-		await fs.writeFile(path.join(pluginRegistryDir, "installed_plugins.json"), JSON.stringify(registry));
-
-		const result = await discoverAgents(tempDir, tempDir);
+		const result = await discoverAgents(projectDir, homeDir);
 		const found = result.agents.find(agent => agent.name === agentName);
 
 		expect(found).toBeDefined();

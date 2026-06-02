@@ -176,7 +176,7 @@ Providers are sorted by numeric priority (higher first). Example priorities:
 
 - Native OMP (`builtin.ts`): `100`
 - Claude: `80`
-- Codex / agents / Claude marketplace: `70`
+- Codex / agents / OMP marketplace plugins: `70`
 - Gemini: `60`
 
 ```text
