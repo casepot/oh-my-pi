@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { initTheme } from "../../src/modes/theme/theme";
-import { containsWorkflow, highlightWorkflow, WORKFLOW_NOTICE } from "../../src/modes/workflow";
+import { containsWorkflow, highlightWorkflow, renderWorkflowNotice, WORKFLOW_NOTICE } from "../../src/modes/workflow";
 
 beforeAll(() => {
 	// highlightWorkflow reads the global theme's color mode.
@@ -46,9 +46,75 @@ describe("workflow keyword highlighting", () => {
 });
 
 describe("workflow notice", () => {
-	it("is a non-empty system notice carrying the eval-fan-out contract", () => {
+	const base = {
+		evalAvailable: true,
+		taskToolAvailable: true,
+		planMode: false,
+		sessionSpawns: "*",
+		taskDepth: 0,
+		taskMaxRecursionDepth: 2,
+		disabledAgents: [],
+		availableAgentTypes: ["task", "explore"],
+	} as const;
+
+	it("is a non-empty system notice carrying the eval-fan-out contract when task spawning is allowed", () => {
 		expect(WORKFLOW_NOTICE.length).toBeGreaterThan(0);
 		expect(WORKFLOW_NOTICE).toContain("**workflow** keyword");
-		expect(WORKFLOW_NOTICE).toContain("parallel(");
+		expect(WORKFLOW_NOTICE).toContain("parallel_settled(");
+		expect(WORKFLOW_NOTICE).toContain('agent("…")');
+	});
+
+	it("renders an inline-only notice when spawns are disabled", () => {
+		const notice = renderWorkflowNotice({ ...base, sessionSpawns: "" });
+		expect(notice).toContain("Allowed subagent spawns now: none");
+		expect(notice).toContain("Do not call eval `agent()`");
+		expect(notice).not.toContain('agent("…")');
+		expect(notice).not.toContain("parallel_settled([lambda");
+	});
+
+	it("renders restricted spawn examples without defaulting to task", () => {
+		const notice = renderWorkflowNotice({ ...base, sessionSpawns: "explore" });
+		expect(notice).toContain("Allowed subagent spawns now: explore");
+		expect(notice).toContain('agent("…", agent_type="explore")');
+		expect(notice).toContain('agent_type="explore"');
+		expect(notice).not.toContain('agent("…")`.');
+	});
+
+	it("keeps recursive spawning available below depth limits and disables it at max depth", () => {
+		const recursiveNotice = renderWorkflowNotice({ ...base, taskDepth: 1 });
+		expect(recursiveNotice).toContain('agent("…")');
+		expect(recursiveNotice).toContain("parallel_settled(");
+
+		const exhaustedNotice = renderWorkflowNotice({ ...base, taskDepth: 3 });
+		expect(exhaustedNotice).toContain("eval agent() recursion depth is exhausted");
+		expect(exhaustedNotice).toContain("task.maxRecursionDepth is exhausted");
+		expect(exhaustedNotice).not.toContain('agent("…")');
+	});
+
+	it("uses a concrete enabled agent when wildcard spawns disable task", () => {
+		const notice = renderWorkflowNotice({ ...base, disabledAgents: ["task"] });
+		expect(notice).toContain("Allowed subagent spawns now: explore");
+		expect(notice).toContain('agent("…", agent_type="explore")');
+		expect(notice).not.toContain('agent_type=""');
+		expect(notice).not.toContain('agent("…")`.');
+	});
+
+	it("falls back to inline workflow when every discovered wildcard agent is disabled", () => {
+		const notice = renderWorkflowNotice({
+			...base,
+			disabledAgents: ["task"],
+			availableAgentTypes: ["task"],
+		});
+		expect(notice).toContain("Allowed subagent spawns now: none");
+		expect(notice).toContain("Do not call eval `agent()`");
+		expect(notice).not.toContain('agent_type=""');
+		expect(notice).not.toContain('agent("…")');
+	});
+
+	it("does not instruct eval agent fan-out in plan mode", () => {
+		const notice = renderWorkflowNotice({ ...base, planMode: true });
+		expect(notice).toContain("Plan mode is active");
+		expect(notice).toContain("Do not call eval `agent()`");
+		expect(notice).not.toContain("parallel_settled([lambda");
 	});
 });

@@ -2130,6 +2130,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agentRegistry,
 			providerSessionId: options.providerSessionId,
 			parentEvalSessionId: options.parentEvalSessionId,
+			sessionSpawns: options.spawns ?? "*",
+			taskDepth: options.taskDepth ?? 0,
 		});
 		hasSession = true;
 		if (asyncJobManager) {

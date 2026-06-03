@@ -177,7 +177,7 @@ import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
-import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
+import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import type { PlanModeState } from "../plan-mode/state";
 import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
 import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
@@ -194,6 +194,7 @@ import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" w
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
+import { discoverAgents } from "../task/discovery";
 import * as taskExecutor from "../task/executor";
 import type { AgentDefinition, SingleResult } from "../task/types";
 import {
@@ -398,6 +399,10 @@ export interface AgentSessionConfig {
 	 * so that credential sticky selection is consistent with the session's streaming calls.
 	 */
 	providerSessionId?: string;
+	/** Spawn capability inherited by this session. `*` = all, empty = none, CSV = allowlist. */
+	sessionSpawns?: string | null;
+	/** Task recursion depth inherited by this session. */
+	taskDepth?: number;
 }
 
 /** Options for AgentSession.prompt() */
@@ -968,6 +973,8 @@ export class AgentSession {
 	#evalAbortControllers = new Set<AbortController>();
 	#evalKernelOwnerId: string;
 	#parentEvalSessionId: string | undefined;
+	#sessionSpawns: string | null | undefined;
+	#taskDepth: number;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
@@ -1163,6 +1170,8 @@ export class AgentSession {
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#parentEvalSessionId = config.parentEvalSessionId;
+		this.#sessionSpawns = config.sessionSpawns;
+		this.#taskDepth = config.taskDepth ?? 0;
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
 		this.#scopedModels = config.scopedModels ?? [];
 		if (config.thinkingLevel === AUTO_THINKING) {
@@ -4641,10 +4650,32 @@ export class AgentSession {
 				});
 			}
 			if (containsWorkflow(expandedText)) {
+				const activeToolNames = new Set(this.getActiveToolNames());
+				let availableAgentTypes: string[] | undefined;
+				if (activeToolNames.has("eval") || activeToolNames.has("task")) {
+					try {
+						availableAgentTypes = (await discoverAgents(this.sessionManager.getCwd())).agents.map(
+							agent => agent.name,
+						);
+					} catch (error) {
+						logger.debug("Workflow notice could not discover available agents", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 				keywordNotices.push({
 					role: "custom",
 					customType: "workflow-notice",
-					content: WORKFLOW_NOTICE,
+					content: renderWorkflowNotice({
+						evalAvailable: activeToolNames.has("eval"),
+						taskToolAvailable: activeToolNames.has("task"),
+						planMode: this.#planModeState?.enabled === true,
+						sessionSpawns: this.#sessionSpawns,
+						taskDepth: this.#taskDepth,
+						taskMaxRecursionDepth: this.settings.get("task.maxRecursionDepth") ?? 2,
+						disabledAgents: this.settings.get("task.disabledAgents") as string[],
+						availableAgentTypes,
+					}),
 					display: false,
 					attribution: "user",
 					timestamp,
@@ -7972,7 +8003,7 @@ export class AgentSession {
 		// ENHANCE_YOUR_CALM, surfaced verbatim from src/http/h2_client/dispatch.zig)
 		return (
 			isUnexpectedSocketCloseMessage(errorMessage) ||
-			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)/i.test(
+			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|typo in the url or port|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)/i.test(
 				errorMessage,
 			)
 		);
