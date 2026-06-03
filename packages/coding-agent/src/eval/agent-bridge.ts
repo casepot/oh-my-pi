@@ -61,6 +61,7 @@ export interface EvalAgentResult {
 		id: string;
 		model?: string | string[];
 		structured: boolean;
+		notice?: string;
 	};
 }
 
@@ -296,6 +297,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			id: result.id,
 			model: result.resolvedModel ?? modelOverride,
 			structured,
+			...(result.providerNotice ? { notice: result.providerNotice } : {}),
 		},
 	};
 }

@@ -911,6 +911,11 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", truncateToWidth(replaceTabs(result.abortReason), 80))}`,
 		);
 	}
+	if (result.providerNotice) {
+		lines.push(
+			`${continuePrefix}${theme.fg("warning", theme.status.warning)} ${theme.fg("dim", truncateToWidth(replaceTabs(result.providerNotice), 100))}`,
+		);
+	}
 	// Check for review result (yield with review schema + report_finding)
 	const completeData = result.extractedToolData?.yield as Array<{ data: unknown }> | undefined;
 	const reportFindingData = normalizeReportFindings(result.extractedToolData?.report_finding);

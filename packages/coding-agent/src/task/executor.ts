@@ -36,10 +36,10 @@ import { truncateTail } from "../session/streaming-output";
 import type { ContextFileEntry } from "../tools";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
-
 import { type ReportFindingDetails, toReviewFinding } from "../tools/review";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
+import { classifyProviderFailure, formatProviderFailure } from "../utils/provider-error-classifier";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
@@ -678,6 +678,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const abortController = new AbortController();
 	const abortSignal = abortController.signal;
 	let activeSession: AgentSession | null = null;
+	let providerNotice: string | undefined;
 	let unsubscribe: (() => void) | null = null;
 	let yieldCalled = false;
 
@@ -1175,15 +1176,31 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				explicitThinkingLevel,
 				authFallbackUsed,
 			} = resolvedModelOverride;
+			if (!model && modelPatterns.length > 0) {
+				throw new Error(
+					formatProviderFailure(
+						"Subagent model preflight failed",
+						classifyProviderFailure(
+							`Model not found for configured subagent model selector(s): ${modelPatterns.join(", ")}`,
+						),
+					),
+				);
+			}
 			if (model && !authFallbackUsed) {
 				const apiKey = await awaitAbortable(modelRegistry.getApiKey(model));
 				if (!(apiKey === kNoAuth || isAuthenticated(apiKey))) {
 					throw new Error(
-						`Subagent model ${model.provider}/${model.id} has no working credentials. Configure credentials for that model or set task.fallbackToParentModelOnAuthFailure=true to allow parent-model substitution.`,
+						formatProviderFailure(
+							"Subagent model preflight failed",
+							classifyProviderFailure(
+								`Subagent model ${model.provider}/${model.id} has no working credentials. Configure credentials for that model or set task.fallbackToParentModelOnAuthFailure=true to allow parent-model substitution.`,
+							),
+						),
 					);
 				}
 			}
 			if (authFallbackUsed && model) {
+				providerNotice = `Subagent model credentials unavailable; using parent session model ${model.provider}/${model.id} because task.fallbackToParentModelOnAuthFailure=true.`;
 				logger.warn("Subagent model has no working credentials; falling back to parent session model", {
 					requested: modelPatterns,
 					parentModel: options.parentActiveModelPattern,
@@ -1511,13 +1528,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					exitCode = 1;
 				} else if (lastAssistant.stopReason === "error") {
 					exitCode = 1;
-					error ??= lastAssistant.errorMessage || "Subagent failed";
+					const failure = classifyProviderFailure(lastAssistant.errorMessage || "Subagent failed");
+					error ??=
+						failure.category === "unknown"
+							? lastAssistant.errorMessage || "Subagent failed"
+							: formatProviderFailure("Subagent provider failure", failure);
 				}
 			}
 		} catch (err) {
 			exitCode = 1;
 			if (!abortSignal.aborted) {
-				error = err instanceof Error ? err.stack || err.message : String(err);
+				const failure = classifyProviderFailure(err);
+				const message = err instanceof Error ? err.stack || err.message : String(err);
+				error =
+					failure.category === "unknown" ? message : formatProviderFailure("Subagent provider failure", failure);
 			}
 		} finally {
 			if (abortSignal.aborted) {
@@ -1669,6 +1693,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		contextWindow: progress.contextWindow,
 		modelOverride,
 		resolvedModel: progress.resolvedModel,
+		providerNotice,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,

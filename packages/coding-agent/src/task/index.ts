@@ -1297,6 +1297,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					id: r.id,
 					preview,
 					truncated,
+					providerNotice: r.providerNotice,
 					meta: r.outputMeta
 						? {
 								lineCount: r.outputMeta.lineCount,

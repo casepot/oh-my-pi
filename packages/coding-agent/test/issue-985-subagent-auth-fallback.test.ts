@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, type ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	type ModelLookupRegistry,
 	resolveModelOverrideWithAuthFallback,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import {
+	classifyProviderFailure,
+	formatProviderFailure,
+	type ProviderFailureCategory,
+} from "@oh-my-pi/pi-coding-agent/utils/provider-error-classifier";
 
 /**
  * Regression coverage for the opt-in parent-model auth fallback introduced
@@ -210,5 +218,98 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 		expect(result.authFallbackUsed).toBe(true);
 		expect(result.model?.provider).toBe("deepseek");
 		expect(result.model?.id).toBe("deepseek-v4-pro");
+	});
+
+	test("runSubprocess preflights missing configured subagent models", async () => {
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"task.isolation.mode": "none",
+			"task.fallbackToParentModelOnAuthFailure": false,
+		});
+		const registry = {
+			authStorage: {},
+			getAvailable: () => [],
+			getAll: () => [],
+			getApiKey: async () => undefined,
+		} as unknown as ModelRegistry;
+		const agent: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+			model: ["missing/model"],
+		};
+
+		const result = await runSubprocess({
+			cwd: process.cwd(),
+			agent,
+			task: "review",
+			index: 0,
+			id: "MissingModel",
+			modelOverride: ["missing/model"],
+			modelRegistry: registry,
+			settings,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.error).toContain("model_not_found");
+		expect(result.error).toContain("Update the configured model id/role");
+	});
+
+	test("runSubprocess keeps strict default for unauthenticated configured subagent models", async () => {
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"task.isolation.mode": "none",
+		});
+		const registry = {
+			authStorage: {},
+			getAvailable: () => [unauthedTaskModel],
+			getAll: () => [unauthedTaskModel],
+			getApiKey: async () => undefined,
+		} as unknown as ModelRegistry;
+		const agent: AgentDefinition = {
+			name: "reviewer",
+			description: "Reviewer",
+			systemPrompt: "Review.",
+			source: "bundled",
+			model: ["qwen3.6-plus-free"],
+		};
+
+		const result = await runSubprocess({
+			cwd: process.cwd(),
+			agent,
+			task: "review",
+			index: 0,
+			id: "MissingAuth",
+			modelOverride: ["qwen3.6-plus-free"],
+			modelRegistry: registry,
+			settings,
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.error).toContain("auth");
+		expect(result.error).toContain("no working credentials");
+		expect(result.error).toContain("task.fallbackToParentModelOnAuthFailure=true");
+	});
+
+	test("provider failure classifier emits actionable representative categories", () => {
+		const cases: Array<{ message: string; category: ProviderFailureCategory }> = [
+			{ message: "401 unauthorized: no api key configured", category: "auth" },
+			{ message: "model_not_found: model does not exist", category: "model_not_found" },
+			{ message: "429 too many requests: rate limit exceeded", category: "rate_limit" },
+			{ message: "maximum context length exceeded: too many tokens", category: "context_overflow" },
+			{ message: "stream stalled while waiting for the next event", category: "stream_stall" },
+			{ message: "timed out while waiting for the first provider event", category: "first_event_timeout" },
+			{ message: "Was there a typo in the url or port?", category: "network" },
+		];
+
+		for (const entry of cases) {
+			const failure = classifyProviderFailure(entry.message);
+			const formatted = formatProviderFailure("Subagent provider failure", failure);
+			expect(failure.category).toBe(entry.category);
+			expect(failure.action.length).toBeGreaterThan(0);
+			expect(formatted).toContain(`[${entry.category}]`);
+			expect(formatted).toContain("Action:");
+		}
 	});
 });
