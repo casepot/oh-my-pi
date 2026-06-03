@@ -1267,6 +1267,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getPlanModeState: () => session?.getPlanModeState(),
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
+			createGoalWithRubric: (input, signal) => {
+				if (!session) throw new Error("Goal mode is not active.");
+				return session.createGoalWithRubric(input, signal);
+			},
+			replaceGoalWithRubric: (input, signal) => {
+				if (!session) throw new Error("Goal mode is not active.");
+				return session.replaceGoalWithRubric(input, signal);
+			},
+			requestGoalCompletion: signal => {
+				if (!session) throw new Error("Goal mode is not active.");
+				return session.requestGoalCompletion(signal);
+			},
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),

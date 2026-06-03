@@ -12,7 +12,7 @@ import { formatErrorMessage, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { renderStatusLine, truncateToWidth } from "../../tui";
 import { completionBudgetReport, remainingTokens } from "../runtime";
-import type { Goal, GoalStatus, GoalToolDetails } from "../state";
+import type { Goal, GoalCompletionVerificationDetails, GoalModeState, GoalStatus, GoalToolDetails } from "../state";
 
 const goalSchema = z.object({
 	op: z.enum(["create", "get", "complete", "resume", "drop"]).describe("goal operation"),
@@ -22,24 +22,37 @@ const goalSchema = z.object({
 
 export type GoalToolInput = z.infer<typeof goalSchema>;
 
+interface GoalSessionSupport {
+	createGoalWithRubric?(
+		input: { objective: string; tokenBudget?: number },
+		signal?: AbortSignal,
+	): Promise<GoalModeState>;
+	requestGoalCompletion?(signal?: AbortSignal): Promise<GoalToolResponse>;
+}
+
 export interface GoalToolResponse {
 	goal: Goal | null;
 	remainingTokens: number | null;
 	completionBudgetReport: string | null;
+	completionVerification?: GoalCompletionVerificationDetails;
 }
 
 export function buildGoalToolResponse(
 	goal: Goal | null | undefined,
-	options?: { includeCompletionReport?: boolean },
+	options?: { includeCompletionReport?: boolean; completionVerification?: GoalCompletionVerificationDetails },
 ): GoalToolResponse {
 	const resolvedGoal = goal ?? null;
+	const completionBudget =
+		options?.completionVerification?.status === "rejected"
+			? null
+			: options?.includeCompletionReport && resolvedGoal?.status === "complete"
+				? completionBudgetReport(resolvedGoal)
+				: null;
 	return {
 		goal: resolvedGoal,
 		remainingTokens: remainingTokens(resolvedGoal),
-		completionBudgetReport:
-			options?.includeCompletionReport && resolvedGoal?.status === "complete"
-				? completionBudgetReport(resolvedGoal)
-				: null,
+		completionBudgetReport: completionBudget,
+		completionVerification: options?.completionVerification,
 	};
 }
 
@@ -71,7 +84,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	async execute(
 		_toolCallId: string,
 		params: GoalToolInput,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<GoalToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GoalToolDetails>> {
@@ -80,9 +93,13 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			throw new ToolError("Goal mode is not active.");
 		}
 
+		const goalSession: ToolSession & GoalSessionSupport = this.#session;
 		let response: GoalToolResponse;
 		if (params.op === "create") {
-			const created = await runtime.createGoal(validateCreateParams(params));
+			const createInput = validateCreateParams(params);
+			const created = goalSession.createGoalWithRubric
+				? await goalSession.createGoalWithRubric(createInput, signal)
+				: await runtime.createGoal(createInput);
 			response = buildGoalToolResponse(created.goal);
 		} else if (params.op === "get") {
 			const state = this.#session.getGoalModeState?.();
@@ -94,8 +111,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			const dropped = await runtime.dropGoal();
 			response = buildGoalToolResponse(dropped ?? null);
 		} else {
-			const completed = await runtime.completeGoalFromTool();
-			response = buildGoalToolResponse(completed, { includeCompletionReport: true });
+			response = goalSession.requestGoalCompletion
+				? await goalSession.requestGoalCompletion(signal)
+				: buildGoalToolResponse(await runtime.completeGoalFromTool(), { includeCompletionReport: true });
 		}
 		let text: string;
 		if (response.goal) {
@@ -106,7 +124,12 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			if (response.remainingTokens !== null) {
 				text += `\nRemaining tokens: ${response.remainingTokens}`;
 			}
-			if (response.completionBudgetReport) {
+			if (response.completionVerification?.status === "rejected") {
+				text += `\n\nCompletion verification rejected (attempt ${response.completionVerification.attempt}/${response.completionVerification.maxAttempts}):\n${response.completionVerification.feedback}`;
+				if (response.completionVerification.continuationMessage) {
+					text += `\n\nContinuation guidance:\n${response.completionVerification.continuationMessage}`;
+				}
+			} else if (response.completionBudgetReport) {
 				text += `\n\n${response.completionBudgetReport}`;
 			}
 		} else {
@@ -118,7 +141,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				op: params.op,
 				goal: response.goal,
 				remainingTokens: response.remainingTokens,
-				completionBudgetReport: response.completionBudgetReport,
+				completionBudgetReport:
+					response.completionVerification?.status === "rejected" ? null : response.completionBudgetReport,
+				completionVerification: response.completionVerification,
 			},
 		};
 	}
@@ -226,6 +251,23 @@ export const goalToolRenderer = {
 
 		if (goal.timeUsedSeconds > 0) {
 			lines.push(`  ${uiTheme.fg("dim", `${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`)}`);
+		}
+
+		const verification = details?.completionVerification;
+		if (verification?.status === "rejected") {
+			lines.push("");
+			lines.push(
+				uiTheme.fg(
+					"warning",
+					`Completion verification rejected (attempt ${verification.attempt}/${verification.maxAttempts})`,
+				),
+			);
+			lines.push(`  ${truncateToWidth(verification.feedback.trim(), TRUNCATE_LENGTHS.LONG)}`);
+			if (verification.continuationMessage) {
+				lines.push(
+					`  ${uiTheme.fg("muted", truncateToWidth(verification.continuationMessage.trim(), TRUNCATE_LENGTHS.LONG))}`,
+				);
+			}
 		}
 
 		const report = details?.completionBudgetReport;

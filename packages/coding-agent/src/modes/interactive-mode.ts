@@ -63,6 +63,7 @@ import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slas
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
+import type { MCPManager } from "../mcp";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -338,7 +339,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planModeHasEntered = false;
 	#planReviewContainer: Container | undefined;
 	readonly lspServers: LspStartupServerInfo[] | undefined = undefined;
-	mcpManager?: import("../mcp").MCPManager;
+	mcpManager?: MCPManager;
 	readonly #toolUiContextSetter: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 
 	readonly #btwController: BtwController;
@@ -367,7 +368,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		changelogMarkdown: string | undefined = undefined,
 		setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void = () => {},
 		lspServers: LspStartupServerInfo[] | undefined = undefined,
-		mcpManager?: import("../mcp").MCPManager,
+		mcpManager?: MCPManager,
 		eventBus?: EventBus,
 	) {
 		this.session = session;
@@ -733,39 +734,65 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	#isGoalContinuationBlocked(): boolean {
+		return this.session.isStreaming || this.session.isCompacting || this.session.hasPostPromptWork;
+	}
+
+	#canConsiderGoalContinuation(): boolean {
+		if (this.loopModeEnabled) return false;
+		if (!this.onInputCallback) return false;
+		if (!this.session.settings.get("goal.continuationModes").includes("interactive")) return false;
+		if (this.planModeEnabled || this.planModePaused) return false;
+		if (!this.goalModeEnabled || this.goalModePaused) return false;
+		if (this.#goalSuppressNextContinuation) return false;
+		if (this.#pendingSubmittedInput) return false;
+		if (this.editor.getText().trim().length > 0) return false;
+		if ((this.pendingImages?.length ?? 0) > 0) return false;
+		const state = this.session.getGoalModeState();
+		return state?.enabled === true && state.goal.status === "active";
+	}
+
 	#scheduleGoalContinuation(): void {
 		this.#cancelGoalContinuation();
-		if (this.loopModeEnabled) return;
-		if (!this.onInputCallback) return;
-		if (!this.session.settings.get("goal.continuationModes").includes("interactive")) return;
-		if (this.planModeEnabled || this.planModePaused) return;
-		if (!this.goalModeEnabled || this.goalModePaused) return;
-		if (this.#goalSuppressNextContinuation) return;
-		if (this.#pendingSubmittedInput) return;
-		if (this.editor.getText().trim().length > 0) return;
-		if ((this.pendingImages?.length ?? 0) > 0) return;
-		const state = this.session.getGoalModeState();
-		if (!state?.enabled || state.goal.status !== "active") return;
-		const prompt = this.session.goalRuntime.buildContinuationPrompt();
-		if (!prompt) return;
+		if (!this.#canConsiderGoalContinuation()) return;
 		this.#goalContinuationTimer = setTimeout(() => {
 			this.#goalContinuationTimer = undefined;
-			if (!this.onInputCallback) return;
-			if (!this.goalModeEnabled || this.goalModePaused) return;
-			if (this.#pendingSubmittedInput) return;
-			if (this.editor.getText().trim().length > 0) return;
-			if ((this.pendingImages?.length ?? 0) > 0) return;
-			const latestState = this.session.getGoalModeState();
-			if (!latestState?.enabled || latestState.goal.status !== "active") return;
-			this.#goalContinuationTurnInFlight = true;
-			this.onInputCallback(
-				this.startPendingSubmission({
-					text: prompt,
-					customType: "goal-continuation",
-					display: false,
-				}),
-			);
+			void this.#submitGoalContinuationWhenReady().catch(error => {
+				logger.warn("Goal continuation preparation failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+				this.#goalSuppressNextContinuation = true;
+			});
 		}, 800);
+	}
+
+	async #submitGoalContinuationWhenReady(): Promise<void> {
+		if (!this.#canConsiderGoalContinuation()) return;
+		if (this.#isGoalContinuationBlocked()) {
+			this.#scheduleGoalContinuation();
+			return;
+		}
+		const state = this.session.getGoalModeState();
+		if (!state?.enabled || state.goal.status !== "active") return;
+		const goalId = state.goal.id;
+		const prompt = await this.session.prepareGoalContinuationPrompt();
+		if (!prompt) return;
+		if (!this.#canConsiderGoalContinuation()) return;
+		if (this.#isGoalContinuationBlocked()) {
+			this.#scheduleGoalContinuation();
+			return;
+		}
+		const latestState = this.session.getGoalModeState();
+		if (!latestState?.enabled || latestState.goal.status !== "active" || latestState.goal.id !== goalId) return;
+		if (!this.onInputCallback) return;
+		this.#goalContinuationTurnInFlight = true;
+		this.onInputCallback(
+			this.startPendingSubmission({
+				text: prompt,
+				customType: "goal-continuation",
+				display: false,
+			}),
+		);
 	}
 
 	#cancelGoalContinuation(): void {
@@ -1267,6 +1294,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			timeUsedSeconds: value.timeUsedSeconds,
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
+			rubric: typeof value.rubric === "string" ? value.rubric : undefined,
+			failedCompletionAttempts:
+				typeof value.failedCompletionAttempts === "number" ? value.failedCompletionAttempts : undefined,
+			lastVerificationFeedback:
+				typeof value.lastVerificationFeedback === "string" ? value.lastVerificationFeedback : undefined,
 		};
 	}
 
@@ -1551,7 +1583,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.goalModePaused = false;
 		const state = options.resume
 			? await this.session.goalRuntime.resumeGoal()
-			: await this.session.goalRuntime.createGoal({ objective: options.objective ?? "" });
+			: await this.session.createGoalWithRubric({ objective: options.objective ?? "" });
 		await this.session.setActiveToolsByName(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
@@ -2098,7 +2130,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #replaceGoalFromObjective(objective: string): Promise<void> {
-		const state = await this.session.goalRuntime.replaceGoal({ objective });
+		const state = await this.session.replaceGoalWithRubric({ objective });
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
 		this.goalModePaused = false;

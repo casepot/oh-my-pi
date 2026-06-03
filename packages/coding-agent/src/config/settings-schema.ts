@@ -2602,6 +2602,16 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"goal.maxCompletionAttempts": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "tasks",
+			label: "Goal Max Completion Attempts",
+			description: "Maximum rejected goal completion verification attempts before surfacing the rejection",
+		},
+	},
+
 	// Delegation
 	"task.isolation.mode": {
 		type: "enum",

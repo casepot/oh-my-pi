@@ -123,6 +123,50 @@ describe("GoalTool", () => {
 		});
 	});
 
+	it("surfaces verifier rejection without completing the goal", async () => {
+		const activeGoal = createGoal({ objective: "Needs proof", tokenBudget: 10 });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () =>
+					({
+						createGoal: vi.fn(),
+						completeGoalFromTool: vi.fn(),
+					}) as unknown as GoalRuntime,
+				getGoalModeState: () => ({
+					enabled: true,
+					mode: "active",
+					goal: activeGoal,
+				}),
+				requestGoalCompletion: vi.fn(async () => ({
+					goal: activeGoal,
+					remainingTokens: 10,
+					completionBudgetReport: null,
+					completionVerification: {
+						status: "rejected" as const,
+						attempt: 1,
+						maxAttempts: 3,
+						feedback: "Missing integration evidence.",
+						continuationMessage: "Gather the missing evidence before retrying.",
+					},
+				})),
+			}),
+		);
+
+		const result = await tool.execute("call-complete", { op: "complete" });
+
+		expect(result.details?.completionBudgetReport).toBeNull();
+		expect(result.details?.completionVerification).toMatchObject({
+			status: "rejected",
+			attempt: 1,
+			maxAttempts: 3,
+			feedback: "Missing integration evidence.",
+		});
+		const content = result.content[0];
+		if (content?.type !== "text") throw new Error("expected text result");
+		expect(content.text).toContain("Completion verification rejected");
+		expect(content.text).toContain("Continuation guidance");
+	});
+
 	it("rejects create when a goal already exists", async () => {
 		const harness = createRuntimeHarness({
 			enabled: true,

@@ -2,27 +2,35 @@ import type { InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { Skill } from "../extensibility/skills";
-import type { GoalModeState, GoalRuntime } from "../goals";
+import type { GoalCompletionVerificationDetails, GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { LspTool } from "../lsp";
+import type { DiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
+import type { AuthStorage } from "../session/auth-storage";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
+import type { UsageStatistics } from "../session/session-manager";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
-import type { DiscoverableTool, DiscoverableToolSearchIndex } from "../tool-discovery/tool-index";
+import type {
+	DiscoverableTool,
+	DiscoverableToolSearchIndex,
+	DiscoverableToolSource,
+} from "../tool-discovery/tool-index";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
@@ -32,6 +40,7 @@ import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
+import type { ConflictHistory } from "./conflict-detect";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -178,9 +187,9 @@ export interface ToolSession {
 	/** Get the current session model string, regardless of how it was chosen */
 	getActiveModelString?: () => string | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
-	authStorage?: import("../session/auth-storage").AuthStorage;
+	authStorage?: AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
-	modelRegistry?: import("../config/model-registry").ModelRegistry;
+	modelRegistry?: ModelRegistry;
 	/** Agent output manager for unique agent:// IDs across task invocations */
 	agentOutputManager?: AgentOutputManager;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
@@ -195,8 +204,25 @@ export interface ToolSession {
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
 	getGoalRuntime?: () => GoalRuntime | undefined;
+	/** Create a goal after generating and attaching a completion rubric. */
+	createGoalWithRubric?: (
+		input: { objective: string; tokenBudget?: number },
+		signal?: AbortSignal,
+	) => Promise<GoalModeState>;
+	/** Replace the active goal after generating and attaching a completion rubric. */
+	replaceGoalWithRubric?: (
+		input: { objective: string; tokenBudget?: number },
+		signal?: AbortSignal,
+	) => Promise<GoalModeState>;
+	/** Request completion of the active goal after external verification. */
+	requestGoalCompletion?: (signal?: AbortSignal) => Promise<{
+		goal: GoalModeState["goal"] | null;
+		remainingTokens: number | null;
+		completionBudgetReport: string | null;
+		completionVerification?: GoalCompletionVerificationDetails;
+	}>;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
-	getUsageStatistics?: () => import("../session/session-manager").UsageStatistics;
+	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */
 	getTurnBudget?: () => { total: number | null; spent: number; hard: boolean };
 	/** Record output tokens consumed by an eval-spawned subagent toward the current turn budget. */
@@ -219,9 +245,7 @@ export interface ToolSession {
 	/** Whether any form of tool discovery is active (tools.discoveryMode !== "off" or mcp.discoveryMode). */
 	isToolDiscoveryEnabled?: () => boolean;
 	/** Get all hidden-but-discoverable tools for search_tool_bm25 prompts. */
-	getDiscoverableTools?: (filter?: {
-		source?: import("../tool-discovery/tool-index").DiscoverableToolSource;
-	}) => DiscoverableTool[];
+	getDiscoverableTools?: (filter?: { source?: DiscoverableToolSource }) => DiscoverableTool[];
 	/** Get the cached generic discoverable search index. */
 	getDiscoverableToolSearchIndex?: () => DiscoverableToolSearchIndex;
 	/** Get tool names activated by prior search_tool_bm25 calls (all sources). */
@@ -257,11 +281,11 @@ export interface ToolSession {
 	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`
 	 *  to splice the recorded region with replacement content. Lazily initialized
 	 *  by `getConflictHistory`. */
-	conflictHistory?: import("./conflict-detect").ConflictHistory;
+	conflictHistory?: ConflictHistory;
 
 	/** Per-session ledger of post-edit LSP diagnostics already surfaced to the
 	 *  model for each file. Lazily initialized by `getDiagnosticsLedger`. */
-	diagnosticsLedger?: import("../lsp/diagnostics-ledger").DiagnosticsLedger;
+	diagnosticsLedger?: DiagnosticsLedger;
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;

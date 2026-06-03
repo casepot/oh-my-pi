@@ -11,6 +11,9 @@ export interface Goal {
 	timeUsedSeconds: number;
 	createdAt: number;
 	updatedAt: number;
+	rubric?: string;
+	failedCompletionAttempts?: number;
+	lastVerificationFeedback?: string;
 }
 
 export interface GoalModeState {
@@ -20,11 +23,20 @@ export interface GoalModeState {
 	goal: Goal;
 }
 
+export interface GoalCompletionVerificationDetails {
+	status: "verified" | "rejected";
+	attempt: number;
+	maxAttempts: number;
+	feedback: string;
+	continuationMessage?: string;
+}
+
 export interface GoalToolDetails {
 	op: "create" | "get" | "complete" | "resume" | "drop";
 	goal?: Goal | null;
 	remainingTokens?: number | null;
 	completionBudgetReport?: string | null;
+	completionVerification?: GoalCompletionVerificationDetails;
 }
 
 export type GoalRuntimeEvent =

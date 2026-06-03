@@ -354,4 +354,52 @@ describe("goal runtime", () => {
 		expect(state?.mode).toBe("exiting");
 		expect(state?.goal.status).toBe("complete");
 	});
+
+	it("stores verifier metadata in rendered goal prompts", async () => {
+		const harness = createHarness();
+
+		const state = await harness.runtime.createGoal({ objective: "Ship <safe> & audited" });
+		await harness.runtime.setGoalRubric(state.goal.id, "4 = excellent <evidence> & coherent");
+		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Missing <integration> & proof");
+
+		const goal = harness.getState()?.goal;
+		if (!goal) throw new Error("expected active goal");
+		const activePrompt = renderGoalPrompt("active", goal);
+		const continuationPrompt = renderGoalPrompt("continuation", goal);
+
+		expect(goal.failedCompletionAttempts).toBe(1);
+		expect(activePrompt).toContain("4 = excellent &lt;evidence&gt; &amp; coherent");
+		expect(activePrompt).toContain("Missing &lt;integration&gt; &amp; proof");
+		expect(continuationPrompt).toContain("Previous completion verification rejected attempt 1");
+	});
+
+	it("records side-agent usage against the active goal budget", async () => {
+		const harness = createHarness();
+
+		const state = await harness.runtime.createGoal({ objective: "Ship usage", tokenBudget: 10 });
+		await harness.runtime.recordExternalUsage(
+			createUsage({ input: 3, output: 2, cacheRead: 99, cacheWrite: 4 }),
+			1_500,
+		);
+
+		const goal = harness.getState()?.goal;
+		expect(goal?.id).toBe(state.goal.id);
+		expect(goal?.tokensUsed).toBe(9);
+		expect(goal?.timeUsedSeconds).toBe(1);
+		expect(goal?.status).toBe("active");
+	});
+
+	it("clears failed completion attempts after substantive non-yield work", async () => {
+		const harness = createHarness();
+		const state = await harness.runtime.createGoal({ objective: "Ship after feedback" });
+		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Need evidence");
+
+		await harness.runtime.onToolCompleted("yield");
+		expect(harness.getState()?.goal.failedCompletionAttempts).toBe(1);
+		expect(harness.getState()?.goal.lastVerificationFeedback).toBe("Need evidence");
+
+		await harness.runtime.onToolCompleted("read");
+		expect(harness.getState()?.goal.failedCompletionAttempts).toBeUndefined();
+		expect(harness.getState()?.goal.lastVerificationFeedback).toBeUndefined();
+	});
 });

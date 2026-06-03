@@ -98,6 +98,10 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
+function optionalPromptSection(value: string | undefined): string {
+	return value ? escapeXmlText(value) : "";
+}
+
 export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 	const template =
 		kind === "active"
@@ -107,6 +111,9 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 				: goalBudgetLimitPrompt;
 	return prompt.render(template, {
 		objective: escapeXmlText(goal.objective),
+		rubric: optionalPromptSection(goal.rubric),
+		failedCompletionAttempts: String(goal.failedCompletionAttempts ?? 0),
+		lastVerificationFeedback: optionalPromptSection(goal.lastVerificationFeedback),
 		tokensUsed: String(goal.tokensUsed),
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
@@ -232,6 +239,21 @@ export class GoalRuntime {
 		if (toolName === "goal") return;
 		if (!this.#hasAccountingState()) return;
 		await this.flushUsage("allowed");
+		if (toolName !== "yield") {
+			await this.#clearFailedCompletionVerificationAfterWork();
+		}
+	}
+
+	async #clearFailedCompletionVerificationAfterWork(): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || !isAccountingStatus(state.goal)) return;
+			if (!state.goal.failedCompletionAttempts && !state.goal.lastVerificationFeedback) return;
+			state.goal.failedCompletionAttempts = undefined;
+			state.goal.lastVerificationFeedback = undefined;
+			state.goal.updatedAt = this.#now();
+			await this.#commitState(state, { persist: "goal" });
+		});
 	}
 
 	async onGoalToolCompleted(): Promise<void> {
@@ -371,6 +393,74 @@ export class GoalRuntime {
 		currentUsage: GoalTokenUsage = this.#host.getCurrentUsage(),
 	): Promise<void> {
 		await this.#withAccounting(() => this.#flushUsageLocked(steering, currentUsage));
+	}
+
+	async setGoalRubric(goalId: string, rubric: string): Promise<Goal | undefined> {
+		const trimmedRubric = rubric.trim();
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.id !== goalId || state.goal.status !== "active") return undefined;
+			state.goal.rubric = trimmedRubric || undefined;
+			state.goal.updatedAt = this.#now();
+			await this.#commitState(state, { persist: "goal" });
+			return state.goal;
+		});
+	}
+
+	async recordFailedCompletionVerification(goalId: string, feedback: string): Promise<Goal | undefined> {
+		const trimmedFeedback = feedback.trim();
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.id !== goalId || !isAccountingStatus(state.goal)) return undefined;
+			const wasBudgetLimited = state.goal.status === "budget-limited";
+			state.goal.failedCompletionAttempts = (state.goal.failedCompletionAttempts ?? 0) + 1;
+			state.goal.lastVerificationFeedback = trimmedFeedback;
+			state.goal.updatedAt = this.#now();
+			if (!wasBudgetLimited) {
+				state.goal.status = "active";
+			}
+			state.enabled = true;
+			state.mode = "active";
+			state.reason = undefined;
+			this.#budgetReportedFor = undefined;
+			if (!wasBudgetLimited) {
+				this.#markActiveAccounting(state.goal);
+			}
+			await this.#commitState(state, { persist: "goal" });
+			return state.goal;
+		});
+	}
+
+	async recordExternalUsage(usage?: GoalTokenUsage, durationMs?: number): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || !isAccountingStatus(state.goal)) return;
+			const now = this.#now();
+			const tokenDelta = usage
+				? Math.max(0, usage.input) + Math.max(0, usage.cacheWrite) + Math.max(0, usage.output)
+				: 0;
+			const wallSeconds = durationMs === undefined ? 0 : Math.max(0, Math.floor(durationMs / 1000));
+			this.#wallClock = { activeGoalId: state.goal.id, lastAccountedAt: now };
+			if (tokenDelta <= 0 && wallSeconds <= 0) return;
+
+			state.goal.tokensUsed += tokenDelta;
+			state.goal.timeUsedSeconds += wallSeconds;
+			state.goal.updatedAt = now;
+			const flippedToBudgetLimited =
+				state.goal.tokenBudget !== undefined &&
+				state.goal.tokensUsed >= state.goal.tokenBudget &&
+				state.goal.status === "active";
+			if (flippedToBudgetLimited) {
+				state.goal.status = "budget-limited";
+			}
+			await this.#commitState(state, { persist: "goal" });
+			if (state.goal.status !== "budget-limited") {
+				this.#budgetReportedFor = undefined;
+			}
+			if (flippedToBudgetLimited && this.#budgetReportedFor !== state.goal.id) {
+				await this.#sendBudgetLimitSteer(state.goal);
+			}
+		});
 	}
 
 	#createGoalState(objective: string, tokenBudget: number | undefined): GoalModeState {

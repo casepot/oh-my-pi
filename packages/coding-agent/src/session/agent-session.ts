@@ -15,6 +15,7 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { isPromise } from "node:util/types";
@@ -153,8 +154,20 @@ import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
-import { GoalRuntime } from "../goals/runtime";
-import type { Goal, GoalModeState } from "../goals/state";
+import { completionBudgetReport, GoalRuntime, remainingTokens, renderGoalPrompt } from "../goals/runtime";
+import {
+	type GoalCompletionVerifierOutput,
+	type GoalContinuationCompactorOutput,
+	type GoalRubricOutput,
+	goalCompletionVerifierAgent,
+	goalContinuationCompactorAgent,
+	goalRubricAgent,
+	renderGoalCompletionVerifierAssignment,
+	renderGoalContinuationCompactorAssignment,
+	renderGoalRubricAssignment,
+	renderPreparedGoalContinuation,
+} from "../goals/side-agents";
+import type { Goal, GoalCompletionVerificationDetails, GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -166,6 +179,8 @@ import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
 import type { PlanModeState } from "../plan-mode/state";
+import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
+import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -179,6 +194,8 @@ import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" w
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
+import * as taskExecutor from "../task/executor";
+import type { AgentDefinition, SingleResult } from "../task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -793,6 +810,64 @@ function extractPermissionLocations(
 	return out;
 }
 
+function isStringRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseStructuredSideAgentOutput(output: string): unknown {
+	const parsed: unknown = JSON.parse(output);
+	if (isStringRecord(parsed) && "data" in parsed) {
+		return parsed.data;
+	}
+	return parsed;
+}
+
+function parseGoalRubricOutput(value: unknown): GoalRubricOutput | undefined {
+	if (!isStringRecord(value) || typeof value.rubric !== "string") return undefined;
+	return { rubric: value.rubric };
+}
+
+function parseGoalCompletionVerifierOutput(value: unknown): GoalCompletionVerifierOutput | undefined {
+	if (!isStringRecord(value)) return undefined;
+	if (value.status !== "verified" && value.status !== "rejected") return undefined;
+	if (typeof value.feedback !== "string") return undefined;
+	const continuationMessage = typeof value.continuationMessage === "string" ? value.continuationMessage : undefined;
+	return { status: value.status, feedback: value.feedback, continuationMessage };
+}
+
+function parseGoalContinuationCompactorOutput(value: unknown): GoalContinuationCompactorOutput | undefined {
+	if (!isStringRecord(value) || typeof value.continuationMessage !== "string") return undefined;
+	return { continuationMessage: value.continuationMessage };
+}
+
+function sideAgentUsage(result: SingleResult): GoalTokenUsage | undefined {
+	if (result.usage) {
+		return {
+			input: result.usage.input,
+			output: result.usage.output,
+			cacheRead: result.usage.cacheRead,
+			cacheWrite: result.usage.cacheWrite,
+		};
+	}
+	if (result.tokens <= 0) return undefined;
+	return { input: result.tokens, output: 0, cacheRead: 0, cacheWrite: 0 };
+}
+function goalMaxCompletionAttempts(settings: Settings): number {
+	const configured = settings.get("goal.maxCompletionAttempts");
+	if (!Number.isFinite(configured)) return 3;
+	const maxAttempts = Math.trunc(configured);
+	return maxAttempts > 0 ? maxAttempts : 3;
+}
+
+function isGoalCompletionStateStillCurrent(initialGoal: Goal, latest: GoalModeState | undefined): boolean {
+	if (!latest?.goal || latest.goal.id !== initialGoal.id) return false;
+	if (latest.goal.status === "complete" || latest.goal.status === "dropped") return false;
+	if (initialGoal.status === "active" || initialGoal.status === "budget-limited") {
+		return latest.enabled && (latest.goal.status === "active" || latest.goal.status === "budget-limited");
+	}
+	return latest.goal.status === initialGoal.status;
+}
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -847,6 +922,7 @@ export class AgentSession {
 	#planModeState: PlanModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	#goalSideAgentTail: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -3856,6 +3932,309 @@ export class AgentSession {
 
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
+	}
+
+	async createGoalWithRubric(
+		input: { objective: string; tokenBudget?: number },
+		signal?: AbortSignal,
+	): Promise<GoalModeState> {
+		const objective = input.objective.trim();
+		if (!objective) throw new Error("objective is required when op=create");
+		const existing = this.#goalModeState;
+		if (existing?.goal && existing.goal.status !== "dropped" && existing.goal.status !== "complete") {
+			throw new Error("cannot create a new goal because this session already has a goal");
+		}
+		const initialGoalId = this.#goalModeState?.goal.id;
+		const initialGoalStatus = this.#goalModeState?.goal.status;
+		const rubric = await this.#generateGoalRubric(objective, signal);
+		const latest = this.#goalModeState;
+		if (latest?.goal.id !== initialGoalId || latest?.goal.status !== initialGoalStatus) {
+			throw new Error("cannot create goal because the active goal changed while generating the rubric");
+		}
+		const state = await this.#goalRuntime.createGoal({ objective, tokenBudget: input.tokenBudget });
+		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
+		return current ? { ...state, goal: current } : state;
+	}
+
+	async replaceGoalWithRubric(
+		input: { objective: string; tokenBudget?: number },
+		signal?: AbortSignal,
+	): Promise<GoalModeState> {
+		const existing = this.#goalModeState;
+		const objective = input.objective.trim();
+		if (!objective) throw new Error("objective is required when op=replace");
+		if (!existing?.enabled || (existing.goal.status !== "active" && existing.goal.status !== "budget-limited")) {
+			throw new Error("cannot replace goal because no goal is active");
+		}
+		const existingGoalId = existing.goal.id;
+		const existingGoalStatus = existing.goal.status;
+		const rubric = await this.#generateGoalRubric(objective, signal);
+		const latest = this.#goalModeState;
+		if (!latest?.enabled || latest.goal.status !== existingGoalStatus || latest.goal.id !== existingGoalId) {
+			throw new Error("cannot replace goal because the active goal changed while generating the rubric");
+		}
+		const state = await this.#goalRuntime.replaceGoal({ objective, tokenBudget: input.tokenBudget });
+		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
+		return current ? { ...state, goal: current } : state;
+	}
+	async requestGoalCompletion(signal?: AbortSignal): Promise<{
+		goal: Goal | null;
+		remainingTokens: number | null;
+		completionBudgetReport: string | null;
+		completionVerification: GoalCompletionVerificationDetails;
+	}> {
+		const state = this.#goalModeState;
+		if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
+		if (state.goal.status === "complete") throw new Error("goal is already complete");
+		if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
+		const goalId = state.goal.id;
+		const maxAttempts = goalMaxCompletionAttempts(this.settings);
+		const failedAttempts = state.goal.failedCompletionAttempts ?? 0;
+		if (failedAttempts >= maxAttempts) {
+			return {
+				goal: state.goal,
+				remainingTokens: remainingTokens(state.goal),
+				completionBudgetReport: null,
+				completionVerification: {
+					status: "rejected",
+					attempt: failedAttempts,
+					maxAttempts,
+					feedback: goalCompletionMaxAttemptsFeedback.trim(),
+				},
+			};
+		}
+
+		const attempt = failedAttempts + 1;
+		const verification = await this.#verifyGoalCompletion(state.goal, attempt, maxAttempts, signal);
+		const latest = this.#goalModeState;
+		if (!isGoalCompletionStateStillCurrent(state.goal, latest)) {
+			const staleGoal = latest?.goal ?? state.goal;
+			return {
+				goal: staleGoal,
+				remainingTokens: remainingTokens(staleGoal),
+				completionBudgetReport: null,
+				completionVerification: {
+					status: "rejected",
+					attempt,
+					maxAttempts,
+					feedback: goalCompletionStaleFeedback.trim(),
+				},
+			};
+		}
+		if (verification.status === "verified") {
+			const completed = await this.#goalRuntime.completeGoalFromTool();
+			return {
+				goal: completed,
+				remainingTokens: remainingTokens(completed),
+				completionBudgetReport: completionBudgetReport(completed),
+				completionVerification: {
+					status: "verified",
+					attempt,
+					maxAttempts,
+					feedback: verification.feedback,
+				},
+			};
+		}
+
+		const latestGoal = latest?.goal ?? state.goal;
+		const recorded = await this.#goalRuntime.recordFailedCompletionVerification(goalId, verification.feedback);
+		const continuationMessage = await this.#buildGoalContinuationMessage(
+			recorded ?? latestGoal,
+			verification.feedback,
+			signal,
+		);
+		const currentState = this.#goalModeState;
+		const currentGoal = currentState?.goal ?? recorded ?? latestGoal;
+		if (!isGoalCompletionStateStillCurrent(state.goal, currentState)) {
+			return {
+				goal: currentGoal,
+				remainingTokens: remainingTokens(currentGoal),
+				completionBudgetReport: null,
+				completionVerification: {
+					status: "rejected",
+					attempt,
+					maxAttempts,
+					feedback: goalCompletionStaleFeedback.trim(),
+				},
+			};
+		}
+		return {
+			goal: currentGoal,
+			remainingTokens: remainingTokens(currentGoal),
+			completionBudgetReport: null,
+			completionVerification: {
+				status: "rejected",
+				attempt,
+				maxAttempts,
+				feedback: verification.feedback,
+				continuationMessage,
+			},
+		};
+	}
+
+	async prepareGoalContinuationPrompt(signal?: AbortSignal): Promise<string | undefined> {
+		const state = this.#goalModeState;
+		if (!state?.enabled || state.goal.status !== "active") return undefined;
+		const goalId = state.goal.id;
+		const continuationMessage = await this.#buildGoalContinuationMessage(
+			state.goal,
+			state.goal.lastVerificationFeedback,
+			signal,
+		);
+		const latest = this.#goalModeState;
+		if (!latest?.enabled || latest.goal.status !== "active" || latest.goal.id !== goalId) return undefined;
+		return continuationMessage;
+	}
+
+	async #generateGoalRubric(objective: string, signal?: AbortSignal): Promise<string> {
+		return await this.#withSerializedGoalSideAgent(async () => {
+			const contextFile = await this.#writeGoalTranscriptFile("rubric", "pending");
+			const assignment = renderGoalRubricAssignment({ objective, contextFile });
+			const output = await this.#runGoalSideAgent({
+				agent: goalRubricAgent,
+				assignment,
+				description: "Goal rubric generation",
+				contextFile,
+				parse: parseGoalRubricOutput,
+				signal,
+			});
+			const rubric = output.rubric.trim();
+			if (!rubric) throw new Error("goal-rubric returned an empty rubric");
+			return rubric;
+		});
+	}
+
+	async #verifyGoalCompletion(
+		goal: Goal,
+		attempt: number,
+		maxAttempts: number,
+		signal?: AbortSignal,
+	): Promise<GoalCompletionVerifierOutput> {
+		return await this.#withSerializedGoalSideAgent(async () => {
+			const contextFile = await this.#writeGoalTranscriptFile("verify", goal.id);
+			const assignment = renderGoalCompletionVerifierAssignment({
+				objective: goal.objective,
+				rubric: goal.rubric ?? "",
+				contextFile,
+				attempt,
+				maxAttempts,
+			});
+			return await this.#runGoalSideAgent({
+				agent: goalCompletionVerifierAgent,
+				assignment,
+				description: "Goal completion verification",
+				contextFile,
+				parse: parseGoalCompletionVerifierOutput,
+				signal,
+			});
+		});
+	}
+
+	async #buildGoalContinuationMessage(
+		goal: Goal,
+		verificationFeedback: string | undefined,
+		signal?: AbortSignal,
+	): Promise<string> {
+		return await this.#withSerializedGoalSideAgent(async () => {
+			const contextFile = await this.#writeGoalTranscriptFile("continue", goal.id);
+			const assignment = renderGoalContinuationCompactorAssignment({
+				objective: goal.objective,
+				rubric: goal.rubric ?? "",
+				contextFile,
+				verificationFeedback,
+			});
+			const output = await this.#runGoalSideAgent({
+				agent: goalContinuationCompactorAgent,
+				assignment,
+				description: "Goal continuation preparation",
+				contextFile,
+				parse: parseGoalContinuationCompactorOutput,
+				signal,
+			});
+			const continuationMessage = output.continuationMessage.trim();
+			if (!continuationMessage) return renderGoalPrompt("continuation", goal);
+			return renderPreparedGoalContinuation({
+				basePrompt: renderGoalPrompt("continuation", goal),
+				continuationMessage,
+			});
+		});
+	}
+
+	async #withSerializedGoalSideAgent<T>(run: () => Promise<T>): Promise<T> {
+		const previous = this.#goalSideAgentTail;
+		const { promise: gate, resolve } = Promise.withResolvers<void>();
+		this.#goalSideAgentTail = previous.then(
+			() => gate,
+			() => gate,
+		);
+		await previous.catch(() => {});
+		try {
+			return await run();
+		} finally {
+			resolve();
+		}
+	}
+
+	async #createGoalSideAgentArtifactsDir(): Promise<string> {
+		const artifactsDir = this.sessionManager.getArtifactsDir();
+		if (artifactsDir) {
+			const dir = path.join(artifactsDir, "goal-side-agents");
+			await fs.promises.mkdir(dir, { recursive: true });
+			return dir;
+		}
+		return await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-goal-side-agents-"));
+	}
+
+	async #writeGoalTranscriptFile(kind: string, goalId: string): Promise<string> {
+		const dir = await this.#createGoalSideAgentArtifactsDir();
+		const safeGoalId = goalId.replace(/[^A-Za-z0-9_-]/g, "_");
+		const filePath = path.join(dir, `${Date.now()}-${safeGoalId}-${kind}-transcript.txt`);
+		await Bun.write(filePath, this.formatSessionAsText());
+		return filePath;
+	}
+
+	async #runGoalSideAgent<T>(options: {
+		agent: AgentDefinition;
+		assignment: string;
+		description: string;
+		contextFile: string;
+		parse(value: unknown): T | undefined;
+		signal?: AbortSignal;
+	}): Promise<T> {
+		const cwd = this.sessionManager.getCwd();
+		const artifactsDir = path.dirname(options.contextFile);
+		await fs.promises.mkdir(artifactsDir, { recursive: true });
+		const sideAgentSettings = await this.settings.cloneForCwd(cwd);
+		sideAgentSettings.override("irc.enabled", false);
+		const result = await taskExecutor.runSubprocess({
+			cwd,
+			agent: options.agent,
+			task: options.assignment,
+			assignment: options.assignment,
+			description: options.description,
+			index: 0,
+			id: `goal-${options.agent.name}-${Snowflake.next()}`,
+			parentActiveModelPattern: this.model ? formatModelString(this.model) : undefined,
+			outputSchema: options.agent.output,
+			enableLsp: true,
+			signal: options.signal,
+			artifactsDir,
+			persistArtifacts: true,
+			contextFile: options.contextFile,
+			settings: sideAgentSettings,
+			modelRegistry: this.#modelRegistry,
+			promptTemplates: this.#promptTemplates,
+			localProtocolOptions: this.#localProtocolOptions(),
+		});
+		await this.#goalRuntime.recordExternalUsage(sideAgentUsage(result), result.durationMs);
+		if (result.exitCode !== 0) {
+			throw new Error(result.error || result.stderr || `${options.agent.name} failed`);
+		}
+		const parsed = options.parse(parseStructuredSideAgentOutput(result.output));
+		if (!parsed) {
+			throw new Error(`${options.agent.name} returned invalid structured output`);
+		}
+		return parsed;
 	}
 
 	markPlanReferenceSent(): void {
