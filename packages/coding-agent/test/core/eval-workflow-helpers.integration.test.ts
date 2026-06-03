@@ -83,6 +83,65 @@ describe.skipIf(!SHOULD_RUN)("python eval workflow helpers", () => {
 		}
 	});
 
+	it("read accepts positional offsets and local line selectors", async () => {
+		using tempDir = TempDir.createSync("@eval-workflow-read-");
+		await Bun.write(`${tempDir.path()}/lines.txt`, "a\nb\nc\nd\n");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const code = ["import json", "print(json.dumps([read('lines.txt', 2, 2), read('lines.txt:3-4')]))"].join("\n");
+			const result = await executePythonWithKernel(kernel, code, { cwd: tempDir.path() });
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.output.trim())).toEqual(["b\nc\n", "c\nd\n"]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("parallel_settled retains successful siblings when one thunk fails", async () => {
+		using tempDir = TempDir.createSync("@eval-workflow-parallel-settled-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const code = [
+				"import json",
+				"def boom():",
+				"    raise ValueError('kaboom')",
+				"print(json.dumps(parallel_settled([lambda: 'a', boom, lambda: 'c'])))",
+			].join("\n");
+			const result = await executePythonWithKernel(kernel, code);
+			expect(result.exitCode).toBe(0);
+			expect(JSON.parse(result.output.trim())).toEqual([
+				{ status: "fulfilled", value: "a" },
+				{ status: "rejected", reason: "kaboom", error_type: "ValueError" },
+				{ status: "fulfilled", value: "c" },
+			]);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("timeout failures include structured cause and preserve partial output", async () => {
+		using tempDir = TempDir.createSync("@eval-workflow-timeout-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				"import time\nprint('before', flush=True)\ntime.sleep(5)",
+				{
+					timeoutMs: 200,
+					sessionId: "py-timeout-test",
+				},
+			);
+			expect(result.cancelled).toBe(true);
+			expect(result.output).toContain("before");
+			expect(result.output).not.toContain("[kernel] Python kernel shutdown");
+			expect(result.failure?.cause).toBe("timeout");
+			expect(result.failure?.sessionId).toBe("py-timeout-test");
+			expect(result.failure?.runId).toMatch(/^py-/);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
 	it("log and phase emit status events", async () => {
 		using tempDir = TempDir.createSync("@eval-workflow-status-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });

@@ -3,7 +3,7 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import os, json, math
+    import os, json, math, re
 
     # __omp_display is injected by runner.py before the prelude executes; it
     # mirrors IPython's display() semantics with the same MIME bundle output.
@@ -53,16 +53,71 @@ if "__omp_prelude_loaded__" not in globals():
         _emit_status("env", key=key, value=val, action="get")
         return val
 
-    def read(path: str | Path, *, offset: int = 1, limit: int | None = None) -> str:
-        """Read file contents. offset/limit are 1-indexed line numbers."""
-        p = Path(path)
-        data = p.read_text(encoding="utf-8")
+    _LINE_SELECTOR_RE = re.compile(r"^([1-9]\d*)(?:\+(\d+)|-(\d*)?)?$")
+
+    def _parse_line_selector(selector: str):
+        ranges = []
+        for part in selector.split(","):
+            part = part.strip()
+            if not part:
+                return None
+            match = _LINE_SELECTOR_RE.match(part)
+            if not match:
+                return None
+            start = int(match.group(1))
+            plus_count = match.group(2)
+            dash_end = match.group(3)
+            if plus_count is not None:
+                end = start + max(0, int(plus_count))
+            elif dash_end is not None:
+                end = None if dash_end == "" else int(dash_end) + 1
+            else:
+                end = start + 1
+            ranges.append((start, end))
+        return ranges
+
+    def _slice_lines(data: str, offset: int = 1, limit: int | None = None) -> str:
         lines = data.splitlines(keepends=True)
-        if offset > 1 or limit is not None:
-            start = max(0, offset - 1)
-            end = start + limit if limit else len(lines)
-            lines = lines[start:end]
-            data = "".join(lines)
+        start = max(0, int(offset) - 1)
+        end = start + max(0, int(limit)) if limit is not None else len(lines)
+        return "".join(lines[start:end])
+
+    def _apply_line_ranges(data: str, ranges) -> str:
+        lines = data.splitlines(keepends=True)
+        chunks = []
+        for start, end in ranges:
+            slice_start = max(0, start - 1)
+            slice_end = len(lines) if end is None else max(slice_start, end - 1)
+            chunks.extend(lines[slice_start:slice_end])
+        return "".join(chunks)
+
+    def _resolve_read_target(raw_path: str | Path):
+        p = Path(raw_path)
+        if p.exists():
+            return p, None
+        text = str(raw_path)
+        base, sep, selector = text.rpartition(":")
+        if not sep or not base:
+            return p, None
+        ranges = _parse_line_selector(selector)
+        if ranges is None:
+            return p, None
+        base_path = Path(base)
+        if base_path.exists():
+            return base_path, ranges
+        raise FileNotFoundError(
+            f"{text!r} looks like an eval read() line selector, but base file {base!r} was not found. "
+            "Use read(path, offset, limit) or a local selector like 'file.md:201-305'."
+        )
+
+    def read(path: str | Path, offset: int = 1, limit: int | None = None) -> str:
+        """Read file contents. offset/limit are 1-indexed line numbers."""
+        p, ranges = _resolve_read_target(path)
+        data = p.read_text(encoding="utf-8")
+        if ranges is not None:
+            data = _apply_line_ranges(data, ranges)
+        elif offset > 1 or limit is not None:
+            data = _slice_lines(data, offset, limit)
         preview = data[:500]
         _emit_status("read", path=str(p), chars=len(data), preview=preview)
         return data
@@ -517,20 +572,19 @@ if "__omp_prelude_loaded__" not in globals():
             return 0
         return n if n > 0 else 0
 
-    def _pool_map(items, fn):
-        """Run ``fn`` over ``items`` through a bounded thread pool.
-
-        Preserves input order, barriers until every task settles, and raises the
-        lowest-index exception if any task failed. Each task runs inside a copy
-        of the submitting thread's context so the ``_CURRENT_RID`` ContextVar
-        propagates and bridge calls (agent(), tool.*, etc.) keep working. The
-        pool width tracks ``task.maxConcurrency`` (0 = run every item at once).
-        """
+    def _pool_map(items, fn, *, concurrency=None, settled=False):
+        """Run ``fn`` over ``items`` through a bounded thread pool."""
         import concurrent.futures, contextvars
         items = list(items)
         if not items:
             return []
-        limit = _concurrency_limit()
+        if concurrency is None:
+            limit = _concurrency_limit()
+        else:
+            try:
+                limit = int(concurrency)
+            except Exception:
+                raise TypeError("concurrency must be an integer") from None
         workers = min(limit, len(items)) if limit > 0 else len(items)
         results = [None] * len(items)
         errors = {}
@@ -542,24 +596,39 @@ if "__omp_prelude_loaded__" not in globals():
             for fut in concurrent.futures.as_completed(futures):
                 i = futures[fut]
                 try:
-                    results[i] = fut.result()
+                    value = fut.result()
+                    if settled:
+                        results[i] = {"status": "fulfilled", "value": value}
+                    else:
+                        results[i] = value
                 except BaseException as exc:  # noqa: BLE001 - propagate to caller
-                    errors[i] = exc
+                    if settled:
+                        results[i] = {
+                            "status": "rejected",
+                            "reason": str(exc),
+                            "error_type": type(exc).__name__,
+                        }
+                    else:
+                        errors[i] = exc
         if errors:
             raise errors[min(errors)]
         return results
 
-    def parallel(thunks):
-        """Run zero-arg callables through a bounded pool, preserving input order.
-
-        Barriers until all finish; re-raises the lowest-index exception if any
-        thunk raised. Pool width tracks the task tool's ``task.maxConcurrency``.
-        """
+    def parallel(thunks, *, concurrency=None):
+        """Run zero-arg callables through a bounded pool, preserving input order."""
         thunks = list(thunks)
         for t in thunks:
             if not callable(t):
                 raise TypeError("parallel() expects an iterable of zero-arg callables")
-        return _pool_map(thunks, lambda t: t())
+        return _pool_map(thunks, lambda t: t(), concurrency=concurrency)
+
+    def parallel_settled(thunks, *, concurrency=None):
+        """Run zero-arg callables and return all fulfilled/rejected outcomes."""
+        thunks = list(thunks)
+        for t in thunks:
+            if not callable(t):
+                raise TypeError("parallel_settled() expects an iterable of zero-arg callables")
+        return _pool_map(thunks, lambda t: t(), concurrency=concurrency, settled=True)
 
     def pipeline(items, *stages):
         """Map items left-to-right through one-arg stage callables.

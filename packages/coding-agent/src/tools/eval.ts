@@ -7,7 +7,14 @@ import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_HEARTBEAT_OP } from "../eval/heartbeat";
 import { IdleTimeout } from "../eval/idle-timeout";
 import { defaultEvalSessionId } from "../eval/session-id";
-import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import type {
+	EvalCellResult,
+	EvalDisplayOutput,
+	EvalFailureInfo,
+	EvalLanguage,
+	EvalStatusEvent,
+	EvalToolDetails,
+} from "../eval/types";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
@@ -127,6 +134,28 @@ function detailsNotice(cells: ResolvedEvalCell[]): string | undefined {
 
 function timeoutSecondsFromMs(timeoutMs: number): number {
 	return clampTimeout("eval", timeoutMs / 1000);
+}
+
+function formatEvalFailure(cell: ResolvedEvalCell, failure: EvalFailureInfo): string {
+	const title = cell.title ? ` "${cell.title}"` : "";
+	const lines = [
+		`Python eval failure in cell ${cell.index + 1}${title}`,
+		`cause: ${failure.cause}`,
+		`message: ${failure.message}`,
+	];
+	if (failure.sessionId || failure.kernelSession || failure.runId || failure.kernelId) {
+		lines.push(
+			`context: session=${failure.sessionId ?? "unknown"} kernelSession=${failure.kernelSession ?? "unknown"} run=${failure.runId ?? "unknown"} kernel=${failure.kernelId ?? "unknown"}`,
+		);
+	}
+	if (failure.artifactId) {
+		lines.push(`artifact: artifact://${failure.artifactId}`);
+	}
+	lines.push(`kernelKilled: ${failure.kernelKilled === true ? "yes" : "no"}`);
+	lines.push(`sideEffects: ${failure.sideEffects}`);
+	lines.push(`recovery: ${failure.recovery}`);
+	lines.push("partial output/status/display events emitted before failure are preserved above and in details.");
+	return lines.join("\n");
 }
 
 async function resolveBackend(session: ToolSession, language: EvalLanguage): Promise<ResolvedBackend> {
@@ -429,6 +458,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					cellResult.durationMs = durationMs;
 					cellResult.statusEvents = cellStatusEvents.length > 0 ? cellStatusEvents : undefined;
 					cellResult.hasMarkdown = cellHasMarkdown || undefined;
+					cellResult.failure = result.failure;
 
 					let combinedCellOutput = "";
 					if (cells.length > 1) {
@@ -453,12 +483,17 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					if (result.cancelled) {
 						cellResult.status = "error";
 						pushUpdate();
-						const errorMsg = result.output || "Command aborted";
+						const failureText = result.failure ? formatEvalFailure(cell, result.failure) : undefined;
+						const fallbackText = result.output || "Command aborted";
 						const combinedOutput = cellOutputs.join("\n\n");
 						const outputText =
 							cells.length > 1
-								? `${combinedOutput}\n\nCell ${i + 1} aborted: ${errorMsg}`
-								: combinedOutput || errorMsg;
+								? `${combinedOutput}\n\nCell ${i + 1} aborted:\n${failureText ?? fallbackText}`
+								: failureText
+									? combinedOutput
+										? `${combinedOutput}\n\n${failureText}`
+										: failureText
+									: combinedOutput || fallbackText;
 
 						const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 						const details: EvalToolDetails = {
@@ -468,6 +503,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
+							failure: result.failure,
 						};
 						if (notice) details.notice = notice;
 
@@ -481,12 +517,17 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						cellResult.status = "error";
 						pushUpdate();
 						const combinedOutput = cellOutputs.join("\n\n");
+						const failureText = result.failure ? formatEvalFailure(cell, result.failure) : undefined;
 						const outputText =
 							cells.length > 1
-								? `${combinedOutput}\n\nCell ${i + 1} failed (exit code ${result.exitCode}). Earlier cells succeeded—their state persists. Fix only cell ${i + 1}.`
-								: combinedOutput
-									? `${combinedOutput}\n\nCommand exited with code ${result.exitCode}`
-									: `Command exited with code ${result.exitCode}`;
+								? `${combinedOutput}\n\nCell ${i + 1} failed (exit code ${result.exitCode}). Earlier cells succeeded—their state persists. Fix only cell ${i + 1}.${failureText ? `\n\n${failureText}` : ""}`
+								: failureText
+									? combinedOutput
+										? `${combinedOutput}\n\n${failureText}`
+										: failureText
+									: combinedOutput
+										? `${combinedOutput}\n\nCommand exited with code ${result.exitCode}`
+										: `Command exited with code ${result.exitCode}`;
 
 						const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 						const details: EvalToolDetails = {
@@ -496,6 +537,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
 							statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
 							isError: true,
+							failure: result.failure,
 						};
 						if (notice) details.notice = notice;
 

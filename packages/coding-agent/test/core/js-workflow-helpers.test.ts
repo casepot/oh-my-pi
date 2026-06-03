@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as z from "zod/v4";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs, type JsResult } from "../../src/eval/js/executor";
 
@@ -94,5 +96,88 @@ describe("executeJs workflow helpers", () => {
 		);
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("[null,777,true]");
+	});
+	it("supports positional read offsets and local line selectors", async () => {
+		const filePath = path.join(tempDir.path(), "lines.txt");
+		await Bun.write(filePath, "a\nb\nc\nd\n");
+		const session = baseSession(tempDir.path(), sessionFile);
+
+		const result = await executeJs(
+			'const positional = await read("lines.txt", 2, 2); const selector = await read("lines.txt:3-4"); return JSON.stringify([positional, selector]);',
+			{ sessionId: `js-read:${tempDir.path()}`, session, sessionFile, cwd: tempDir.path() },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output.trim())).toEqual(["b\nc", "c\nd"]);
+	});
+
+	it("parallel_settled preserves sibling successes and failure order", async () => {
+		const session = baseSession(tempDir.path(), sessionFile);
+		const result = await executeJs(
+			'const r = await parallel_settled([async () => "a", async () => { throw new Error("boom"); }, async () => "c"]); return JSON.stringify(r);',
+			{ sessionId: `js-settled:${tempDir.path()}`, session, sessionFile },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output.trim())).toEqual([
+			{ status: "fulfilled", value: "a" },
+			{ status: "rejected", reason: "boom", error_type: "Error" },
+			{ status: "fulfilled", value: "c" },
+		]);
+	});
+
+	it("parallel throws after siblings settle so side effects are not dropped mid-flight", async () => {
+		const session = baseSession(tempDir.path(), sessionFile);
+		const result = await executeJs(
+			[
+				"const seen = [];",
+				"try {",
+				"  await parallel([",
+				"    async () => { throw new Error('boom'); },",
+				"    async () => { await Bun.sleep(20); seen.push('sibling'); },",
+				"  ], { concurrency: 2 });",
+				"} catch (error) { seen.push(error.message); }",
+				"return JSON.stringify(seen);",
+			].join("\n"),
+			{ sessionId: `js-parallel-error-settles:${tempDir.path()}`, session, sessionFile },
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output.trim())).toEqual(["sibling", "boom"]);
+	});
+
+	it("normalizes null optional tool fields only when omission validates", async () => {
+		const seen: unknown[] = [];
+		const captureSchema = z
+			.object({
+				_i: z.string().optional(),
+				skip: z.number().optional(),
+				intentional: z.null().optional(),
+			})
+			.strict();
+		const captureTool: AgentTool<typeof captureSchema> = {
+			name: "capture",
+			label: "Capture",
+			description: "Capture arguments",
+			parameters: captureSchema,
+			strict: true,
+			execute: async (_id, params) => {
+				seen.push(params);
+				return { content: [{ type: "text", text: JSON.stringify(params) }] };
+			},
+		};
+		const session = baseSession(tempDir.path(), sessionFile, {
+			getToolByName: name => (name === "capture" ? captureTool : undefined),
+		});
+
+		const result = await executeJs("return await tool.capture({ skip: null, intentional: null });", {
+			sessionId: `js-tool-null:${tempDir.path()}`,
+			session,
+			sessionFile,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.output.trim())).toEqual({ _i: "js prelude", intentional: null });
+		expect(seen).toEqual([{ _i: "js prelude", intentional: null }]);
 	});
 });

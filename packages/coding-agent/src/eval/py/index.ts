@@ -54,6 +54,7 @@ export default {
 			outputLines: result.outputLines,
 			outputBytes: result.outputBytes,
 			displayOutputs: result.displayOutputs,
+			failure: result.failure,
 		};
 	},
 } satisfies ExecutorBackend;

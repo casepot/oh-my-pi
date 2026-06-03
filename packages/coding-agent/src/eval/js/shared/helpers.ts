@@ -46,18 +46,63 @@ export interface HelperBundle {
 
 const utf8Encoder = new TextEncoder();
 
+function isEnoent(error: unknown): boolean {
+	return error instanceof Error && "code" in error && (error as { code?: unknown }).code === "ENOENT";
+}
+
+function parseReadSelector(rawPath: string): { path: string; ranges: Array<{ start: number; end?: number }> } | null {
+	const colon = rawPath.lastIndexOf(":");
+	if (colon <= 0) return null;
+	const selector = rawPath.slice(colon + 1);
+	const ranges: Array<{ start: number; end?: number }> = [];
+	for (const rawPart of selector.split(",")) {
+		const part = rawPart.trim();
+		const match = /^([1-9]\d*)(?:\+(\d+)|-(\d*)?)?$/.exec(part);
+		if (!match) return null;
+		const start = Number(match[1]);
+		const plusCount = match[2];
+		const dashEnd = match[3];
+		if (plusCount !== undefined) {
+			ranges.push({ start, end: start + Math.max(0, Number(plusCount)) });
+		} else if (dashEnd !== undefined) {
+			ranges.push(dashEnd === "" ? { start } : { start, end: Number(dashEnd) + 1 });
+		} else {
+			ranges.push({ start, end: start + 1 });
+		}
+	}
+	return { path: rawPath.slice(0, colon), ranges };
+}
+
+function sliceTextLines(text: string, offset: number, limit: number | undefined): string {
+	const lines = text.split(/\r?\n/);
+	const start = Math.max(0, Math.trunc(offset) - 1);
+	const end = limit !== undefined ? start + Math.max(0, Math.trunc(limit)) : lines.length;
+	return lines.slice(start, end).join("\n");
+}
+
+function sliceTextRanges(text: string, ranges: Array<{ start: number; end?: number }>): string {
+	const lines = text.split(/\r?\n/);
+	const chunks: string[] = [];
+	for (const range of ranges) {
+		const start = Math.max(0, range.start - 1);
+		const end = range.end === undefined ? lines.length : Math.max(start, range.end - 1);
+		chunks.push(...lines.slice(start, end));
+	}
+	return chunks.join("\n");
+}
+
 export function createHelpers(ctx: HelperContext): HelperBundle {
 	return {
 		read: async (rawPath, options = {}) => {
-			const { filePath, file, size } = await resolveRegularFile(ctx, rawPath);
+			const resolved = await resolveRegularFile(ctx, rawPath);
+			const { filePath, file, size, selectorRanges } = resolved;
 			let text = await file.text();
 			const offset = typeof options.offset === "number" ? options.offset : 1;
 			const limit = typeof options.limit === "number" ? options.limit : undefined;
-			if (offset > 1 || limit !== undefined) {
-				const lines = text.split(/\r?\n/);
-				const start = Math.max(0, offset - 1);
-				const end = limit !== undefined ? start + limit : lines.length;
-				text = lines.slice(start, end).join("\n");
+			if (selectorRanges) {
+				text = sliceTextRanges(text, selectorRanges);
+			} else if (offset > 1 || limit !== undefined) {
+				text = sliceTextLines(text, offset, limit);
 			}
 			ctx.emitStatus({ op: "read", path: filePath, bytes: size, chars: text.length });
 			return text;
@@ -210,17 +255,46 @@ function resolvePath(ctx: HelperContext, value: string): string {
 async function resolveRegularFile(
 	ctx: HelperContext,
 	rawPath: string,
-): Promise<{ filePath: string; file: Bun.BunFile; size: number }> {
+): Promise<{
+	filePath: string;
+	file: Bun.BunFile;
+	size: number;
+	selectorRanges?: Array<{ start: number; end?: number }>;
+}> {
 	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(rawPath)) {
 		throw new ToolError(`Protocol paths are not supported by read(): ${rawPath}`);
 	}
-	const filePath = resolvePath(ctx, rawPath);
-	const file = Bun.file(filePath);
-	const stat = await file.stat();
-	if (stat.isDirectory()) {
-		throw new ToolError(`Directory paths are not supported by read(): ${filePath}`);
+	const directPath = resolvePath(ctx, rawPath);
+	let file = Bun.file(directPath);
+	try {
+		const stat = await file.stat();
+		if (stat.isDirectory()) {
+			throw new ToolError(`Directory paths are not supported by read(): ${directPath}`);
+		}
+		return { filePath: directPath, file, size: stat.size };
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
 	}
-	return { filePath, file, size: stat.size };
+	const selector = parseReadSelector(rawPath);
+	if (!selector) {
+		throw new ToolError(`File not found: ${directPath}`);
+	}
+	const selectorPath = resolvePath(ctx, selector.path);
+	file = Bun.file(selectorPath);
+	try {
+		const stat = await file.stat();
+		if (stat.isDirectory()) {
+			throw new ToolError(`Directory paths are not supported by read(): ${selectorPath}`);
+		}
+		return { filePath: selectorPath, file, size: stat.size, selectorRanges: selector.ranges };
+	} catch (error) {
+		if (isEnoent(error)) {
+			throw new ToolError(
+				`${rawPath} looks like an eval read() line selector, but base file ${selector.path} was not found. Use read(path, offset, limit) or a local selector like 'file.md:201-305'.`,
+			);
+		}
+		throw error;
+	}
 }
 
 function getDataSize(data: string | Blob | ArrayBuffer | ArrayBufferView): number {

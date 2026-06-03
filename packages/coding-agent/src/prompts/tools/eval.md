@@ -22,14 +22,14 @@ Cell fields:
 </instruction>
 
 <prelude>
-{{#ifAll py js}}Same helpers in both runtimes with the same positional argument order. Python: trailing options as keyword args. JavaScript: trailing options as a trailing object literal. JavaScript helpers are async and `await`able; Python helpers run synchronously.{{else}}{{#if py}}Helpers run synchronously. Trailing options are keyword arguments.{{/if}}{{#if js}}Helpers are async and `await`able. Trailing options are a final object literal.{{/if}}{{/ifAll}}
+{{#ifAll py js}}Same helpers in both runtimes with the same positional argument order. Python helpers run synchronously; JavaScript helpers are async and `await`able. Python accepts trailing options as keyword args; JavaScript accepts a trailing options object where noted.{{else}}{{#if py}}Helpers run synchronously. Trailing options are keyword arguments.{{/if}}{{#if js}}Helpers are async and `await`able. Trailing options are a final object literal.{{/if}}{{/ifAll}}
 ```
 display(value) → None
     Render a value in the current cell output.
 print(value, ...) → None
     Print to the cell's text output.
 read(path, offset?=1, limit?=None) → str
-    Read file contents as text. offset/limit are 1-indexed line bounds.
+    Read file contents as text. offset/limit are 1-indexed line bounds. Local line selectors like `"file.md:201-305"` also work; if the base file is missing, the error says it was parsed as a selector.
 write(path, content) → str
     Write content to a file (creates parent directories). Returns the resolved path.
 append(path, content) → str
@@ -43,13 +43,15 @@ env(key?=None, value?=None) → str | None | dict
 output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | dict | list[dict]
     Read task/agent output by ID. Single id returns text/dict; multiple ids return a list.
 tool.<name>(args) → unknown
-    Invoke any session tool by name. `args` is the tool's parameter object.
+    Invoke any session tool by name. `args` is the tool's parameter object. Null/None optional fields are omitted when the tool schema rejects null but accepts omission.
 llm(prompt, model?="default", system?=None, schema?=None) → str | dict
     Oneshot, stateless LLM call (no history, no tools). `model` picks a tier: "smol" (fast), "default" (this session's model), "slow" (most capable). Pass `system` for a system prompt. Pass a JSON-Schema `schema` to force structured output and get the parsed object back; otherwise returns the completion text.
 agent(prompt, agent_type?="task", model?=None, context?=None, label?=None, schema?=None) → str | dict
     Run a subagent and return its final output. Defaults to the bundled "task" agent; pass `agent_type`/`agentType` for another discovered agent. Pass a JSON-Schema `schema` to force structured output and get the parsed object back.
 parallel(thunks) → list
-    Run thunks (callables) through a bounded pool, preserving input order. The pool is as wide as a `task` tool batch (tracks the `task.maxConcurrency` setting), so fan out as wide as the work divides — don't pre-shrink it. Barrier: returns once all finish; a thunk that throws propagates.
+    Run thunks (callables) through a bounded pool, preserving input order. The pool is as wide as a `task` tool batch (tracks `task.maxConcurrency`), so fan out as wide as the work divides. Barrier: returns once all finish; a thunk that throws propagates after siblings settle.
+parallel_settled(thunks) → list
+    Same scheduling/order as `parallel()`, but returns per-child `{status:"fulfilled", value}` or `{status:"rejected", reason, error_type}` records so one failure cannot erase successful siblings.
 pipeline(items, ...stages) → list
     Map each item through stages left-to-right; a barrier runs between stages (every item clears stage N before stage N+1). Each stage is a one-arg callable: stage 1 gets the original item, later stages get the previous result. Same pool width as parallel().
 log(message) → None

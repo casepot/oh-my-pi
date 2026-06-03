@@ -16,6 +16,20 @@ export type EvalDisplayOutput =
 	| { type: "image"; data: string; mimeType: string }
 	| { type: "markdown"; text?: string }
 	| { type: "status"; event: EvalStatusEvent };
+export type EvalFailureCause = "timeout" | "reset" | "shutdown" | "crash" | "abort" | "error";
+
+export interface EvalFailureInfo {
+	cause: EvalFailureCause;
+	message: string;
+	runId?: string;
+	kernelId?: string;
+	sessionId?: string;
+	kernelSession?: string;
+	artifactId?: string;
+	kernelKilled?: boolean;
+	sideEffects: "none" | "possible" | "unknown";
+	recovery: string;
+}
 
 /** Per-cell execution result for transcript rendering. */
 export interface EvalCellResult {
@@ -29,6 +43,7 @@ export interface EvalCellResult {
 	exitCode?: number;
 	statusEvents?: EvalStatusEvent[];
 	hasMarkdown?: boolean;
+	failure?: EvalFailureInfo;
 }
 
 /** Tool result detail object surfaced to the UI/transcript. */
@@ -45,4 +60,5 @@ export interface EvalToolDetails {
 	languages?: EvalLanguage[];
 	/** Optional human-readable notice (e.g. fallback explanation). */
 	notice?: string;
+	failure?: EvalFailureInfo;
 }

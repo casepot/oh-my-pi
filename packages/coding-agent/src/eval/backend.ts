@@ -1,5 +1,5 @@
 import type { ToolSession } from "../tools";
-import type { EvalDisplayOutput, EvalLanguage, EvalStatusEvent } from "./types";
+import type { EvalDisplayOutput, EvalFailureInfo, EvalLanguage, EvalStatusEvent } from "./types";
 
 /** Per-cell execute() options. */
 export interface ExecutorBackendExecOptions {
@@ -43,6 +43,7 @@ export interface ExecutorBackendResult {
 	outputLines: number;
 	outputBytes: number;
 	displayOutputs: EvalDisplayOutput[];
+	failure?: EvalFailureInfo;
 }
 
 /** Pluggable language backend for the eval tool. */

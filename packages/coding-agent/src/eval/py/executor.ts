@@ -7,6 +7,7 @@ import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
 import { EVAL_HEARTBEAT_OP } from "../heartbeat";
 import type { JsStatusEvent } from "../js/shared/types";
+import type { EvalFailureCause, EvalFailureInfo } from "../types";
 import {
 	checkPythonKernelAvailability,
 	type KernelDisplayOutput,
@@ -78,6 +79,7 @@ export interface PythonExecutorOptions {
 }
 
 export interface PythonKernelExecutor {
+	readonly id?: string;
 	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
 }
 
@@ -104,6 +106,7 @@ export interface PythonResult {
 	displayOutputs: KernelDisplayOutput[];
 	/** Whether stdin was requested */
 	stdinRequested: boolean;
+	failure?: EvalFailureInfo;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +240,54 @@ function formatTimeoutAnnotation(timeoutMs?: number): string | undefined {
 	const secs = Math.max(1, Math.round(timeoutMs / 1000));
 	return `Command timed out after ${secs} seconds`;
 }
+function failureRecovery(cause: EvalFailureCause, kernelKilled: boolean): string {
+	if (kernelKilled) {
+		return "Kernel was killed and will be recreated on the next Python eval. Treat filesystem/process side effects from the interrupted cell as uncertain.";
+	}
+	if (cause === "reset") {
+		return "A reset was already active for this session. Retry after the reset completes; later evals should acquire a fresh kernel.";
+	}
+	if (cause === "timeout") {
+		return "The kernel was interrupted. Retry the cell or run a reset=True cell if Python state appears corrupted.";
+	}
+	if (cause === "abort") {
+		return "The caller aborted execution; retry only if the original cancellation is no longer active.";
+	}
+	return "Retry with reset=True if the session kernel state is suspect.";
+}
+
+function buildPythonFailure(
+	cause: EvalFailureCause,
+	message: string,
+	options: PythonExecutorOptions | undefined,
+	extra: Partial<EvalFailureInfo> = {},
+): EvalFailureInfo {
+	const kernelKilled = extra.kernelKilled === true;
+	const sessionId = options?.sessionId;
+	const cwd = options?.cwd;
+	return {
+		cause,
+		message,
+		runId: extra.runId,
+		kernelId: extra.kernelId,
+		sessionId,
+		kernelSession: sessionId && cwd ? `${sessionId} @ ${cwd}` : sessionId,
+		artifactId: options?.artifactId,
+		kernelKilled,
+		sideEffects: extra.sideEffects ?? (cause === "reset" ? "none" : "possible"),
+		recovery: extra.recovery ?? failureRecovery(cause, kernelKilled),
+	};
+}
+
+function classifyPythonExecutorFailure(error: unknown): EvalFailureCause {
+	const message = error instanceof Error ? error.message : String(error);
+	const lower = message.toLowerCase();
+	if (lower.includes("reset already in progress") || lower.includes("reset in progress")) return "reset";
+	if (lower.includes("timed out") || lower.includes("timeout")) return "timeout";
+	if (lower.includes("abort") || lower.includes("cancel")) return "abort";
+	if (lower.includes("not running") || lower.includes("exited") || lower.includes("shutdown")) return "shutdown";
+	return "crash";
+}
 
 function formatKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKilled: boolean): string {
 	const secs = timeoutMs === undefined ? undefined : Math.max(1, Math.round(timeoutMs / 1000));
@@ -247,10 +298,18 @@ function formatKernelTimeoutAnnotation(timeoutMs: number | undefined, kernelKill
 	return `eval cell timed out after ${duration}; kernel interrupted but remains running. Reset the kernel via { reset: true } if state appears corrupted.`;
 }
 
-function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): PythonResult {
+function createCancelledPythonResult(
+	timedOut: boolean,
+	timeoutMs?: number,
+	options?: PythonExecutorOptions,
+): PythonResult {
 	const output = timedOut ? (formatTimeoutAnnotation(timeoutMs) ?? "Command timed out") : "";
 	const outputBytes = Buffer.byteLength(output, "utf-8");
 	const outputLines = output.length > 0 ? 1 : 0;
+	const failure = buildPythonFailure(timedOut ? "timeout" : "abort", output || "Command aborted", options, {
+		kernelKilled: false,
+		sideEffects: "none",
+	});
 	return {
 		output,
 		exitCode: undefined,
@@ -262,6 +321,29 @@ function createCancelledPythonResult(timedOut: boolean, timeoutMs?: number): Pyt
 		outputBytes,
 		displayOutputs: [],
 		stdinRequested: false,
+		failure,
+	};
+}
+function createFailedPythonResult(error: unknown, options?: PythonExecutorOptions): PythonResult {
+	const message = error instanceof Error ? error.message : String(error);
+	const failure = buildPythonFailure(classifyPythonExecutorFailure(error), message, options, {
+		kernelKilled: false,
+		sideEffects: "none",
+	});
+	const output = `Python eval failure [${failure.cause}]: ${message}\nAction: ${failure.recovery}`;
+	const outputBytes = Buffer.byteLength(output, "utf-8");
+	return {
+		output,
+		exitCode: 1,
+		cancelled: false,
+		truncated: false,
+		totalLines: output.split("\n").length,
+		totalBytes: outputBytes,
+		outputLines: output.split("\n").length,
+		outputBytes,
+		displayOutputs: [],
+		stdinRequested: false,
+		failure,
 	};
 }
 
@@ -488,12 +570,8 @@ async function executeWithKernel(
 	const deadlineMs = getExecutionDeadlineMs(options);
 	let executionTimeoutMs: number | undefined;
 
-	// Collect every display output and, for status events, stream them live so
-	// long-running bridge helpers (e.g. `agent()`) surface progress mid-cell.
 	const collectDisplay = (output: KernelDisplayOutput) => {
 		if (output.type === "status") {
-			// Heartbeats are pure idle-watchdog keepalives: forward them so the
-			// eval tool re-arms its timer, but never store or render them.
 			options?.onStatus?.(output.event);
 			if (output.event.op === EVAL_HEARTBEAT_OP) return;
 		}
@@ -523,15 +601,25 @@ async function executeWithKernel(
 		});
 
 		if (result.cancelled) {
-			const annotation = result.timedOut
+			const message = result.timedOut
 				? formatKernelTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs, result.kernelKilled ?? false)
-				: undefined;
+				: (result.failure?.message ?? "Python execution aborted");
+			const failure =
+				result.failure ??
+				buildPythonFailure(result.timedOut ? "timeout" : "abort", message, options, {
+					runId,
+					kernelId: kernel.id,
+					kernelKilled: result.kernelKilled ?? false,
+					sideEffects: "possible",
+				});
+			const enrichedFailure = buildPythonFailure(failure.cause, failure.message, options, failure);
 			return {
 				exitCode: undefined,
 				cancelled: true,
 				displayOutputs,
 				stdinRequested: result.stdinRequested,
-				...(await sink.dump(annotation)),
+				failure: enrichedFailure,
+				...(await sink.dump(message)),
 			};
 		}
 
@@ -556,11 +644,19 @@ async function executeWithKernel(
 	} catch (err) {
 		if (isCancellationError(err) || options?.signal?.aborted) {
 			const timedOut = isTimedOutCancellation(err, options?.signal);
+			const message = timedOut ? "Command timed out" : "Command aborted";
+			const failure = buildPythonFailure(timedOut ? "timeout" : "abort", message, options, {
+				runId,
+				kernelId: kernel.id,
+				kernelKilled: false,
+				sideEffects: "none",
+			});
 			return {
 				exitCode: undefined,
 				cancelled: true,
 				displayOutputs,
 				stdinRequested: false,
+				failure,
 				...(await sink.dump(
 					timedOut ? formatTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs) : undefined,
 				)),
@@ -689,8 +785,12 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		return await executeOnSession(code, cwd, executionOptions);
 	} catch (err) {
 		if (isCancellationError(err) || executionOptions.signal?.aborted) {
-			return createCancelledPythonResult(isTimedOutCancellation(err, executionOptions.signal));
+			return createCancelledPythonResult(
+				isTimedOutCancellation(err, executionOptions.signal),
+				undefined,
+				executionOptions,
+			);
 		}
-		throw err;
+		return createFailedPythonResult(err, executionOptions);
 	}
 }

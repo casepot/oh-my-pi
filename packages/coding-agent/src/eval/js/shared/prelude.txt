@@ -4,7 +4,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	const toOptions = value => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
 	const callHelper = (name, ...args) => globalThis.__omp_helpers__[name](...args);
 
-	const read = (path, opts = {}) => callHelper("read", path, toOptions(opts));
+	const read = (path, offsetOrOptions = 1, limit = null) => {
+		const opts =
+			offsetOrOptions && typeof offsetOrOptions === "object" && !Array.isArray(offsetOrOptions)
+				? toOptions(offsetOrOptions)
+				: { offset: offsetOrOptions, ...(limit === null || limit === undefined ? {} : { limit }) };
+		return callHelper("read", path, opts);
+	};
 	const write = async (path, data) => callHelper("writeFile", path, data);
 	const append = (path, content) => callHelper("append", path, content);
 	const sort = (text, opts = {}) => callHelper("sortText", text, toOptions(opts));
@@ -68,29 +74,60 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	};
 
-	const __pool = async (items, fn) => {
+	const __pool = async (items, fn, opts = {}) => {
 		const list = Array.from(items ?? []);
 		if (list.length === 0) return [];
-		const limit = await __concurrencyLimit();
+		const requested = Number(opts.concurrency ?? 0);
+		const limit = Number.isFinite(requested) && requested > 0 ? Math.trunc(requested) : await __concurrencyLimit();
 		const concurrency = limit > 0 ? Math.min(limit, list.length) : list.length;
 		const results = new Array(list.length);
+		const errors = new Array(list.length);
 		let next = 0;
 		const worker = async () => {
 			while (true) {
 				const index = next++;
 				if (index >= list.length) return;
-				results[index] = await fn(list[index], index);
+				try {
+					const value = await fn(list[index], index);
+					results[index] = opts.settled ? { status: "fulfilled", value } : value;
+				} catch (error) {
+					if (opts.settled) {
+						results[index] = {
+							status: "rejected",
+							reason: error instanceof Error ? error.message : String(error),
+							error_type: error instanceof Error ? error.name : typeof error,
+						};
+					} else {
+						errors[index] = error;
+					}
+				}
 			}
 		};
 		await Promise.all(Array.from({ length: concurrency }, () => worker()));
+		const firstError = errors.find(error => error !== undefined);
+		if (firstError !== undefined) throw firstError;
 		return results;
 	};
 
-	const parallel = async thunks =>
-		__pool(thunks, (thunk, index) => {
-			if (typeof thunk !== "function") throw new TypeError("parallel() expects an iterable of functions");
-			return thunk(index);
-		});
+	const parallel = async (thunks, opts = {}) =>
+		__pool(
+			thunks,
+			(thunk, index) => {
+				if (typeof thunk !== "function") throw new TypeError("parallel() expects an iterable of functions");
+				return thunk(index);
+			},
+			toOptions(opts),
+		);
+
+	const parallel_settled = async (thunks, opts = {}) =>
+		__pool(
+			thunks,
+			(thunk, index) => {
+				if (typeof thunk !== "function") throw new TypeError("parallel_settled() expects an iterable of functions");
+				return thunk(index);
+			},
+			{ ...toOptions(opts), settled: true },
+		);
 
 	const pipeline = async (items, ...stages) => {
 		let current = Array.from(items ?? []);
@@ -152,6 +189,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.output = output;
 	globalThis.agent = agent;
 	globalThis.parallel = parallel;
+	globalThis.parallel_settled = parallel_settled;
 	globalThis.pipeline = pipeline;
 	globalThis.log = log;
 	globalThis.phase = phase;

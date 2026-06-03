@@ -14,6 +14,7 @@ import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { $ } from "bun";
 import { Settings } from "../../config/settings";
+import type { EvalFailureInfo } from "../types";
 import { type KernelDisplayOutput, renderKernelDisplay } from "./display";
 import { PYTHON_PRELUDE } from "./prelude";
 import RUNNER_SCRIPT from "./runner.py" with { type: "text" };
@@ -81,6 +82,7 @@ export interface KernelExecuteResult {
 	 * kernel died unexpectedly). When false, the kernel remains reusable.
 	 */
 	kernelKilled?: boolean;
+	failure?: EvalFailureInfo;
 }
 
 export interface KernelShutdownResult {
@@ -100,6 +102,7 @@ interface KernelStartOptions extends KernelLifecycleOptions {
 interface KernelShutdownOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
+	cause?: EvalFailureInfo["cause"];
 }
 
 export interface PythonKernelAvailability {
@@ -119,6 +122,25 @@ function createAbortError(name: "AbortError" | "TimeoutError", message: string):
 	const err = new Error(message);
 	err.name = name;
 	return err;
+}
+
+function createKernelFailure(
+	cause: EvalFailureInfo["cause"],
+	message: string,
+	options: { runId?: string; kernelId?: string; kernelKilled?: boolean },
+): EvalFailureInfo {
+	const kernelKilled = options.kernelKilled === true;
+	return {
+		cause,
+		message,
+		runId: options.runId,
+		kernelId: options.kernelId,
+		kernelKilled,
+		sideEffects: cause === "abort" ? "unknown" : "possible",
+		recovery: kernelKilled
+			? "Kernel was killed; later Python eval calls will start a fresh kernel. Treat side effects from the interrupted cell as uncertain."
+			: "Kernel may still be reusable. Reset with reset=True if state appears corrupted.",
+	};
 }
 
 function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: string): void {
@@ -186,6 +208,8 @@ interface Frame {
 }
 
 interface PendingExecution {
+	id: string;
+	kernelId: string;
 	resolve: (result: KernelExecuteResult) => void;
 	options?: KernelExecuteOptions;
 	status: "ok" | "error";
@@ -197,6 +221,7 @@ interface PendingExecution {
 	kernelKilled: boolean;
 	settled: boolean;
 	escalationTimer?: NodeJS.Timeout;
+	failure?: EvalFailureInfo;
 }
 
 export class PythonKernel {
@@ -260,7 +285,10 @@ export class PythonKernel {
 		kernel.#exitedPromise = proc.exited;
 		void kernel.#exitedPromise.then(code => {
 			kernel.#alive = false;
-			kernel.#abortPendingExecutions(`Python kernel exited with code ${code}`, { kernelKilled: true });
+			kernel.#abortPendingExecutions(`Python kernel exited with code ${code}`, {
+				kernelKilled: true,
+				cause: "crash",
+			});
 		});
 
 		kernel.#startReader(proc.stdout as ReadableStream<Uint8Array>);
@@ -292,6 +320,8 @@ export class PythonKernel {
 		const msgId = options?.id ?? Snowflake.next();
 		const { promise, resolve } = Promise.withResolvers<KernelExecuteResult>();
 		const pending: PendingExecution = {
+			id: msgId,
+			kernelId: this.id,
 			resolve,
 			options,
 			status: "ok",
@@ -316,6 +346,7 @@ export class PythonKernel {
 				timedOut: pending.timedOut,
 				stdinRequested: pending.stdinRequested,
 				kernelKilled: pending.kernelKilled,
+				failure: pending.failure,
 			});
 		};
 
@@ -333,7 +364,12 @@ export class PythonKernel {
 				// host queue unblocks even if the runner is stuck in a
 				// non-interruptible state.
 				pending.kernelKilled = true;
-				void this.shutdown();
+				pending.failure = createKernelFailure("timeout", "Python kernel ignored interrupt and was terminated.", {
+					runId: msgId,
+					kernelId: this.id,
+					kernelKilled: true,
+				});
+				void this.shutdown({ cause: "timeout" });
 			}, INTERRUPT_ESCALATION_MS);
 			escalation.unref?.();
 			pending.escalationTimer = escalation;
@@ -408,8 +444,10 @@ export class PythonKernel {
 		if (this.#shutdownConfirmed) return { confirmed: true };
 
 		this.#alive = false;
-		this.#abortPendingExecutions("Python kernel shutdown", { kernelKilled: true });
-
+		this.#abortPendingExecutions("Python kernel shutdown", {
+			kernelKilled: true,
+			cause: options?.cause ?? "shutdown",
+		});
 		const timeoutMs = options?.timeoutMs ?? SHUTDOWN_GRACE_MS;
 		const proc = this.#proc;
 		if (!proc) {
@@ -455,15 +493,24 @@ export class PythonKernel {
 		return { confirmed };
 	}
 
-	#abortPendingExecutions(reason: string, options?: { kernelKilled?: boolean }): void {
+	#abortPendingExecutions(
+		reason: string,
+		options?: { kernelKilled?: boolean; cause?: EvalFailureInfo["cause"] },
+	): void {
 		if (this.#pending.size === 0) return;
 		const pending = Array.from(this.#pending.values());
 		this.#pending.clear();
 		const kernelKilledDefault = options?.kernelKilled ?? false;
+		const cause = options?.cause ?? "shutdown";
 		for (const entry of pending) {
 			if (entry.settled) continue;
 			entry.settled = true;
-			void entry.options?.onChunk?.(`[kernel] ${reason}\n`);
+			const kernelKilled = entry.kernelKilled || kernelKilledDefault;
+			entry.failure ??= createKernelFailure(cause, reason, {
+				runId: entry.id,
+				kernelId: entry.kernelId,
+				kernelKilled,
+			});
 			entry.resolve({
 				status: "error",
 				cancelled: true,
@@ -471,7 +518,8 @@ export class PythonKernel {
 				stdinRequested: entry.stdinRequested,
 				executionCount: entry.executionCount,
 				error: entry.error,
-				kernelKilled: entry.kernelKilled || kernelKilledDefault,
+				kernelKilled,
+				failure: entry.failure,
 			});
 		}
 	}

@@ -43,15 +43,47 @@ function getTool(session: ToolSession, name: string): AgentTool {
 	return tool;
 }
 
-function normalizeArgs(args: unknown): unknown {
-	if (!args || typeof args !== "object" || Array.isArray(args)) {
-		return args;
+type SafeParsable = {
+	safeParse(input: unknown): { success: boolean };
+};
+
+function isSafeParsable(value: unknown): value is SafeParsable {
+	return Boolean(value && typeof value === "object" && "safeParse" in value && typeof value.safeParse === "function");
+}
+
+function normalizeNullishProperties(record: Record<string, unknown>, schema: SafeParsable): Record<string, unknown> {
+	const nullishKeys = Object.keys(record).filter(key => record[key] === null || record[key] === undefined);
+	if (nullishKeys.length === 0) return record;
+	const normalized: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(record)) {
+		if (value !== null && value !== undefined) normalized[key] = value;
+	}
+	for (const key of nullishKeys) {
+		const candidate = { ...normalized, [key]: record[key] };
+		if (schema.safeParse(candidate).success) {
+			normalized[key] = record[key];
+		}
+	}
+	return normalized;
+}
+
+function normalizeArgs(args: unknown, tool: AgentTool): unknown {
+	if (args === null || args === undefined) {
+		return { _i: "js prelude" };
+	}
+	if (typeof args !== "object" || Array.isArray(args)) {
+		throw new ToolError(`tool.${tool.name}(...) expects an object of arguments or null/undefined`);
 	}
 	const record = { ...(args as Record<string, unknown>) };
 	if (record._i === undefined) {
 		record._i = "js prelude";
 	}
-	return record;
+	const schema = tool.parameters;
+	if (!isSafeParsable(schema) || schema.safeParse(record).success) {
+		return record;
+	}
+	const normalized = normalizeNullishProperties(record, schema);
+	return schema.safeParse(normalized).success ? normalized : record;
 }
 
 function summarizeToolResult(
@@ -120,7 +152,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 		return runEvalConcurrency(args, options);
 	}
 	const tool = getTool(options.session, name);
-	const normalizedArgs = normalizeArgs(args);
+	const normalizedArgs = normalizeArgs(args, tool);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	try {
 		const result = await tool.execute(toolCallId, normalizedArgs, options.signal);
