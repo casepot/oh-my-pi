@@ -1,7 +1,12 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { __resetAutoQaFlushStateForTests, flushGrievances } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	__resetAutoQaFlushStateForTests,
+	createReportToolIssueTool,
+	flushGrievances,
+} from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { hookFetch } from "@oh-my-pi/pi-utils";
 
@@ -299,5 +304,23 @@ describe("flushGrievances", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
 		expect(selectPushedIds(db).length).toBe(firstBatch);
 		expect(selectUnpushedIds(db).length).toBe(secondBatch);
+	});
+});
+
+describe("createReportToolIssueTool", () => {
+	it("acknowledges unknown tool reports without pretending they were recorded", async () => {
+		const session = {
+			settings: Settings.isolated(),
+			getActiveModelString: () => "p/model",
+		} as unknown as ToolSession;
+		const tool = createReportToolIssueTool(session, ["read"]);
+
+		const result = await tool.execute("qa-unknown", { tool: "skill", report: "registry unavailable" });
+
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: "Noted, but 'skill' is not an active built-in tool; no local QA row was recorded.",
+		});
+		expect(result.details).toEqual({ recorded: false, tool: "skill", reason: "not-active-built-in" });
 	});
 });

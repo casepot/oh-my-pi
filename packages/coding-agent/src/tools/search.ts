@@ -10,6 +10,7 @@ import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import * as z from "zod/v4";
 import { recordFileSnapshot } from "../edit/file-snapshot-store";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import type { Skill } from "../extensibility/skills";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import { InternalUrlRouter } from "../internal-urls/router";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
@@ -520,6 +521,7 @@ async function resolveInternalSearchInputs(opts: {
 	signal?: AbortSignal;
 	archiveDisplayMap: ReadonlyMap<string, string>;
 	localProtocolOptions?: LocalProtocolOptions;
+	skills?: readonly Skill[];
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -533,6 +535,7 @@ async function resolveInternalSearchInputs(opts: {
 		settings: opts.settings,
 		signal: opts.signal,
 		localProtocolOptions: opts.localProtocolOptions,
+		skills: opts.skills,
 	};
 
 	for (let idx = 0; idx < paths.length; idx++) {
@@ -583,6 +586,11 @@ export interface SearchToolDetails {
 	matchCount?: number;
 	fileCount?: number;
 	files?: string[];
+	totalMatchCount?: number;
+	totalFileCount?: number;
+	filesSearched?: number;
+	skippedFiles?: number;
+	internalLimitReached?: boolean;
 	fileMatches?: Array<{ path: string; count: number }>;
 	truncated?: boolean;
 	error?: string;
@@ -656,6 +664,7 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					settings: this.session.settings,
 					signal,
 					archiveDisplayMap,
+					skills: this.session.skills,
 					localProtocolOptions: this.session.localProtocolOptions,
 				});
 				const searchablePaths = internalResolution.paths;
@@ -723,6 +732,7 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 						multipathStatHint: " (`paths` entries must each exist relative to cwd)",
 						settings: this.session.settings,
 						signal,
+						skills: this.session.skills,
 						localProtocolOptions: this.session.localProtocolOptions,
 					});
 					searchPath = scope.searchPath;
@@ -967,19 +977,31 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 				const missingPathsForNote = missingPaths.filter(p => !archiveUnreadablePaths.has(p));
 				const missingPathsNote =
 					missingPathsForNote.length > 0 ? `Skipped missing paths: ${missingPathsForNote.join(", ")}` : undefined;
+				const capNote = result.limitReached
+					? `Search stopped after the internal ${INTERNAL_TOTAL_CAP}-match safety cap; narrow paths/pattern before concluding later files do not match.`
+					: undefined;
 				const warningNote =
-					[missingPathsNote, archiveNote].filter((s): s is string => Boolean(s)).join("\n") || undefined;
+					[missingPathsNote, archiveNote, capNote].filter((s): s is string => Boolean(s)).join("\n") || undefined;
 				if (selectedMatches.length === 0) {
+					const skippedWindowNote =
+						totalFiles > 0 && skipFiles >= totalFiles
+							? `No matches found in selected file window; search found ${totalFiles} matching file${totalFiles === 1 ? "" : "s"}. Lower skip or use skip=0.`
+							: "No matches found";
 					const details: SearchToolDetails = {
 						scopePath,
 						searchPath,
 						matchCount: 0,
+						totalMatchCount: result.totalMatches,
 						fileCount: 0,
+						totalFileCount: totalFiles,
+						filesSearched: result.filesSearched,
+						skippedFiles: skipFiles || undefined,
 						files: [],
-						truncated: false,
+						truncated: Boolean(result.limitReached),
+						internalLimitReached: result.limitReached || undefined,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
-					const text = warningNote ? `No matches found\n${warningNote}` : "No matches found";
+					const text = warningNote ? `${skippedWindowNote}\n${warningNote}` : skippedWindowNote;
 					return toolResult(details).text(text).done();
 				}
 				const outputLines: string[] = [];
@@ -1101,6 +1123,10 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					searchPath,
 					matchCount: selectedMatches.length,
 					fileCount: fileList.length,
+					totalMatchCount: result.totalMatches,
+					totalFileCount: totalFiles,
+					filesSearched: result.filesSearched,
+					skippedFiles: skipFiles || undefined,
 					files: fileList,
 					fileMatches: fileList.map(path => ({
 						path,
@@ -1109,6 +1135,7 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					truncated,
 					fileLimitReached: fileLimitReached ? DEFAULT_FILE_LIMIT : undefined,
 					perFileLimitReached: perFileLimitReached ? perFileMatchCap : undefined,
+					internalLimitReached: result.limitReached || undefined,
 					displayContent: displayText,
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 				};

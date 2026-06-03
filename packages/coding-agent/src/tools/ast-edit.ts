@@ -232,6 +232,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				internalUrlAction: "rewrite",
 				settings: this.session.settings,
 				signal,
+				skills: this.session.skills,
 				localProtocolOptions: this.session.localProtocolOptions,
 			});
 			const { searchPath: resolvedSearchPath, scopePath, isDirectory, multiTargets, globFilter } = scope;

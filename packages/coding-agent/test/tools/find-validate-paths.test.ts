@@ -3,9 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { Settings } from "../../src/config/settings";
 import type { RenderResultOptions } from "../../src/extensibility/custom-tools/types";
 import { getThemeByName, initTheme, type Theme } from "../../src/modes/theme/theme";
-import { findToolRenderer } from "../../src/tools/find";
+import type { ToolSession } from "../../src/tools";
+import { FindTool, findToolRenderer } from "../../src/tools/find";
 import { expandDelimitedPathEntries, parseFindPattern, splitDelimitedPathEntry } from "../../src/tools/path-utils";
 
 let uiTheme: Theme;
@@ -98,6 +100,43 @@ describe("delimited path expansion", () => {
 				splitter: parseFindPattern,
 			}),
 		).toEqual(["apps/**/*.txt", "packages/**/*.txt"]);
+	});
+});
+
+describe("find diagnostics", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "find-diagnostics-"));
+		await Bun.write(path.join(tempDir, "a.txt"), "a\n");
+		await Bun.write(path.join(tempDir, "b.txt"), "b\n");
+	});
+
+	afterEach(async () => {
+		await fs.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("surfaces clamped limits in model text and structured details", async () => {
+		const session = {
+			cwd: tempDir,
+			hasUI: false,
+			settings: Settings.isolated(),
+			getSessionSpawns: () => "*",
+			getSessionFile: () => null,
+		} as unknown as ToolSession;
+		const tool = new FindTool(session);
+
+		const result = await tool.execute("find-clamped-limit", {
+			paths: ["**/*.txt"],
+			limit: 999,
+		});
+		const text = result.content
+			.filter(entry => entry.type === "text")
+			.map(entry => entry.text ?? "")
+			.join("\n");
+
+		expect(text).toContain("Find limit 999 was clamped to 200");
+		expect(result.details?.limitClamped).toEqual({ requested: 999, effective: 200 });
 	});
 });
 

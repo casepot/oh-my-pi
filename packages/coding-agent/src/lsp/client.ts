@@ -1,6 +1,6 @@
 import { isEnoent, logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
-import { applyWorkspaceEdit } from "./edits";
+import { flattenWorkspaceTextEdits } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import type {
 	LspClient,
@@ -337,23 +337,19 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
  */
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
 	if (typeof message.id !== "number") return;
-	const params = message.params as { edit?: WorkspaceEdit };
-	if (!params?.edit) {
-		await sendResponse(
-			client,
-			message.id,
-			{ applied: false, failureReason: "No edit provided" },
-			"workspace/applyEdit",
-		);
-		return;
-	}
-
-	try {
-		await applyWorkspaceEdit(params.edit, client.cwd);
-		await sendResponse(client, message.id, { applied: true }, "workspace/applyEdit");
-	} catch (err) {
-		await sendResponse(client, message.id, { applied: false, failureReason: String(err) }, "workspace/applyEdit");
-	}
+	const params = message.params as { edit?: WorkspaceEdit } | undefined;
+	const editCount = params?.edit
+		? Array.from(flattenWorkspaceTextEdits(params.edit).values()).reduce((total, edits) => total + edits.length, 0)
+		: 0;
+	await sendResponse(
+		client,
+		message.id,
+		{
+			applied: false,
+			failureReason: `Rejected server-initiated workspace/applyEdit containing ${editCount} text edit${editCount === 1 ? "" : "s"}; use an explicit tool action so workspace mutations stay approval-gated.`,
+		},
+		"workspace/applyEdit",
+	);
 }
 
 /**

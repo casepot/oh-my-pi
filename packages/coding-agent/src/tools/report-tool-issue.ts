@@ -483,13 +483,21 @@ export function createReportToolIssueTool(session: ToolSession, activeBuiltinNam
 				// passthrough wrapper. Strip the prefix before allowlist check so
 				// `proxy_read` lands as a report against `read`, not a silent drop.
 				const canonicalTool = params.tool.startsWith("proxy_") ? params.tool.slice("proxy_".length) : params.tool;
-				// Silently drop reports targeting tools that aren't shipped built-ins
-				// (MCP servers, extensions that overrode a built-in name, typos).
-				// Not the model's fault — no error, no DB row, just acknowledge.
+				// Acknowledge reports targeting tools that are not active built-ins
+				// (MCP servers, extensions that overrode a built-in name, typos), but
+				// do not persist them as if QA can replay a missing built-in tool.
 				// Empty allowlist means the factory was called without a known active
 				// set, so behave as before and record everything.
 				if (allowedToolNames.size > 0 && !allowedToolNames.has(canonicalTool)) {
-					return { content: [{ type: "text", text: "Noted, thanks!" }] };
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Noted, but '${canonicalTool}' is not an active built-in tool; no local QA row was recorded.`,
+							},
+						],
+						details: { recorded: false, tool: canonicalTool, reason: "not-active-built-in" },
+					};
 				}
 				const db = openAutoQaDb();
 				if (db) {
@@ -522,6 +530,7 @@ export function createReportToolIssueTool(session: ToolSession, activeBuiltinNam
 			}
 			return {
 				content: [{ type: "text", text: "Noted, thanks!" }],
+				details: { recorded: true },
 			};
 		},
 	};

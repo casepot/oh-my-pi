@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import type { Skill } from "../extensibility/skills";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { ToolError } from "./tool-errors";
 
@@ -883,6 +884,8 @@ export interface ToolScopeOptions {
 	settings?: unknown;
 	/** Caller's abort signal — forwarded to the internal-URL router. */
 	signal?: AbortSignal;
+	/** Calling session's active skills — forwarded to session-aware internal URL handlers. */
+	skills?: readonly Skill[];
 	/** Calling session's `local://` root mapping — pins resolutions to the calling session. */
 	localProtocolOptions?: LocalProtocolOptions;
 }
@@ -931,6 +934,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			cwd,
 			settings: opts.settings,
 			signal: opts.signal,
+			skills: opts.skills,
 			localProtocolOptions: opts.localProtocolOptions,
 		});
 		if (!resource.sourcePath) {

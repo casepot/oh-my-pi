@@ -48,13 +48,44 @@ describe("write tool ACP fs routing", () => {
 			const session = createSession(tmpDir, bridge);
 			const tool = new WriteTool(session);
 
-			await tool.execute("call-1", { path: filePath, content: FILE_CONTENT });
+			const result = await tool.execute("call-1", { path: filePath, content: FILE_CONTENT });
 
 			// Bridge was called with the exact path and content
 			expect(bridgeSpy).toHaveBeenCalledTimes(1);
 			expect(bridgeSpy).toHaveBeenCalledWith({ path: filePath, content: FILE_CONTENT });
 			// Disk write must not have been called — bridge is the destination
 			expect(bunWriteSpy).not.toHaveBeenCalled();
+			expect(result.details?.bridge).toEqual({ readBack: "unavailable", diagnostics: "skipped" });
+			expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain(
+				"filesystem read-back unavailable",
+			);
+		} finally {
+			bunWriteSpy.mockRestore();
+		}
+	});
+
+	it("records verified bridge writes when filesystem read-back matches", async () => {
+		const filePath = path.join(tmpDir, "output.txt");
+
+		const bridge: ClientBridge = {
+			capabilities: { writeTextFile: true },
+			writeTextFile: async ({ path: writePath, content }) => {
+				await fs.writeFile(writePath, content);
+			},
+		};
+
+		const bunWriteSpy = spyOn(Bun, "write");
+
+		try {
+			const session = createSession(tmpDir, bridge);
+			const tool = new WriteTool(session);
+
+			const result = await tool.execute("call-2", { path: filePath, content: FILE_CONTENT });
+
+			expect(await fs.readFile(filePath, "utf8")).toBe(FILE_CONTENT);
+			expect(bunWriteSpy).not.toHaveBeenCalled();
+			expect(result.details?.bridge).toEqual({ readBack: "verified", diagnostics: "skipped" });
+			expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("LSP diagnostics skipped");
 		} finally {
 			bunWriteSpy.mockRestore();
 		}

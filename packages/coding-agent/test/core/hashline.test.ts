@@ -671,6 +671,32 @@ describe("hashline executor", () => {
 		});
 	});
 
+	it("rejects multi-section no-ops before writing earlier sections", async () => {
+		await withTempDir(async tempDir => {
+			const aPath = path.join(tempDir, "a.ts");
+			const bPath = path.join(tempDir, "b.ts");
+			await Bun.write(aPath, "aaa\n");
+			await Bun.write(bPath, "bbb\n");
+			const session = makeHashlineSession(tempDir);
+			const aTag = recordFullSnapshot(getFileReadCache(session), aPath, "aaa\n");
+			const bTag = recordFullSnapshot(getFileReadCache(session), bPath, "bbb\n");
+			const input = [
+				header("a.ts", aTag),
+				`${sameLineRange(tag(1, "aaa"))}`,
+				repl("AAA"),
+				header("b.ts", bTag),
+				`${sameLineRange(tag(1, "bbb"))}`,
+				repl("bbb"),
+			].join("\n");
+
+			await expect(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session)),
+			).rejects.toThrow(/produced no change/);
+			expect(await Bun.file(aPath).text()).toBe("aaa\n");
+			expect(await Bun.file(bPath).text()).toBe("bbb\n");
+		});
+	});
+
 	it("preflights every section before writing multi-file edits", async () => {
 		await withTempDir(async tempDir => {
 			const aPath = path.join(tempDir, "a.ts");
@@ -879,6 +905,35 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toMatch(/Recovered from a stale file hash using a previous read snapshot/);
+		});
+	});
+
+	it("runs delimiter repair when applying a stale snapshot recovery", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			const v0Text = `${["it('a', () => {", "\tsetup();", "\trun();", "});", "after();"].join("\n")}\n`;
+			await Bun.write(filePath, v0Text);
+			const session = makeHashlineSession(tempDir);
+			const v0Tag = recordFullSnapshot(getFileReadCache(session), filePath, v0Text);
+			await Bun.write(filePath, `before();\n${v0Text}`);
+
+			const input = [
+				header("a.ts", v0Tag),
+				`replace ${tag(2, "setup")}..${tag(3, "run")}:`,
+				repl("\tsetup2();"),
+				repl("\trun2();"),
+				repl("});"),
+			].join("\n");
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session));
+			const finalText = await Bun.file(filePath).text();
+			const output = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(finalText.split("\n").filter(line => line === "});")).toHaveLength(1);
+			expect(finalText).toBe(
+				["before();", "it('a', () => {", "\tsetup2();", "\trun2();", "});", "after();", ""].join("\n"),
+			);
+			expect(output).toMatch(/Recovered from a stale file hash using a previous read snapshot/);
+			expect(output).toMatch(/delimiter-balance/);
 		});
 	});
 

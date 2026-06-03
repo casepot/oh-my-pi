@@ -73,10 +73,16 @@ const writeSchema = z.object({
 
 export type WriteToolInput = z.infer<typeof writeSchema>;
 
+interface BridgeWriteDetails {
+	readBack: "verified" | "unavailable" | "mismatch";
+	diagnostics: "skipped";
+}
+
 /** Details returned by the write tool for TUI rendering */
 export interface WriteToolDetails {
 	diagnostics?: FileDiagnosticsResult;
 	meta?: OutputMeta;
+	bridge?: BridgeWriteDetails;
 	/** Set when the file was auto-chmod'd because content begins with a `#!` shebang. */
 	madeExecutable?: boolean;
 }
@@ -747,6 +753,21 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		if (!bridge?.capabilities.writeTextFile || !bridge.writeTextFile) return undefined;
 		return bridge.writeTextFile({ path: absolutePath, content });
 	}
+
+	async #verifyBridgeWrite(absolutePath: string, expectedContent: string): Promise<BridgeWriteDetails> {
+		try {
+			const actualContent = await fs.readFile(absolutePath, "utf8");
+			return {
+				readBack: actualContent === expectedContent ? "verified" : "mismatch",
+				diagnostics: "skipped",
+			};
+		} catch (error) {
+			if (isEnoent(error)) {
+				return { readBack: "unavailable", diagnostics: "skipped" };
+			}
+			throw error;
+		}
+	}
 	async execute(
 		_toolCallId: string,
 		{ path, content }: WriteParams,
@@ -849,13 +870,28 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 				invalidateFsScanAfterWrite(absolutePath);
 				const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent);
-				const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
+				const bridge = await this.#verifyBridgeWrite(absolutePath, cleanContent);
+				const header =
+					bridge.readBack === "verified"
+						? maybeWriteSnapshotHeader(this.session, absolutePath, cleanContent)
+						: undefined;
+				const writeLine =
+					bridge.readBack === "verified"
+						? `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`
+						: `Bridge accepted ${cleanContent.length} bytes for ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
+				if (bridge.readBack === "unavailable") {
+					resultText +=
+						"\nNote: filesystem read-back unavailable after ACP bridge write; LSP diagnostics skipped.";
+				} else if (bridge.readBack === "mismatch") {
+					resultText += "\nNote: filesystem read-back differs after ACP bridge write; LSP diagnostics skipped.";
+				} else {
+					resultText += "\nNote: ACP bridge handled the write; LSP diagnostics skipped.";
+				}
 				if (stripped) {
 					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
 				}
-				return { content: [{ type: "text", text: resultText }], details: {} };
+				return { content: [{ type: "text", text: resultText }], details: { bridge } };
 			}
 
 			const diagnostics = await this.#writethrough(absolutePath, cleanContent, signal, undefined, batchRequest);

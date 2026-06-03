@@ -154,6 +154,29 @@ describe("tool path arrays", () => {
 		expect(details?.scopePath).toBe("apps/, packages/, phases/");
 	});
 
+	it("search surfaces total match counts when skip selects an empty page", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const tool = tools.find(entry => entry.name === "search");
+		expect(tool).toBeDefined();
+		if (!tool) throw new Error("Missing search tool");
+
+		const result = await tool.execute("search-skip-empty-page", {
+			pattern: "shared-needle",
+			paths: ["apps/", "packages/", "phases/"],
+			skip: 3,
+		});
+		const text = getText(result);
+		const details = result.details as
+			| { matchCount?: number; totalMatchCount?: number; totalFileCount?: number; skippedFiles?: number }
+			| undefined;
+
+		expect(text).toContain("No matches found in selected file window");
+		expect(details?.matchCount).toBe(0);
+		expect(details?.totalMatchCount).toBe(3);
+		expect(details?.totalFileCount).toBe(3);
+		expect(details?.skippedFiles).toBe(3);
+	});
+
 	it("search expands delimited path entries", async () => {
 		const tools = await createTools(createTestSession(tempDir));
 		const tool = tools.find(entry => entry.name === "search");

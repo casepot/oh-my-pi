@@ -8,7 +8,7 @@ import { LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
 import { getServersForFile, loadConfig } from "@oh-my-pi/pi-coding-agent/lsp/config";
-import { applyWorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/edits";
+import { applyWorkspaceEdit, workspaceEditTouchesRange } from "@oh-my-pi/pi-coding-agent/lsp/edits";
 import { renderCall, renderResult } from "@oh-my-pi/pi-coding-agent/lsp/render";
 import type {
 	CodeAction,
@@ -143,6 +143,203 @@ process.abort();
 			expect(await markerExists(path.join(markerDir, "sigterm"))).toBe(false);
 		} finally {
 			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rejects server-initiated workspace/applyEdit without mutating files", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-apply-edit-");
+		try {
+			const markerDir = tempDir.path();
+			const targetPath = path.join(markerDir, "target.ts");
+			const responsePath = path.join(markerDir, "apply-response.json");
+			await Bun.write(targetPath, "export const value = 1;\n");
+			const serverPath = path.join(markerDir, "server.ts");
+			await Bun.write(
+				serverPath,
+				`
+const markerDir = process.argv[2];
+const targetUri = process.argv[3];
+const responsePath = process.argv[4];
+const decoder = new TextDecoder();
+let buffer = "";
+let nextRequestId = 100;
+
+function send(message) {
+	const content = JSON.stringify(message);
+	process.stdout.write(\`Content-Length: \${Buffer.byteLength(content, "utf8")}\\r\\n\\r\\n\${content}\`);
+}
+
+for await (const chunk of Bun.stdin.stream()) {
+	buffer += decoder.decode(chunk, { stream: true });
+	while (true) {
+		const headerEnd = buffer.indexOf("\\r\\n\\r\\n");
+		if (headerEnd === -1) break;
+		const header = buffer.slice(0, headerEnd);
+		const match = /Content-Length: (\\d+)/i.exec(header);
+		if (!match) process.exit(2);
+		const contentLength = Number(match[1]);
+		const contentStart = headerEnd + 4;
+		const contentEnd = contentStart + contentLength;
+		if (buffer.length < contentEnd) break;
+		const message = JSON.parse(buffer.slice(contentStart, contentEnd));
+		buffer = buffer.slice(contentEnd);
+
+		if (message.method === "initialize") {
+			send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+			send({
+				jsonrpc: "2.0",
+				id: nextRequestId,
+				method: "workspace/applyEdit",
+				params: {
+					edit: {
+						changes: {
+							[targetUri]: [
+								{
+									range: {
+										start: { line: 0, character: 21 },
+										end: { line: 0, character: 22 },
+									},
+									newText: "2",
+								},
+							],
+						},
+					},
+				},
+			});
+		} else if (message.id === nextRequestId) {
+			await Bun.write(responsePath, JSON.stringify(message.result));
+		} else if (message.method === "shutdown") {
+			send({ jsonrpc: "2.0", id: message.id, result: null });
+		} else if (message.method === "exit") {
+			process.exit(0);
+		}
+	}
+}
+`,
+			);
+
+			const server: ServerConfig = {
+				command: process.execPath,
+				args: [serverPath, markerDir, fileToUri(targetPath), responsePath],
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			await lspClient.getOrCreateClient(server, tempDir.path(), 1_000);
+			for (let i = 0; i < 50 && !(await markerExists(responsePath)); i += 1) {
+				await Bun.sleep(10);
+			}
+
+			expect(await Bun.file(targetPath).text()).toBe("export const value = 1;\n");
+			const response = JSON.parse(await Bun.file(responsePath).text()) as {
+				applied?: boolean;
+				failureReason?: string;
+			};
+			expect(response.applied).toBe(false);
+			expect(response.failureReason).toContain("approval-gated");
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("detects explicit rename edits that miss the requested symbol range", () => {
+		const uri = fileToUri("/tmp/lsp-rename-target.ts");
+		const requestedRange = { start: { line: 0, character: 6 }, end: { line: 0, character: 9 } };
+
+		expect(
+			workspaceEditTouchesRange(
+				{
+					changes: {
+						[uri]: [
+							{ range: { start: { line: 0, character: 22 }, end: { line: 0, character: 28 } }, newText: "bar" },
+						],
+					},
+				},
+				uri,
+				requestedRange,
+			),
+		).toBe(false);
+
+		expect(
+			workspaceEditTouchesRange(
+				{
+					documentChanges: [
+						{
+							textDocument: { uri, version: null },
+							edits: [
+								{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 9 } }, newText: "bar" },
+							],
+						},
+					],
+				},
+				uri,
+				requestedRange,
+			),
+		).toBe(true);
+	});
+
+	it("refuses explicit rename workspace edits that do not touch the requested symbol", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-guard-");
+		try {
+			const targetFile = path.join(tempDir.path(), "target.ts");
+			await Bun.write(targetFile, "const foo = 1; const foobar = foo;\n");
+			const targetUri = fileToUri(targetFile);
+			const server: ServerConfig = { command: "test-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "test-lsp",
+				cwd: tempDir.path(),
+				config: server,
+				proc: {
+					stdin: {
+						write() {},
+						flush: async () => {},
+					},
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(),
+				isReading: false,
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", server]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "ensureFileOpen").mockResolvedValue();
+			vi.spyOn(lspClient, "waitForProjectLoaded").mockResolvedValue();
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue({
+				changes: {
+					[targetUri]: [
+						{
+							range: { start: { line: 0, character: 21 }, end: { line: 0, character: 27 } },
+							newText: "barbar",
+						},
+					],
+				},
+			});
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			await expect(
+				tool.execute("rename-guard", {
+					action: "rename",
+					file: targetFile,
+					line: 1,
+					symbol: "foo",
+					new_name: "bar",
+					timeout: 5,
+				}),
+			).rejects.toThrow("server returned edits that do not touch requested symbol");
+			expect(await Bun.file(targetFile).text()).toBe("const foo = 1; const foobar = foo;\n");
+		} finally {
+			vi.restoreAllMocks();
 			tempDir.removeSync();
 		}
 	});
@@ -466,6 +663,46 @@ process.abort();
 				.join("\n");
 
 			expect(output).toBe("OK");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("reports diagnostics as incomplete when every applicable server fails", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-diag-failure-");
+		try {
+			const targetFile = path.join(tempDir.path(), "target.ts");
+			await Bun.write(targetFile, "export const target = 1;\n");
+			const failingServer: ServerConfig = {
+				command: "failing-linter",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+				createClient: () => ({
+					format: async (_filePath, content) => content,
+					lint: async () => {
+						throw new Error("linter unavailable");
+					},
+				}),
+			};
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["failing-linter", failingServer]]);
+
+			const tool = new LspTool({ cwd: tempDir.path() } as ToolSession);
+			const result = await tool.execute("diag-failure", {
+				action: "diagnostics",
+				file: targetFile,
+				timeout: 5,
+			});
+			const output = result.content
+				.filter(block => block.type === "text")
+				.map(block => block.text)
+				.join("\n");
+
+			expect(output).toContain("Diagnostics incomplete");
+			expect(output).toContain("failing-linter: linter unavailable");
+			expect(result.details?.success).toBe(false);
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();

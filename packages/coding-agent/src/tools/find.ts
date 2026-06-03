@@ -87,6 +87,7 @@ export function formatFindGroupedOutput(paths: readonly string[]): string {
 export interface FindToolDetails {
 	truncation?: TruncationResult;
 	resultLimitReached?: number;
+	limitClamped?: { requested: number; effective: number };
 	meta?: OutputMeta;
 	// Fields for TUI rendering
 	scopePath?: string;
@@ -172,6 +173,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 					cwd: this.session.cwd,
 					settings: this.session.settings,
 					signal,
+					skills: this.session.skills,
 					localProtocolOptions: this.session.localProtocolOptions,
 				});
 				if (!resource.sourcePath) {
@@ -217,6 +219,10 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			const useGitignore = gitignore ?? true;
 			const requestedTimeoutMs = timeout != null ? Math.round(timeout * 1000) : DEFAULT_GLOB_TIMEOUT_MS;
 			const timeoutMs = Math.min(MAX_GLOB_TIMEOUT_MS, Math.max(MIN_GLOB_TIMEOUT_MS, requestedTimeoutMs));
+			const limitClamped =
+				Math.floor(requestedLimit) > effectiveLimit
+					? { requested: Math.floor(requestedLimit), effective: effectiveLimit }
+					: undefined;
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const formatMatchPath = (matchPath: string, fileType?: natives.FileType): string => {
@@ -244,9 +250,15 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 						truncated: forceTruncated,
 						cwd: this.session.cwd,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
+						limitClamped,
 					};
 					const parts = ["No files found matching pattern"];
 					if (notice) parts.push(notice);
+					if (limitClamped) {
+						parts.push(
+							`Find limit ${limitClamped.requested} was clamped to ${limitClamped.effective}; narrow the glob before concluding absence beyond the shown window.`,
+						);
+					}
 					if (missingPathsNote) parts.push(missingPathsNote);
 					return toolResult(details).text(parts.join("\n")).done();
 				}
@@ -256,6 +268,11 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				const limitMeta = listLimit.meta;
 				const baseOutput = formatFindGroupedOutput(limited);
 				const trailingNotes: string[] = [];
+				if (limitClamped) {
+					trailingNotes.push(
+						`Find limit ${limitClamped.requested} was clamped to ${limitClamped.effective}; narrow the glob before concluding absence beyond the shown window.`,
+					);
+				}
 				if (notice) trailingNotes.push(notice);
 				if (missingPathsNote) trailingNotes.push(missingPathsNote);
 				const rawOutput = trailingNotes.length > 0 ? `${baseOutput}\n\n${trailingNotes.join("\n")}` : baseOutput;
@@ -270,6 +287,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 					truncation: truncation.truncated ? truncation : undefined,
 					cwd: this.session.cwd,
 					missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
+					limitClamped,
 				};
 
 				const resultBuilder = toolResult(details)
@@ -536,6 +554,11 @@ export const findToolRenderer = {
 		const truncationReasons: string[] = [];
 		if (details?.resultLimitReached) truncationReasons.push(`limit ${details.resultLimitReached} results`);
 		if (limits?.resultLimit) truncationReasons.push(`limit ${limits.resultLimit.reached} results`);
+		if (details?.limitClamped) {
+			truncationReasons.push(
+				`requested limit ${details.limitClamped.requested} clamped to ${details.limitClamped.effective}`,
+			);
+		}
 		if (truncation) truncationReasons.push(truncation.truncatedBy === "lines" ? "line limit" : "size limit");
 		const artifactId = truncation && "artifactId" in truncation ? truncation.artifactId : undefined;
 		if (artifactId) truncationReasons.push(formatFullOutputReference(artifactId));

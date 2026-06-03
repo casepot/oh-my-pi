@@ -38,6 +38,7 @@ import {
 	applyWorkspaceEdit,
 	flattenWorkspaceTextEdits,
 	rangesOverlap,
+	workspaceEditTouchesRange,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import { renderCall, renderResult } from "./render";
@@ -458,6 +459,18 @@ function getAcceptedDiagnostics(
 	return undefined;
 }
 
+function formatDiagnosticServerFailure(serverName: string, err: unknown): string {
+	return `${serverName}: ${err instanceof Error ? err.message : String(err)}`;
+}
+
+function formatDiagnosticsIncompleteSummary(failures: string[]): string {
+	return `Diagnostics incomplete (${failures.length} server${failures.length === 1 ? "" : "s"} failed)`;
+}
+
+function formatDiagnosticsIncompleteOutput(failures: string[]): string {
+	return `${formatDiagnosticsIncompleteSummary(failures)}:\n${failures.map(failure => `  ${failure}`).join("\n")}`;
+}
+
 async function waitForDiagnostics(
 	client: LspClient,
 	uri: string,
@@ -652,6 +665,7 @@ async function getDiagnosticsForFile(
 	const relPath = formatPathRelativeToCwd(absolutePath, cwd);
 	const allDiagnostics: Diagnostic[] = [];
 	const serverNames: string[] = [];
+	const serverFailures: string[] = [];
 
 	// Wait for diagnostics from all servers in parallel
 	const results = await Promise.allSettled(
@@ -685,23 +699,33 @@ async function getDiagnosticsForFile(
 		}),
 	);
 
-	for (const result of results) {
+	for (let i = 0; i < results.length; i += 1) {
+		const result = results[i]!;
+		const [serverName] = servers[i]!;
 		if (result.status === "fulfilled") {
 			serverNames.push(result.value.serverName);
 			allDiagnostics.push(...result.value.diagnostics);
+		} else {
+			serverFailures.push(formatDiagnosticServerFailure(serverName, result.reason));
 		}
 	}
 
 	if (serverNames.length === 0) {
-		return undefined;
+		if (serverFailures.length === 0) return undefined;
+		return {
+			server: servers.map(([name]) => name).join(", "),
+			messages: serverFailures,
+			summary: formatDiagnosticsIncompleteSummary(serverFailures),
+			errored: true,
+		};
 	}
 
 	if (allDiagnostics.length === 0) {
 		return {
 			server: serverNames.join(", "),
-			messages: [],
-			summary: "OK",
-			errored: false,
+			messages: serverFailures,
+			summary: serverFailures.length > 0 ? formatDiagnosticsIncompleteSummary(serverFailures) : "OK",
+			errored: serverFailures.length > 0,
 		};
 	}
 
@@ -718,9 +742,13 @@ async function getDiagnosticsForFile(
 
 	sortDiagnostics(uniqueDiagnostics);
 	const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
-	const limited = limitDiagnosticMessages(formatted);
-	const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-	const hasErrors = uniqueDiagnostics.some(d => d.severity === 1);
+	const messages = serverFailures.length > 0 ? [...formatted, ...serverFailures] : formatted;
+	const limited = limitDiagnosticMessages(messages);
+	const summary =
+		serverFailures.length > 0
+			? `${formatDiagnosticsSummary(uniqueDiagnostics)}; ${formatDiagnosticsIncompleteSummary(serverFailures)}`
+			: formatDiagnosticsSummary(uniqueDiagnostics);
+	const hasErrors = uniqueDiagnostics.some(d => d.severity === 1) || serverFailures.length > 0;
 
 	return {
 		server: serverNames.join(", "),
@@ -1302,6 +1330,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				: Math.min(SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000);
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
+			let sawServerFailure = false;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -1320,6 +1349,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const uri = fileToUri(resolved);
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
 				const allDiagnostics: Diagnostic[] = [];
+				const serverFailures: string[] = [];
 
 				// Query all applicable servers for this file
 				for (const [serverName, serverConfig] of servers) {
@@ -1351,9 +1381,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						if (err instanceof ToolAbortError || signal?.aborted) {
 							throw err;
 						}
-						// Server failed, continue with others
+						serverFailures.push(formatDiagnosticServerFailure(serverName, err));
 					}
 				}
+				if (serverFailures.length > 0) sawServerFailure = true;
 
 				// Deduplicate diagnostics
 				const seen = new Set<string>();
@@ -1370,6 +1401,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				if (!detailed && targets.length === 1) {
 					if (uniqueDiagnostics.length === 0) {
+						if (serverFailures.length > 0) {
+							return {
+								content: [{ type: "text", text: formatDiagnosticsIncompleteOutput(serverFailures) }],
+								details: {
+									action,
+									serverName: Array.from(allServerNames).join(", "),
+									success: false,
+								},
+							};
+						}
 						return {
 							content: [{ type: "text", text: "OK" }],
 							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
@@ -1378,26 +1419,38 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
 					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
-					const output = `${summary}:\n${formatGroupedDiagnosticMessages(formatted)}`;
+					const failureText =
+						serverFailures.length > 0 ? `\n${formatDiagnosticsIncompleteOutput(serverFailures)}` : "";
+					const output = `${summary}:\n${formatGroupedDiagnosticMessages(formatted)}${failureText}`;
 					return {
 						content: [{ type: "text", text: output }],
-						details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+						details: {
+							action,
+							serverName: Array.from(allServerNames).join(", "),
+							success: serverFailures.length === 0,
+						},
 					};
 				}
 
 				if (uniqueDiagnostics.length === 0) {
-					results.push(`${theme.status.success} ${relPath}: no issues`);
+					results.push(
+						serverFailures.length > 0
+							? `${theme.status.warning} ${relPath}: ${formatDiagnosticsIncompleteSummary(serverFailures)}`
+							: `${theme.status.success} ${relPath}: no issues`,
+					);
+					if (serverFailures.length > 0) results.push(formatDiagnosticsIncompleteOutput(serverFailures));
 				} else {
 					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
 					results.push(`${theme.status.error} ${relPath}: ${summary}`);
 					const formatted = uniqueDiagnostics.map(d => formatDiagnostic(d, relPath));
 					results.push(formatGroupedDiagnosticMessages(formatted));
+					if (serverFailures.length > 0) results.push(formatDiagnosticsIncompleteOutput(serverFailures));
 				}
 			}
 
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
-				details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+				details: { action, serverName: Array.from(allServerNames).join(", "), success: !sawServerFailure },
 			};
 		}
 
@@ -2257,6 +2310,21 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					if (!result) {
 						output = "Rename returned no edits";
 					} else {
+						if (targetFile && symbol) {
+							const requestedSymbol = symbol.replace(/#\d+$/, "");
+							const requestedRange = {
+								start: position,
+								end: {
+									line: position.line,
+									character: position.character + Math.max(1, requestedSymbol.length),
+								},
+							};
+							if (!workspaceEditTouchesRange(result, uri, requestedRange)) {
+								throw new ToolError(
+									`Rename refused: server returned edits that do not touch requested symbol "${requestedSymbol}" at ${formatPathRelativeToCwd(targetFile, this.session.cwd)}:${position.line + 1}:${position.character + 1}.`,
+								);
+							}
+						}
 						const shouldApply = apply !== false;
 						if (shouldApply) {
 							const applied = await applyWorkspaceEdit(result, this.session.cwd);

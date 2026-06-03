@@ -106,6 +106,15 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 	return out;
 }
 
+export function workspaceEditTouchesRange(edit: WorkspaceEdit, uri: string, requestedRange: Range): boolean {
+	const edits = flattenWorkspaceTextEdits(edit).get(uri);
+	if (!edits || edits.length === 0) return false;
+	return edits.some(textEdit => {
+		if (rangesOverlap(textEdit.range, requestedRange)) return true;
+		return comparePosition(textEdit.range.start, requestedRange.start) === 0;
+	});
+}
+
 /**
  * Apply text edits to a file.
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
