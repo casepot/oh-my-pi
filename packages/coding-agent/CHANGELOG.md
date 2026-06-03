@@ -10,6 +10,7 @@
 - Added compact startup update status for fork/source installs, including dirty checkout, local-vs-fork divergence, fork-vs-upstream divergence, and non-fork install migration hints.
 - Added goal-mode side agents for rubric generation, completion verification, and goal-aware continuation compaction.
 - Added expandable TUI artifacts and `/goal` affordances for goal rubrics and verification feedback.
+- Added `parallel_settled()` to Python and JavaScript eval runtimes so workflow fan-outs can preserve successful sibling results when one child fails.
 
 ### Changed
 
@@ -25,6 +26,17 @@
 
 - Fixed `ttsr.enabled: false` so it prevents TTSR registration and matching instead of only being stored in settings.
 - Fixed marketplace plugin discovery so OMP only loads plugins from OMP-owned registries or explicit `--plugin-dir` roots; Claude Code's `~/.claude/plugins/installed_plugins.json` is ignored.
+- Fixed workflow notices to describe the current session's spawn capabilities instead of recommending forbidden nested `agent()`/`task` calls.
+- Fixed eval helper mismatches: Python `read(path, offset, limit)` now accepts the documented positional form, Python/JS eval reads understand local line selectors, and eval `tool.*` calls normalize optional nullish fields before validation.
+- Fixed eval `llm()` calls without an explicit system prompt by supplying provider-compatible default instructions and surfacing provider/model failures with actionable categories.
+- Fixed Python eval shutdown/reset/timeout failures to return structured failure metadata and preserve partial output instead of bare kernel shutdown text.
+- Fixed subagent model preflight/fallback reporting so missing models, credentials, rate limits, context overflows, and provider stream stalls surface actionable errors or parent-model fallback notices.
+- Fixed search/find diagnostics for empty or truncated result windows and report-tool-issue handling for inactive tool names.
+- Fixed workflow notices for wildcard spawn sessions when the default `task` agent is disabled so examples choose a concrete enabled agent or explicitly fall back to inline orchestration.
+- Fixed `skill://` resolution to prefer the calling session's active skills over stale process-global skill state.
+- Fixed LSP safety diagnostics by rejecting unsolicited server `workspace/applyEdit`, refusing explicit rename edits that do not touch the requested symbol range, and surfacing diagnostics collection failures instead of reporting `OK`.
+- Fixed ACP bridge writes to report read-back verification/uncertainty and skipped diagnostics, and fixed provider URL/port transport messages to surface as provider-network failures.
+- Fixed hashline edit regression coverage for stale-snapshot delimiter repair and multi-section no-op preflight behavior.
 
 ## [15.8.1] - 2026-06-02
 
