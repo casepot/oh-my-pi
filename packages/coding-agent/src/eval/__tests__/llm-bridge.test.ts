@@ -183,6 +183,25 @@ describe("runEvalLlm", () => {
 		expect(opts.reasoning).toBeUndefined();
 	});
 
+	it("sends provider-compatible instructions when no system prompt is supplied", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+
+		await runEvalLlm({ prompt: "q", model: "smol" }, { session: makeSession() });
+		await runEvalLlm({ prompt: "q", model: "smol", system: "Custom system." }, { session: makeSession() });
+
+		const defaultCtx = spy.mock.calls[0]?.[1] as { systemPrompt?: string[] };
+		const customCtx = spy.mock.calls[1]?.[1] as { systemPrompt?: string[] };
+		expect(defaultCtx.systemPrompt?.[0]).toContain("stateless eval helper");
+		expect(customCtx.systemPrompt).toEqual(["Custom system."]);
+	});
+
+	it("classifies thrown provider failures with actionable categories", async () => {
+		vi.spyOn(ai, "completeSimple").mockRejectedValue(new Error("404 model_not_found: gemini-1.5-flash"));
+		await expect(runEvalLlm({ prompt: "q", model: "smol" }, { session: makeSession() })).rejects.toThrow(
+			"model_not_found",
+		);
+	});
+
 	it("throws ToolError on invalid arguments", async () => {
 		await expect(runEvalLlm({ prompt: "" }, { session: makeSession() })).rejects.toBeInstanceOf(ToolError);
 		await expect(runEvalLlm({ prompt: "q", model: "huge" }, { session: makeSession() })).rejects.toBeInstanceOf(

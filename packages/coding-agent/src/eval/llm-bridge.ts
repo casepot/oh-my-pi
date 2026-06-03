@@ -12,12 +12,14 @@
  * in, text (or, with `schema`, a structured object) out.
  */
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import { type Api, Effort, getSupportedEfforts, type Model, type Tool } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, Effort, getSupportedEfforts, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import * as z from "zod/v4";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import { expandRoleAlias, formatModelString, resolveModelFromString } from "../config/model-resolver";
+import evalLlmDefaultSystem from "../prompts/system/eval-llm-default-system.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
+import { classifyProviderFailure, formatProviderFailure } from "../utils/provider-error-classifier";
 import { withBridgeHeartbeat } from "./heartbeat";
 import type { JsStatusEvent } from "./js/shared/types";
 
@@ -115,7 +117,10 @@ export async function runEvalLlm(args: unknown, options: EvalLlmBridgeOptions): 
 	const apiKey = await options.session.modelRegistry?.getApiKey(model);
 	if (!apiKey) {
 		throw new ToolError(
-			`llm() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
+			formatProviderFailure(
+				"llm() cannot start",
+				classifyProviderFailure(`No API key for ${formatModelString(model)}`),
+			),
 		);
 	}
 
@@ -135,29 +140,39 @@ export async function runEvalLlm(args: unknown, options: EvalLlmBridgeOptions): 
 	// A oneshot completion emits no status until it returns, so pump a heartbeat
 	// while it runs to keep the eval idle watchdog armed across a slow (e.g.
 	// reasoning-tier) request that would otherwise look like a stalled cell.
-	const response = await withBridgeHeartbeat(options.emitStatus, () =>
-		instrumentedCompleteSimple(
-			model,
-			{
-				systemPrompt: system ? [system] : undefined,
-				messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-				tools,
-			},
-			{
-				apiKey,
-				signal: options.signal,
-				reasoning: reasoningForTier(tier, model),
-				toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
-			},
-			{ telemetry, oneshotKind: "eval_llm" },
-		),
-	);
+	let response: AssistantMessage;
+	try {
+		response = await withBridgeHeartbeat(options.emitStatus, () =>
+			instrumentedCompleteSimple(
+				model,
+				{
+					systemPrompt: [system ?? evalLlmDefaultSystem.trim()],
+					messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+					tools,
+				},
+				{
+					apiKey,
+					signal: options.signal,
+					reasoning: reasoningForTier(tier, model),
+					toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
+				},
+				{ telemetry, oneshotKind: "eval_llm" },
+			),
+		);
+	} catch (error) {
+		throw new ToolError(formatProviderFailure("llm() request failed", classifyProviderFailure(error)));
+	}
 
 	if (response.stopReason === "error") {
-		throw new ToolError(response.errorMessage ?? "llm() request failed.");
+		throw new ToolError(
+			formatProviderFailure(
+				"llm() request failed",
+				classifyProviderFailure(response.errorMessage ?? "llm() request failed."),
+			),
+		);
 	}
 	if (response.stopReason === "aborted") {
-		throw new ToolError("llm() request aborted.");
+		throw new ToolError(formatProviderFailure("llm() request aborted", classifyProviderFailure("aborted")));
 	}
 
 	let resultText: string;
