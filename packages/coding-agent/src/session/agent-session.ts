@@ -235,6 +235,10 @@ import {
 	type CustomMessage,
 	convertToLlm,
 	type FileMentionMessage,
+	GOAL_RUBRIC_MESSAGE_TYPE,
+	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+	type GoalRubricMessageDetails,
+	type GoalVerificationFeedbackMessageDetails,
 	type PythonExecutionMessage,
 	readPendingDisplayTag,
 	SILENT_ABORT_MARKER,
@@ -923,6 +927,9 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#goalSideAgentTail: Promise<void> = Promise.resolve();
+	#pendingGoalArtifactMessages: Array<
+		Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details" | "attribution">
+	> = [];
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -1824,6 +1831,9 @@ export class AgentSession {
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
 				this.sessionManager.appendMessage(event.message);
+				if (event.message.role === "toolResult") {
+					this.#flushPendingGoalArtifactMessages();
+				}
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -1928,6 +1938,7 @@ export class AgentSession {
 
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
+			this.#flushPendingGoalArtifactMessages();
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
 				currentUsage: {
@@ -3953,7 +3964,11 @@ export class AgentSession {
 		}
 		const state = await this.#goalRuntime.createGoal({ objective, tokenBudget: input.tokenBudget });
 		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
-		return current ? { ...state, goal: current } : state;
+		if (current) {
+			await this.#publishGoalRubricArtifact(current, rubric);
+			return { ...state, goal: current };
+		}
+		return state;
 	}
 
 	async replaceGoalWithRubric(
@@ -3975,7 +3990,11 @@ export class AgentSession {
 		}
 		const state = await this.#goalRuntime.replaceGoal({ objective, tokenBudget: input.tokenBudget });
 		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
-		return current ? { ...state, goal: current } : state;
+		if (current) {
+			await this.#publishGoalRubricArtifact(current, rubric);
+			return { ...state, goal: current };
+		}
+		return state;
 	}
 	async requestGoalCompletion(signal?: AbortSignal): Promise<{
 		goal: Goal | null;
@@ -4000,6 +4019,7 @@ export class AgentSession {
 					attempt: failedAttempts,
 					maxAttempts,
 					feedback: goalCompletionMaxAttemptsFeedback.trim(),
+					compactorMemo: state.goal.lastVerificationCompactorMemo,
 				},
 			};
 		}
@@ -4037,14 +4057,34 @@ export class AgentSession {
 		}
 
 		const latestGoal = latest?.goal ?? state.goal;
-		const recorded = await this.#goalRuntime.recordFailedCompletionVerification(goalId, verification.feedback);
-		const continuationMessage = await this.#buildGoalContinuationMessage(
-			recorded ?? latestGoal,
-			verification.feedback,
-			signal,
-		);
+		let continuation: { prompt: string; memo: string | undefined };
+		try {
+			continuation = await this.#buildGoalContinuationMessage(
+				{
+					...latestGoal,
+					failedCompletionAttempts: attempt,
+					lastVerificationFeedback: verification.feedback,
+				},
+				verification.feedback,
+				signal,
+			);
+		} catch (error) {
+			const recorded = await this.#goalRuntime.recordFailedCompletionVerification(goalId, verification.feedback, {
+				attempt,
+			});
+			if (recorded) {
+				await this.#publishGoalVerificationFeedbackArtifact({
+					goal: recorded,
+					attempt: recorded.lastVerificationAttempt ?? attempt,
+					maxAttempts,
+					feedback: verification.feedback,
+					compactorMemo: undefined,
+				});
+			}
+			throw error;
+		}
 		const currentState = this.#goalModeState;
-		const currentGoal = currentState?.goal ?? recorded ?? latestGoal;
+		const currentGoal = currentState?.goal ?? latestGoal;
 		if (!isGoalCompletionStateStillCurrent(state.goal, currentState)) {
 			return {
 				goal: currentGoal,
@@ -4058,16 +4098,41 @@ export class AgentSession {
 				},
 			};
 		}
+		const recorded = await this.#goalRuntime.recordFailedCompletionVerification(goalId, verification.feedback, {
+			attempt,
+			compactorMemo: continuation.memo,
+		});
+		if (!recorded) {
+			return {
+				goal: currentGoal,
+				remainingTokens: remainingTokens(currentGoal),
+				completionBudgetReport: null,
+				completionVerification: {
+					status: "rejected",
+					attempt,
+					maxAttempts,
+					feedback: goalCompletionStaleFeedback.trim(),
+				},
+			};
+		}
+		const recordedAttempt = recorded.lastVerificationAttempt ?? attempt;
+		await this.#publishGoalVerificationFeedbackArtifact({
+			goal: recorded,
+			attempt: recordedAttempt,
+			maxAttempts,
+			feedback: verification.feedback,
+			compactorMemo: continuation.memo,
+		});
 		return {
-			goal: currentGoal,
-			remainingTokens: remainingTokens(currentGoal),
+			goal: recorded,
+			remainingTokens: remainingTokens(recorded),
 			completionBudgetReport: null,
 			completionVerification: {
 				status: "rejected",
-				attempt,
+				attempt: recordedAttempt,
 				maxAttempts,
 				feedback: verification.feedback,
-				continuationMessage,
+				compactorMemo: continuation.memo,
 			},
 		};
 	}
@@ -4076,14 +4141,90 @@ export class AgentSession {
 		const state = this.#goalModeState;
 		if (!state?.enabled || state.goal.status !== "active") return undefined;
 		const goalId = state.goal.id;
-		const continuationMessage = await this.#buildGoalContinuationMessage(
+		const continuation = await this.#buildGoalContinuationMessage(
 			state.goal,
 			state.goal.lastVerificationFeedback,
 			signal,
 		);
 		const latest = this.#goalModeState;
 		if (!latest?.enabled || latest.goal.status !== "active" || latest.goal.id !== goalId) return undefined;
-		return continuationMessage;
+		return continuation.prompt;
+	}
+
+	async #publishGoalRubricArtifact(goal: Goal, rubric: string): Promise<void> {
+		const details: GoalRubricMessageDetails = {
+			goalId: goal.id,
+			objective: goal.objective,
+			rubric,
+			generatedAt: Date.now(),
+		};
+		await this.#sendGoalArtifactMessage<GoalRubricMessageDetails>({
+			customType: GOAL_RUBRIC_MESSAGE_TYPE,
+			content: rubric,
+			display: true,
+			details,
+			attribution: "agent",
+		});
+	}
+
+	async #publishGoalVerificationFeedbackArtifact(input: {
+		goal: Goal;
+		attempt: number;
+		maxAttempts: number;
+		feedback: string;
+		compactorMemo: string | undefined;
+	}): Promise<void> {
+		const details: GoalVerificationFeedbackMessageDetails = {
+			goalId: input.goal.id,
+			objective: input.goal.objective,
+			attempt: input.attempt,
+			maxAttempts: input.maxAttempts,
+			feedback: input.feedback,
+			rejectedAt: Date.now(),
+		};
+		if (input.compactorMemo !== undefined) details.compactorMemo = input.compactorMemo;
+		await this.#sendGoalArtifactMessage<GoalVerificationFeedbackMessageDetails>({
+			customType: GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+			content: this.#renderGoalVerificationFeedbackContent(input.feedback, input.compactorMemo),
+			display: true,
+			details,
+			attribution: "agent",
+		});
+	}
+
+	async #sendGoalArtifactMessage<T>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+	): Promise<void> {
+		if (this.isStreaming) {
+			this.#pendingGoalArtifactMessages.push(message);
+			return;
+		}
+		await this.sendCustomMessage<T>(message);
+	}
+
+	#flushPendingGoalArtifactMessages(): void {
+		const messages = this.#pendingGoalArtifactMessages.splice(0);
+		for (const message of messages) {
+			this.#appendGoalArtifactMessage(message);
+		}
+	}
+
+	#appendGoalArtifactMessage(
+		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details" | "attribution">,
+	): void {
+		this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+			message.attribution ?? "agent",
+		);
+	}
+
+	#renderGoalVerificationFeedbackContent(feedback: string, compactorMemo: string | undefined): string {
+		const trimmedMemo = compactorMemo?.trim();
+		if (!trimmedMemo) return `## Verifier feedback\n\n${feedback}`;
+		return `## Verifier feedback\n\n${feedback}\n\n## Compactor memo\n\n${trimmedMemo}`;
 	}
 
 	async #generateGoalRubric(objective: string, signal?: AbortSignal): Promise<string> {
@@ -4134,7 +4275,7 @@ export class AgentSession {
 		goal: Goal,
 		verificationFeedback: string | undefined,
 		signal?: AbortSignal,
-	): Promise<string> {
+	): Promise<{ prompt: string; memo: string | undefined }> {
 		return await this.#withSerializedGoalSideAgent(async () => {
 			const contextFile = await this.#writeGoalTranscriptFile("continue", goal.id);
 			const assignment = renderGoalContinuationCompactorAssignment({
@@ -4151,12 +4292,16 @@ export class AgentSession {
 				parse: parseGoalContinuationCompactorOutput,
 				signal,
 			});
-			const continuationMessage = output.continuationMessage.trim();
-			if (!continuationMessage) return renderGoalPrompt("continuation", goal);
-			return renderPreparedGoalContinuation({
-				basePrompt: renderGoalPrompt("continuation", goal),
-				continuationMessage,
-			});
+			const memo = output.continuationMessage.trim();
+			const basePrompt = renderGoalPrompt("continuation", goal);
+			if (!memo) return { prompt: basePrompt, memo: undefined };
+			return {
+				prompt: renderPreparedGoalContinuation({
+					basePrompt,
+					continuationMessage: memo,
+				}),
+				memo,
+			};
 		});
 	}
 

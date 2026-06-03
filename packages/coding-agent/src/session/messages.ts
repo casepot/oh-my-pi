@@ -31,6 +31,25 @@ import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
+export const GOAL_RUBRIC_MESSAGE_TYPE = "goal-rubric";
+export const GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE = "goal-verification-feedback";
+
+export interface GoalRubricMessageDetails {
+	goalId: string;
+	objective: string;
+	rubric: string;
+	generatedAt: number;
+}
+
+export interface GoalVerificationFeedbackMessageDetails {
+	goalId: string;
+	objective: string;
+	attempt: number;
+	maxAttempts: number;
+	feedback: string;
+	compactorMemo?: string;
+	rejectedAt: number;
+}
 
 export interface SkillPromptDetails {
 	name: string;

@@ -1,7 +1,7 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
-import { formatNumber, prompt } from "@oh-my-pi/pi-utils";
+import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
+import { formatNumber, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as z from "zod/v4";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
@@ -42,8 +42,9 @@ export function buildGoalToolResponse(
 	options?: { includeCompletionReport?: boolean; completionVerification?: GoalCompletionVerificationDetails },
 ): GoalToolResponse {
 	const resolvedGoal = goal ?? null;
+	const completionVerification = normalizeCompletionVerification(resolvedGoal, options?.completionVerification);
 	const completionBudget =
-		options?.completionVerification?.status === "rejected"
+		completionVerification?.status === "rejected"
 			? null
 			: options?.includeCompletionReport && resolvedGoal?.status === "complete"
 				? completionBudgetReport(resolvedGoal)
@@ -52,8 +53,24 @@ export function buildGoalToolResponse(
 		goal: resolvedGoal,
 		remainingTokens: remainingTokens(resolvedGoal),
 		completionBudgetReport: completionBudget,
-		completionVerification: options?.completionVerification,
+		completionVerification,
 	};
+}
+
+function normalizeCompletionVerification(
+	goal: Goal | null,
+	completionVerification: GoalCompletionVerificationDetails | undefined,
+): GoalCompletionVerificationDetails | undefined {
+	if (!completionVerification) return undefined;
+	const { continuationMessage: _continuationMessage, ...visibleVerification } = completionVerification;
+	if (
+		visibleVerification.status === "rejected" &&
+		!visibleVerification.compactorMemo &&
+		goal?.lastVerificationCompactorMemo
+	) {
+		return { ...visibleVerification, compactorMemo: goal.lastVerificationCompactorMemo };
+	}
+	return visibleVerification;
 }
 
 function validateCreateParams(params: GoalToolInput): { objective: string; tokenBudget?: number } {
@@ -69,6 +86,7 @@ function validateCreateParams(params: GoalToolInput): { objective: string; token
 }
 
 export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
+	readonly concurrency = "exclusive";
 	readonly name = "goal";
 	readonly label = "Goal";
 	readonly description = prompt.render(goalDescription);
@@ -115,6 +133,10 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				? await goalSession.requestGoalCompletion(signal)
 				: buildGoalToolResponse(await runtime.completeGoalFromTool(), { includeCompletionReport: true });
 		}
+		const completionVerification = normalizeCompletionVerification(response.goal, response.completionVerification);
+		if (completionVerification !== response.completionVerification) {
+			response = { ...response, completionVerification };
+		}
 		let text: string;
 		if (response.goal) {
 			text = `Goal: ${response.goal.objective}\nStatus: ${response.goal.status}\nTokens: ${response.goal.tokensUsed} used`;
@@ -126,8 +148,8 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			}
 			if (response.completionVerification?.status === "rejected") {
 				text += `\n\nCompletion verification rejected (attempt ${response.completionVerification.attempt}/${response.completionVerification.maxAttempts}):\n${response.completionVerification.feedback}`;
-				if (response.completionVerification.continuationMessage) {
-					text += `\n\nContinuation guidance:\n${response.completionVerification.continuationMessage}`;
+				if (response.completionVerification.compactorMemo) {
+					text += `\n\nCompactor memo:\n${response.completionVerification.compactorMemo}`;
 				}
 			} else if (response.completionBudgetReport) {
 				text += `\n\n${response.completionBudgetReport}`;
@@ -154,7 +176,7 @@ function describeOp(op: string | undefined): string {
 		case "create":
 			return "set";
 		case "complete":
-			return "complete";
+			return "verify completion";
 		case "get":
 			return "check";
 		case "resume":
@@ -178,6 +200,10 @@ function goalBadgeColor(status: GoalStatus): ThemeColor {
 		default:
 			return "accent";
 	}
+}
+
+function humanPreview(text: string): string {
+	return truncateToWidth(replaceTabs(sanitizeText(text).trim()), TRUNCATE_LENGTHS.LONG);
 }
 
 interface GoalRenderArgs {
@@ -226,14 +252,20 @@ export const goalToolRenderer = {
 			return new Text([header, body].join("\n"), 0, 0);
 		}
 
+		const verification = details?.completionVerification;
+		const verificationRejected = verification?.status === "rejected";
 		const lines: string[] = [];
 		lines.push(
 			renderStatusLine(
 				{
-					icon: "success",
+					icon: verificationRejected ? "warning" : "success",
 					title: "Goal",
 					description,
-					badge: { label: goal.status, color: goalBadgeColor(goal.status) },
+					badge: {
+						label: verificationRejected ? "verification rejected" : goal.status,
+						color: verificationRejected ? "warning" : goalBadgeColor(goal.status),
+					},
+					meta: verificationRejected ? [`attempt ${verification.attempt}/${verification.maxAttempts}`] : undefined,
 				},
 				uiTheme,
 			),
@@ -253,20 +285,10 @@ export const goalToolRenderer = {
 			lines.push(`  ${uiTheme.fg("dim", `${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`)}`);
 		}
 
-		const verification = details?.completionVerification;
-		if (verification?.status === "rejected") {
-			lines.push("");
-			lines.push(
-				uiTheme.fg(
-					"warning",
-					`Completion verification rejected (attempt ${verification.attempt}/${verification.maxAttempts})`,
-				),
-			);
-			lines.push(`  ${truncateToWidth(verification.feedback.trim(), TRUNCATE_LENGTHS.LONG)}`);
-			if (verification.continuationMessage) {
-				lines.push(
-					`  ${uiTheme.fg("muted", truncateToWidth(verification.continuationMessage.trim(), TRUNCATE_LENGTHS.LONG))}`,
-				);
+		if (verificationRejected) {
+			lines.push(`  ${uiTheme.fg("warning", humanPreview(verification.feedback))}`);
+			if (verification.compactorMemo) {
+				lines.push(`  ${uiTheme.fg("muted", humanPreview(verification.compactorMemo))}`);
 			}
 		}
 

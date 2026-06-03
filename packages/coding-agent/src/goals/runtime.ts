@@ -248,9 +248,18 @@ export class GoalRuntime {
 		await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
 			if (!state?.enabled || !isAccountingStatus(state.goal)) return;
-			if (!state.goal.failedCompletionAttempts && !state.goal.lastVerificationFeedback) return;
+			if (
+				!state.goal.failedCompletionAttempts &&
+				!state.goal.lastVerificationFeedback &&
+				!state.goal.lastVerificationCompactorMemo &&
+				!state.goal.lastVerificationAttempt
+			) {
+				return;
+			}
 			state.goal.failedCompletionAttempts = undefined;
 			state.goal.lastVerificationFeedback = undefined;
+			state.goal.lastVerificationCompactorMemo = undefined;
+			state.goal.lastVerificationAttempt = undefined;
 			state.goal.updatedAt = this.#now();
 			await this.#commitState(state, { persist: "goal" });
 		});
@@ -407,14 +416,24 @@ export class GoalRuntime {
 		});
 	}
 
-	async recordFailedCompletionVerification(goalId: string, feedback: string): Promise<Goal | undefined> {
+	async recordFailedCompletionVerification(
+		goalId: string,
+		feedback: string,
+		options?: { attempt?: number; compactorMemo?: string },
+	): Promise<Goal | undefined> {
 		const trimmedFeedback = feedback.trim();
+		const trimmedCompactorMemo = options?.compactorMemo?.trim();
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
 			if (!state?.enabled || state.goal.id !== goalId || !isAccountingStatus(state.goal)) return undefined;
 			const wasBudgetLimited = state.goal.status === "budget-limited";
-			state.goal.failedCompletionAttempts = (state.goal.failedCompletionAttempts ?? 0) + 1;
+			const currentAttempts = state.goal.failedCompletionAttempts ?? 0;
+			const nextAttempt =
+				options?.attempt === undefined ? currentAttempts + 1 : Math.max(currentAttempts + 1, options.attempt);
+			state.goal.failedCompletionAttempts = nextAttempt;
+			state.goal.lastVerificationAttempt = nextAttempt;
 			state.goal.lastVerificationFeedback = trimmedFeedback;
+			state.goal.lastVerificationCompactorMemo = trimmedCompactorMemo || undefined;
 			state.goal.updatedAt = this.#now();
 			if (!wasBudgetLimited) {
 				state.goal.status = "active";

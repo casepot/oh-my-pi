@@ -100,6 +100,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		subcommands: [
 			{ name: "set", description: "Set or replace the goal", usage: "<objective>" },
 			{ name: "show", description: "Show current goal details" },
+			{ name: "rubric", description: "Show the goal completion rubric" },
+			{ name: "feedback", description: "Show the latest goal verification feedback" },
 			{ name: "pause", description: "Pause the current goal" },
 			{ name: "resume", description: "Resume a paused goal" },
 			{ name: "drop", description: "Drop the current goal" },

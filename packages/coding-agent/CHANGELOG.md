@@ -9,6 +9,7 @@
 - Added a built-in Rust skillset with a small project-gated native `rs-*` TTSR guardrail pack for generated Rust edits.
 - Added compact startup update status for fork/source installs, including dirty checkout, local-vs-fork divergence, fork-vs-upstream divergence, and non-fork install migration hints.
 - Added goal-mode side agents for rubric generation, completion verification, and goal-aware continuation compaction.
+- Added expandable TUI artifacts and `/goal` affordances for goal rubrics and verification feedback.
 
 ### Changed
 

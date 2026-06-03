@@ -10,6 +10,8 @@ import { CompactionSummaryMessageComponent } from "../../modes/components/compac
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
+import { GoalRubricMessageComponent } from "../../modes/components/goal-rubric-message";
+import { GoalVerificationFeedbackMessageComponent } from "../../modes/components/goal-verification-feedback-message";
 import {
 	ReadToolGroupComponent,
 	readArgsHaveTarget,
@@ -22,6 +24,10 @@ import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "../../modes/types";
 import {
 	type CustomMessage,
+	GOAL_RUBRIC_MESSAGE_TYPE,
+	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+	type GoalRubricMessageDetails,
+	type GoalVerificationFeedbackMessageDetails,
 	isSilentAbort,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
@@ -156,6 +162,22 @@ export class UiHelpers {
 					}
 					if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {
 						const component = new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === GOAL_RUBRIC_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(new Spacer(1));
+						const component = new GoalRubricMessageComponent(message as CustomMessage<GoalRubricMessageDetails>);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(new Spacer(1));
+						const component = new GoalVerificationFeedbackMessageComponent(
+							message as CustomMessage<GoalVerificationFeedbackMessageDetails>,
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;

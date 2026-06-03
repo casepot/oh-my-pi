@@ -14,6 +14,8 @@ export interface Goal {
 	rubric?: string;
 	failedCompletionAttempts?: number;
 	lastVerificationFeedback?: string;
+	lastVerificationCompactorMemo?: string;
+	lastVerificationAttempt?: number;
 }
 
 export interface GoalModeState {
@@ -28,6 +30,8 @@ export interface GoalCompletionVerificationDetails {
 	attempt: number;
 	maxAttempts: number;
 	feedback: string;
+	compactorMemo?: string;
+	/** Legacy/compatibility field; visible renderers must never contain a hidden prepared continuation prompt. */
 	continuationMessage?: string;
 }
 

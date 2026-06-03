@@ -76,6 +76,13 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 };
 import type { AgentSession, AgentSessionEvent, ResolvedRoleModel } from "../session/agent-session";
 import { HistoryStorage } from "../session/history-storage";
+import {
+	type CustomMessage,
+	GOAL_RUBRIC_MESSAGE_TYPE,
+	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+	type GoalRubricMessageDetails,
+	type GoalVerificationFeedbackMessageDetails,
+} from "../session/messages";
 import type { SessionContext, SessionManager } from "../session/session-manager";
 import { getRecentSessions } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
@@ -212,11 +219,33 @@ function formatHudNoteMarker(count: number): string {
 	return theme.fg("dim", chalk.italic(` \u207a${sub}`));
 }
 
-type GoalSubcommand = "set" | "show" | "pause" | "resume" | "drop" | "budget";
+type GoalSubcommand = "set" | "show" | "rubric" | "feedback" | "pause" | "resume" | "drop" | "budget";
+type GoalArtifactMessage =
+	| CustomMessage<GoalRubricMessageDetails>
+	| CustomMessage<GoalVerificationFeedbackMessageDetails>;
 
-const GOAL_SUBCOMMANDS = new Set<GoalSubcommand>(["set", "show", "pause", "resume", "drop", "budget"]);
+interface PendingGoalArtifactMessage {
+	message: GoalArtifactMessage;
+	persist: boolean;
+	warn?: boolean;
+}
+
+const GOAL_SUBCOMMANDS: Record<GoalSubcommand, true> = {
+	set: true,
+	show: true,
+	rubric: true,
+	feedback: true,
+	pause: true,
+	resume: true,
+	drop: true,
+	budget: true,
+};
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
+
+function isGoalSubcommand(value: string): value is GoalSubcommand {
+	return Object.hasOwn(GOAL_SUBCOMMANDS, value);
+}
 
 function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; rest: string } {
 	const trimmed = args.trim();
@@ -224,8 +253,8 @@ function parseGoalSubcommand(args: string): { sub: GoalSubcommand | undefined; r
 	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
 	if (!match) return { sub: undefined, rest: trimmed };
 	const first = match[1].toLowerCase();
-	if (GOAL_SUBCOMMANDS.has(first as GoalSubcommand)) {
-		return { sub: first as GoalSubcommand, rest: match[2]?.trim() ?? "" };
+	if (isGoalSubcommand(first)) {
+		return { sub: first, rest: match[2]?.trim() ?? "" };
 	}
 	return { sub: undefined, rest: trimmed };
 }
@@ -334,6 +363,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
 	#goalSuppressNextContinuation = false;
+	#lastGoalVerificationArtifactKey: string | undefined;
+	#lastGoalRubricArtifactKey: string | undefined;
+	#pendingGoalArtifactMessages: PendingGoalArtifactMessage[] = [];
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
 	#planModeHasEntered = false;
@@ -1299,6 +1331,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				typeof value.failedCompletionAttempts === "number" ? value.failedCompletionAttempts : undefined,
 			lastVerificationFeedback:
 				typeof value.lastVerificationFeedback === "string" ? value.lastVerificationFeedback : undefined,
+			lastVerificationCompactorMemo:
+				typeof value.lastVerificationCompactorMemo === "string" ? value.lastVerificationCompactorMemo : undefined,
+			lastVerificationAttempt:
+				typeof value.lastVerificationAttempt === "number" ? value.lastVerificationAttempt : undefined,
 		};
 	}
 
@@ -1306,6 +1342,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (event.type === "agent_start") {
 			this.#goalTurnHadToolCalls = false;
 			this.#cancelGoalContinuation();
+			return;
+		}
+		if (event.type === "message_end" && event.message.role === "toolResult") {
+			await this.#flushPendingGoalArtifactMessages();
 			return;
 		}
 		if (event.type === "tool_execution_start") {
@@ -1328,6 +1368,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			this.goalModeEnabled = event.state?.enabled === true;
 			this.goalModePaused = event.state?.enabled !== true && event.state?.goal?.status === "paused";
+			if (event.state?.goal) {
+				this.#surfaceLatestGoalRubric(event.state.goal);
+				this.#surfaceLatestGoalVerificationFeedback(event.state.goal);
+			}
 			if (!event.state?.enabled) {
 				this.#cancelGoalContinuation();
 			}
@@ -1337,6 +1381,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (event.type !== "agent_end") {
 			return;
 		}
+		await this.#flushPendingGoalArtifactMessages();
 		if (this.#goalContinuationTurnInFlight) {
 			this.#goalSuppressNextContinuation = !this.#goalTurnHadToolCalls;
 			this.#goalContinuationTurnInFlight = false;
@@ -1581,9 +1626,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
 		this.goalModePaused = false;
-		const state = options.resume
-			? await this.session.goalRuntime.resumeGoal()
-			: await this.session.createGoalWithRubric({ objective: options.objective ?? "" });
+		let state: GoalModeState;
+		if (options.resume) {
+			state = await this.session.goalRuntime.resumeGoal();
+		} else {
+			this.showStatus("Generating goal rubric…");
+			state = await this.session.createGoalWithRubric({ objective: options.objective ?? "" });
+			this.showStatus("Goal rubric generated.");
+			this.#displayGoalArtifact(this.#goalRubricMessage(state.goal));
+		}
 		await this.session.setActiveToolsByName(goalTools);
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
@@ -1920,6 +1971,193 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	async #appendGoalRubricArtifact(goal: Goal): Promise<void> {
+		if (!goal.rubric) {
+			this.showStatus("No goal rubric generated yet.");
+			return;
+		}
+		const message = this.#goalRubricMessage(goal);
+		if (this.session.isStreaming) {
+			this.#queueGoalArtifactMessage(message, true);
+			return;
+		}
+		await this.#persistGoalArtifactMessage(message);
+		this.#displayGoalArtifact(message);
+	}
+
+	async #appendGoalVerificationFeedbackArtifact(goal: Goal): Promise<void> {
+		if (!goal.lastVerificationFeedback && !goal.lastVerificationAttempt) {
+			this.showStatus("No verification feedback yet.");
+			return;
+		}
+		const message = this.#goalVerificationFeedbackMessage(goal);
+		if (this.session.isStreaming) {
+			this.#queueGoalArtifactMessage(message, true);
+			return;
+		}
+		await this.#persistGoalArtifactMessage(message);
+		this.#displayGoalArtifact(message);
+	}
+
+	async #persistGoalArtifactMessage(message: GoalArtifactMessage): Promise<void> {
+		this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+			message.attribution ?? "agent",
+		);
+	}
+
+	async #flushPendingGoalArtifactMessages(): Promise<void> {
+		const pending = this.#pendingGoalArtifactMessages.splice(0);
+		for (const item of pending) {
+			if (item.persist) {
+				await this.#persistGoalArtifactMessage(item.message);
+			}
+			if (item.warn) {
+				this.#showGoalVerificationArtifactWarning(item.message);
+			}
+			this.#displayGoalArtifact(item.message);
+		}
+	}
+
+	#queueGoalArtifactMessage(message: GoalArtifactMessage, persist: boolean, warn?: boolean): void {
+		this.#markGoalArtifactDisplayed(message);
+		const key = this.#goalArtifactMessageKey(message);
+		const alreadyQueued = this.#pendingGoalArtifactMessages.some(
+			item => this.#goalArtifactMessageKey(item.message) === key,
+		);
+		if (!alreadyQueued) {
+			this.#pendingGoalArtifactMessages.push({ message, persist, warn });
+		}
+	}
+
+	#goalArtifactMessageKey(message: GoalArtifactMessage): string {
+		if (message.customType === GOAL_RUBRIC_MESSAGE_TYPE) {
+			const details = message.details as GoalRubricMessageDetails | undefined;
+			return [message.customType, details?.goalId ?? "", details?.rubric ?? ""].join("\0");
+		}
+		const details = message.details as GoalVerificationFeedbackMessageDetails | undefined;
+		return [
+			message.customType,
+			details?.goalId ?? "",
+			details?.attempt ?? 0,
+			details?.feedback ?? "",
+			details?.compactorMemo ?? "",
+		].join("\0");
+	}
+
+	#surfaceLatestGoalRubric(goal: Goal): void {
+		if (!goal.rubric) {
+			this.#lastGoalRubricArtifactKey = undefined;
+			return;
+		}
+		if (!this.session.isStreaming) return;
+		const key = [goal.id, goal.rubric].join("\0");
+		if (this.#lastGoalRubricArtifactKey === key) return;
+		this.#queueGoalArtifactMessage(this.#goalRubricMessage(goal), false);
+	}
+
+	#surfaceLatestGoalVerificationFeedback(goal: Goal): void {
+		if (!goal.lastVerificationFeedback && !goal.lastVerificationAttempt) {
+			this.#lastGoalVerificationArtifactKey = undefined;
+			return;
+		}
+		if (!this.session.isStreaming) return;
+		const key = [
+			goal.id,
+			goal.lastVerificationAttempt ?? goal.failedCompletionAttempts ?? 0,
+			goal.lastVerificationFeedback ?? "",
+			goal.lastVerificationCompactorMemo ?? "",
+		].join("\0");
+		if (this.#lastGoalVerificationArtifactKey === key) return;
+		this.#queueGoalArtifactMessage(this.#goalVerificationFeedbackMessage(goal), false, true);
+	}
+
+	#goalRubricMessage(goal: Goal): CustomMessage<GoalRubricMessageDetails> {
+		const rubric = goal.rubric ?? "";
+		return {
+			role: "custom",
+			customType: GOAL_RUBRIC_MESSAGE_TYPE,
+			content: rubric,
+			display: true,
+			details: {
+				goalId: goal.id,
+				objective: goal.objective,
+				rubric,
+				generatedAt: Date.now(),
+			},
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	#goalVerificationFeedbackMessage(goal: Goal): CustomMessage<GoalVerificationFeedbackMessageDetails> {
+		const feedback = goal.lastVerificationFeedback ?? "";
+		const compactorMemo = goal.lastVerificationCompactorMemo;
+		const details: GoalVerificationFeedbackMessageDetails = {
+			goalId: goal.id,
+			objective: goal.objective,
+			attempt: goal.lastVerificationAttempt ?? goal.failedCompletionAttempts ?? 0,
+			maxAttempts: this.#goalMaxCompletionAttempts(),
+			feedback,
+			rejectedAt: Date.now(),
+		};
+		if (compactorMemo !== undefined) details.compactorMemo = compactorMemo;
+		return {
+			role: "custom",
+			customType: GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+			content: this.#formatGoalVerificationFeedbackContent(feedback, compactorMemo),
+			display: true,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	#displayGoalArtifact(message: GoalArtifactMessage): void {
+		this.#markGoalArtifactDisplayed(message);
+		this.addMessageToChat(message);
+		this.ui.requestRender();
+	}
+
+	#showGoalVerificationArtifactWarning(message: GoalArtifactMessage): void {
+		if (message.customType !== GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE) return;
+		const details = message.details as GoalVerificationFeedbackMessageDetails | undefined;
+		this.showWarning(
+			`Goal verification rejected (attempt ${details?.attempt ?? 0}/${details?.maxAttempts ?? this.#goalMaxCompletionAttempts()}).`,
+		);
+	}
+
+	#markGoalArtifactDisplayed(message: GoalArtifactMessage): void {
+		if (message.customType === GOAL_RUBRIC_MESSAGE_TYPE) {
+			const details = message.details as GoalRubricMessageDetails | undefined;
+			this.#lastGoalRubricArtifactKey = [details?.goalId ?? "", details?.rubric ?? ""].join("\0");
+		} else if (message.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE) {
+			const details = message.details as GoalVerificationFeedbackMessageDetails | undefined;
+			this.#lastGoalVerificationArtifactKey = [
+				details?.goalId ?? "",
+				details?.attempt ?? 0,
+				details?.feedback ?? "",
+				details?.compactorMemo ?? "",
+			].join("\0");
+		}
+	}
+
+	#formatGoalVerificationFeedbackContent(feedback: string, compactorMemo: string | undefined): string {
+		const trimmedMemo = compactorMemo?.trim();
+		if (!trimmedMemo) return `## Verifier feedback\n\n${feedback}`;
+		return `## Verifier feedback\n\n${feedback}\n\n## Compactor memo\n\n${trimmedMemo}`;
+	}
+
+	#goalMaxCompletionAttempts(): number {
+		const configured = this.session.settings.get("goal.maxCompletionAttempts");
+		if (!Number.isFinite(configured)) return 3;
+		const maxAttempts = Math.trunc(configured);
+		return maxAttempts > 0 ? maxAttempts : 3;
+	}
+
 	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {
 		const state = this.session.getGoalModeState();
 		if (!this.goalModeEnabled || !state?.enabled) {
@@ -1991,14 +2229,27 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
-
 	async #dispatchGoalSubcommand(sub: GoalSubcommand, rest: string): Promise<void> {
 		switch (sub) {
 			case "set":
 				await this.#handleGoalSetSubcommand(rest);
 				return;
 			case "show":
+				if (rest === "rubric") {
+					await this.#showGoalRubric();
+					return;
+				}
+				if (rest === "feedback") {
+					await this.#showGoalVerificationFeedback();
+					return;
+				}
 				this.#showGoalDetails();
+				return;
+			case "rubric":
+				await this.#showGoalRubric();
+				return;
+			case "feedback":
+				await this.#showGoalVerificationFeedback();
 				return;
 			case "pause":
 				await this.#pauseGoalAction();
@@ -2030,15 +2281,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!goal) return;
 		const summary = goal.objective.length > 48 ? `${goal.objective.slice(0, 47)}…` : goal.objective;
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
-		const items =
-			state === "active"
-				? ["Show details", "Adjust budget…", "Pause", "Drop"]
-				: ["Resume", "Show details", "Adjust budget…", "Drop"];
+		const activeItems = ["Show details"];
+		const pausedItems = ["Resume", "Show details"];
+		if (goal.rubric) {
+			activeItems.push("Show rubric");
+			pausedItems.push("Show rubric");
+		}
+		if (goal.lastVerificationFeedback || goal.lastVerificationAttempt) {
+			activeItems.push("Show verification feedback");
+			pausedItems.push("Show verification feedback");
+		}
+		activeItems.push("Adjust budget…", "Pause", "Drop");
+		pausedItems.push("Adjust budget…", "Drop");
+		const items = state === "active" ? activeItems : pausedItems;
 		const choice = await this.showHookSelector(title, items);
 		if (!choice) return;
 		switch (choice) {
 			case "Show details":
 				this.#showGoalDetails();
+				return;
+			case "Show rubric":
+				await this.#showGoalRubric();
+				return;
+			case "Show verification feedback":
+				await this.#showGoalVerificationFeedback();
 				return;
 			case "Adjust budget…":
 				await this.#promptGoalBudgetEdit();
@@ -2074,6 +2340,24 @@ export class InteractiveMode implements InteractiveModeContext {
 			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
 		];
 		this.showStatus(lines.join("\n"));
+	}
+
+	async #showGoalRubric(): Promise<void> {
+		const goal = this.session.getGoalModeState()?.goal;
+		if (!goal?.rubric) {
+			this.showStatus("No goal rubric generated yet.");
+			return;
+		}
+		await this.#appendGoalRubricArtifact(goal);
+	}
+
+	async #showGoalVerificationFeedback(): Promise<void> {
+		const goal = this.session.getGoalModeState()?.goal;
+		if (!goal?.lastVerificationFeedback && !goal?.lastVerificationAttempt) {
+			this.showStatus("No verification feedback yet.");
+			return;
+		}
+		await this.#appendGoalVerificationFeedbackArtifact(goal);
 	}
 
 	async #promptGoalBudgetEdit(): Promise<void> {
@@ -2130,7 +2414,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #replaceGoalFromObjective(objective: string): Promise<void> {
+		this.showStatus("Generating goal rubric…");
 		const state = await this.session.replaceGoalWithRubric({ objective });
+		this.showStatus("Goal rubric generated.");
+		this.#displayGoalArtifact(this.#goalRubricMessage(state.goal));
 		this.session.setGoalModeState(state);
 		this.goalModeEnabled = true;
 		this.goalModePaused = false;

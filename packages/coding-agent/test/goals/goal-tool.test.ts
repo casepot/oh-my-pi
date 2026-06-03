@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
 import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal, GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
-import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { GoalTool, goalToolRenderer } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
@@ -85,6 +86,7 @@ describe("GoalTool", () => {
 				getGoalModeState,
 			}),
 		);
+		expect(tool.concurrency).toBe("exclusive");
 
 		const created = await tool.execute("call-create", {
 			op: "create",
@@ -124,7 +126,19 @@ describe("GoalTool", () => {
 	});
 
 	it("surfaces verifier rejection without completing the goal", async () => {
-		const activeGoal = createGoal({ objective: "Needs proof", tokenBudget: 10 });
+		const activeGoal = createGoal({
+			objective: "Needs proof",
+			tokenBudget: 10,
+			lastVerificationCompactorMemo: "Gather the missing evidence before retrying.",
+		});
+		const feedback = "Missing integration evidence.";
+		const compactorMemo = activeGoal.lastVerificationCompactorMemo ?? "";
+		const hiddenContinuation = [
+			"Continue work on the active goal.",
+			"<goal_continuation_compaction>",
+			"Hidden prepared continuation prompt.",
+			"</goal_continuation_compaction>",
+		].join("\n");
 		const tool = new GoalTool(
 			createToolSession({
 				getGoalRuntime: () =>
@@ -145,8 +159,8 @@ describe("GoalTool", () => {
 						status: "rejected" as const,
 						attempt: 1,
 						maxAttempts: 3,
-						feedback: "Missing integration evidence.",
-						continuationMessage: "Gather the missing evidence before retrying.",
+						feedback,
+						continuationMessage: hiddenContinuation,
 					},
 				})),
 			}),
@@ -159,12 +173,37 @@ describe("GoalTool", () => {
 			status: "rejected",
 			attempt: 1,
 			maxAttempts: 3,
-			feedback: "Missing integration evidence.",
+			feedback,
+			compactorMemo,
 		});
+		expect(result.details?.completionVerification?.continuationMessage).toBeUndefined();
 		const content = result.content[0];
 		if (content?.type !== "text") throw new Error("expected text result");
 		expect(content.text).toContain("Completion verification rejected");
-		expect(content.text).toContain("Continuation guidance");
+		expect(content.text).toContain(feedback);
+		expect(content.text).toContain("Compactor memo");
+		expect(content.text).toContain(compactorMemo);
+		expect(content.text).not.toContain("<goal_continuation_compaction>");
+		expect(content.text).not.toContain("Continue work on the active goal.");
+		expect(content.text).not.toContain("Hidden prepared continuation prompt.");
+
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("expected dark theme");
+		const renderOptions = { expanded: false, isPartial: false };
+		const pendingRendered = Bun.stripANSI(
+			goalToolRenderer.renderCall({ op: "complete" }, renderOptions, uiTheme).render(120).join("\n"),
+		);
+		expect(pendingRendered).toContain("verify completion");
+		const rendered = Bun.stripANSI(
+			goalToolRenderer.renderResult(result, renderOptions, uiTheme, { op: "complete" }).render(120).join("\n"),
+		);
+		expect(rendered).toContain("verification rejected");
+		expect(rendered).toContain("attempt 1/3");
+		expect(rendered).toContain(feedback);
+		expect(rendered).toContain(compactorMemo);
+		expect(rendered).not.toContain("<goal_continuation_compaction>");
+		expect(rendered).not.toContain("Continue work on the active goal.");
+		expect(rendered).not.toContain("Hidden prepared continuation prompt.");
 	});
 
 	it("rejects create when a goal already exists", async () => {

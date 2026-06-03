@@ -8,6 +8,12 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	GOAL_RUBRIC_MESSAGE_TYPE,
+	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+	type GoalRubricMessageDetails,
+	type GoalVerificationFeedbackMessageDetails,
+} from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -39,7 +45,8 @@ type GoalHarness = {
 type GoalSideAgentMock = {
 	completionStatus: "verified" | "rejected";
 	feedback: string;
-	continuationMessage: string;
+	compactorFails: boolean;
+	compactorMemo: string;
 };
 
 let goalSideAgentMock: GoalSideAgentMock;
@@ -68,7 +75,8 @@ function installGoalSideAgentMock(): void {
 	goalSideAgentMock = {
 		completionStatus: "verified",
 		feedback: "Verifier accepted the test goal.",
-		continuationMessage: "Continue with the highest-value missing evidence.",
+		compactorFails: false,
+		compactorMemo: "Continue with the highest-value missing evidence.",
 	};
 	goalSideAgentCalls = [];
 	vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
@@ -82,12 +90,23 @@ function installGoalSideAgentMock(): void {
 			return createSideAgentResult(options, {
 				status: goalSideAgentMock.completionStatus,
 				feedback: goalSideAgentMock.feedback,
-				continuationMessage: goalSideAgentMock.continuationMessage,
+				compactorMemo: goalSideAgentMock.compactorMemo,
+				continuationMessage:
+					"<goal_continuation_compaction>Hidden prepared verifier hint.</goal_continuation_compaction>",
 			});
 		}
 		if (options.agent.name === "goal-continuation-compactor") {
+			if (goalSideAgentMock.compactorFails) {
+				return {
+					...createSideAgentResult(options, {}),
+					exitCode: 1,
+					error: "compactor failed",
+					output: "",
+				};
+			}
 			return createSideAgentResult(options, {
-				continuationMessage: goalSideAgentMock.continuationMessage,
+				compactorMemo: goalSideAgentMock.compactorMemo,
+				continuationMessage: goalSideAgentMock.compactorMemo,
 			});
 		}
 		throw new Error(`unexpected side agent ${options.agent.name}`);
@@ -196,17 +215,56 @@ describe("InteractiveMode goal mode integration", () => {
 	});
 
 	it("generates a rubric through a read-only side agent before goal work starts", async () => {
+		const showStatus = vi.spyOn(harness.mode, "showStatus");
+
 		await harness.mode.handleGoalModeCommand("Ship the release");
 
 		const state = harness.session.getGoalModeState();
 		const rubricCall = goalSideAgentCalls.find(call => call.agent.name === "goal-rubric");
 		expect(state?.goal.rubric).toContain("Strict test rubric");
+		expect(showStatus).toHaveBeenCalledWith("Generating goal rubric…");
+		expect(showStatus).toHaveBeenCalledWith("Goal rubric generated.");
+		const artifact = harness.session.sessionManager
+			.getEntries()
+			.find(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
+		if (artifact?.type !== "custom_message") throw new Error("expected rubric artifact");
+		expect(JSON.stringify(artifact.content)).toContain("Strict test rubric");
+		expect((artifact.details as GoalRubricMessageDetails).objective).toBe("Ship the release");
+		expect((artifact.details as GoalRubricMessageDetails).rubric).toContain("Strict test rubric");
+		const renderedChat = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
+		expect(renderedChat).toContain("[goal-rubric]");
+		expect(renderedChat).toContain("ctrl+o to expand");
+		expect(showStatus.mock.calls.map(call => String(call[0])).join("\n")).not.toContain("Strict test rubric");
 		expect(rubricCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
 		expect(rubricCall?.task).toContain("<full_transcript_file>");
 		expect(rubricCall?.task).toContain("Ship the release");
 		if (!rubricCall?.contextFile) throw new Error("expected rubric side agent context file");
 		const transcript = await Bun.file(rubricCall.contextFile).text();
 		expect(transcript).toContain("Test");
+	});
+
+	it("surfaces rubric generation status when replacing the active goal", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const showStatus = vi.spyOn(harness.mode, "showStatus");
+		const beforeRubricCount = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE).length;
+
+		await harness.mode.handleGoalModeCommand("set Replace the objective");
+
+		expect(showStatus).toHaveBeenCalledWith("Generating goal rubric…");
+		expect(showStatus).toHaveBeenCalledWith("Goal rubric generated.");
+		const rubricEntries = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
+		expect(rubricEntries.length).toBe(beforeRubricCount + 1);
+		const latestRubricEntry = rubricEntries[rubricEntries.length - 1];
+		if (latestRubricEntry?.type !== "custom_message") throw new Error("expected replacement rubric artifact");
+		expect((latestRubricEntry.details as GoalRubricMessageDetails).objective).toBe("Replace the objective");
+		expect((latestRubricEntry.details as GoalRubricMessageDetails).rubric).toContain("Strict test rubric");
+		const renderedChat = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
+		expect(renderedChat).toContain("[goal-rubric]");
+		expect(showStatus.mock.calls.map(call => String(call[0])).join("\n")).not.toContain("Strict test rubric");
 	});
 
 	it("replaces the active goal via /goal set", async () => {
@@ -318,7 +376,7 @@ describe("InteractiveMode goal mode integration", () => {
 	it("keeps the goal active and returns continuation guidance when verification rejects completion", async () => {
 		goalSideAgentMock.completionStatus = "rejected";
 		goalSideAgentMock.feedback = "Missing end-to-end verification evidence.";
-		goalSideAgentMock.continuationMessage = "Run the focused integration proof before trying completion again.";
+		goalSideAgentMock.compactorMemo = "Run the focused integration proof before trying completion again.";
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
 			tool => tool.name === "goal",
@@ -337,12 +395,15 @@ describe("InteractiveMode goal mode integration", () => {
 			maxAttempts: 3,
 			feedback: "Missing end-to-end verification evidence.",
 		});
-		expect(result.details?.completionVerification?.continuationMessage).toContain(
+		expect(result.details?.completionVerification?.compactorMemo).toContain(
 			"Run the focused integration proof before trying completion again.",
 		);
-		expect(result.details?.completionVerification?.continuationMessage).toContain("<goal_continuation_compaction>");
+		expect(result.details?.completionVerification?.compactorMemo).not.toContain("<goal_continuation_compaction>");
+		expect(result.details?.completionVerification?.continuationMessage).toBeUndefined();
 		expect(completionText).toContain("Completion verification rejected");
-		expect(completionText).toContain("Continuation guidance");
+		expect(completionText).toContain("Run the focused integration proof before trying completion again.");
+		expect(completionText).not.toContain("<goal_continuation_compaction>");
+		expect(completionText).not.toContain("<prepared_goal_continuation>");
 		expect(harness.session.getGoalModeState()?.enabled).toBe(true);
 		expect(harness.session.getGoalModeState()?.mode).toBe("active");
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
@@ -357,12 +418,143 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(verifierCall?.task).toContain("Strict test rubric");
 		expect(compactorCall?.task).toContain("<verification_feedback>");
 		expect(compactorCall?.task).toContain("Missing end-to-end verification evidence.");
+		const entries = harness.session.sessionManager.getEntries();
+		const rubricEntries = entries.filter(
+			entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE,
+		);
+		const feedbackEntries = entries.filter(
+			entry => entry.type === "custom_message" && entry.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+		);
+		expect(rubricEntries.length).toBeGreaterThan(0);
+		expect(feedbackEntries.length).toBeGreaterThan(0);
+		const latestFeedbackEntry = feedbackEntries[feedbackEntries.length - 1];
+		if (latestFeedbackEntry?.type !== "custom_message") throw new Error("expected verification feedback artifact");
+		expect(JSON.stringify(latestFeedbackEntry.content)).not.toContain("<goal_continuation_compaction>");
+		expect(JSON.stringify(latestFeedbackEntry.content)).not.toContain("<prepared_goal_continuation>");
+		expect(JSON.stringify(latestFeedbackEntry.details)).not.toContain("<goal_continuation_compaction>");
+		expect(JSON.stringify(latestFeedbackEntry.details)).not.toContain("<prepared_goal_continuation>");
+		expect(JSON.stringify(latestFeedbackEntry.content)).toContain(
+			"Run the focused integration proof before trying completion again.",
+		);
+		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).attempt).toBe(1);
+		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).maxAttempts).toBe(3);
+		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).feedback).toBe(
+			"Missing end-to-end verification evidence.",
+		);
+		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).compactorMemo).toBe(
+			"Run the focused integration proof before trying completion again.",
+		);
+		const beforeMenuCount = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message").length;
+		const selector = vi.spyOn(harness.mode, "showHookSelector").mockResolvedValue("Show verification feedback");
+		await harness.mode.handleGoalModeCommand();
+		expect(selector.mock.calls[0]?.[1]).toContain("Show rubric");
+		expect(selector.mock.calls[0]?.[1]).toContain("Show verification feedback");
+		const afterMenuEntries = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message");
+		expect(afterMenuEntries.length).toBe(beforeMenuCount + 1);
+		expect(
+			afterMenuEntries[afterMenuEntries.length - 1]?.type === "custom_message"
+				? afterMenuEntries[afterMenuEntries.length - 1]?.customType
+				: "",
+		).toBe(GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE);
+		const renderedAfterMenu = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
+		expect(renderedAfterMenu).toContain("[goal-verification-feedback]");
+		const beforeSubcommandCount = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message").length;
+		await harness.mode.handleGoalModeCommand("rubric");
+		await harness.mode.handleGoalModeCommand("feedback");
+		const afterSubcommandEntries = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message");
+		expect(afterSubcommandEntries.length).toBe(beforeSubcommandCount + 2);
+		const addedSubcommandEntries = afterSubcommandEntries.slice(beforeSubcommandCount);
+		expect(addedSubcommandEntries.map(entry => (entry.type === "custom_message" ? entry.customType : ""))).toEqual([
+			GOAL_RUBRIC_MESSAGE_TYPE,
+			GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+		]);
+		const renderedAfterSubcommands = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
+		expect(renderedAfterSubcommands).toContain("[goal-rubric]");
+		expect(renderedAfterSubcommands).toContain("[goal-verification-feedback]");
+		expect(renderedAfterSubcommands).toContain("ctrl+o to expand");
 		expect(goalSideAgentCalls.map(call => call.agent.name)).toEqual([
 			"goal-rubric",
 			"goal-completion-verifier",
 			"goal-continuation-compactor",
 		]);
 	});
+
+	it("persists verifier feedback when continuation compaction fails", async () => {
+		goalSideAgentMock.completionStatus = "rejected";
+		goalSideAgentMock.feedback = "Verifier found a blocking gap before compaction.";
+		goalSideAgentMock.compactorFails = true;
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
+			tool => tool.name === "goal",
+		);
+		if (!goalTool) {
+			throw new Error("Expected goal tool to be active");
+		}
+
+		await expect(goalTool.execute("call-verify-compactor-fail", { op: "complete" })).rejects.toThrow(
+			"compactor failed",
+		);
+
+		const goal = harness.session.getGoalModeState()?.goal;
+		expect(goal?.failedCompletionAttempts).toBe(1);
+		expect(goal?.lastVerificationAttempt).toBe(1);
+		expect(goal?.lastVerificationFeedback).toBe("Verifier found a blocking gap before compaction.");
+		expect(goal?.lastVerificationCompactorMemo).toBeUndefined();
+		const feedbackEntries = harness.session.sessionManager
+			.getEntries()
+			.filter(
+				entry => entry.type === "custom_message" && entry.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+			);
+		expect(feedbackEntries.length).toBeGreaterThan(0);
+		const latestFeedbackEntry = feedbackEntries[feedbackEntries.length - 1];
+		if (latestFeedbackEntry?.type !== "custom_message") throw new Error("expected verification feedback artifact");
+		const details = latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails;
+		expect(details.attempt).toBe(1);
+		expect(details.maxAttempts).toBe(3);
+		expect(details.feedback).toBe("Verifier found a blocking gap before compaction.");
+		expect(details.compactorMemo).toBeUndefined();
+		expect(JSON.stringify(latestFeedbackEntry.content)).not.toContain("<goal_continuation_compaction>");
+	});
+	it("returns and persists the recorded attempt across repeated verifier rejections", async () => {
+		goalSideAgentMock.completionStatus = "rejected";
+		goalSideAgentMock.feedback = "Still missing verification evidence.";
+		goalSideAgentMock.compactorMemo = "Keep gathering proof.";
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
+			tool => tool.name === "goal",
+		);
+		if (!goalTool) {
+			throw new Error("Expected goal tool to be active");
+		}
+
+		await goalTool.execute("call-verify-reject-1", { op: "complete" });
+		const second = await goalTool.execute("call-verify-reject-2", { op: "complete" });
+
+		expect(second.details?.completionVerification?.attempt).toBe(2);
+		expect(harness.session.getGoalModeState()?.goal.failedCompletionAttempts).toBe(2);
+		expect(harness.session.getGoalModeState()?.goal.lastVerificationAttempt).toBe(2);
+		const feedbackEntries = harness.session.sessionManager
+			.getEntries()
+			.filter(
+				entry => entry.type === "custom_message" && entry.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+			);
+		const latestFeedbackEntry = feedbackEntries[feedbackEntries.length - 1];
+		if (latestFeedbackEntry?.type !== "custom_message") throw new Error("expected verification feedback artifact");
+		const details = latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails;
+		expect(details.attempt).toBe(2);
+		expect(details.maxAttempts).toBe(3);
+		expect(details.feedback).toBe("Still missing verification evidence.");
+		expect(details.compactorMemo).toBe("Keep gathering proof.");
+	});
+
 	it("returns the completion report from the goal tool and exits goal mode before the next turn rebuild", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		await harness.mode.handleGoalModeCommand("budget 50");

@@ -389,6 +389,18 @@ describe("goal runtime", () => {
 		expect(goal?.status).toBe("active");
 	});
 
+	it("keeps failed completion attempts monotonic when supplied attempts are stale", async () => {
+		const harness = createHarness();
+		const state = await harness.runtime.createGoal({ objective: "Ship concurrent completions" });
+
+		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "First rejection", { attempt: 1 });
+		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Second rejection", { attempt: 1 });
+
+		const goal = harness.getState()?.goal;
+		expect(goal?.failedCompletionAttempts).toBe(2);
+		expect(goal?.lastVerificationAttempt).toBe(2);
+		expect(goal?.lastVerificationFeedback).toBe("Second rejection");
+	});
 	it("clears failed completion attempts after substantive non-yield work", async () => {
 		const harness = createHarness();
 		const state = await harness.runtime.createGoal({ objective: "Ship after feedback" });
