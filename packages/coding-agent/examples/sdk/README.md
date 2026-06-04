@@ -1,172 +1,213 @@
 # SDK Examples
 
-Programmatic usage of omp-coding-agent via `createAgentSession()`.
+Programmatic usage of `@oh-my-pi/pi-coding-agent` through `createAgentSession()`.
 
-## Examples
+These examples are source-linked Bun/TypeScript examples. Source is the authority for the SDK surface; the most common current exports are `createAgentSession`, `SessionManager`, `Settings`, `AuthStorage`, `ModelRegistry`, `discoverAuthStorage`, and the discovery helpers listed below.
 
-| File                       | Description                                    |
-| -------------------------- | ---------------------------------------------- |
-| `01-minimal.ts`            | Simplest usage with all defaults               |
-| `02-custom-model.ts`       | Select model and thinking level                |
-| `03-custom-prompt.ts`      | Replace or modify system prompt                |
-| `04-skills.ts`             | Discover, filter, or replace skills            |
-| `05-tools.ts`              | Built-in tools, custom tools                   |
-| `06-hooks.ts`              | Logging, blocking, result modification         |
-| `07-context-files.ts`      | AGENTS.md context files                        |
-| `08-slash-commands.ts`     | File-based slash commands                      |
-| `09-api-keys-and-oauth.ts` | API key resolution, OAuth config               |
-| `10-settings.ts`           | Override compaction, retry, terminal settings  |
-| `11-sessions.ts`           | In-memory, persistent, continue, list sessions |
-| `12-full-control.ts`       | Replace everything, no discovery               |
+## Examples in this directory
+
+| File | Description |
+| --- | --- |
+| `01-minimal.ts` | Simplest usage with SDK defaults |
+| `02-custom-model.ts` | Explicit auth/model registry and thinking level |
+| `03-custom-prompt.ts` | Replace or extend system prompt blocks |
+| `04-skills.ts` | Discover, filter, or replace skills |
+| `06-extensions.ts` | Extension discovery and `additionalExtensionPaths` |
+| `06-hooks.ts` | Legacy-named inline `ExtensionFactory[]` example |
+| `07-context-files.ts` | AGENTS.md/project context files |
+| `08-prompt-templates.ts` | Prompt template discovery/replacement |
+| `08-slash-commands.ts` | File-based slash commands |
+| `09-api-keys-and-oauth.ts` | Auth storage, model registry, runtime API keys |
+| `11-sessions.ts` | In-memory, persistent, continue, list sessions |
+| `12-redis-sessions.ts` | Redis-backed session storage |
+| `13-sql-sessions.ts` | SQL-backed session storage |
+
+There are no `05-tools.ts`, `10-settings.ts`, or `12-full-control.ts` files in the current tree.
 
 ## Running
 
+From the repo root:
+
 ```bash
-cd packages/coding-agent
-npx tsx examples/sdk/01-minimal.ts
+bun packages/coding-agent/examples/sdk/01-minimal.ts
 ```
 
-## Quick Reference
+Most examples create real sessions and may require configured provider credentials. Use `SessionManager.inMemory()` in your own examples when you do not want file-backed persistence.
 
-```typescript
+## Quick reference
+
+```ts
 import { getModel } from "@oh-my-pi/pi-ai";
 import {
-	AuthStorage,
-	createAgentSession,
-	discoverAuthStorage,
-	discoverModels,
-	discoverSkills,
-	discoverHooks,
-	discoverCustomTools,
-	discoverContextFiles,
-	discoverSlashCommands,
-	loadSettings,
-	buildSystemPrompt,
-	ModelRegistry,
-	SessionManager,
-	BUILTIN_TOOLS,
-	HIDDEN_TOOLS,
-	createTools,
-	ResolveTool,
+  AuthStorage,
+  BUILTIN_TOOLS,
+  createAgentSession,
+  createTools,
+  discoverAuthStorage,
+  discoverContextFiles,
+  discoverCustomTSCommands,
+  discoverExtensions,
+  discoverMCPServers,
+  discoverPromptTemplates,
+  discoverSkills,
+  discoverSlashCommands,
+  HIDDEN_TOOLS,
+  ModelRegistry,
+  ResolveTool,
+  SessionManager,
+  Settings,
 } from "@oh-my-pi/pi-coding-agent";
 
-// Auth and models setup
-const authStorage = discoverAuthStorage();
-const modelRegistry = discoverModels(authStorage);
+// Auth and models.
+const authStorage = await discoverAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
+await modelRegistry.refresh();
 
-// Minimal
-const { session } = await createAgentSession({ authStorage, modelRegistry });
+// Minimal: omit options to let the SDK discover auth, model registry, settings,
+// session manager, skills, context, prompt templates, slash commands,
+// extensions, built-in tools, custom tools, MCP, and LSP.
+const { session } = await createAgentSession();
 
-// Custom model
+// Explicit model.
 const model = getModel("anthropic", "claude-opus-4-5");
-const { session } = await createAgentSession({ model, thinkingLevel: "high", authStorage, modelRegistry });
-
-// Modify prompt
-const { session } = await createAgentSession({
-	systemPrompt: (defaultPrompt) => defaultPrompt + "\n\nBe concise.",
-	authStorage,
-	modelRegistry,
+const { session: modelSession } = await createAgentSession({
+  model: model ?? undefined,
+  thinkingLevel: "high",
+  authStorage,
+  modelRegistry,
 });
 
-// Read-only tools
-const { session } = await createAgentSession({ toolNames: ["read", "search", "find"], authStorage, modelRegistry });
-
-// In-memory
-const { session } = await createAgentSession({
-	sessionManager: SessionManager.inMemory(),
-	authStorage,
-	modelRegistry,
+// Extend the default system prompt. The callback receives and returns string[].
+const { session: prompted } = await createAgentSession({
+  systemPrompt: (defaults) => [...defaults, "## Host instruction\nBe concise."],
+  authStorage,
+  modelRegistry,
 });
 
-// Full control
+// Read-only active tool set.
+const { session: readOnly } = await createAgentSession({
+  toolNames: ["read", "search", "find"],
+  authStorage,
+  modelRegistry,
+});
+
+// In-memory persistence.
+const { session: ephemeral } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(),
+  authStorage,
+  modelRegistry,
+});
+
+// More controlled session.
 const customAuth = await AuthStorage.create("/my/app/agent.db");
-customAuth.setRuntimeApiKey("anthropic", Bun.env.MY_KEY!);
-const customRegistry = new ModelRegistry(customAuth);
+customAuth.setRuntimeApiKey("anthropic", Bun.env.MY_KEY ?? "");
+const customRegistry = new ModelRegistry(customAuth, "/my/app/models.json");
+await customRegistry.refresh();
 
-const { session } = await createAgentSession({
-	model,
-	authStorage: customAuth,
-	modelRegistry: customRegistry,
-	systemPrompt: ["You are helpful."],
-	toolNames: ["read", "bash"],
-	customTools: [{ tool: myTool }],
-	hooks: [{ factory: myHook }],
-	skills: [],
-	contextFiles: [],
-	slashCommands: [],
-	sessionManager: SessionManager.inMemory(),
+const { session: controlled } = await createAgentSession({
+  authStorage: customAuth,
+  modelRegistry: customRegistry,
+  systemPrompt: ["You are helpful."],
+  toolNames: ["read", "bash"],
+  extensions: [],
+  skills: [],
+  contextFiles: [],
+  promptTemplates: [],
+  slashCommands: [],
+  enableMCP: false,
+  sessionManager: SessionManager.inMemory(),
 });
 
-// Run prompts
-session.subscribe((event) => {
-	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-		process.stdout.write(event.assistantMessageEvent.delta);
-	}
+const done = Promise.withResolvers<void>();
+const unsubscribe = controlled.subscribe((event) => {
+  if (
+    event.type === "message_update" &&
+    event.assistantMessageEvent.type === "text_delta"
+  ) {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
+  if (event.type === "agent_end") done.resolve();
 });
-await session.prompt("Hello");
+
+try {
+  await controlled.prompt("Hello");
+  await done.promise;
+} finally {
+  unsubscribe();
+  await controlled.dispose();
+}
 ```
 
-## Resolve preview workflow (AST edit apply/discard)
+There is no exported `discoverModels`, `discoverHooks`, `discoverCustomTools`, or `loadSettings` helper in the current SDK. Use `new ModelRegistry(authStorage)` for models and `Settings` for settings.
 
-`ast_edit` now always returns a preview. To finalize, call hidden `resolve` with a required reason.
+## Current option notes
 
-- `action: "apply"` → commit pending preview changes
-- `action: "discard"` → drop pending preview changes
-- `reason: string` is required for both paths
+| Option | Default / behavior |
+| --- | --- |
+| `authStorage` | Discovered with `discoverAuthStorage(agentDir)` when omitted |
+| `modelRegistry` | `new ModelRegistry(authStorageOrDiscoveredAuthStorage)` when omitted |
+| `cwd` | `getProjectDir()` |
+| `agentDir` | `getAgentDir()` |
+| `model` / `modelPattern` | Explicit model or deferred selector; otherwise session restore, settings default, then first authenticated model |
+| `thinkingLevel` | Explicit option, restored setting, model default, or global default |
+| `systemPrompt` | `string[]` replacement or `(defaultPrompt: string[]) => string[]` |
+| `toolNames` | Requested active tools; use `strictToolNames: true` for an exact active allowlist |
+| `customTools` | Additional explicit tools; does not replace discovered/extension tools |
+| `extensions` | Inline extension factories |
+| `additionalExtensionPaths` | Extra extension files/dirs |
+| `disableExtensionDiscovery` | Disable automatic extension scanning |
+| `skills`, `rules`, `contextFiles` | Explicit arrays replace those discovery branches |
+| `promptTemplates` | Prompt templates; distinct from slash commands |
+| `slashCommands` | File-based slash commands |
+| `enableMCP` | Defaults true |
+| `enableLsp` | Defaults true |
+| `sessionManager` | File-backed `SessionManager.create(...)` by default |
+| `settings` | `Settings.init({ cwd, agentDir })` by default |
+| `hasUI` | Defaults false; set true only when the host supplies UI behavior |
 
-`createAgentSession()` / `createTools()` include `resolve` automatically, even when filtering `toolNames`.
-If you are composing tools manually, use `HIDDEN_TOOLS.resolve` (or `ResolveTool`) and wire the same `pendingActionStore`.
-
-```typescript
-const tools = await createTools(toolSession, ["ast_edit"]); // resolve is auto-included
-const resolveTool = tools.find(t => t.name === "resolve") as ResolveTool;
-
-await resolveTool.execute("call-1", {
-  action: "apply",
-  reason: "Preview matches expected replacements",
-});
-```
-## Options
-
-| Option                      | Default                       | Description                       |
-| --------------------------- | ----------------------------- | --------------------------------- |
-| `authStorage`               | `discoverAuthStorage()`       | Credential storage                |
-| `modelRegistry`             | `discoverModels(authStorage)` | Model registry                    |
-| `cwd`                       | `process.cwd()`               | Working directory                 |
-| `agentDir`                  | `~/.omp/agent`                | Config directory                  |
-| `model`                     | From settings/first available | Model to use                      |
-| `thinkingLevel`             | From settings/"off"           | off, low, medium, high            |
-| `systemPrompt`              | Discovered                    | String or `(default) => modified` |
-| `toolNames`                 | All built-in tools            | Filter which tools to include     |
-| `customTools`               | Discovered                    | Replaces discovery                |
-| `additionalCustomToolPaths` | `[]`                          | Merge with discovery              |
-| `hooks`                     | Discovered                    | Replaces discovery                |
-| `additionalHookPaths`       | `[]`                          | Merge with discovery              |
-| `skills`                    | Discovered                    | Skills for prompt                 |
-| `contextFiles`              | Discovered                    | AGENTS.md files                   |
-| `slashCommands`             | Discovered                    | File commands                     |
-| `sessionManager`            | `SessionManager.create(cwd)`  | Persistence                       |
-| `settingsManager`           | From agentDir                 | Settings overrides                |
+Current terminology is **extensions**. Legacy hook examples and CLI aliases may still exist, but the SDK option names are `extensions`, `additionalExtensionPaths`, and `disableExtensionDiscovery`.
 
 ## Events
 
-```typescript
-session.subscribe((event) => {
-	switch (event.type) {
-		case "message_update":
-			if (event.assistantMessageEvent.type === "text_delta") {
-				process.stdout.write(event.assistantMessageEvent.delta);
-			}
-			break;
-		case "tool_execution_start":
-			console.log(`Tool: ${event.toolName}`);
-			break;
-		case "tool_execution_end":
-			console.log(`Result: ${event.result}`);
-			break;
-		case "agent_end":
-			console.log("Done");
-			break;
-	}
+```ts
+const unsubscribe = session.subscribe((event) => {
+  switch (event.type) {
+    case "message_update":
+      if (event.assistantMessageEvent.type === "text_delta") {
+        process.stdout.write(event.assistantMessageEvent.delta);
+      }
+      break;
+    case "tool_execution_start":
+      process.stderr.write(`Tool: ${event.toolName}\n`);
+      break;
+    case "tool_execution_end":
+      process.stderr.write(`Tool result: ${JSON.stringify(event.result)}\n`);
+      break;
+    case "agent_end":
+      process.stderr.write("Done\n");
+      break;
+  }
+});
+```
+
+Call the returned unsubscribe function when the host no longer wants events, and call `await session.dispose()` before process shutdown.
+
+## Resolve preview workflow
+
+`ast_edit` returns a preview. To finalize it, call hidden `resolve` with a required reason.
+
+- `action: "apply"` commits pending preview changes.
+- `action: "discard"` drops pending preview changes.
+- `reason: string` is required for both paths.
+
+`createAgentSession()` / `createTools()` include `resolve` automatically when a deferrable tool or plan-mode flow needs it. If you compose tools manually, use `HIDDEN_TOOLS.resolve` or `ResolveTool` and wire the same pending-action store.
+
+```ts
+const tools = await createTools(toolSession, ["ast_edit"]);
+const resolveTool = tools.find((tool) => tool.name === "resolve") as ResolveTool;
+
+await resolveTool.execute("call-1", {
+  action: "apply",
+  reason: "Preview matches expected replacements.",
 });
 ```

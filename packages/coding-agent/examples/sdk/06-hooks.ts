@@ -1,29 +1,29 @@
 /**
- * Hooks Configuration
+ * Legacy-Named Extension Example
  *
- * Hooks intercept agent events for logging, blocking, or modification.
- * Note: "hooks" is now called "extensions" in the API.
+ * Extensions intercept agent events for logging, blocking, or modification.
+ * This file keeps its historical name, but the SDK API is `extensions`.
  */
 import { createAgentSession, type ExtensionFactory, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
-// Logging hook (now called extension)
-const loggingHook: ExtensionFactory = api => {
+// Logging extension
+const loggingExtension: ExtensionFactory = api => {
 	api.on("agent_start", async () => {
-		console.log("[Hook] Agent starting");
+		console.log("[Extension] Agent starting");
 	});
 
 	api.on("tool_call", async event => {
-		console.log(`[Hook] Tool: ${event.toolName}`);
+		console.log(`[Extension] Tool: ${event.toolName}`);
 		return undefined; // Don't block
 	});
 
 	api.on("agent_end", async event => {
-		console.log(`[Hook] Done, ${event.messages.length} messages`);
+		console.log(`[Extension] Done, ${event.messages.length} messages`);
 	});
 };
 
 // Blocking extension (returns { block: true, reason: "..." })
-const safetyHook: ExtensionFactory = api => {
+const safetyExtension: ExtensionFactory = api => {
 	api.on("tool_call", async event => {
 		if (event.toolName === "bash") {
 			const cmd = (event.input as { command?: string }).command ?? "";
@@ -35,9 +35,9 @@ const safetyHook: ExtensionFactory = api => {
 	});
 };
 
-// Use inline extensions (hooks is now extensions)
+// Use inline extensions
 const { session } = await createAgentSession({
-	extensions: [loggingHook, safetyHook],
+	extensions: [loggingExtension, safetyExtension],
 	sessionManager: SessionManager.inMemory(),
 });
 
@@ -50,12 +50,9 @@ session.subscribe(event => {
 await session.prompt("List files in the current directory.");
 console.log();
 
-// Disable all extensions:
+// Inline extensions are merged with discovery by default. For isolation:
+// disableExtensionDiscovery: true
 // extensions: []
-
-// Merge with discovered extensions:
-// const discovered = await discoverExtensions();
-// extensions: [...discovered.extensions.map(e => e.factory), myHook]
 
 // Add paths without replacing discovery:
 // additionalExtensionPaths: ["/extra/extensions"]

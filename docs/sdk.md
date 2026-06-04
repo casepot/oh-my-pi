@@ -1,9 +1,9 @@
 # SDK
 
 The SDK is the in-process integration surface for `@oh-my-pi/pi-coding-agent`.
-Use it when you want direct access to agent state, event streaming, tool wiring, and session control from your own Bun/Node process.
+Use it when your Bun/Node process owns the agent lifecycle and wants direct access to session state, event streaming, tool wiring, model/auth objects, and session persistence.
 
-If you need cross-language/process isolation, use RPC mode instead.
+Use [`docs/rpc.md`](./rpc.md) instead when the host needs process isolation, cross-language embedding, or a stdio protocol boundary.
 
 ## Installation
 
@@ -11,11 +11,17 @@ If you need cross-language/process isolation, use RPC mode instead.
 bun add @oh-my-pi/pi-coding-agent
 ```
 
-## Entry points
+## Entry points and exported surface
 
-`@oh-my-pi/pi-coding-agent` exports the SDK APIs from the package root (and also via `@oh-my-pi/pi-coding-agent/sdk`).
+The package root exports the SDK surface:
 
-Core exports for embedders:
+```ts
+import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
+```
+
+The `@oh-my-pi/pi-coding-agent/sdk` subpath resolves to `src/sdk.ts` through the package wildcard export. It exposes the helpers/types exported by that file. Import from the package root when you need root-only exports such as `SessionManager`, `AuthStorage`, `ModelRegistry`, or `Settings`.
+
+Core package-root exports for embedders include:
 
 - `createAgentSession`
 - `SessionManager`
@@ -23,10 +29,22 @@ Core exports for embedders:
 - `AuthStorage`
 - `ModelRegistry`
 - `discoverAuthStorage`
-- Discovery helpers (`discoverExtensions`, `discoverSkills`, `discoverContextFiles`, `discoverPromptTemplates`, `discoverSlashCommands`, `discoverCustomTSCommands`, `discoverMCPServers`)
-- Tool factory surface (`createTools`, `BUILTIN_TOOLS`, tool classes)
+- Discovery helpers: `discoverExtensions`, `discoverSkills`, `discoverContextFiles`, `discoverPromptTemplates`, `discoverSlashCommands`, `discoverCustomTSCommands`, `discoverMCPServers`
+- `buildSystemPrompt`
+- Tool factory/classes: `createTools`, `BUILTIN_TOOLS`, `HIDDEN_TOOLS`, `ReadTool`, `SearchTool`, `WriteTool`, `ResolveTool`, etc.
+- Extension and custom-tool types from `src/extensibility/extensions` and `src/extensibility/custom-tools`
 
-## Quick start (auto-discovery defaults)
+There is no exported `discoverModels` helper. If you want explicit model/auth wiring, create a `ModelRegistry` from an `AuthStorage` instance:
+
+```ts
+import { discoverAuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
+
+const authStorage = await discoverAuthStorage();
+const modelRegistry = new ModelRegistry(authStorage);
+await modelRegistry.refresh();
+```
+
+## Quick start with default discovery
 
 ```ts
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
@@ -37,6 +55,7 @@ if (modelFallbackMessage) {
   process.stderr.write(`${modelFallbackMessage}\n`);
 }
 
+const done = Promise.withResolvers<void>();
 const unsubscribe = session.subscribe((event) => {
   if (
     event.type === "message_update" &&
@@ -44,12 +63,21 @@ const unsubscribe = session.subscribe((event) => {
   ) {
     process.stdout.write(event.assistantMessageEvent.delta);
   }
+  if (event.type === "agent_end") {
+    done.resolve();
+  }
 });
 
-await session.prompt("Summarize this repository in 3 bullets.");
-unsubscribe();
-await session.dispose();
+try {
+  await session.prompt("Summarize this repository in 3 bullets.");
+  await done.promise;
+} finally {
+  unsubscribe();
+  await session.dispose();
+}
 ```
+
+`session.prompt(...)` is awaited in-process. Streaming events arrive through `session.subscribe(...)` while the turn is running; `agent_end` is the event-level completion signal.
 
 ## What `createAgentSession()` discovers by default
 
@@ -58,33 +86,90 @@ await session.dispose();
 If omitted, it resolves:
 
 - `cwd`: `getProjectDir()`
-- `agentDir`: `~/.omp/agent` (via `getAgentDir()`)
-- `authStorage`: `discoverAuthStorage(agentDir)`
-- `modelRegistry`: `new ModelRegistry(authStorage)` + background `refreshInBackground()` when the registry is not provided
+- `agentDir`: `getAgentDir()` (`~/.omp/agent` by default)
+- `authStorage`: `await discoverAuthStorage(agentDir)`
+- `modelRegistry`: `new ModelRegistry(authStorage)` plus background `refreshInBackground()` when the registry was created by the SDK
 - `settings`: `await Settings.init({ cwd, agentDir })`
-- `sessionManager`: `SessionManager.create(cwd)` (file-backed)
-- skills/context files/prompt templates/slash commands/extensions/custom TS commands
+- `sessionManager`: `SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir))`
+- skills, rules, context files, prompt templates, slash commands, extensions, and custom TypeScript commands
 - built-in tools via `createTools(...)`
-- MCP tools (enabled by default; Exa MCP servers are folded into native Exa integration, and browser automation MCP servers are filtered when the built-in browser tool is enabled)
-- LSP integration (enabled by default)
-- `eventBus`: new `EventBus()` unless supplied
+- custom tools discovered from configured custom-tool directories
+- MCP tools when `enableMCP !== false`
+- LSP integration when `enableLsp !== false`
+- `eventBus`: a new `EventBus` unless supplied
 
-### Required vs optional inputs
+Usually embedders only provide what they need to control:
 
-Typically you must provide only what you want to control:
+- `sessionManager` for in-memory sessions or a custom session location/storage backend
+- `authStorage` and `modelRegistry` when the host owns credential/model lifecycle
+- `model` or `modelPattern` when deterministic selection matters
+- `settings` for isolated/test configuration
+- `extensions`, `customTools`, `skills`, `rules`, `contextFiles`, `promptTemplates`, or `slashCommands` when the host wants explicit capability input
 
-- **Must provide**: nothing for a minimal session
-- **Usually provide explicitly** in embedders:
-  - `sessionManager` (if you need in-memory or custom location)
-  - `authStorage` + `modelRegistry` (if you own credential/model lifecycle)
-  - `model` or `modelPattern` (if deterministic model selection matters)
-  - `settings` (if you need isolated/test config)
+## `CreateAgentSessionOptions`
 
-## Session manager behavior (persistent vs in-memory)
+Important options for embedders:
 
-`AgentSession` always uses a `SessionManager`; behavior depends on which factory you use.
+| Option | Actual behavior |
+| --- | --- |
+| `cwd?: string` | Working directory for project-local discovery. Defaults to `getProjectDir()`. |
+| `agentDir?: string` | Global config directory. Defaults to `getAgentDir()`. |
+| `authStorage?: AuthStorage` | Credential storage. Must be the same instance as `modelRegistry.authStorage` if both are supplied. |
+| `modelRegistry?: ModelRegistry` | Model registry. Defaults to `new ModelRegistry(authStorageOrDiscoveredAuthStorage)`. |
+| `model?: Model` | Explicit model object. |
+| `modelPattern?: string` | Raw model selector resolved after extensions load, so extension-registered providers can participate. |
+| `thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "auto"` | Initial thinking selector. |
+| `scopedModels?: Array<{ model; thinkingLevel? }>` | Models available for cycling. |
+| `systemPrompt?: string[] \| ((defaultPrompt: string[]) => string[])` | Array replaces all provider-facing prompt blocks; function receives the default block array and returns the final block array. |
+| `providerSessionId?: string` | Provider-facing session ID for prompt caches/sticky auth. Does not merge persisted session files. |
+| `customTools?: (CustomTool \| ToolDefinition)[]` | Additional SDK-owned tools. Does not disable discovered or extension tools. |
+| `extensions?: ExtensionFactory[]` | Inline extensions. Current terminology is extensions, not hooks. |
+| `additionalExtensionPaths?: string[]` | Extra extension files/dirs loaded with discovery. |
+| `disableExtensionDiscovery?: boolean` | Disables automatic extension discovery; explicit paths still load. |
+| `skills?: Skill[]`, `rules?: Rule[]`, `contextFiles?: ...[]` | Explicit inputs replace those discovery branches. |
+| `promptTemplates?: PromptTemplate[]`, `slashCommands?: FileSlashCommand[]` | Explicit prompt-template or file-slash-command inputs. These are distinct systems. |
+| `enableMCP?: boolean` | Defaults true. `false` skips `.mcp.json` discovery. |
+| `mcpManager?: MCPManager` | Reuses an existing manager and skips new MCP discovery. |
+| `enableLsp?: boolean` | Defaults true. `false` disables LSP tool/format/diagnostic integration. |
+| `toolNames?: string[]` | Requested active tool names. Enables disabled-by-default tools when named. |
+| `strictToolNames?: boolean` | When true and `toolNames` is set, treats `toolNames` as an exact active-tool allowlist. |
+| `requireYieldTool?: boolean` | Ensures the hidden `yield` tool stays active for subagent-style sessions. |
+| `sessionManager?: SessionManager` | Persistence backend/identity. Defaults to a file-backed session manager. |
+| `settings?: Settings` | Settings instance. Defaults to `Settings.init({ cwd, agentDir })`. |
+| `hasUI?: boolean` | Enables tools/extensions that require UI. Defaults false. |
+| `telemetry?: AgentTelemetryConfig` | Enables OpenTelemetry instrumentation in the underlying agent loop. |
+| `autoApprove?: boolean` | Runtime equivalent of CLI auto-approve/yolo behavior. |
 
-### File-backed (default)
+Options not present in source include `discoverModels`, `hooks`, `additionalHookPaths`, `discoverCustomTools`, `additionalCustomToolPaths`, `loadSettings`, and `settingsManager`.
+
+## System prompt blocks
+
+The provider-facing system prompt is an array of blocks. OMP keeps stable harness text and dynamic project context as separate strings so providers can cache prompt prefixes.
+
+```ts
+const { session } = await createAgentSession({
+  systemPrompt: (defaults) => [
+    ...defaults,
+    "## Host policy\nReturn concise answers and cite files you changed.",
+  ],
+});
+```
+
+Use a literal array only when replacing the full default prompt:
+
+```ts
+const { session } = await createAgentSession({
+  systemPrompt: ["You are a repository summarizer. Do not modify files."],
+});
+```
+
+Do not treat `systemPrompt` as a string concatenation callback; the callback input and output are both `string[]`.
+
+## Session manager behavior
+
+`AgentSession` always uses a `SessionManager`.
+
+### File-backed sessions
 
 ```ts
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
@@ -93,14 +178,12 @@ const { session } = await createAgentSession({
   sessionManager: SessionManager.create(process.cwd()),
 });
 
-console.log(session.sessionFile); // absolute .jsonl path
+process.stdout.write(`${session.sessionFile ?? "(no file)"}\n`);
 ```
 
-- Persists conversation/messages/state deltas to session files.
-- Supports resume/open/list/fork workflows.
-- `session.sessionFile` is defined.
+File-backed sessions persist conversation entries and state deltas, support resume/open/list/fork workflows, and expose `session.sessionFile`.
 
-### In-memory
+### In-memory sessions
 
 ```ts
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
@@ -109,12 +192,10 @@ const { session } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),
 });
 
-console.log(session.sessionFile); // undefined
+process.stdout.write(`${session.sessionFile ?? "(in memory)"}\n`);
 ```
 
-- No filesystem persistence.
-- Useful for tests, ephemeral workers, request-scoped agents.
-- Session methods still work, but persistence-specific behaviors (file resume/fork paths) are naturally limited.
+In-memory sessions are useful for tests, ephemeral workers, and request-scoped agents. Persistence-specific operations are naturally limited.
 
 ### Resume/open/list helpers
 
@@ -128,10 +209,6 @@ const opened = listed[0] ? await SessionManager.open(listed[0].path) : null;
 
 ## Model and auth wiring
 
-`createAgentSession()` uses `ModelRegistry` + `AuthStorage` for model selection and API key resolution.
-
-### Explicit wiring
-
 ```ts
 import {
   createAgentSession,
@@ -144,100 +221,104 @@ const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 
-const available = modelRegistry.getAvailable();
-if (available.length === 0)
-  throw new Error("No authenticated models available");
+const model = modelRegistry.getAvailable()[0];
+if (!model) throw new Error("No authenticated models available");
 
 const { session } = await createAgentSession({
   authStorage,
   modelRegistry,
-  model: available[0],
+  model,
   thinkingLevel: "medium",
   sessionManager: SessionManager.inMemory(),
 });
 ```
 
-### Selection order when `model` is omitted
+When `model`/`modelPattern` is omitted, selection order is:
 
-When no explicit `model`/`modelPattern` is provided:
-
-1. restore model from existing session (if restorable + key available)
+1. restored model from existing session, if restorable and authenticated
 2. settings default model role (`default`)
-3. first available model with valid auth
+3. first allowed model with usable auth
 
-If restore fails, `modelFallbackMessage` explains fallback.
+If restore falls back, `modelFallbackMessage` describes the fallback.
 
-### Auth priority
+`AuthStorage.getApiKey(...)` resolves runtime overrides, config overrides, stored API keys, stored OAuth credentials, provider environment variables, and custom-provider fallback resolvers.
 
-`AuthStorage.getApiKey(...)` resolves in this order:
+## Event subscription and prompt lifecycle
 
-1. runtime override (`setRuntimeApiKey`, used by CLI `--api-key`)
-2. config-sourced API key override (`models.yml` provider `apiKey`)
-3. stored API-key credential in `agent.db` / broker-backed storage
-4. stored OAuth credential, including refresh when needed
-5. provider environment variables
-6. custom-provider resolver fallback
+`session.subscribe(listener)` appends a listener and returns an unsubscribe function for that listener.
 
-## Event subscription model
+`AgentSessionEvent` includes core agent events:
 
-Subscribe with `session.subscribe(listener)`; it returns an unsubscribe function.
+- `agent_start`, `agent_end`
+- `turn_start`, `turn_end`
+- `message_start`, `message_update`, `message_end`
+- `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
+
+It also includes session-level events:
+
+- `auto_compaction_start`, `auto_compaction_end`
+- `auto_retry_start`, `auto_retry_end`
+- `retry_fallback_applied`, `retry_fallback_succeeded`
+- `ttsr_triggered`
+- `todo_reminder`, `todo_auto_clear`
+- `irc_message`
+- `notice`
+- `thinking_level_changed`
+- `goal_updated`
+
+`session.prompt(text, options?)` is the primary prompt API. It expands command/template syntax by default, validates model/API-key availability, appends the user message, and starts the turn.
 
 ```ts
 const unsubscribe = session.subscribe((event) => {
   switch (event.type) {
-    case "agent_start":
-    case "turn_start":
-    case "tool_execution_start":
-      break;
     case "message_update":
       if (event.assistantMessageEvent.type === "text_delta") {
         process.stdout.write(event.assistantMessageEvent.delta);
       }
       break;
+    case "tool_execution_start":
+      process.stderr.write(`tool:${event.toolName}\n`);
+      break;
   }
 });
+
+try {
+  await session.prompt("Explain the current branch state.");
+} finally {
+  unsubscribe();
+}
 ```
 
-`AgentSessionEvent` includes core `AgentEvent` plus session-level events:
+Prompt options from source:
 
-- `auto_compaction_start` / `auto_compaction_end`
-- `auto_retry_start` / `auto_retry_end`
-- `retry_fallback_applied` / `retry_fallback_succeeded`
-- `ttsr_triggered`
-- `todo_reminder` / `todo_auto_clear`
-- `irc_message`
-
-## Prompt lifecycle
-
-`session.prompt(text, options?)` is the primary entry point.
-
-Behavior:
-
-1. optional command/template expansion (`/` commands, custom commands, file slash commands, prompt templates)
-2. if currently streaming:
-   - requires `streamingBehavior: "steer" | "followUp"`
-   - queues instead of throwing work away
-3. if idle:
-   - validates model + API key
-   - appends user message
-   - starts agent turn
+| Option | Behavior |
+| --- | --- |
+| `expandPromptTemplates?: boolean` | Defaults true. Enables extension commands, custom TS commands, file slash commands, and prompt templates. |
+| `images?: ImageContent[]` | Image attachments. |
+| `streamingBehavior?: "steer" \| "followUp"` | Required if calling `prompt` while the session is already streaming. |
+| `toolChoice?: ToolChoice` | Overrides tool choice for the next LLM call. |
+| `synthetic?: boolean` | Sends a developer/system-style synthetic message where supported. |
+| `attribution?: MessageAttribution` | Explicit billing/initiator attribution. |
+| `skipCompactionCheck?: boolean` | Internal maintenance escape hatch. |
 
 Related APIs:
 
-- `sendUserMessage(content, { deliverAs? })`
 - `steer(text, images?)`
 - `followUp(text, images?)`
-- `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`
+- `sendUserMessage(content, options?)`
+- `sendCustomMessage(message, options?)`
 - `abort()`
+- `dispose()`
 
-## Tools and extension integration
+When the session is streaming, `prompt(...)` throws `AgentBusyError` unless `streamingBehavior` is provided. `steer(...)` and `followUp(...)` are explicit queueing APIs and reject extension command text that starts with `/`.
+
+Always call `await session.dispose()` when the host is done. Disposal aborts active agent/retry/compaction work, cancels owned background jobs, disposes eval/provider/session resources, unregisters the session from the agent registry, and clears listeners.
+
+## Tools and extensions
 
 ### Built-ins and filtering
 
-- Built-ins come from `createTools(...)` and `BUILTIN_TOOLS`.
-- `toolNames` acts as an allowlist for built-ins.
-- `customTools` and extension-registered tools are still included.
-- Hidden tools (for example `yield`) are opt-in unless required by options.
+Built-ins come from `createTools(...)` and `BUILTIN_TOOLS`.
 
 ```ts
 const { session } = await createAgentSession({
@@ -246,23 +327,29 @@ const { session } = await createAgentSession({
 });
 ```
 
+`toolNames` requests the active tool set. Disabled-by-default tools become active when named. Extension/custom tools are still considered unless `strictToolNames: true` is set. With `strictToolNames: true`, the requested names are treated as an exact active-tool allowlist, and matching discovered MCP/custom tools are filtered during loading.
+
 ### Extensions
 
+Current source uses **extensions** terminology:
+
 - `extensions`: inline `ExtensionFactory[]`
-- `additionalExtensionPaths`: load extra extension files
-- `disableExtensionDiscovery`: disable automatic extension scanning
-- `preloadedExtensions`: reuse already loaded extension set
+- `additionalExtensionPaths`: extra extension files/dirs
+- `disableExtensionDiscovery`: skip automatic extension scanning
+- `preloadedExtensions`: reuse an already loaded extension set
+
+Legacy CLI `--hook` is handled as an alias for `--extension`, but the SDK option surface is extensions, not hooks.
 
 ### Runtime tool set changes
 
-`AgentSession` supports runtime activation updates:
+`AgentSession` supports runtime tool activation updates:
 
 - `getActiveToolNames()`
 - `getAllToolNames()`
 - `setActiveToolsByName(names)`
 - `refreshMCPTools(mcpTools)`
 
-System prompt is rebuilt to reflect active tool changes.
+The system prompt is rebuilt to reflect active tool changes.
 
 ## Discovery helpers
 
@@ -270,6 +357,7 @@ Use these when you want partial control without recreating internal discovery lo
 
 - `discoverAuthStorage(agentDir?)`
 - `discoverExtensions(cwd?)`
+- `loadSessionExtensions(options, cwd, settings, eventBus)`
 - `discoverSkills(cwd?, _agentDir?, settings?)`
 - `discoverContextFiles(cwd?, _agentDir?)`
 - `discoverPromptTemplates(cwd?, agentDir?)`
@@ -278,18 +366,7 @@ Use these when you want partial control without recreating internal discovery lo
 - `discoverMCPServers(cwd?)`
 - `buildSystemPrompt(options?)`
 
-## Subagent-oriented options
-
-For SDK consumers building orchestrators (similar to task executor flow):
-
-- `outputSchema`: passes structured output expectation into tool context
-- `requireYieldTool`: forces `yield` tool inclusion
-- `taskDepth`: recursion-depth context for nested task sessions
-- `parentTaskPrefix`: artifact naming prefix for nested task outputs
-
-These are optional for normal single-agent embedding.
-
-## `createAgentSession()` return value
+## `CreateAgentSessionResult`
 
 ```ts
 type CreateAgentSessionResult = {
@@ -298,29 +375,21 @@ type CreateAgentSessionResult = {
   setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
   mcpManager?: MCPManager;
   modelFallbackMessage?: string;
-  lspServers?: Array<{
-    name: string;
-    status: "ready" | "error";
-    fileTypes: string[];
-    error?: string;
-  }>;
+  lspServers?: LspStartupServerInfo[];
   eventBus: EventBus;
 };
 ```
 
 Use `setToolUIContext(...)` only if your embedder provides UI capabilities that tools/extensions should call into.
 
-## Startup performance
+## Startup behavior and limitations
 
-`createAgentSession()` runs two background optimizations to overlap I/O with the rest of session setup:
-
-- **Model-host preconnect.** As soon as the model is resolved, the SDK fires a best-effort `fetch.preconnect(model.baseUrl)` so DNS + TCP + TLS + HTTP/2 to the provider's host happens in parallel with extension/skill load, tool registry build, and system-prompt assembly. The first real `fetch(...)` then reuses the warm connection, saving 100–300 ms on transcontinental hops (e.g. residential IP → `api.anthropic.com`). Implementation lives in `preconnectModelHost()` in `packages/coding-agent/src/sdk.ts`. If `fetch.preconnect` is unavailable (non-Bun runtime) or the call throws, the optimization is silently skipped — never a hard dependency. Applies to every mode (interactive, print, RPC, ACP).
-- **Conditional LSP warmup.** Startup LSP servers (those returned by `discoverStartupLspServers(cwd)`) are only warmed when **all** of these hold:
-  - `enableLsp !== false` on the session options, **and**
-  - `options.hasUI === true` (interactive TUI), **and**
-  - the `lsp.diagnosticsOnWrite` setting is enabled.
-
-  Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup entirely: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is therefore `undefined` (not an empty array) whenever the warmup branch was bypassed.
+- `createAgentSession()` does substantial discovery work. For isolation from ambient project/user config, provide explicit `settings` and `sessionManager`, set explicit arrays for branches you want empty (`skills: []`, `rules: []`, `contextFiles: []`, `promptTemplates: []`, `slashCommands: []`), use `disableExtensionDiscovery: true` for extensions, and set `enableMCP: false` when MCP discovery should not run.
+- The SDK runs in the same process as the host. Tool execution, extension code, and global singletons are not isolated from host process state.
+- The SDK is not a JSON-RPC or stdio protocol; use RPC mode for cross-process embedding.
+- `hasUI` defaults false. Interactive tools/extensions require a UI context supplied through the returned `setToolUIContext` callback.
+- Startup LSP warmup only runs when `enableLsp !== false`, `hasUI === true`, and `lsp.diagnosticsOnWrite` is enabled. Non-UI SDK sessions can still start LSP servers on demand when an LSP tool needs one.
+- Model-host preconnect is best-effort and silently skipped if `fetch.preconnect` is unavailable or throws.
 
 ## Minimal controlled embed example
 
@@ -352,7 +421,7 @@ const { session } = await createAgentSession({
   enableLsp: true,
 });
 
-session.subscribe((event) => {
+const unsubscribe = session.subscribe((event) => {
   if (
     event.type === "message_update" &&
     event.assistantMessageEvent.type === "text_delta"
@@ -361,6 +430,10 @@ session.subscribe((event) => {
   }
 });
 
-await session.prompt("Find all TODO comments in this repo and propose fixes.");
-await session.dispose();
+try {
+  await session.prompt("Find TODO comments in this repo and propose fixes.");
+} finally {
+  unsubscribe();
+  await session.dispose();
+}
 ```

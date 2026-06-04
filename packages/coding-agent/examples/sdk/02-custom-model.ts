@@ -3,13 +3,13 @@
  *
  * Shows how to select a specific model and thinking level.
  */
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getModel } from "@oh-my-pi/pi-ai";
-import { createAgentSession, discoverAuthStorage, discoverModels } from "@oh-my-pi/pi-coding-agent";
+import { createAgentSession, discoverAuthStorage, ModelRegistry } from "@oh-my-pi/pi-coding-agent";
 
 // Set up auth storage and model registry
 const authStorage = await discoverAuthStorage();
-const modelRegistry = await discoverModels(authStorage);
+const modelRegistry = new ModelRegistry(authStorage);
+await modelRegistry.refresh();
 
 // Option 1: Find a specific built-in model by provider/id
 const opus = getModel("anthropic", "claude-opus-4-5");
@@ -33,7 +33,7 @@ console.log(
 if (available.length > 0) {
 	const { session } = await createAgentSession({
 		model: available[0],
-		thinkingLevel: ThinkingLevel.Medium, // off, low, medium, high
+		thinkingLevel: "medium", // off, minimal, low, medium, high, xhigh
 		authStorage,
 		modelRegistry,
 	});
