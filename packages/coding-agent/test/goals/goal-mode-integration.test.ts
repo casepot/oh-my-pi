@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { GoalContinuationFocus } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -47,6 +48,7 @@ type GoalSideAgentMock = {
 	feedback: string;
 	compactorFails: boolean;
 	compactorMemo: string;
+	continuationFocus: GoalContinuationFocus | undefined;
 };
 
 let goalSideAgentMock: GoalSideAgentMock;
@@ -77,6 +79,12 @@ function installGoalSideAgentMock(): void {
 		feedback: "Verifier accepted the test goal.",
 		compactorFails: false,
 		compactorMemo: "Continue with the highest-value missing evidence.",
+		continuationFocus: {
+			openGaps: ["Missing end-to-end verification evidence."],
+			nextActions: ["Continue with the highest-value missing evidence."],
+			evidenceToCollect: ["Current focused integration proof."],
+			avoidRepeating: ["Do not redo accepted setup work."],
+		},
 	};
 	goalSideAgentCalls = [];
 	vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
@@ -90,7 +98,29 @@ function installGoalSideAgentMock(): void {
 			return createSideAgentResult(options, {
 				status: goalSideAgentMock.completionStatus,
 				feedback: goalSideAgentMock.feedback,
-				compactorMemo: goalSideAgentMock.compactorMemo,
+				summary: goalSideAgentMock.feedback,
+				score: goalSideAgentMock.completionStatus === "verified" ? 4 : 2,
+				deliverableResults: [
+					{
+						id: "D1",
+						status: goalSideAgentMock.completionStatus === "verified" ? "passed" : "failed",
+						rationale: goalSideAgentMock.feedback,
+					},
+				],
+				evidenceChecked: [{ claim: "Goal state", evidence: "Mock verifier inspected state", current: true }],
+				completionBlockers:
+					goalSideAgentMock.completionStatus === "verified"
+						? []
+						: [
+								{
+									id: "B1",
+									deliverableId: "D1",
+									severity: "blocking",
+									problem: goalSideAgentMock.feedback,
+									requiredEvidenceOrFix: goalSideAgentMock.compactorMemo,
+								},
+							],
+				continuationFocus: goalSideAgentMock.continuationFocus,
 				continuationMessage:
 					"<goal_continuation_compaction>Hidden prepared verifier hint.</goal_continuation_compaction>",
 			});
@@ -377,6 +407,12 @@ describe("InteractiveMode goal mode integration", () => {
 		goalSideAgentMock.completionStatus = "rejected";
 		goalSideAgentMock.feedback = "Missing end-to-end verification evidence.";
 		goalSideAgentMock.compactorMemo = "Run the focused integration proof before trying completion again.";
+		goalSideAgentMock.continuationFocus = {
+			openGaps: [goalSideAgentMock.feedback],
+			nextActions: [goalSideAgentMock.compactorMemo],
+			evidenceToCollect: ["Current focused integration proof."],
+			avoidRepeating: ["Do not redo accepted setup work."],
+		};
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
 			tool => tool.name === "goal",
@@ -393,7 +429,11 @@ describe("InteractiveMode goal mode integration", () => {
 			status: "rejected",
 			attempt: 1,
 			maxAttempts: 3,
+			totalAttempts: 1,
 			feedback: "Missing end-to-end verification evidence.",
+			structuredFeedback: {
+				score: 2,
+			},
 		});
 		expect(result.details?.completionVerification?.compactorMemo).toContain(
 			"Run the focused integration proof before trying completion again.",
@@ -409,15 +449,12 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
 		expect(harness.session.getGoalModeState()?.goal.failedCompletionAttempts).toBe(1);
 		expect(goalSideAgentCalls.map(call => call.agent.name)).toContain("goal-completion-verifier");
-		expect(goalSideAgentCalls.map(call => call.agent.name)).toContain("goal-continuation-compactor");
+		expect(goalSideAgentCalls.map(call => call.agent.name)).not.toContain("goal-continuation-compactor");
 		const verifierCall = goalSideAgentCalls.find(call => call.agent.name === "goal-completion-verifier");
-		const compactorCall = goalSideAgentCalls.find(call => call.agent.name === "goal-continuation-compactor");
 		expect(verifierCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
-		expect(compactorCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
+		expect(verifierCall?.strictToolNames).toBe(true);
 		expect(verifierCall?.task).toContain("<full_transcript_file>");
 		expect(verifierCall?.task).toContain("Strict test rubric");
-		expect(compactorCall?.task).toContain("<verification_feedback>");
-		expect(compactorCall?.task).toContain("Missing end-to-end verification evidence.");
 		const entries = harness.session.sessionManager.getEntries();
 		const rubricEntries = entries.filter(
 			entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE,
@@ -438,10 +475,12 @@ describe("InteractiveMode goal mode integration", () => {
 		);
 		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).attempt).toBe(1);
 		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).maxAttempts).toBe(3);
+		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).totalAttempts).toBe(1);
 		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).feedback).toBe(
 			"Missing end-to-end verification evidence.",
 		);
-		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).compactorMemo).toBe(
+		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).structuredFeedback?.score).toBe(2);
+		expect((latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails).compactorMemo).toContain(
 			"Run the focused integration proof before trying completion again.",
 		);
 		const beforeMenuCount = harness.session.sessionManager
@@ -454,12 +493,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const afterMenuEntries = harness.session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "custom_message");
-		expect(afterMenuEntries.length).toBe(beforeMenuCount + 1);
-		expect(
-			afterMenuEntries[afterMenuEntries.length - 1]?.type === "custom_message"
-				? afterMenuEntries[afterMenuEntries.length - 1]?.customType
-				: "",
-		).toBe(GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE);
+		expect(afterMenuEntries.length).toBe(beforeMenuCount);
 		const renderedAfterMenu = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
 		expect(renderedAfterMenu).toContain("[goal-verification-feedback]");
 		const beforeSubcommandCount = harness.session.sessionManager
@@ -470,27 +504,21 @@ describe("InteractiveMode goal mode integration", () => {
 		const afterSubcommandEntries = harness.session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "custom_message");
-		expect(afterSubcommandEntries.length).toBe(beforeSubcommandCount + 2);
+		expect(afterSubcommandEntries.length).toBe(beforeSubcommandCount);
 		const addedSubcommandEntries = afterSubcommandEntries.slice(beforeSubcommandCount);
-		expect(addedSubcommandEntries.map(entry => (entry.type === "custom_message" ? entry.customType : ""))).toEqual([
-			GOAL_RUBRIC_MESSAGE_TYPE,
-			GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
-		]);
+		expect(addedSubcommandEntries).toEqual([]);
 		const renderedAfterSubcommands = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
 		expect(renderedAfterSubcommands).toContain("[goal-rubric]");
 		expect(renderedAfterSubcommands).toContain("[goal-verification-feedback]");
 		expect(renderedAfterSubcommands).toContain("ctrl+o to expand");
-		expect(goalSideAgentCalls.map(call => call.agent.name)).toEqual([
-			"goal-rubric",
-			"goal-completion-verifier",
-			"goal-continuation-compactor",
-		]);
+		expect(goalSideAgentCalls.map(call => call.agent.name)).toEqual(["goal-rubric", "goal-completion-verifier"]);
 	});
 
 	it("persists verifier feedback when continuation compaction fails", async () => {
 		goalSideAgentMock.completionStatus = "rejected";
 		goalSideAgentMock.feedback = "Verifier found a blocking gap before compaction.";
 		goalSideAgentMock.compactorFails = true;
+		goalSideAgentMock.continuationFocus = undefined;
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
 			tool => tool.name === "goal",
@@ -520,6 +548,8 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(details.attempt).toBe(1);
 		expect(details.maxAttempts).toBe(3);
 		expect(details.feedback).toBe("Verifier found a blocking gap before compaction.");
+		expect(details.totalAttempts).toBe(1);
+		expect(details.structuredFeedback?.completionBlockers[0]?.id).toBe("B1");
 		expect(details.compactorMemo).toBeUndefined();
 		expect(JSON.stringify(latestFeedbackEntry.content)).not.toContain("<goal_continuation_compaction>");
 	});
@@ -527,6 +557,7 @@ describe("InteractiveMode goal mode integration", () => {
 		goalSideAgentMock.completionStatus = "rejected";
 		goalSideAgentMock.feedback = "Still missing verification evidence.";
 		goalSideAgentMock.compactorMemo = "Keep gathering proof.";
+		goalSideAgentMock.continuationFocus = undefined;
 		await harness.mode.handleGoalModeCommand("Ship the release");
 		const goalTool = (await createTools(harness.toolSession, harness.session.getActiveToolNames())).find(
 			tool => tool.name === "goal",
@@ -539,6 +570,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const second = await goalTool.execute("call-verify-reject-2", { op: "complete" });
 
 		expect(second.details?.completionVerification?.attempt).toBe(2);
+		expect(second.details?.completionVerification?.totalAttempts).toBe(2);
 		expect(harness.session.getGoalModeState()?.goal.failedCompletionAttempts).toBe(2);
 		expect(harness.session.getGoalModeState()?.goal.lastVerificationAttempt).toBe(2);
 		const feedbackEntries = harness.session.sessionManager
@@ -551,8 +583,10 @@ describe("InteractiveMode goal mode integration", () => {
 		const details = latestFeedbackEntry.details as GoalVerificationFeedbackMessageDetails;
 		expect(details.attempt).toBe(2);
 		expect(details.maxAttempts).toBe(3);
+		expect(details.totalAttempts).toBe(2);
 		expect(details.feedback).toBe("Still missing verification evidence.");
 		expect(details.compactorMemo).toBe("Keep gathering proof.");
+		expect(harness.session.getGoalModeState()?.goal.verificationAttempts?.length).toBe(2);
 	});
 
 	it("returns the completion report from the goal tool and exits goal mode before the next turn rebuild", async () => {

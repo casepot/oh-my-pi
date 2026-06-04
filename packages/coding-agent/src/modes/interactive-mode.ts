@@ -60,7 +60,7 @@ import type {
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
 import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slash-commands";
-import type { Goal, GoalModeState } from "../goals/state";
+import type { Goal, GoalCompletionVerifierStructuredOutput, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
@@ -1317,6 +1317,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			return undefined;
 		}
+		const verificationAttempts = Array.isArray(value.verificationAttempts)
+			? (value.verificationAttempts as Goal["verificationAttempts"])
+			: undefined;
 		return {
 			id: value.id,
 			objective: value.objective,
@@ -1327,6 +1330,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
 			rubric: typeof value.rubric === "string" ? value.rubric : undefined,
+			workEpoch: typeof value.workEpoch === "number" ? value.workEpoch : undefined,
+			totalVerificationAttempts:
+				typeof value.totalVerificationAttempts === "number" ? value.totalVerificationAttempts : undefined,
+			verificationAttempts,
 			failedCompletionAttempts:
 				typeof value.failedCompletionAttempts === "number" ? value.failedCompletionAttempts : undefined,
 			lastVerificationFeedback:
@@ -1335,6 +1342,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				typeof value.lastVerificationCompactorMemo === "string" ? value.lastVerificationCompactorMemo : undefined,
 			lastVerificationAttempt:
 				typeof value.lastVerificationAttempt === "number" ? value.lastVerificationAttempt : undefined,
+			lastVerificationAttemptId:
+				typeof value.lastVerificationAttemptId === "string" ? value.lastVerificationAttemptId : undefined,
 		};
 	}
 
@@ -2000,6 +2009,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #persistGoalArtifactMessage(message: GoalArtifactMessage): Promise<void> {
+		if (this.#hasPersistedGoalArtifactMessage(message)) return;
 		this.sessionManager.appendCustomMessageEntry(
 			message.customType,
 			message.content,
@@ -2007,6 +2017,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			message.details,
 			message.attribution ?? "agent",
 		);
+	}
+
+	#hasPersistedGoalArtifactMessage(message: GoalArtifactMessage): boolean {
+		const key = this.#goalArtifactMessageKey(message);
+		return this.sessionManager.getEntries().some(entry => {
+			if (entry.type !== "custom_message" || entry.customType !== message.customType) return false;
+			return this.#goalArtifactMessageKey(entry as unknown as GoalArtifactMessage) === key;
+		});
 	}
 
 	async #flushPendingGoalArtifactMessages(): Promise<void> {
@@ -2043,6 +2061,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			message.customType,
 			details?.goalId ?? "",
 			details?.attempt ?? 0,
+			details?.totalAttempts ?? 0,
 			details?.feedback ?? "",
 			details?.compactorMemo ?? "",
 		].join("\0");
@@ -2066,8 +2085,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (!this.session.isStreaming) return;
 		const key = [
+			GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 			goal.id,
 			goal.lastVerificationAttempt ?? goal.failedCompletionAttempts ?? 0,
+			goal.totalVerificationAttempts ?? 0,
 			goal.lastVerificationFeedback ?? "",
 			goal.lastVerificationCompactorMemo ?? "",
 		].join("\0");
@@ -2096,19 +2117,28 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalVerificationFeedbackMessage(goal: Goal): CustomMessage<GoalVerificationFeedbackMessageDetails> {
 		const feedback = goal.lastVerificationFeedback ?? "";
 		const compactorMemo = goal.lastVerificationCompactorMemo;
+		const latestAttempt =
+			goal.verificationAttempts?.find(attempt => attempt.id === goal.lastVerificationAttemptId) ??
+			goal.verificationAttempts?.at(-1);
 		const details: GoalVerificationFeedbackMessageDetails = {
 			goalId: goal.id,
 			objective: goal.objective,
 			attempt: goal.lastVerificationAttempt ?? goal.failedCompletionAttempts ?? 0,
 			maxAttempts: this.#goalMaxCompletionAttempts(),
+			totalAttempts: goal.totalVerificationAttempts,
 			feedback,
+			structuredFeedback: latestAttempt?.structuredFeedback,
 			rejectedAt: Date.now(),
 		};
 		if (compactorMemo !== undefined) details.compactorMemo = compactorMemo;
 		return {
 			role: "custom",
 			customType: GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
-			content: this.#formatGoalVerificationFeedbackContent(feedback, compactorMemo),
+			content: this.#formatGoalVerificationFeedbackContent(
+				feedback,
+				compactorMemo,
+				latestAttempt?.structuredFeedback,
+			),
 			display: true,
 			details,
 			attribution: "agent",
@@ -2135,20 +2165,28 @@ export class InteractiveMode implements InteractiveModeContext {
 			const details = message.details as GoalRubricMessageDetails | undefined;
 			this.#lastGoalRubricArtifactKey = [details?.goalId ?? "", details?.rubric ?? ""].join("\0");
 		} else if (message.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE) {
-			const details = message.details as GoalVerificationFeedbackMessageDetails | undefined;
-			this.#lastGoalVerificationArtifactKey = [
-				details?.goalId ?? "",
-				details?.attempt ?? 0,
-				details?.feedback ?? "",
-				details?.compactorMemo ?? "",
-			].join("\0");
+			this.#lastGoalVerificationArtifactKey = this.#goalArtifactMessageKey(message);
 		}
 	}
 
-	#formatGoalVerificationFeedbackContent(feedback: string, compactorMemo: string | undefined): string {
+	#formatGoalVerificationFeedbackContent(
+		feedback: string,
+		compactorMemo: string | undefined,
+		structuredFeedback: GoalCompletionVerifierStructuredOutput | undefined,
+	): string {
+		const sections = [`## Verifier feedback\n\n${feedback}`];
+		if (structuredFeedback) {
+			sections.push(`## Score\n\n${structuredFeedback.score}/4`);
+			if (structuredFeedback.completionBlockers.length > 0) {
+				const blockers = structuredFeedback.completionBlockers
+					.map(blocker => `- ${blocker.id}: ${blocker.problem} (${blocker.requiredEvidenceOrFix})`)
+					.join("\n");
+				sections.push(`## Blocking gaps\n\n${blockers}`);
+			}
+		}
 		const trimmedMemo = compactorMemo?.trim();
-		if (!trimmedMemo) return `## Verifier feedback\n\n${feedback}`;
-		return `## Verifier feedback\n\n${feedback}\n\n## Compactor memo\n\n${trimmedMemo}`;
+		if (trimmedMemo) sections.push(`## Continuation focus\n\n${trimmedMemo}`);
+		return sections.join("\n\n");
 	}
 
 	#goalMaxCompletionAttempts(): number {

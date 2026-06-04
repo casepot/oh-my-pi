@@ -2,7 +2,16 @@ import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
-import type { Goal, GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
+import type {
+	Goal,
+	GoalBudgetSteering,
+	GoalCompletionVerifierStructuredOutput,
+	GoalModeState,
+	GoalRuntimeEvent,
+	GoalTokenUsage,
+	GoalVerificationAttempt,
+	GoalVerificationStatus,
+} from "./state";
 
 export interface GoalRuntimeHost {
 	getState(): GoalModeState | undefined;
@@ -29,6 +38,16 @@ export interface GoalWallClockSnapshot {
 	activeGoalId?: string;
 }
 
+interface GoalVerificationRecordInput {
+	status: GoalVerificationStatus;
+	attempt: number;
+	maxAttempts: number;
+	feedback: string;
+	structuredFeedback?: GoalCompletionVerifierStructuredOutput;
+	compactorMemo?: string;
+	sideAgentTokensUsed?: number;
+}
+
 export interface GoalRuntimeSnapshot {
 	turnSnapshot?: GoalTurnSnapshot;
 	wallClock: GoalWallClockSnapshot;
@@ -37,8 +56,39 @@ export interface GoalRuntimeSnapshot {
 
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
 
+function cloneStructuredFeedback(
+	structuredFeedback: GoalCompletionVerifierStructuredOutput | undefined,
+): GoalCompletionVerifierStructuredOutput | undefined {
+	if (!structuredFeedback) return undefined;
+	return {
+		...structuredFeedback,
+		deliverableResults: structuredFeedback.deliverableResults.map(result => ({
+			...result,
+			evidence: result.evidence?.map(item => ({ ...item })),
+		})),
+		evidenceChecked: structuredFeedback.evidenceChecked.map(item => ({ ...item })),
+		completionBlockers: structuredFeedback.completionBlockers.map(item => ({ ...item })),
+		continuationFocus: structuredFeedback.continuationFocus
+			? {
+					openGaps: [...structuredFeedback.continuationFocus.openGaps],
+					nextActions: [...structuredFeedback.continuationFocus.nextActions],
+					evidenceToCollect: [...structuredFeedback.continuationFocus.evidenceToCollect],
+					avoidRepeating: structuredFeedback.continuationFocus.avoidRepeating
+						? [...structuredFeedback.continuationFocus.avoidRepeating]
+						: undefined,
+				}
+			: undefined,
+	};
+}
+
 function cloneGoal(goal: Goal): Goal {
-	return { ...goal };
+	return {
+		...goal,
+		verificationAttempts: goal.verificationAttempts?.map(attempt => ({
+			...attempt,
+			structuredFeedback: cloneStructuredFeedback(attempt.structuredFeedback),
+		})),
+	};
 }
 
 function cloneState(state: GoalModeState): GoalModeState {
@@ -109,10 +159,11 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 			: kind === "continuation"
 				? goalContinuationPrompt
 				: goalBudgetLimitPrompt;
+	const verificationAttempt = goal.lastVerificationAttempt ?? goal.failedCompletionAttempts ?? 0;
 	return prompt.render(template, {
 		objective: escapeXmlText(goal.objective),
 		rubric: optionalPromptSection(goal.rubric),
-		failedCompletionAttempts: String(goal.failedCompletionAttempts ?? 0),
+		failedCompletionAttempts: String(verificationAttempt),
 		lastVerificationFeedback: optionalPromptSection(goal.lastVerificationFeedback),
 		tokensUsed: String(goal.tokensUsed),
 		tokenBudget: budgetValue(goal),
@@ -240,26 +291,17 @@ export class GoalRuntime {
 		if (!this.#hasAccountingState()) return;
 		await this.flushUsage("allowed");
 		if (toolName !== "yield") {
-			await this.#clearFailedCompletionVerificationAfterWork();
+			await this.#recordWorkAfterVerification();
 		}
 	}
 
-	async #clearFailedCompletionVerificationAfterWork(): Promise<void> {
+	async #recordWorkAfterVerification(): Promise<void> {
 		await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
 			if (!state?.enabled || !isAccountingStatus(state.goal)) return;
-			if (
-				!state.goal.failedCompletionAttempts &&
-				!state.goal.lastVerificationFeedback &&
-				!state.goal.lastVerificationCompactorMemo &&
-				!state.goal.lastVerificationAttempt
-			) {
-				return;
-			}
+			if (!state.goal.failedCompletionAttempts) return;
 			state.goal.failedCompletionAttempts = undefined;
-			state.goal.lastVerificationFeedback = undefined;
-			state.goal.lastVerificationCompactorMemo = undefined;
-			state.goal.lastVerificationAttempt = undefined;
+			state.goal.workEpoch = (state.goal.workEpoch ?? 0) + 1;
 			state.goal.updatedAt = this.#now();
 			await this.#commitState(state, { persist: "goal" });
 		});
@@ -416,13 +458,43 @@ export class GoalRuntime {
 		});
 	}
 
+	#appendVerificationAttempt(goal: Goal, input: GoalVerificationRecordInput): GoalVerificationAttempt {
+		const sequence = Math.max(goal.totalVerificationAttempts ?? 0, goal.verificationAttempts?.length ?? 0) + 1;
+		const compactorMemo = input.compactorMemo?.trim() || undefined;
+		const attempt: GoalVerificationAttempt = {
+			id: `${goal.id}-verification-${sequence}`,
+			sequence,
+			attempt: input.attempt,
+			maxAttempts: input.maxAttempts,
+			status: input.status,
+			feedback: input.feedback.trim(),
+			structuredFeedback: cloneStructuredFeedback(input.structuredFeedback),
+			compactorMemo,
+			createdAt: this.#now(),
+			workEpoch: goal.workEpoch ?? 0,
+			sideAgentTokensUsed: input.sideAgentTokensUsed,
+		};
+		goal.verificationAttempts = [...(goal.verificationAttempts ?? []), attempt];
+		goal.totalVerificationAttempts = sequence;
+		goal.lastVerificationAttempt = input.attempt;
+		goal.lastVerificationAttemptId = attempt.id;
+		goal.lastVerificationFeedback = attempt.feedback;
+		goal.lastVerificationCompactorMemo = compactorMemo;
+		return attempt;
+	}
+
 	async recordFailedCompletionVerification(
 		goalId: string,
 		feedback: string,
-		options?: { attempt?: number; compactorMemo?: string },
+		options?: {
+			attempt?: number;
+			maxAttempts?: number;
+			structuredFeedback?: GoalCompletionVerifierStructuredOutput;
+			compactorMemo?: string;
+			sideAgentTokensUsed?: number;
+		},
 	): Promise<Goal | undefined> {
 		const trimmedFeedback = feedback.trim();
-		const trimmedCompactorMemo = options?.compactorMemo?.trim();
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
 			if (!state?.enabled || state.goal.id !== goalId || !isAccountingStatus(state.goal)) return undefined;
@@ -430,10 +502,16 @@ export class GoalRuntime {
 			const currentAttempts = state.goal.failedCompletionAttempts ?? 0;
 			const nextAttempt =
 				options?.attempt === undefined ? currentAttempts + 1 : Math.max(currentAttempts + 1, options.attempt);
+			this.#appendVerificationAttempt(state.goal, {
+				status: "rejected",
+				attempt: nextAttempt,
+				maxAttempts: options?.maxAttempts ?? nextAttempt,
+				feedback: trimmedFeedback,
+				structuredFeedback: options?.structuredFeedback,
+				compactorMemo: options?.compactorMemo,
+				sideAgentTokensUsed: options?.sideAgentTokensUsed,
+			});
 			state.goal.failedCompletionAttempts = nextAttempt;
-			state.goal.lastVerificationAttempt = nextAttempt;
-			state.goal.lastVerificationFeedback = trimmedFeedback;
-			state.goal.lastVerificationCompactorMemo = trimmedCompactorMemo || undefined;
 			state.goal.updatedAt = this.#now();
 			if (!wasBudgetLimited) {
 				state.goal.status = "active";
@@ -445,6 +523,39 @@ export class GoalRuntime {
 			if (!wasBudgetLimited) {
 				this.#markActiveAccounting(state.goal);
 			}
+			await this.#commitState(state, { persist: "goal" });
+			return state.goal;
+		});
+	}
+
+	async recordSuccessfulCompletionVerification(
+		goalId: string,
+		feedback: string,
+		options: {
+			attempt: number;
+			maxAttempts: number;
+			structuredFeedback?: GoalCompletionVerifierStructuredOutput;
+			sideAgentTokensUsed?: number;
+		},
+	): Promise<Goal | undefined> {
+		const trimmedFeedback = feedback.trim();
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.id !== goalId || !isAccountingStatus(state.goal)) return undefined;
+			this.#appendVerificationAttempt(state.goal, {
+				status: "verified",
+				attempt: options.attempt,
+				maxAttempts: options.maxAttempts,
+				feedback: trimmedFeedback,
+				structuredFeedback: options.structuredFeedback,
+				sideAgentTokensUsed: options.sideAgentTokensUsed,
+			});
+			state.goal.failedCompletionAttempts = undefined;
+			state.goal.lastVerificationAttempt = undefined;
+			state.goal.lastVerificationAttemptId = undefined;
+			state.goal.lastVerificationFeedback = undefined;
+			state.goal.lastVerificationCompactorMemo = undefined;
+			state.goal.updatedAt = this.#now();
 			await this.#commitState(state, { persist: "goal" });
 			return state.goal;
 		});
@@ -493,6 +604,9 @@ export class GoalRuntime {
 			timeUsedSeconds: 0,
 			createdAt: now,
 			updatedAt: now,
+			workEpoch: 0,
+			totalVerificationAttempts: 0,
+			verificationAttempts: [],
 		};
 		return { enabled: true, mode: "active", goal };
 	}

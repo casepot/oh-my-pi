@@ -21,6 +21,7 @@
 - Changed compaction to use the active session model by default; `compaction.allowModelFallbacks` restores role/large-context fallback candidates when explicitly enabled.
 - Changed subagent model auth handling so parent-model substitution requires `task.fallbackToParentModelOnAuthFailure`; otherwise an unauthenticated configured subagent model fails visibly.
 - Changed `omp update` and fork installers to use the `casepot/oh-my-pi` source checkout channel instead of npm/upstream release metadata for Bun-capable installs.
+- Changed goal-mode rubrics/verifiers/continuations to favor evergreen deliverable IDs, structured evidence/blocker output, durable verification history, and delta-focused continuation guidance.
 
 ### Fixed
 
@@ -37,6 +38,7 @@
 - Fixed LSP safety diagnostics by rejecting unsolicited server `workspace/applyEdit`, refusing explicit rename edits that do not touch the requested symbol range, and surfacing diagnostics collection failures instead of reporting `OK`.
 - Fixed ACP bridge writes to report read-back verification/uncertainty and skipped diagnostics, and fixed provider URL/port transport messages to surface as provider-network failures.
 - Fixed hashline edit regression coverage for stale-snapshot delimiter repair and multi-section no-op preflight behavior.
+- Fixed goal side agents so explicit read-only tool lists are strict active-tool allowlists, preventing image/custom/extension tools from leaking into rubric/verifier/continuation agents.
 
 ## [15.8.1] - 2026-06-02
 

@@ -27,7 +27,9 @@ export {
 	createCompactionSummaryMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
+import type { GoalCompletionVerifierStructuredOutput } from "../goals/state";
 import type { OutputMeta } from "../tools/output-meta";
+
 import { formatOutputNotice } from "../tools/output-meta";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
@@ -46,7 +48,9 @@ export interface GoalVerificationFeedbackMessageDetails {
 	objective: string;
 	attempt: number;
 	maxAttempts: number;
+	totalAttempts?: number;
 	feedback: string;
+	structuredFeedback?: GoalCompletionVerifierStructuredOutput;
 	compactorMemo?: string;
 	rejectedAt: number;
 }

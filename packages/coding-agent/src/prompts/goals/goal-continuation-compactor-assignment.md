@@ -1,4 +1,4 @@
-Prepare a hidden goal continuation message for the main agent.
+Prepare a hidden goal continuation delta for the main agent.
 
 <full_transcript_file>
 {{contextFile}}
@@ -18,12 +18,14 @@ Prepare a hidden goal continuation message for the main agent.
 </verification_feedback>
 {{/if}}
 
-Use the transcript and current repository state available through read/search/find only. NEVER modify files. NEVER run tests, checks, linters, formatters, or project-wide commands.
+Use read/search/find only. NEVER modify files. NEVER run tests/checks/linters/formatters/project-wide commands.
 
 Return one concise continuation message. It MUST:
-- Preserve the full objective and rubric.
-- Capture only load-bearing context the next turn needs.
+- Reference objective/rubric by implication; NEVER restate them wholesale.
+- Preserve only load-bearing next-turn context.
 - Incorporate verifier feedback when present.
-- Direct effort toward the work/evidence that most increases goal completion confidence.
-- Avoid becoming a raw fix list, status recap, or invitation to churn.
-- Tell the main agent to execute, verify, and only attempt completion when the stringent rubric is directly satisfied.
+- Focus effort on open blockers and missing evidence.
+- Include `avoidRepeating` guidance when prior work should not be redone.
+- Tell main agent to execute, verify, and only complete when current evidence satisfies the rubric.
+
+Return `continuationMessage` plus optional `continuationFocus` fields: `openGaps`, `nextActions`, `evidenceToCollect`, `avoidRepeating`.

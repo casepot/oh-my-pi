@@ -13,8 +13,9 @@ import goalPreparedContinuation from "../prompts/goals/goal-prepared-continuatio
 import goalRubricAssignment from "../prompts/goals/goal-rubric-assignment.md" with { type: "text" };
 import goalRubricSystem from "../prompts/goals/goal-rubric-system.md" with { type: "text" };
 import type { AgentDefinition } from "../task/types";
+import type { GoalCompletionVerifierStructuredOutput, GoalContinuationFocus } from "./state";
 
-const GOAL_SIDE_AGENT_TOOLS = ["read", "search", "find", "yield"] as const;
+export const GOAL_SIDE_AGENT_TOOLS = ["read", "search", "find", "yield"] as const;
 
 const goalRubricOutputSchema = {
 	properties: {
@@ -22,12 +23,60 @@ const goalRubricOutputSchema = {
 	},
 } as const;
 
+const evidenceItemSchema = {
+	properties: {
+		claim: { type: "string" },
+		evidence: { type: "string" },
+		current: { type: "boolean" },
+	},
+} as const;
+
+const deliverableResultSchema = {
+	properties: {
+		id: { type: "string" },
+		status: { enum: ["passed", "failed", "unknown"] },
+		rationale: { type: "string" },
+	},
+	optionalProperties: {
+		evidence: { elements: evidenceItemSchema },
+	},
+} as const;
+
+const completionBlockerSchema = {
+	properties: {
+		id: { type: "string" },
+		severity: { enum: ["blocking", "important", "polish"] },
+		problem: { type: "string" },
+		requiredEvidenceOrFix: { type: "string" },
+	},
+	optionalProperties: {
+		deliverableId: { type: "string" },
+	},
+} as const;
+
+const continuationFocusSchema = {
+	properties: {
+		openGaps: { elements: { type: "string" } },
+		nextActions: { elements: { type: "string" } },
+		evidenceToCollect: { elements: { type: "string" } },
+	},
+	optionalProperties: {
+		avoidRepeating: { elements: { type: "string" } },
+	},
+} as const;
+
 const goalCompletionOutputSchema = {
 	properties: {
 		status: { enum: ["verified", "rejected"] },
 		feedback: { type: "string" },
+		summary: { type: "string" },
+		score: { type: "float64" },
+		deliverableResults: { elements: deliverableResultSchema },
+		evidenceChecked: { elements: evidenceItemSchema },
+		completionBlockers: { elements: completionBlockerSchema },
 	},
 	optionalProperties: {
+		continuationFocus: continuationFocusSchema,
 		continuationMessage: { type: "string" },
 	},
 } as const;
@@ -35,6 +84,9 @@ const goalCompletionOutputSchema = {
 const goalContinuationOutputSchema = {
 	properties: {
 		continuationMessage: { type: "string" },
+	},
+	optionalProperties: {
+		continuationFocus: continuationFocusSchema,
 	},
 } as const;
 
@@ -69,7 +121,7 @@ export interface GoalRubricOutput {
 	rubric: string;
 }
 
-export interface GoalCompletionVerifierOutput {
+export interface GoalCompletionVerifierOutput extends GoalCompletionVerifierStructuredOutput {
 	status: "verified" | "rejected";
 	feedback: string;
 	continuationMessage?: string;
@@ -77,6 +129,7 @@ export interface GoalCompletionVerifierOutput {
 
 export interface GoalContinuationCompactorOutput {
 	continuationMessage: string;
+	continuationFocus?: GoalContinuationFocus;
 }
 
 export function renderGoalRubricAssignment(input: { objective: string; contextFile: string }): string {

@@ -147,7 +147,11 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				text += `\nRemaining tokens: ${response.remainingTokens}`;
 			}
 			if (response.completionVerification?.status === "rejected") {
-				text += `\n\nCompletion verification rejected (attempt ${response.completionVerification.attempt}/${response.completionVerification.maxAttempts}):\n${response.completionVerification.feedback}`;
+				const totalAttemptText =
+					response.completionVerification.totalAttempts === undefined
+						? ""
+						: `, total ${response.completionVerification.totalAttempts}`;
+				text += `\n\nCompletion verification rejected (attempt ${response.completionVerification.attempt}/${response.completionVerification.maxAttempts}${totalAttemptText}):\n${response.completionVerification.feedback}`;
 				if (response.completionVerification.compactorMemo) {
 					text += `\n\nCompactor memo:\n${response.completionVerification.compactorMemo}`;
 				}
@@ -265,7 +269,13 @@ export const goalToolRenderer = {
 						label: verificationRejected ? "verification rejected" : goal.status,
 						color: verificationRejected ? "warning" : goalBadgeColor(goal.status),
 					},
-					meta: verificationRejected ? [`attempt ${verification.attempt}/${verification.maxAttempts}`] : undefined,
+					meta: verificationRejected
+						? [
+								verification.totalAttempts === undefined
+									? `attempt ${verification.attempt}/${verification.maxAttempts}`
+									: `attempt ${verification.attempt}/${verification.maxAttempts}, total ${verification.totalAttempts}`,
+							]
+						: undefined,
 				},
 				uiTheme,
 			),

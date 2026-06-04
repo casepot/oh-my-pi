@@ -159,7 +159,11 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	thinkingLevel?: ThinkingLevel;
 	outputSchema?: unknown;
+	/** Treat agent.tools/toolNames as an exact active-tool allowlist. */
+	strictToolNames?: boolean;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
+	enableMCP?: boolean;
+	disableExtensionDiscovery?: boolean;
 	taskDepth?: number;
 	enableLsp?: boolean;
 	signal?: AbortSignal;
@@ -634,9 +638,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
 	}
-	// IRC is always available; the COOP prompt section advertises it, so a restricted
-	// whitelist must still carry `irc` for the subagent to actually use it.
-	if (toolNames && !toolNames.includes("irc")) {
+	if (toolNames && !options.strictToolNames && !toolNames.includes("irc")) {
 		toolNames = [...toolNames, "irc"];
 	}
 	if (toolNames?.includes("exec")) {
@@ -659,7 +661,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
-	const ircEnabled = subagentSettings.get("irc.enabled") === true;
+	const ircEnabled =
+		subagentSettings.get("irc.enabled") === true && (toolNames === undefined || toolNames.includes("irc"));
 	const contextFileForPrompt = ircEnabled ? undefined : options.contextFile;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
 
@@ -1227,8 +1230,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 
-			const mcpProxyTools = options.mcpManager ? createMCPProxyTools(options.mcpManager) : [];
-			const enableMCP = !options.mcpManager;
+			const mcpProxyTools =
+				options.mcpManager && options.enableMCP !== false ? createMCPProxyTools(options.mcpManager) : [];
+			const enableMCP = options.enableMCP ?? !options.mcpManager;
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -1272,6 +1276,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					thinkingLevel: effectiveThinkingLevel,
 					toolNames,
 					outputSchema,
+					strictToolNames: options.strictToolNames,
 					requireYieldTool: true,
 					contextFiles: options.contextFiles,
 					skills: options.skills,
@@ -1303,6 +1308,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					enableLsp: lspEnabled,
 					skipPythonPreflight,
 					enableMCP,
+					disableExtensionDiscovery: options.disableExtensionDiscovery,
 					mcpManager: options.mcpManager,
 					customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 					localProtocolOptions: options.localProtocolOptions,
@@ -1331,6 +1337,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const filteredSubagentTools = subagentToolNames.filter(name => !parentOwnedToolNames.has(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
+			}
+			if (options.strictToolNames && toolNames) {
+				const expected = [...new Set(toolNames.map(name => name.toLowerCase()))].sort();
+				const actual = session
+					.getActiveToolNames()
+					.map(name => name.toLowerCase())
+					.sort();
+				if (expected.join("\0") !== actual.join("\0")) {
+					throw new Error(
+						`strict subagent tool allowlist mismatch: expected ${expected.join(", ")}, got ${actual.join(", ")}`,
+					);
+				}
 			}
 
 			session.sessionManager.appendSessionInit({

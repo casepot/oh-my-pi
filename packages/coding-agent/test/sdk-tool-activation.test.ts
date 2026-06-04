@@ -76,6 +76,40 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("treats explicit toolNames as an exact active allowlist in strict mode", async () => {
+		const tempDir = path.join(os.tmpdir(), `pi-sdk-tool-activation-${Snowflake.next()}`);
+		tempDirs.push(tempDir);
+		fs.mkdirSync(tempDir, { recursive: true });
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			extensions: [toolActivationExtension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["read"],
+			strictToolNames: true,
+		});
+
+		try {
+			expect(session.getAllToolNames()).toEqual(
+				expect.arrayContaining(["read", "default_active_tool", "default_inactive_tool"]),
+			);
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+			expect(session.systemPrompt.join("\n")).not.toContain("default_active_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("allows explicitly requested defaultInactive extension tools into the initial active set", async () => {
 		const tempDir = path.join(os.tmpdir(), `pi-sdk-tool-activation-${Snowflake.next()}`);
 		tempDirs.push(tempDir);

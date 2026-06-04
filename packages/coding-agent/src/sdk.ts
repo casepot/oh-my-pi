@@ -310,6 +310,8 @@ export interface CreateAgentSessionOptions {
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
 	toolNames?: string[];
+	/** Treat `toolNames` as an exact active-tool allowlist. */
+	strictToolNames?: boolean;
 
 	/** Output schema for structured completion (subagents) */
 	outputSchema?: unknown;
@@ -1363,6 +1365,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		toolSession.mcpManager = mcpManager;
 		const enableMCP = options.enableMCP ?? true;
 		const customTools: CustomTool[] = [];
+		const strictToolNames = options.strictToolNames === true && options.toolNames !== undefined;
+		const strictToolNameSet = new Set(options.toolNames?.map(name => name.toLowerCase()) ?? []);
 		if (enableMCP && !mcpManager) {
 			const mcpResult = await logger.time("discoverAndLoadMCPTools", discoverAndLoadMCPTools, cwd, {
 				onConnecting: serverNames => {
@@ -1393,8 +1397,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 
 			if (mcpResult.tools.length > 0) {
-				// MCP tools are LoadedCustomTool, extract the tool property
-				customTools.push(...mcpResult.tools.map(loaded => loaded.tool));
+				const loadedTools = strictToolNames
+					? mcpResult.tools.filter(loaded => strictToolNameSet.has(loaded.tool.name.toLowerCase()))
+					: mcpResult.tools;
+				customTools.push(...loadedTools.map(loaded => loaded.tool));
 			}
 		}
 		// Only top-level sessions own the global MCPManager. Subagents already
@@ -1403,13 +1409,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// to mirror the AsyncJobManager ownership rule.
 		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
 
-		// Add image tools when the active model or configured image providers can generate images.
-		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
-		if (imageGenTools.length > 0) {
-			customTools.push(...(imageGenTools as unknown as CustomTool[]));
+		// Add image/TTS tools when supported unless an exact tool allowlist is active.
+		if (!strictToolNames || strictToolNameSet.has("generate_image")) {
+			const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
+			if (imageGenTools.length > 0) {
+				customTools.push(...(imageGenTools as unknown as CustomTool[]));
+			}
 		}
 
-		if (settings.get("tts.enabled")) {
+		if (settings.get("tts.enabled") && (!strictToolNames || strictToolNameSet.has(ttsTool.name))) {
 			customTools.push(ttsTool as unknown as CustomTool);
 		}
 
@@ -1432,7 +1440,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			logger.error("Custom tool load failed", { path, error });
 		}
 		if (discoveredCustomTools.tools.length > 0) {
-			customTools.push(...discoveredCustomTools.tools.map(loaded => loaded.tool));
+			const loadedTools = strictToolNames
+				? discoveredCustomTools.tools.filter(loaded => strictToolNameSet.has(loaded.tool.name.toLowerCase()))
+				: discoveredCustomTools.tools;
+			customTools.push(...loadedTools.map(loaded => loaded.tool));
 		}
 
 		const inlineExtensions: ExtensionFactory[] = options.extensions ? [...options.extensions] : [];
@@ -1624,6 +1635,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 		for (const tool of wrappedExtensionTools) {
+			if (strictToolNames && toolRegistry.has(tool.name)) continue;
 			toolRegistry.set(tool.name, tool);
 		}
 		// Wrap every tool with `ExtensionToolWrapper` so the per-tool approval gate runs on every
@@ -1821,11 +1833,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			];
 		}
 
-		// Custom tools and extension-registered tools are always included regardless of toolNames filter
-		const alwaysInclude: string[] = [
-			...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
-			...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
-		];
+		const alwaysInclude: string[] = strictToolNames
+			? []
+			: [
+					...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
+					...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
+				];
 		for (const name of alwaysInclude) {
 			if (mcpDiscoveryEnabled && name.startsWith("mcp__")) {
 				continue;

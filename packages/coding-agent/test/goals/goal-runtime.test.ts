@@ -34,7 +34,23 @@ function createGoal(overrides: Partial<Goal> = {}): Goal {
 }
 
 function cloneGoal(goal: Goal): Goal {
-	return { ...goal };
+	return {
+		...goal,
+		verificationAttempts: goal.verificationAttempts?.map(attempt => ({
+			...attempt,
+			structuredFeedback: attempt.structuredFeedback
+				? {
+						...attempt.structuredFeedback,
+						deliverableResults: attempt.structuredFeedback.deliverableResults.map(result => ({
+							...result,
+							evidence: result.evidence?.map(item => ({ ...item })),
+						})),
+						evidenceChecked: attempt.structuredFeedback.evidenceChecked.map(item => ({ ...item })),
+						completionBlockers: attempt.structuredFeedback.completionBlockers.map(item => ({ ...item })),
+					}
+				: undefined,
+		})),
+	};
 }
 
 function cloneState(state: GoalModeState | undefined): GoalModeState | undefined {
@@ -389,22 +405,33 @@ describe("goal runtime", () => {
 		expect(goal?.status).toBe("active");
 	});
 
-	it("keeps failed completion attempts monotonic when supplied attempts are stale", async () => {
+	it("keeps durable verification history when supplied attempts are stale", async () => {
 		const harness = createHarness();
 		const state = await harness.runtime.createGoal({ objective: "Ship concurrent completions" });
 
-		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "First rejection", { attempt: 1 });
-		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Second rejection", { attempt: 1 });
+		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "First rejection", {
+			attempt: 1,
+			maxAttempts: 3,
+		});
+		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Second rejection", {
+			attempt: 1,
+			maxAttempts: 3,
+		});
 
 		const goal = harness.getState()?.goal;
 		expect(goal?.failedCompletionAttempts).toBe(2);
 		expect(goal?.lastVerificationAttempt).toBe(2);
+		expect(goal?.totalVerificationAttempts).toBe(2);
+		expect(goal?.verificationAttempts?.map(attempt => attempt.sequence)).toEqual([1, 2]);
 		expect(goal?.lastVerificationFeedback).toBe("Second rejection");
 	});
-	it("clears failed completion attempts after substantive non-yield work", async () => {
+	it("resets blind-retry attempts after substantive non-yield work but preserves audit feedback", async () => {
 		const harness = createHarness();
 		const state = await harness.runtime.createGoal({ objective: "Ship after feedback" });
-		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Need evidence");
+		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Need evidence", {
+			attempt: 1,
+			maxAttempts: 3,
+		});
 
 		await harness.runtime.onToolCompleted("yield");
 		expect(harness.getState()?.goal.failedCompletionAttempts).toBe(1);
@@ -412,6 +439,8 @@ describe("goal runtime", () => {
 
 		await harness.runtime.onToolCompleted("read");
 		expect(harness.getState()?.goal.failedCompletionAttempts).toBeUndefined();
-		expect(harness.getState()?.goal.lastVerificationFeedback).toBeUndefined();
+		expect(harness.getState()?.goal.lastVerificationFeedback).toBe("Need evidence");
+		expect(harness.getState()?.goal.totalVerificationAttempts).toBe(1);
+		expect(harness.getState()?.goal.workEpoch).toBe(1);
 	});
 });

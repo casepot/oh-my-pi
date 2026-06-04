@@ -167,7 +167,17 @@ import {
 	renderGoalRubricAssignment,
 	renderPreparedGoalContinuation,
 } from "../goals/side-agents";
-import type { Goal, GoalCompletionVerificationDetails, GoalModeState, GoalTokenUsage } from "../goals/state";
+import type {
+	Goal,
+	GoalCompletionVerificationDetails,
+	GoalCompletionVerifierStructuredOutput,
+	GoalContinuationFocus,
+	GoalModeState,
+	GoalTokenUsage,
+	GoalVerificationDeliverableResult,
+	GoalVerificationEvidenceItem,
+	GoalVerificationGap,
+} from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -836,17 +846,128 @@ function parseGoalRubricOutput(value: unknown): GoalRubricOutput | undefined {
 	return { rubric: value.rubric };
 }
 
+function stringArray(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function parseGoalVerificationEvidenceItem(value: unknown): GoalVerificationEvidenceItem | undefined {
+	if (!isStringRecord(value)) return undefined;
+	if (typeof value.claim !== "string" || typeof value.evidence !== "string" || typeof value.current !== "boolean") {
+		return undefined;
+	}
+	return { claim: value.claim, evidence: value.evidence, current: value.current };
+}
+
+function parseGoalVerificationEvidenceItems(value: unknown): GoalVerificationEvidenceItem[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap(item => {
+		const parsed = parseGoalVerificationEvidenceItem(item);
+		return parsed ? [parsed] : [];
+	});
+}
+
+function parseGoalVerificationDeliverableResults(value: unknown): GoalVerificationDeliverableResult[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap(item => {
+		if (!isStringRecord(item)) return [];
+		if (typeof item.id !== "string" || typeof item.rationale !== "string") return [];
+		if (item.status !== "passed" && item.status !== "failed" && item.status !== "unknown") return [];
+		return [
+			{
+				id: item.id,
+				status: item.status,
+				rationale: item.rationale,
+				evidence: parseGoalVerificationEvidenceItems(item.evidence),
+			} satisfies GoalVerificationDeliverableResult,
+		];
+	});
+}
+
+function parseGoalVerificationGaps(value: unknown): GoalVerificationGap[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap(item => {
+		if (!isStringRecord(item)) return [];
+		if (
+			typeof item.id !== "string" ||
+			typeof item.problem !== "string" ||
+			typeof item.requiredEvidenceOrFix !== "string"
+		) {
+			return [];
+		}
+		if (item.severity !== "blocking" && item.severity !== "important" && item.severity !== "polish") return [];
+		const parsed: GoalVerificationGap = {
+			id: item.id,
+			severity: item.severity,
+			problem: item.problem,
+			requiredEvidenceOrFix: item.requiredEvidenceOrFix,
+		};
+		if (typeof item.deliverableId === "string") parsed.deliverableId = item.deliverableId;
+		return [parsed];
+	});
+}
+
+function parseGoalContinuationFocus(value: unknown): GoalContinuationFocus | undefined {
+	if (!isStringRecord(value)) return undefined;
+	return {
+		openGaps: stringArray(value.openGaps),
+		nextActions: stringArray(value.nextActions),
+		evidenceToCollect: stringArray(value.evidenceToCollect),
+		avoidRepeating: stringArray(value.avoidRepeating),
+	};
+}
+
 function parseGoalCompletionVerifierOutput(value: unknown): GoalCompletionVerifierOutput | undefined {
 	if (!isStringRecord(value)) return undefined;
 	if (value.status !== "verified" && value.status !== "rejected") return undefined;
 	if (typeof value.feedback !== "string") return undefined;
 	const continuationMessage = typeof value.continuationMessage === "string" ? value.continuationMessage : undefined;
-	return { status: value.status, feedback: value.feedback, continuationMessage };
+	const structuredFeedback: GoalCompletionVerifierStructuredOutput = {
+		summary: typeof value.summary === "string" ? value.summary : value.feedback,
+		score: typeof value.score === "number" && Number.isFinite(value.score) ? value.score : 0,
+		deliverableResults: parseGoalVerificationDeliverableResults(value.deliverableResults),
+		evidenceChecked: parseGoalVerificationEvidenceItems(value.evidenceChecked),
+		completionBlockers: parseGoalVerificationGaps(value.completionBlockers),
+		continuationFocus: parseGoalContinuationFocus(value.continuationFocus),
+	};
+	return { status: value.status, feedback: value.feedback, continuationMessage, ...structuredFeedback };
 }
 
 function parseGoalContinuationCompactorOutput(value: unknown): GoalContinuationCompactorOutput | undefined {
 	if (!isStringRecord(value) || typeof value.continuationMessage !== "string") return undefined;
-	return { continuationMessage: value.continuationMessage };
+	return {
+		continuationMessage: value.continuationMessage,
+		continuationFocus: parseGoalContinuationFocus(value.continuationFocus),
+	};
+}
+function structuredFeedbackFromVerification(
+	verification: GoalCompletionVerifierOutput,
+): GoalCompletionVerifierStructuredOutput {
+	return {
+		summary: verification.summary,
+		score: verification.score,
+		deliverableResults: verification.deliverableResults,
+		evidenceChecked: verification.evidenceChecked,
+		completionBlockers: verification.completionBlockers,
+		continuationFocus: verification.continuationFocus,
+	};
+}
+
+function renderGoalContinuationFocus(focus: GoalContinuationFocus | undefined): string | undefined {
+	if (!focus) return undefined;
+	const sections: string[] = [];
+	if (focus.openGaps.length > 0) {
+		sections.push(`Open gaps:\n${focus.openGaps.map(gap => `- ${gap}`).join("\n")}`);
+	}
+	if (focus.nextActions.length > 0) {
+		sections.push(`Next actions:\n${focus.nextActions.map(action => `- ${action}`).join("\n")}`);
+	}
+	if (focus.evidenceToCollect.length > 0) {
+		sections.push(`Evidence to collect:\n${focus.evidenceToCollect.map(evidence => `- ${evidence}`).join("\n")}`);
+	}
+	if (focus.avoidRepeating && focus.avoidRepeating.length > 0) {
+		sections.push(`Do not redo:\n${focus.avoidRepeating.map(item => `- ${item}`).join("\n")}`);
+	}
+	return sections.length > 0 ? sections.join("\n\n") : undefined;
 }
 
 function sideAgentUsage(result: SingleResult): GoalTokenUsage | undefined {
@@ -4005,6 +4126,7 @@ export class AgentSession {
 		}
 		return state;
 	}
+
 	async requestGoalCompletion(signal?: AbortSignal): Promise<{
 		goal: Goal | null;
 		remainingTokens: number | null;
@@ -4018,6 +4140,7 @@ export class AgentSession {
 		const goalId = state.goal.id;
 		const maxAttempts = goalMaxCompletionAttempts(this.settings);
 		const failedAttempts = state.goal.failedCompletionAttempts ?? 0;
+		const totalAttempts = state.goal.totalVerificationAttempts ?? state.goal.verificationAttempts?.length ?? 0;
 		if (failedAttempts >= maxAttempts) {
 			return {
 				goal: state.goal,
@@ -4027,6 +4150,7 @@ export class AgentSession {
 					status: "rejected",
 					attempt: failedAttempts,
 					maxAttempts,
+					totalAttempts,
 					feedback: goalCompletionMaxAttemptsFeedback.trim(),
 					compactorMemo: state.goal.lastVerificationCompactorMemo,
 				},
@@ -4034,7 +4158,9 @@ export class AgentSession {
 		}
 
 		const attempt = failedAttempts + 1;
+		const totalAttempt = totalAttempts + 1;
 		const verification = await this.#verifyGoalCompletion(state.goal, attempt, maxAttempts, signal);
+		const structuredFeedback = structuredFeedbackFromVerification(verification);
 		const latest = this.#goalModeState;
 		if (!isGoalCompletionStateStillCurrent(state.goal, latest)) {
 			const staleGoal = latest?.goal ?? state.goal;
@@ -4046,12 +4172,24 @@ export class AgentSession {
 					status: "rejected",
 					attempt,
 					maxAttempts,
+					totalAttempts: totalAttempt,
 					feedback: goalCompletionStaleFeedback.trim(),
 				},
 			};
 		}
 		if (verification.status === "verified") {
+			const recorded = await this.#goalRuntime.recordSuccessfulCompletionVerification(
+				goalId,
+				verification.feedback,
+				{
+					attempt,
+					maxAttempts,
+					structuredFeedback,
+				},
+			);
 			const completed = await this.#goalRuntime.completeGoalFromTool();
+			const completedTotalAttempts =
+				recorded?.totalVerificationAttempts ?? completed.totalVerificationAttempts ?? totalAttempt;
 			return {
 				goal: completed,
 				remainingTokens: remainingTokens(completed),
@@ -4060,33 +4198,49 @@ export class AgentSession {
 					status: "verified",
 					attempt,
 					maxAttempts,
+					totalAttempts: completedTotalAttempts,
 					feedback: verification.feedback,
+					structuredFeedback,
 				},
 			};
 		}
 
 		const latestGoal = latest?.goal ?? state.goal;
+		const continuationGoal: Goal = {
+			...latestGoal,
+			failedCompletionAttempts: attempt,
+			lastVerificationAttempt: attempt,
+			lastVerificationFeedback: verification.feedback,
+		};
+		const directContinuationMemo = renderGoalContinuationFocus(verification.continuationFocus);
 		let continuation: { prompt: string; memo: string | undefined };
 		try {
-			continuation = await this.#buildGoalContinuationMessage(
-				{
-					...latestGoal,
-					failedCompletionAttempts: attempt,
-					lastVerificationFeedback: verification.feedback,
-				},
-				verification.feedback,
-				signal,
-			);
+			if (directContinuationMemo) {
+				const basePrompt = renderGoalPrompt("continuation", continuationGoal);
+				continuation = {
+					prompt: renderPreparedGoalContinuation({
+						basePrompt,
+						continuationMessage: directContinuationMemo,
+					}),
+					memo: directContinuationMemo,
+				};
+			} else {
+				continuation = await this.#buildGoalContinuationMessage(continuationGoal, verification.feedback, signal);
+			}
 		} catch (error) {
 			const recorded = await this.#goalRuntime.recordFailedCompletionVerification(goalId, verification.feedback, {
 				attempt,
+				maxAttempts,
+				structuredFeedback,
 			});
 			if (recorded) {
 				await this.#publishGoalVerificationFeedbackArtifact({
 					goal: recorded,
 					attempt: recorded.lastVerificationAttempt ?? attempt,
 					maxAttempts,
+					totalAttempts: recorded.totalVerificationAttempts ?? totalAttempt,
 					feedback: verification.feedback,
+					structuredFeedback,
 					compactorMemo: undefined,
 				});
 			}
@@ -4103,12 +4257,15 @@ export class AgentSession {
 					status: "rejected",
 					attempt,
 					maxAttempts,
+					totalAttempts: totalAttempt,
 					feedback: goalCompletionStaleFeedback.trim(),
 				},
 			};
 		}
 		const recorded = await this.#goalRuntime.recordFailedCompletionVerification(goalId, verification.feedback, {
 			attempt,
+			maxAttempts,
+			structuredFeedback,
 			compactorMemo: continuation.memo,
 		});
 		if (!recorded) {
@@ -4120,16 +4277,20 @@ export class AgentSession {
 					status: "rejected",
 					attempt,
 					maxAttempts,
+					totalAttempts: totalAttempt,
 					feedback: goalCompletionStaleFeedback.trim(),
 				},
 			};
 		}
 		const recordedAttempt = recorded.lastVerificationAttempt ?? attempt;
+		const recordedTotalAttempts = recorded.totalVerificationAttempts ?? totalAttempt;
 		await this.#publishGoalVerificationFeedbackArtifact({
 			goal: recorded,
 			attempt: recordedAttempt,
 			maxAttempts,
+			totalAttempts: recordedTotalAttempts,
 			feedback: verification.feedback,
+			structuredFeedback,
 			compactorMemo: continuation.memo,
 		});
 		return {
@@ -4140,7 +4301,9 @@ export class AgentSession {
 				status: "rejected",
 				attempt: recordedAttempt,
 				maxAttempts,
+				totalAttempts: recordedTotalAttempts,
 				feedback: verification.feedback,
+				structuredFeedback,
 				compactorMemo: continuation.memo,
 			},
 		};
@@ -4150,6 +4313,13 @@ export class AgentSession {
 		const state = this.#goalModeState;
 		if (!state?.enabled || state.goal.status !== "active") return undefined;
 		const goalId = state.goal.id;
+		if (state.goal.failedCompletionAttempts && state.goal.lastVerificationCompactorMemo) {
+			const basePrompt = renderGoalPrompt("continuation", state.goal);
+			return renderPreparedGoalContinuation({
+				basePrompt,
+				continuationMessage: state.goal.lastVerificationCompactorMemo,
+			});
+		}
 		const continuation = await this.#buildGoalContinuationMessage(
 			state.goal,
 			state.goal.lastVerificationFeedback,
@@ -4180,7 +4350,9 @@ export class AgentSession {
 		goal: Goal;
 		attempt: number;
 		maxAttempts: number;
+		totalAttempts?: number;
 		feedback: string;
+		structuredFeedback?: GoalCompletionVerifierStructuredOutput;
 		compactorMemo: string | undefined;
 	}): Promise<void> {
 		const details: GoalVerificationFeedbackMessageDetails = {
@@ -4188,13 +4360,19 @@ export class AgentSession {
 			objective: input.goal.objective,
 			attempt: input.attempt,
 			maxAttempts: input.maxAttempts,
+			totalAttempts: input.totalAttempts,
 			feedback: input.feedback,
+			structuredFeedback: input.structuredFeedback,
 			rejectedAt: Date.now(),
 		};
 		if (input.compactorMemo !== undefined) details.compactorMemo = input.compactorMemo;
 		await this.#sendGoalArtifactMessage<GoalVerificationFeedbackMessageDetails>({
 			customType: GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
-			content: this.#renderGoalVerificationFeedbackContent(input.feedback, input.compactorMemo),
+			content: this.#renderGoalVerificationFeedbackContent(
+				input.feedback,
+				input.compactorMemo,
+				input.structuredFeedback,
+			),
 			display: true,
 			details,
 			attribution: "agent",
@@ -4230,10 +4408,24 @@ export class AgentSession {
 		);
 	}
 
-	#renderGoalVerificationFeedbackContent(feedback: string, compactorMemo: string | undefined): string {
+	#renderGoalVerificationFeedbackContent(
+		feedback: string,
+		compactorMemo: string | undefined,
+		structuredFeedback: GoalCompletionVerifierStructuredOutput | undefined,
+	): string {
+		const sections = [`## Verifier feedback\n\n${feedback}`];
+		if (structuredFeedback) {
+			sections.push(`## Score\n\n${structuredFeedback.score}/4`);
+			if (structuredFeedback.completionBlockers.length > 0) {
+				const blockers = structuredFeedback.completionBlockers
+					.map(blocker => `- ${blocker.id}: ${blocker.problem} (${blocker.requiredEvidenceOrFix})`)
+					.join("\n");
+				sections.push(`## Blocking gaps\n\n${blockers}`);
+			}
+		}
 		const trimmedMemo = compactorMemo?.trim();
-		if (!trimmedMemo) return `## Verifier feedback\n\n${feedback}`;
-		return `## Verifier feedback\n\n${feedback}\n\n## Compactor memo\n\n${trimmedMemo}`;
+		if (trimmedMemo) sections.push(`## Continuation focus\n\n${trimmedMemo}`);
+		return sections.join("\n\n");
 	}
 
 	async #generateGoalRubric(objective: string, signal?: AbortSignal): Promise<string> {
@@ -4370,7 +4562,10 @@ export class AgentSession {
 			id: `goal-${options.agent.name}-${Snowflake.next()}`,
 			parentActiveModelPattern: this.model ? formatModelString(this.model) : undefined,
 			outputSchema: options.agent.output,
+			strictToolNames: true,
 			enableLsp: true,
+			enableMCP: false,
+			disableExtensionDiscovery: true,
 			signal: options.signal,
 			artifactsDir,
 			persistArtifacts: true,
