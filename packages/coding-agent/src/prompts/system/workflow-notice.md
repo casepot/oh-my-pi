@@ -23,7 +23,7 @@ State persists across cells, so scout in one cell and fan out in the next. Every
 
 - `agent(prompt, *, agent_type="{{preferredAgentType}}", model=None, context=None, label=None, schema=None)` — run ONE allowed subagent; returns final text, or the validated object when `schema` (a JSON Schema dict) is given. With `schema`, branch on the object, not parsed prose. `agent_type` MUST be one of: {{allowedAgentSummary}}. Eval-spawned agents nest at most 3 deep and still inherit their own spawn limits.
 - `parallel(thunks)` — run zero-arg callables concurrently through a bounded pool, preserving input order; returns once all finish. A thunk that raises propagates after siblings settle.
-- `parallel_settled(thunks)` — same scheduling/order as `parallel()`, but returns `[{"status":"fulfilled","value":...}, {"status":"rejected","reason":"...","error_type":"..."}]` so one bad child cannot erase successful siblings.
+- `parallel_settled(thunks)` — same scheduling/order as `parallel()`, but returns `[{"status":"fulfilled","value":…}, {"status":"rejected","reason":"…","error_type":"…"}]` so one bad child cannot erase successful siblings.
 - `pipeline(items, *stages)` — map items through `stages` left-to-right. There is a BARRIER between stages: ALL items clear stage N before stage N+1 begins.
 - `llm(prompt, *, model="default", system=None, schema=None)` — oneshot, stateless model call. Tiers: "smol", "default", "slow".
 - `log(message)` / `phase(title)` — emit progress/status.

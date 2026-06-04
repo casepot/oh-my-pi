@@ -77,7 +77,6 @@ With most FS/bash-like tools, static references to them will automatically resol
 {{#each activeSkillsets}}
 - {{id}}: detected from {{detectedFrom}} (root {{root}}).{{#if skills.length}} Skills: {{#list skills join=", "}}{{this}}{{/list}}. Read `skill://<name>` before using an activated skill.{{/if}}{{#if promptSummary}} {{promptSummary}}{{/if}}
 {{/each}}
-
 {{/if}}
 
 {{#if skills.length}}
