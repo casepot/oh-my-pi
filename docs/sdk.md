@@ -21,6 +21,20 @@ import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 The `@oh-my-pi/pi-coding-agent/sdk` subpath resolves to `src/sdk.ts` through the package wildcard export. It exposes the helpers/types exported by that file. Import from the package root when you need root-only exports such as `SessionManager`, `AuthStorage`, `ModelRegistry`, or `Settings`.
 
+## Cross-process RPC clients
+
+For production embedders that need process isolation or cross-language control, use the RPC protocol instead of the in-process SDK. The TypeScript helper is exported from:
+
+```ts
+import { RpcClient, defineRpcClientTool } from "@oh-my-pi/pi-coding-agent/modes";
+```
+
+Protocol-only types are exported from `@oh-my-pi/pi-coding-agent/modes`, and the JSON schema artifact is exported as `@oh-my-pi/pi-coding-agent/modes/rpc/rpc.schema.json`.
+
+`RpcClient` preserves raw/unknown frames, surfaces typed protocol errors, tracks long-running operations, rejects pending requests on close, serves host tools/URIs, and exposes extension UI responders. Long commands such as `bash`, `compact`, `handoff`, and `login` resolve after terminal operation frames; `prompt`, `followUp`, and `abortAndPrompt` return operation ACKs so callers can decide whether to wait for `agent_end` events or operation terminals.
+
+Python embedders should use `python/omp-rpc` (`omp_rpc.RpcClient`). The Python client preserves enriched/future metadata in parsed `raw` fields and raw-frame listeners.
+
 Core package-root exports for embedders include:
 
 - `createAgentSession`
