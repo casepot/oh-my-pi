@@ -140,6 +140,10 @@ If any remain, schema is incompatible.
 
 - **OpenAI-compatible strict paths** (`openai-completions`, `openai-responses`, `openai-codex-responses`):
   - Use `adaptSchemaForStrict`.
+  - Collapse root object unions before strict enforcement; function-tool roots
+    MUST NOT expose top-level `oneOf`/`anyOf`/`allOf`/`enum`/`not` to OpenAI/Codex.
+  - Collapsed root unions MUST be sent non-strict because branch-specific
+    strictness cannot be represented without forcing unrelated nullable fields.
   - Emit `strict: true` only when effective strict enforcement succeeded.
 
 - **Google Gemini/Vertex/Gemini CLI (non-CCA Claude)**:

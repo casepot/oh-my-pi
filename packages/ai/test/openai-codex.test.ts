@@ -3,6 +3,7 @@ import { type RequestBody, transformRequestBody } from "@oh-my-pi/pi-ai/provider
 import { parseCodexError } from "@oh-my-pi/pi-ai/providers/openai-codex/response-handler";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Tool } from "@oh-my-pi/pi-ai/types";
+import * as z from "zod/v4";
 import { createCodexModel } from "./helpers";
 
 const DEFAULT_PROMPT_PREFIX =
@@ -26,6 +27,42 @@ describe("openai-codex tool schemas", () => {
 			description: "List outgoing messages",
 			parameters: { type: "object", properties: {} },
 		});
+	});
+
+	it("collapses discriminated object unions at the function-tool root", () => {
+		const tools: Tool[] = [
+			{
+				name: "goal",
+				description: "Goal operations",
+				parameters: z.discriminatedUnion("op", [
+					z.object({ op: z.literal("get") }).strict(),
+					z.object({ op: z.literal("complete") }).strict(),
+					z.object({ op: z.literal("start_target"), title: z.string() }).strict(),
+				]),
+				strict: true,
+			},
+		];
+
+		const converted = convertOpenAICodexResponsesTools(tools, createCodexModel("gpt-5.1-codex"));
+		const tool = converted[0];
+		if (tool?.type !== "function") throw new Error("expected function tool");
+
+		expect("strict" in tool).toBe(false);
+		expect(tool.parameters.type).toBe("object");
+		expect(tool.parameters.oneOf).toBeUndefined();
+		expect(tool.parameters.anyOf).toBeUndefined();
+		expect(tool.parameters.allOf).toBeUndefined();
+		expect(tool.parameters.enum).toBeUndefined();
+		expect(tool.parameters.not).toBeUndefined();
+
+		const properties = tool.parameters.properties as Record<string, Record<string, unknown>>;
+		expect(properties.op.anyOf).toEqual([
+			{ type: "string", const: "get" },
+			{ type: "string", const: "complete" },
+			{ type: "string", const: "start_target" },
+		]);
+		expect(properties.title).toEqual({ type: "string" });
+		expect(tool.parameters.required).toEqual(["op"]);
 	});
 });
 

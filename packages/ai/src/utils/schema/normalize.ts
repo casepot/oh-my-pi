@@ -455,6 +455,34 @@ function mergeObjectCombinerVariants(schema: JsonObject, combiner: "anyOf" | "on
 	return nextSchema;
 }
 
+const OPENAI_FUNCTION_TOOL_ROOT_FORBIDDEN_KEYS = ["oneOf", "anyOf", "allOf", "enum", "not"] as const;
+const OPENAI_FUNCTION_TOOL_ROOT_FALLBACK_SCHEMA = { type: "object", properties: {} } as const;
+
+function isOpenAIFunctionToolRootSchemaCompatible(schema: JsonObject): boolean {
+	if (schema.type !== "object") return false;
+	for (const key of OPENAI_FUNCTION_TOOL_ROOT_FORBIDDEN_KEYS) {
+		if (Object.hasOwn(schema, key)) return false;
+	}
+	return true;
+}
+
+/**
+ * OpenAI-compatible function tools require the root parameters schema to be a
+ * plain object; Codex rejects top-level `oneOf`/`anyOf` even when every branch
+ * is an object and `type: "object"` is present. Collapse only the root object
+ * union into a merged object shape so branch-specific validation remains the
+ * tool runtime's responsibility while the provider sees an acceptable tool
+ * declaration. If the root still cannot be represented as a function parameter
+ * object, fall back per-tool instead of letting one bad declaration reject the
+ * whole request.
+ */
+export function normalizeOpenAIFunctionToolRootSchema(schema: JsonObject): JsonObject {
+	let current = mergeObjectCombinerVariants(schema, "oneOf");
+	current = mergeObjectCombinerVariants(current, "anyOf");
+	if (isOpenAIFunctionToolRootSchemaCompatible(current)) return current;
+	return { ...OPENAI_FUNCTION_TOOL_ROOT_FALLBACK_SCHEMA };
+}
+
 function collapseMixedTypeCombinerVariants(schema: JsonObject, combiner: "anyOf" | "oneOf"): JsonObject {
 	const variantsRaw = schema[combiner];
 	if (!Array.isArray(variantsRaw) || variantsRaw.length === 0) {

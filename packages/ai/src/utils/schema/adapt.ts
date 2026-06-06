@@ -1,6 +1,6 @@
 import { $flag } from "@oh-my-pi/pi-utils";
 import { upgradeJsonSchemaTo202012 } from "./draft";
-import { tryEnforceStrictSchema } from "./normalize";
+import { normalizeOpenAIFunctionToolRootSchema, tryEnforceStrictSchema } from "./normalize";
 
 /**
  * Set when callers want to globally bypass OpenAI strict-mode enforcement
@@ -19,18 +19,23 @@ export const NO_STRICT = $flag("PI_NO_STRICT");
  * Each provider computes its own `strict` boolean (logic differs), then calls
  * this to handle the tryEnforceStrictSchema dance uniformly:
  * - Draft-07-shaped inputs are upgraded to draft 2020-12 first.
- * - If `strict` is false, passes the upgraded schema through unchanged.
- * - If `strict` is true, attempts to enforce strict mode; falls back to
- *   non-strict if the schema isn't representable.
+ * - Root object unions are collapsed before provider submission because
+ *   OpenAI-compatible function tools reject top-level combinators. Collapsed
+ *   roots intentionally run non-strict: branch-specific strictness cannot be
+ *   preserved without forcing unrelated nullable fields into every call.
+ * - If `strict` is false, passes the root-normalized schema through unchanged.
+ * - If `strict` is true and the root was not collapsed, attempts to enforce
+ *   strict mode; falls back to non-strict if the schema isn't representable.
  */
 export function adaptSchemaForStrict(
 	schema: Record<string, unknown>,
 	strict: boolean,
 ): { schema: Record<string, unknown>; strict: boolean } {
 	const upgraded = upgradeJsonSchemaTo202012(schema) as Record<string, unknown>;
-	if (!strict) {
-		return { schema: upgraded, strict: false };
+	const rootSchema = normalizeOpenAIFunctionToolRootSchema(upgraded);
+	if (!strict || rootSchema !== upgraded) {
+		return { schema: rootSchema, strict: false };
 	}
 
-	return tryEnforceStrictSchema(upgraded);
+	return tryEnforceStrictSchema(rootSchema);
 }
