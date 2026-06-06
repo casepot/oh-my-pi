@@ -1,4 +1,18 @@
 import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import type {
+	BackgroundLane,
+	BackgroundLaneAgentHandle,
+	BackgroundLaneBranchHandle,
+	BackgroundLaneCloseDisposition,
+	BackgroundLanePatchSnapshot,
+	BackgroundLaneReport,
+	BackgroundLaneSpawnFailure,
+} from "../background-lanes/state";
+import {
+	cloneBackgroundLane,
+	requiredBlockingBackgroundLanes,
+	structuredBlockingBackgroundLanes,
+} from "../background-lanes/state";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
@@ -132,7 +146,12 @@ export interface GoalSideAgentExpectation {
 }
 
 export interface GoalContinuationPacket {
-	transition: "target-checkpoint" | "context-compaction" | "verification-rejected" | "parent-completion-candidate";
+	transition:
+		| "target-checkpoint"
+		| "context-compaction"
+		| "verification-rejected"
+		| "parent-completion-candidate"
+		| "background-lane-blocked";
 	reason: string;
 	stateVersion: number;
 	runMode: GoalRunMode;
@@ -247,6 +266,7 @@ export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: 
 		latestCheckpointResolution: latestResolution(goal),
 		lastCheckpointRejection: goal.lastCheckpointRejection,
 		verificationRepair: goal.verificationRepair,
+		backgroundLanes: goal.backgroundLanes,
 	};
 	return escapeJsonForPrompt(snapshot);
 }
@@ -384,6 +404,30 @@ function cloneRefs(refs: GoalRef[] | undefined): GoalRef[] {
 
 function cloneStringArray(value: string[] | undefined): string[] {
 	return value ? [...value] : [];
+}
+
+function parentDeltaHasFrameChanges(delta: GoalParentStateDelta): boolean {
+	return (
+		delta.admittedClaims.length > 0 ||
+		delta.candidateClaimsAdded.length > 0 ||
+		delta.rejectedClaims.length > 0 ||
+		delta.boundariesAdded.length > 0 ||
+		delta.residualsAddedOrUpdated.length > 0 ||
+		delta.gateDeltas.length > 0 ||
+		delta.frontierDeltas.length > 0 ||
+		delta.staleRefs.length > 0 ||
+		delta.externalRecordRefs.length > 0 ||
+		(delta.authorityDecisionRefs?.length ?? 0) > 0
+	);
+}
+
+function upsertStrings(values: string[], additions: string[]): string[] {
+	const output = [...values];
+	for (const addition of additions) {
+		const clean = addition.trim();
+		if (clean && !output.includes(clean)) output.push(clean);
+	}
+	return output;
 }
 
 function includesEquivalentClaim(values: string[], candidate: string): boolean {
@@ -573,6 +617,64 @@ export class GoalRuntime {
 		if (options?.emit !== false) {
 			await this.#host.emit({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
 		}
+	}
+
+	#requiredLaneCompletionBlockers(goal: Goal): BackgroundLane[] {
+		return requiredBlockingBackgroundLanes(goal.backgroundLanes);
+	}
+
+	#structuredLaneIntakeBlockers(goal: Goal): BackgroundLane[] {
+		return structuredBlockingBackgroundLanes(goal.backgroundLanes);
+	}
+
+	#assertNoBackgroundLaneCompletionBlockers(goal: Goal): void {
+		const required = this.#requiredLaneCompletionBlockers(goal);
+		if (required.length > 0) {
+			throw new Error(
+				`cannot complete parent goal while required background lanes remain undispositioned: ${required.map(lane => lane.id).join(", ")}`,
+			);
+		}
+		const blocked = this.#structuredLaneIntakeBlockers(goal);
+		if (blocked.length > 0) {
+			throw new Error(
+				`cannot complete parent goal while background lane blockers require intake: ${blocked.map(lane => lane.id).join(", ")}`,
+			);
+		}
+	}
+
+	#assertNoBackgroundLaneIntake(state: GoalModeState, action: string): void {
+		if (state.runMode !== "awaiting-background-lane-intake") return;
+		const blocked = this.#structuredLaneIntakeBlockers(state.goal);
+		const suffix = blocked.length ? `: ${blocked.map(lane => lane.id).join(", ")}` : "";
+		throw new Error(`${action} is blocked until background lane intake is recorded${suffix}`);
+	}
+
+	async #updateBackgroundLane(
+		laneId: string,
+		update: (lane: BackgroundLane, state: GoalModeState) => BackgroundLane,
+		options?: { runMode?: GoalRunMode },
+	): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.goal) throw new Error("cannot update background lane because no goal exists");
+			const lanes = state.goal.backgroundLanes ?? [];
+			const index = lanes.findIndex(lane => lane.id === laneId);
+			if (index === -1) throw new Error(`unknown background lane: ${laneId}`);
+			const next = lanes.map((lane, laneIndex) =>
+				laneIndex === index ? update(cloneBackgroundLane(lane), state) : cloneBackgroundLane(lane),
+			);
+			state.goal.backgroundLanes = next;
+			if (options?.runMode) state.runMode = options.runMode;
+			else if (
+				state.runMode === "awaiting-background-lane-intake" &&
+				this.#structuredLaneIntakeBlockers(state.goal).length === 0
+			) {
+				state.runMode = "working-target";
+			}
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
 	}
 
 	#bumpState(state: GoalModeState, options?: { parentFrameChanged?: boolean }): void {
@@ -1076,6 +1178,7 @@ export class GoalRuntime {
 			if (state.goal.verificationRepair) {
 				throw new Error("cannot retry parent completion until verifier blockers have fresh repair evidence");
 			}
+			this.#assertNoBackgroundLaneCompletionBlockers(state.goal);
 			state.enabled = false;
 			state.goal.status = "complete";
 			state.mode = "exiting";
@@ -1094,6 +1197,7 @@ export class GoalRuntime {
 			const state = this.#getStateClone();
 			if (!state?.enabled || state.goal.status !== "active")
 				throw new Error("cannot start target because no active parent goal exists");
+			this.#assertNoBackgroundLaneIntake(state, "start_target");
 			if (state.goal.pendingCheckpointId || state.runMode === "awaiting-checkpoint-resolution") {
 				throw new Error("cannot start a target while a checkpoint is pending resolution");
 			}
@@ -1147,6 +1251,7 @@ export class GoalRuntime {
 		const state = this.#getStateClone();
 		if (!state?.enabled || state.goal.status !== "active")
 			throw new Error("cannot checkpoint because no active parent goal exists");
+		this.#assertNoBackgroundLaneIntake(state, "checkpoint");
 		if (state.runMode === "awaiting-checkpoint-resolution" || state.goal.pendingCheckpointId) {
 			throw new Error("cannot checkpoint while another checkpoint is pending resolution");
 		}
@@ -1264,6 +1369,7 @@ export class GoalRuntime {
 				throw new Error("cannot resolve checkpoint because no checkpoint is pending");
 			if (state.goal.pendingCheckpointId !== input.checkpointId)
 				throw new Error("checkpoint_id does not match the pending checkpoint");
+			this.#assertNoBackgroundLaneIntake(state, "resolve_checkpoint");
 			if (input.decision === "next_target" && !input.nextTarget) {
 				throw new Error("next_target is required when decision is next_target");
 			}
@@ -1276,7 +1382,7 @@ export class GoalRuntime {
 			const sequence = nextResolutionSequence(state.goal);
 			const resolutionId = `${state.goal.id}-checkpoint-resolution-${sequence}`;
 			let parentFrameChanged = false;
-			if (input.parentDelta) {
+			if (input.parentDelta && parentDeltaHasFrameChanges(input.parentDelta)) {
 				state.goal.parentFrame = this.#applyParentStateDeltaToFrame(state.goal, input.parentDelta, resolutionId);
 				parentFrameChanged = true;
 			}
@@ -1334,6 +1440,125 @@ export class GoalRuntime {
 		});
 	}
 
+	async recordBackgroundLaneCreated(lane: BackgroundLane): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot create background lane because no active parent goal exists");
+			if (state.goal.backgroundLanes?.some(existing => existing.id === lane.id)) {
+				throw new Error(`background lane already exists: ${lane.id}`);
+			}
+			state.goal.backgroundLanes = [...(state.goal.backgroundLanes ?? []), cloneBackgroundLane(lane)];
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	async recordBackgroundLaneBranch(laneId: string, branch: BackgroundLaneBranchHandle): Promise<GoalModeState> {
+		return await this.#updateBackgroundLane(laneId, lane => ({
+			...lane,
+			branch: { ...lane.branch, ...branch },
+			agent: { ...lane.agent, status: lane.agent.status === "failed" ? "starting" : lane.agent.status },
+			updatedAt: this.#now(),
+		}));
+	}
+
+	async recordBackgroundLaneAgent(laneId: string, agent: Partial<BackgroundLaneAgentHandle>): Promise<GoalModeState> {
+		return await this.#updateBackgroundLane(laneId, lane => ({
+			...lane,
+			agent: { ...lane.agent, ...agent, status: agent.status ?? lane.agent.status },
+			updatedAt: this.#now(),
+		}));
+	}
+
+	async recordBackgroundLaneSpawnFailed(
+		laneId: string,
+		input: BackgroundLaneSpawnFailure & { branchName?: string },
+	): Promise<GoalModeState> {
+		return await this.#updateBackgroundLane(laneId, lane => ({
+			...lane,
+			branch: input.branchName ? { ...lane.branch, name: lane.branch.name ?? input.branchName } : lane.branch,
+			agent: { ...lane.agent, status: "failed" },
+			status: "spawn_failed",
+			spawnFailure: {
+				stage: input.stage,
+				message: input.message,
+				retryable: true,
+				failedAt: input.failedAt,
+			},
+			retryable: true,
+			updatedAt: this.#now(),
+		}));
+	}
+
+	async recordBackgroundLaneSnapshot(laneId: string, snapshot: BackgroundLanePatchSnapshot): Promise<GoalModeState> {
+		return await this.#updateBackgroundLane(laneId, lane => ({
+			...lane,
+			latestSnapshot: {
+				...snapshot,
+				changedFiles: [...snapshot.changedFiles],
+			},
+			latestPatchRef: snapshot.patchRef ?? lane.latestPatchRef,
+			changedFiles: snapshot.changedFiles.length > 0 ? [...snapshot.changedFiles] : lane.changedFiles,
+			updatedAt: this.#now(),
+		}));
+	}
+
+	async recordBackgroundLaneReport(laneId: string, report: BackgroundLaneReport): Promise<GoalModeState> {
+		return await this.#updateBackgroundLane(
+			laneId,
+			lane => {
+				const evidenceRefs = upsertStrings(lane.evidenceRefs, report.evidenceRefs);
+				const changedFiles = upsertStrings(lane.changedFiles, report.changedFiles);
+				const nonClaims = upsertStrings(lane.nonClaims, report.nonClaims);
+				const staleIf = upsertStrings(lane.staleIf, report.staleIf);
+				return {
+					...lane,
+					status: report.blocksIfFired ? "blocked" : lane.status === "spawn_failed" ? "open" : lane.status,
+					blocksIfFired: lane.blocksIfFired || report.blocksIfFired,
+					latestReportRef: report.artifactRef ?? report.sessionMessageRef ?? lane.latestReportRef,
+					changedFiles,
+					evidenceRefs,
+					nonClaims,
+					staleIf,
+					reports: [...lane.reports, { ...report }],
+					updatedAt: this.#now(),
+				};
+			},
+			report.blocksIfFired ? { runMode: "awaiting-background-lane-intake" } : undefined,
+		);
+	}
+
+	async recordBackgroundLaneReportSessionRef(
+		laneId: string,
+		reportId: string,
+		sessionMessageRef: string,
+	): Promise<GoalModeState> {
+		return await this.#updateBackgroundLane(laneId, lane => ({
+			...lane,
+			reports: lane.reports.map(report =>
+				report.id === reportId ? { ...report, sessionMessageRef } : { ...report },
+			),
+			latestReportRef: lane.latestReportRef ?? sessionMessageRef,
+			updatedAt: this.#now(),
+		}));
+	}
+
+	async recordBackgroundLaneClosed(
+		laneId: string,
+		closeDisposition: BackgroundLaneCloseDisposition,
+	): Promise<GoalModeState> {
+		return await this.#updateBackgroundLane(laneId, lane => ({
+			...lane,
+			status: "closed",
+			outcome: closeDisposition.outcome,
+			closeDisposition: { ...closeDisposition },
+			retryable: undefined,
+			spawnFailure: undefined,
+			updatedAt: this.#now(),
+		}));
+	}
 	#applyParentStateDeltaToFrame(goal: Goal, delta: GoalParentStateDelta, deltaId: string): GoalParentFrame {
 		const base = cloneParentFrame(goal.parentFrame) ?? {
 			kind: "plain" as const,

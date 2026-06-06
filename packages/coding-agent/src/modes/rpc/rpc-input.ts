@@ -72,6 +72,7 @@ const KNOWN_COMMANDS: Record<string, true> = {
 	get_observable_sessions: true,
 	get_login_providers: true,
 	login: true,
+	background_lane: true,
 };
 
 const HOST_OR_UI_FRAMES: Record<string, true> = {
@@ -95,6 +96,8 @@ const THINKING_LEVELS = new Set<string>([
 ]);
 const SERIAL_QUEUE_MODES = new Set(["all", "one-at-a-time"]);
 const INTERRUPT_MODES = new Set(["immediate", "wait"]);
+const BACKGROUND_LANE_OPS = new Set(["spawn", "list", "message", "snapshot", "close"]);
+const BACKGROUND_LANE_CLOSE_OUTCOMES = new Set(["merged", "dropped", "stale", "superseded", "no_release", "deferred"]);
 
 function enumProp(frame: Record<string, unknown>, key: string, type: string, allowed: Set<string>): string | undefined {
 	const value = frame[key];
@@ -156,6 +159,59 @@ function optionalObjectProp(frame: Record<string, unknown>, key: string, type: s
 function integerProp(frame: Record<string, unknown>, key: string, type: string): string | undefined {
 	const value = frame[key];
 	return Number.isSafeInteger(value) ? undefined : `${type}.${key} must be an integer`;
+}
+
+function validateLaneContract(value: unknown): string | undefined {
+	if (!isRecord(value)) return "background_lane.contract must be an object";
+	const questionError = stringProp(value, "question", "background_lane.contract");
+	if (questionError) return questionError;
+	const blocksIfError = stringProp(value, "blocks_if", "background_lane.contract");
+	if (blocksIfError) return blocksIfError;
+	return booleanProp(value, "required_before_parent", "background_lane.contract");
+}
+
+function validateBackgroundLaneCommand(frame: Record<string, unknown>): RpcErrorInfo | undefined {
+	const opError = enumProp(frame, "op", "background_lane", BACKGROUND_LANE_OPS);
+	if (opError) return rpcErrorInfo("invalid_arguments", opError);
+	switch (frame.op) {
+		case "spawn": {
+			if (!isRecord(frame.from)) return rpcErrorInfo("invalid_arguments", "background_lane.from must be an object");
+			const sourceRefError = stringProp(frame.from, "source_ref", "background_lane.from");
+			if (sourceRefError) return rpcErrorInfo("invalid_arguments", sourceRefError);
+			const checkpointError = optionalStringProp(frame.from, "checkpoint_id", "background_lane.from");
+			if (checkpointError) return rpcErrorInfo("invalid_arguments", checkpointError);
+			const contractError = validateLaneContract(frame.contract);
+			if (contractError) return rpcErrorInfo("invalid_arguments", contractError);
+			const assignmentError = stringProp(frame, "assignment", "background_lane");
+			if (assignmentError) return rpcErrorInfo("invalid_arguments", assignmentError);
+			const agentError = optionalStringProp(frame, "agent", "background_lane");
+			return agentError ? rpcErrorInfo("invalid_arguments", agentError) : undefined;
+		}
+		case "message": {
+			const laneError = stringProp(frame, "lane_id", "background_lane");
+			if (laneError) return rpcErrorInfo("invalid_arguments", laneError);
+			const messageError = stringProp(frame, "message", "background_lane");
+			return messageError ? rpcErrorInfo("invalid_arguments", messageError) : undefined;
+		}
+		case "snapshot":
+			return stringProp(frame, "lane_id", "background_lane")
+				? rpcErrorInfo("invalid_arguments", stringProp(frame, "lane_id", "background_lane")!)
+				: undefined;
+		case "close": {
+			const laneError = stringProp(frame, "lane_id", "background_lane");
+			if (laneError) return rpcErrorInfo("invalid_arguments", laneError);
+			const outcomeError = enumProp(frame, "outcome", "background_lane", BACKGROUND_LANE_CLOSE_OUTCOMES);
+			if (outcomeError) return rpcErrorInfo("invalid_arguments", outcomeError);
+			const reasonError = stringProp(frame, "reason", "background_lane");
+			if (reasonError) return rpcErrorInfo("invalid_arguments", reasonError);
+			const mergedRefError = optionalStringProp(frame, "merged_source_ref", "background_lane");
+			if (mergedRefError) return rpcErrorInfo("invalid_arguments", mergedRefError);
+			const statementError = optionalStringProp(frame, "operator_statement", "background_lane");
+			return statementError ? rpcErrorInfo("invalid_arguments", statementError) : undefined;
+		}
+		default:
+			return undefined;
+	}
 }
 
 function validateHostOrUiFrameShape(frame: Record<string, unknown>): RpcErrorInfo | undefined {
@@ -304,6 +360,8 @@ function validateCommandShape(frame: Record<string, unknown>): RpcErrorInfo | un
 			return stringProp(frame, "providerId", type)
 				? rpcErrorInfo("invalid_arguments", stringProp(frame, "providerId", type)!)
 				: undefined;
+		case "background_lane":
+			return validateBackgroundLaneCommand(frame);
 		case "shutdown_after":
 			return isRecord(frame.command)
 				? undefined

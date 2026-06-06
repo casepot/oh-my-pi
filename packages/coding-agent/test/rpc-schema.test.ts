@@ -146,6 +146,7 @@ describe("RPC schema artifact", () => {
 		const taskRuns = new Map<string, JsonObject>();
 		const hostTools = new Map<string, JsonObject>();
 		const pendingUi = new Map<string, JsonObject>();
+		const laneUpdates: JsonObject[] = [];
 		for (const frame of frames) {
 			if (frame.type === "operation_start" && typeof frame.operationId === "string") {
 				operations.set(frame.operationId, { command: frame.command, status: "running" });
@@ -171,6 +172,9 @@ describe("RPC schema artifact", () => {
 				const existing = taskRuns.get(frame.taskRunId) ?? {};
 				taskRuns.set(frame.taskRunId, { ...existing, results: frame.results });
 			}
+			if (frame.type === "background_lane_update") {
+				laneUpdates.push(frame);
+			}
 			if (frame.type === "host_tool_call" && typeof frame.id === "string") {
 				hostTools.set(frame.id, { toolCallId: frame.toolCallId, metadata: frame.metadata });
 			}
@@ -193,6 +197,12 @@ describe("RPC schema artifact", () => {
 		expect(taskResults[0]).toMatchObject({
 			id: "agent_1",
 			outputRef: { kind: "artifact", uri: "agent://agent_1" },
+		});
+		expect(laneUpdates[0]).toMatchObject({
+			laneId: "lane_1",
+			status: "blocked",
+			blocksIfFired: true,
+			summary: { requiredBeforeParent: true, blocksIfFired: true },
 		});
 		expect(hostTools.get("host_1")).toMatchObject({ toolCallId: "tool_1" });
 		expect(pendingUi.get("ui_1")).toMatchObject({ method: "confirm", responseSchema: { kind: "boolean" } });

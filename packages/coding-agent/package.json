@@ -115,6 +115,14 @@
 			"types": "./src/autoresearch/tools/*.ts",
 			"import": "./src/autoresearch/tools/*.ts"
 		},
+		"./background-lanes": {
+			"types": "./src/background-lanes/index.ts",
+			"import": "./src/background-lanes/index.ts"
+		},
+		"./background-lanes/*": {
+			"types": "./src/background-lanes/*.ts",
+			"import": "./src/background-lanes/*.ts"
+		},
 		"./capability": {
 			"types": "./src/capability/index.ts",
 			"import": "./src/capability/index.ts"

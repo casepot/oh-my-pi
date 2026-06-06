@@ -126,13 +126,12 @@ function findCompactionCallSites(src: string): CallSite[] {
 }
 
 function expressionThreadsThinkingLevel(callExpression: string): boolean {
-	// `thinkingLevel:` must appear as a property key — i.e. preceded by `{`
-	// or `,` or whitespace + `,` or start of expression, and followed by a
-	// value. Loose check via the substring is sufficient because the call
-	// expression is brace-balanced (we extracted only one call's contents).
-	// We also require the value to be the session field, to defend against
-	// `thinkingLevel: undefined` accidentally satisfying the gate.
-	return /\bthinkingLevel\s*:\s*this\.thinkingLevel\b/.test(callExpression);
+	// `thinkingLevel:` must be a property key whose value ultimately falls back
+	// to the session field. Some call sites may choose a scoped-model thinking
+	// override first (`candidate.thinkingLevel ?? this.thinkingLevel`), but the
+	// invariant is that the session's explicit thinking selection is threaded
+	// instead of allowing the compaction default to take over.
+	return /\bthinkingLevel\s*:\s*(?:[\w.]+\s*\?\?\s*)?this\.thinkingLevel\b/.test(callExpression);
 }
 
 describe("agent-session.ts compaction threading (audit gate)", () => {

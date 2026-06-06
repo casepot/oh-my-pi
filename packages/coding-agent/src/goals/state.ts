@@ -1,3 +1,5 @@
+import type { BackgroundLane, BackgroundLaneSpawnRequest } from "../background-lanes/state";
+import { cloneBackgroundLane, normalizeBackgroundLanes } from "../background-lanes/state";
 import type { UsageStatistics } from "../session/session-manager";
 
 export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
@@ -10,8 +12,8 @@ export type GoalRunMode =
 	| "awaiting-checkpoint-resolution"
 	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
+	| "awaiting-background-lane-intake"
 	| "awaiting-user-input";
-
 export const GOAL_MODE_SCHEMA_VERSION = 2;
 
 export interface GoalVerificationEvidenceItem {
@@ -272,6 +274,7 @@ export interface GoalParentStateDelta {
 	staleRefs: GoalRef[];
 	externalRecordRefs: GoalRef[];
 	authorityDecisionRefs?: GoalRef[];
+	backgroundLanesToSpawn?: BackgroundLaneSpawnRequest[];
 }
 
 export interface GoalCheckpointResolution {
@@ -327,6 +330,7 @@ export interface Goal {
 	lastCheckpointResolutionId?: string;
 	lastCheckpointRejection?: GoalCheckpointRejection;
 	verificationRepair?: GoalVerificationRepairState;
+	backgroundLanes?: BackgroundLane[];
 }
 
 export interface GoalModeState {
@@ -491,6 +495,7 @@ function normalizeRunMode(value: unknown): GoalRunMode {
 		case "awaiting-checkpoint-resolution":
 		case "awaiting-parent-completion":
 		case "awaiting-verification-repair":
+		case "awaiting-background-lane-intake":
 		case "awaiting-user-input":
 			return value;
 		default:
@@ -824,6 +829,14 @@ function cloneParentDelta(delta: GoalParentStateDelta | undefined): GoalParentSt
 		staleRefs: cloneRefs(delta.staleRefs),
 		externalRecordRefs: cloneRefs(delta.externalRecordRefs),
 		authorityDecisionRefs: delta.authorityDecisionRefs ? cloneRefs(delta.authorityDecisionRefs) : undefined,
+		backgroundLanesToSpawn: delta.backgroundLanesToSpawn
+			? delta.backgroundLanesToSpawn.map(request => ({
+					from: { ...request.from },
+					contract: { ...request.contract },
+					assignment: request.assignment,
+					agent: request.agent,
+				}))
+			: undefined,
 	};
 }
 
@@ -881,6 +894,7 @@ export function cloneGoal(goal: Goal): Goal {
 				}
 			: undefined,
 		verificationRepair: cloneVerificationRepair(goal.verificationRepair),
+		backgroundLanes: goal.backgroundLanes?.map(cloneBackgroundLane),
 	};
 }
 
@@ -945,6 +959,8 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 		goal.lastCheckpointRejection = value.lastCheckpointRejection as unknown as GoalCheckpointRejection;
 	if (isRecord(value.verificationRepair))
 		goal.verificationRepair = value.verificationRepair as unknown as GoalVerificationRepairState;
+	const backgroundLanes = normalizeBackgroundLanes(value.backgroundLanes);
+	if (backgroundLanes) goal.backgroundLanes = backgroundLanes;
 	return cloneGoal(goal);
 }
 

@@ -7,6 +7,7 @@
  */
 import type { AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import type { BackgroundLane, BackgroundLaneCloseOutcome, BackgroundLaneListItem } from "../../background-lanes/state";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-manager";
 import type { AgentProgress } from "../../task";
 import type { TodoPhase } from "../../tools/todo-write";
@@ -53,6 +54,7 @@ export interface RpcCapabilities {
 	chunkedPayloads: boolean;
 	oneShot: true;
 	heartbeat: true;
+	backgroundLanes: true;
 }
 
 export interface RpcLimits {
@@ -166,6 +168,54 @@ export interface RpcLargeContentRef {
 }
 
 // ============================================================================
+export interface RpcBackgroundLaneContract {
+	question: string;
+	blocks_if: string;
+	required_before_parent: boolean;
+}
+
+export type RpcBackgroundLaneCommand =
+	| {
+			id?: string;
+			type: "background_lane";
+			op: "spawn";
+			from: { checkpoint_id?: string; source_ref: string };
+			contract: RpcBackgroundLaneContract;
+			assignment: string;
+			agent?: string;
+	  }
+	| { id?: string; type: "background_lane"; op: "list" }
+	| { id?: string; type: "background_lane"; op: "message"; lane_id: string; message: string }
+	| { id?: string; type: "background_lane"; op: "snapshot"; lane_id: string }
+	| {
+			id?: string;
+			type: "background_lane";
+			op: "close";
+			lane_id: string;
+			outcome: BackgroundLaneCloseOutcome;
+			reason: string;
+			merged_source_ref?: string;
+			operator_statement?: string;
+	  };
+
+export interface RpcBackgroundLaneUpdateSummary {
+	id: string;
+	question: string;
+	status: BackgroundLane["status"];
+	agentStatus: BackgroundLane["agent"]["status"];
+	outcome: BackgroundLane["outcome"];
+	requiredBeforeParent: boolean;
+	blocksIfFired: boolean;
+	latestReportRef?: string;
+	latestPatchRef?: string;
+	branch?: string;
+	worktreePath?: string;
+}
+
+export interface RpcBackgroundLaneListResult {
+	lanes: BackgroundLaneListItem[];
+}
+
 // RPC Commands (stdin)
 // ============================================================================
 
@@ -244,7 +294,8 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string };
+	| { id?: string; type: "login"; providerId: string }
+	| RpcBackgroundLaneCommand;
 
 export type RpcCommandType = RpcCommand["type"];
 
@@ -301,6 +352,7 @@ export interface RpcSessionState {
 	contextUsage?: unknown;
 	hostTools: RpcHostToolDefinition[];
 	hostUriSchemes: RpcHostUriSchemeDefinition[];
+	backgroundLanes: BackgroundLaneListItem[];
 }
 
 export interface RpcHandoffResult {
@@ -496,6 +548,15 @@ export type RpcObservableSessionUpdateFrame = RpcFrameMetadata & {
 	type: "observable_session_update";
 	schemaVersion: 1;
 	sessions: RpcObservableSessionView[];
+};
+
+export type RpcBackgroundLaneUpdateFrame = RpcFrameMetadata & {
+	type: "background_lane_update";
+	schemaVersion: 1;
+	laneId: string;
+	status: BackgroundLane["status"];
+	blocksIfFired: boolean;
+	summary: RpcBackgroundLaneUpdateSummary;
 };
 
 export type RpcHeartbeatFrame = RpcFrameMetadata & { type: "heartbeat" };
@@ -766,6 +827,7 @@ export type RpcNotificationFrame =
 	| RpcSubagentLifecycleFrame
 	| RpcObservableSessionUpdateFrame
 	| RpcHeartbeatFrame
+	| RpcBackgroundLaneUpdateFrame
 	| RpcPongFrame
 	| RpcShutdownFrame
 	| RpcExtensionUIRequestFrame

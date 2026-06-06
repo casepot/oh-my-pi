@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- Added durable background lanes for goal mode, including persistent lane ledgers, git worktrees, child RPC sessions, structured `lane_report` handling, parent-completion guards, RPC commands/update frames, and audit messages.
+
+- Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
+
 
 - Added OMP RPC protocol v1.1 metadata, typed errors, operation lifecycle frames, state/session graph queries, task/subagent frames, host URI/tool hardening, schema/golden fixtures, one-shot probing, and dashboard/gateway integration docs.
 - Added project-aware skillsets that detect project facets from markers/globs, load JSON/YAML skillset definitions, activate session-local skill directories, and render compact Active Project Skillsets prompt metadata.

@@ -53,8 +53,15 @@ export interface RpcMessagesResponse {
 	messagesRef?: RpcLargeContentRef;
 }
 
+export interface RpcClientCommand {
+	cmd: string;
+	args?: string[];
+	shell?: boolean;
+}
+
 export interface RpcClientOptions {
 	cliPath?: string;
+	command?: RpcClientCommand;
 	cwd?: string;
 	env?: Record<string, string>;
 	provider?: string;
@@ -153,6 +160,7 @@ const sessionEventTypes: Record<string, true> = {
 	notice: true,
 	thinking_level_changed: true,
 	goal_updated: true,
+	background_lane_update: true,
 };
 
 function jsonByteLength(value: unknown): number {
@@ -294,13 +302,15 @@ export class RpcClient {
 		if (this.#process) throw new Error("Client already started");
 		this.#closed = false;
 		this.#abortController = new AbortController();
-		const cliPath = this.#options.cliPath ?? "dist/cli.js";
+		const baseCommand = this.#options.command
+			? [this.#options.command.cmd, ...(this.#options.command.args ?? [])]
+			: ["bun", this.#options.cliPath ?? "dist/cli.js"];
 		const args = ["--mode", "rpc"];
 		if (this.#options.provider) args.push("--provider", this.#options.provider);
 		if (this.#options.model) args.push("--model", this.#options.model);
 		if (this.#options.sessionDir) args.push("--session-dir", this.#options.sessionDir);
 		if (this.#options.args) args.push(...this.#options.args);
-		this.#process = ptree.spawn(["bun", cliPath, ...args], {
+		this.#process = ptree.spawn([...baseCommand, ...args], {
 			cwd: this.#options.cwd,
 			env: { ...Bun.env, ...this.#options.env },
 			stdin: "pipe",

@@ -98,6 +98,23 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import {
+	type BackgroundLaneCloseInput,
+	type BackgroundLaneCloseResult,
+	type BackgroundLaneHost,
+	BackgroundLaneManager,
+	type BackgroundLaneMessageInput,
+	type BackgroundLaneMessageResult,
+	type BackgroundLaneSnapshotResult,
+	type BackgroundLaneSpawnInput,
+	type BackgroundLaneSpawnResult,
+} from "../background-lanes/manager";
+import {
+	type BackgroundLane,
+	type BackgroundLaneListItem,
+	requiredBlockingBackgroundLanes,
+	structuredBlockingBackgroundLanes,
+} from "../background-lanes/state";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import type { SkillsetActivation } from "../capability/skillset";
@@ -210,6 +227,7 @@ import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import type { PlanModeState } from "../plan-mode/state";
+import backgroundLaneIntakeTemplate from "../prompts/background-lanes/lane-intake.md" with { type: "text" };
 import goalCompactionContextTemplate from "../prompts/goals/goal-compaction-context.md" with { type: "text" };
 import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
 import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
@@ -263,6 +281,11 @@ import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AuthStorage } from "./auth-storage";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
+	BACKGROUND_LANE_CLOSED_MESSAGE_TYPE,
+	BACKGROUND_LANE_CREATED_MESSAGE_TYPE,
+	BACKGROUND_LANE_REPORT_MESSAGE_TYPE,
+	BACKGROUND_LANE_UPDATED_MESSAGE_TYPE,
+	type BackgroundLaneMessageDetails,
 	type BashExecutionMessage,
 	type CompactionSummaryMessage,
 	type CustomMessage,
@@ -329,7 +352,8 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
-	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| { type: "background_lane_update"; lane: BackgroundLane };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -871,6 +895,16 @@ function checkpointResolutionArtifactDetailsMatch(details: unknown, goalId: stri
 	return isStringRecord(resolution) && resolution.id === resolutionId;
 }
 
+function backgroundLaneArtifactDetailsMatch(
+	details: unknown,
+	laneId: string,
+	kind: BackgroundLaneMessageDetails["kind"],
+	reportId?: string,
+): boolean {
+	if (!isStringRecord(details) || details.laneId !== laneId || details.kind !== kind) return false;
+	return reportId === undefined || details.reportId === reportId;
+}
+
 function parseStructuredSideAgentOutput(output: string): unknown {
 	const parsed: unknown = JSON.parse(output);
 	if (isStringRecord(parsed) && "data" in parsed) {
@@ -1117,6 +1151,7 @@ export class AgentSession {
 	#planModeState: PlanModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
+	#backgroundLaneManager: BackgroundLaneManager;
 	#goalSideAgentTail: Promise<void> = Promise.resolve();
 	#pendingGoalArtifactMessages: Array<
 		Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details" | "attribution">
@@ -1513,6 +1548,22 @@ export class AgentSession {
 				);
 			},
 		});
+		const session = this;
+		const backgroundLaneHost: BackgroundLaneHost = {
+			get cwd() {
+				return session.sessionManager.getCwd();
+			},
+			getGoalModeState: () => this.#goalModeState,
+			getGoalRuntime: () => this.#goalRuntime,
+			getParentSessionRef: () => this.sessionId,
+			getSessionDir: () => this.sessionManager.getSessionDir(),
+			ensureDurableSession: () => this.sessionManager.ensureOnDisk(),
+			flushDurableSession: () => this.sessionManager.flush(),
+			saveArtifact: (content, toolType) => this.sessionManager.saveArtifact(content, toolType),
+			appendLaneAuditMessage: input => this.#appendBackgroundLaneAuditMessage(input),
+			emitBackgroundLaneUpdate: lane => this.#emitSessionEvent({ type: "background_lane_update", lane }),
+		};
+		this.#backgroundLaneManager = new BackgroundLaneManager(backgroundLaneHost);
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
@@ -4181,10 +4232,66 @@ export class AgentSession {
 				attribution: "agent",
 			});
 		}
+		for (const lane of goal.backgroundLanes ?? []) {
+			if (!this.#hasBackgroundLaneArtifact(lane.id, "created")) {
+				this.#appendBackgroundLaneAuditMessage({
+					kind: "created",
+					lane,
+					content: this.#renderBackgroundLaneContent("created", lane),
+					details: { laneId: lane.id, kind: "created", status: lane.status, blocksIfFired: lane.blocksIfFired },
+				});
+			}
+			for (const report of lane.reports) {
+				if (this.#hasBackgroundLaneArtifact(lane.id, "report", report.id)) continue;
+				this.#appendBackgroundLaneAuditMessage({
+					kind: "report",
+					lane,
+					content: this.#renderBackgroundLaneContent("report", lane, report.summary),
+					details: {
+						laneId: lane.id,
+						reportId: report.id,
+						kind: "report",
+						status: lane.status,
+						blocksIfFired: lane.blocksIfFired,
+					},
+				});
+			}
+			if (lane.status === "closed" && !this.#hasBackgroundLaneArtifact(lane.id, "closed")) {
+				this.#appendBackgroundLaneAuditMessage({
+					kind: "closed",
+					lane,
+					content: this.#renderBackgroundLaneContent("closed", lane),
+					details: { laneId: lane.id, kind: "closed", status: lane.status, blocksIfFired: lane.blocksIfFired },
+				});
+			}
+		}
 	}
 
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
+	}
+
+	backgroundLaneSpawn(input: BackgroundLaneSpawnInput, signal?: AbortSignal): Promise<BackgroundLaneSpawnResult> {
+		return this.#backgroundLaneManager.spawn(input, signal);
+	}
+
+	backgroundLaneList(): BackgroundLaneListItem[] {
+		return this.#backgroundLaneManager.list();
+	}
+
+	backgroundLaneMessage(
+		input: BackgroundLaneMessageInput,
+		signal?: AbortSignal,
+	): Promise<BackgroundLaneMessageResult> {
+		return this.#backgroundLaneManager.message(input, signal);
+	}
+
+	backgroundLaneSnapshot(laneId: string, signal?: AbortSignal): Promise<BackgroundLaneSnapshotResult> {
+		return this.#backgroundLaneManager.snapshot(laneId, signal);
+	}
+
+	backgroundLaneClose(input: BackgroundLaneCloseInput): Promise<BackgroundLaneCloseResult> {
+		return this.#backgroundLaneManager.close(input);
 	}
 
 	async createGoalWithRubric(
@@ -4282,7 +4389,7 @@ export class AgentSession {
 
 	async requestGoalCheckpointResolution(
 		input: GoalCheckpointResolutionInput,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 	): Promise<{
 		goal: Goal | null;
 		state?: GoalModeState | null;
@@ -4293,10 +4400,24 @@ export class AgentSession {
 		const state = await this.#goalRuntime.recordCheckpointResolution(input);
 		const resolution = state.goal.checkpointResolutions?.at(-1);
 		if (resolution) await this.#publishGoalCheckpointResolutionArtifact(state.goal, resolution);
+		let latestState = this.#goalModeState ?? state;
+		for (const request of input.parentDelta?.backgroundLanesToSpawn ?? []) {
+			await this.backgroundLaneSpawn(
+				{
+					...request,
+					from: {
+						...request.from,
+						checkpointId: request.from.checkpointId ?? input.checkpointId,
+					},
+				},
+				signal,
+			);
+			latestState = this.#goalModeState ?? latestState;
+		}
 		return {
-			goal: state.goal,
-			state,
-			remainingTokens: remainingTokens(state.goal),
+			goal: latestState.goal,
+			state: latestState,
+			remainingTokens: remainingTokens(latestState.goal),
 			completionBudgetReport: null,
 			checkpointResolution: resolution,
 		};
@@ -4314,6 +4435,18 @@ export class AgentSession {
 		if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
 		if (state.goal.pendingCheckpointId) {
 			throw new Error("cannot complete parent goal while a checkpoint is pending resolution");
+		}
+		const requiredLaneBlockers = requiredBlockingBackgroundLanes(state.goal.backgroundLanes);
+		if (requiredLaneBlockers.length > 0) {
+			throw new Error(
+				`cannot complete parent goal while required background lanes remain undispositioned: ${requiredLaneBlockers.map(lane => lane.id).join(", ")}`,
+			);
+		}
+		const structuredLaneBlockers = structuredBlockingBackgroundLanes(state.goal.backgroundLanes);
+		if (structuredLaneBlockers.length > 0) {
+			throw new Error(
+				`cannot complete parent goal while background lane blockers require intake: ${structuredLaneBlockers.map(lane => lane.id).join(", ")}`,
+			);
 		}
 		if (state.goal.verificationRepair) {
 			throw new Error("cannot retry parent completion until verifier blockers have fresh repair evidence");
@@ -4535,6 +4668,7 @@ export class AgentSession {
 					| "checkpoint-resolution"
 					| "parent-completion"
 					| "verification-repair"
+					| "background-lane-intake"
 					| "post-compaction";
 				customType: string;
 				prompt: string;
@@ -4563,6 +4697,12 @@ export class AgentSession {
 			const latest = this.#goalModeState;
 			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
 			return { kind: "verification-repair", customType: "goal-verification-repair", prompt: promptText };
+		}
+		if (state.runMode === "awaiting-background-lane-intake") {
+			const promptText = this.#prepareBackgroundLaneIntakePrompt(state);
+			const latest = this.#goalModeState;
+			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
+			return { kind: "background-lane-intake", customType: "background-lane-intake", prompt: promptText };
 		}
 		if (state.goal.failedCompletionAttempts && state.goal.lastVerificationCompactorMemo) {
 			const basePrompt = renderGoalPrompt("continuation", state.goal, state);
@@ -4735,6 +4875,90 @@ export class AgentSession {
 		});
 	}
 
+	#hasBackgroundLaneArtifact(laneId: string, kind: BackgroundLaneMessageDetails["kind"], reportId?: string): boolean {
+		const customType = this.#backgroundLaneCustomType(kind);
+		if (
+			this.#pendingGoalArtifactMessages.some(
+				message =>
+					message.customType === customType &&
+					backgroundLaneArtifactDetailsMatch(message.details, laneId, kind, reportId),
+			)
+		) {
+			return true;
+		}
+		return this.sessionManager.getEntries().some(entry => {
+			if (entry.type !== "custom_message" || entry.customType !== customType) return false;
+			return backgroundLaneArtifactDetailsMatch(entry.details, laneId, kind, reportId);
+		});
+	}
+
+	#backgroundLaneCustomType(kind: BackgroundLaneMessageDetails["kind"]): string {
+		switch (kind) {
+			case "created":
+				return BACKGROUND_LANE_CREATED_MESSAGE_TYPE;
+			case "updated":
+				return BACKGROUND_LANE_UPDATED_MESSAGE_TYPE;
+			case "report":
+				return BACKGROUND_LANE_REPORT_MESSAGE_TYPE;
+			case "closed":
+				return BACKGROUND_LANE_CLOSED_MESSAGE_TYPE;
+		}
+	}
+
+	#appendBackgroundLaneAuditMessage(input: {
+		kind: BackgroundLaneMessageDetails["kind"];
+		lane: BackgroundLane;
+		content: string;
+		details: unknown;
+	}): string | undefined {
+		const detailsInput = isStringRecord(input.details) ? input.details : {};
+		const details: BackgroundLaneMessageDetails = {
+			laneId: input.lane.id,
+			reportId: typeof detailsInput.reportId === "string" ? detailsInput.reportId : undefined,
+			goalId: input.lane.goalId,
+			lane: input.lane,
+			kind: input.kind,
+			status: input.lane.status,
+			blocksIfFired: input.lane.blocksIfFired,
+			recordedAt: Date.now(),
+		};
+		return this.sessionManager.appendCustomMessageEntry(
+			this.#backgroundLaneCustomType(input.kind),
+			input.content,
+			true,
+			details,
+			"agent",
+		);
+	}
+
+	#renderBackgroundLaneContent(
+		kind: BackgroundLaneMessageDetails["kind"],
+		lane: BackgroundLane,
+		note?: string,
+	): string {
+		const sections = [
+			`## Background lane ${kind}`,
+			`Lane: ${lane.id}`,
+			`Question: ${lane.contract.question}`,
+			`Status: ${lane.status}`,
+			`Required before parent: ${lane.contract.requiredBeforeParent}`,
+			`Blocks if fired: ${lane.blocksIfFired}`,
+		];
+		if (lane.origin.checkpointId) sections.push(`Origin checkpoint: ${lane.origin.checkpointId}`);
+		sections.push(`Source ref: ${lane.origin.sourceRef}`);
+		sections.push(`Source commit: ${lane.origin.sourceCommit}`);
+		if (lane.branch.name) sections.push(`Branch: ${lane.branch.name}`);
+		if (lane.branch.worktreePath) sections.push(`Worktree: ${lane.branch.worktreePath}`);
+		if (lane.latestReportRef) sections.push(`Latest report: ${lane.latestReportRef}`);
+		if (lane.latestPatchRef) sections.push(`Latest patch: ${lane.latestPatchRef}`);
+		if (lane.closeDisposition) {
+			sections.push(`Outcome: ${lane.closeDisposition.outcome}`);
+			sections.push(`Reason: ${lane.closeDisposition.reason}`);
+		}
+		if (note) sections.push(`Note: ${note}`);
+		sections.push("Authority: lane artifacts are candidate evidence only and do not complete the parent goal.");
+		return sections.join("\n");
+	}
 	#appendGoalArtifactMessage(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details" | "attribution">,
 	): void {
@@ -4904,6 +5128,43 @@ export class AgentSession {
 			basePrompt,
 			continuationMessage: [
 				output.continuationMessage,
+				"<goal_continuation_packet>",
+				JSON.stringify(packet, null, 2),
+				"</goal_continuation_packet>",
+			].join("\n"),
+		});
+	}
+
+	#prepareBackgroundLaneIntakePrompt(state: GoalModeState): string {
+		const blocked = structuredBlockingBackgroundLanes(state.goal.backgroundLanes);
+		const blockedLaneSummary =
+			blocked.length === 0
+				? "- No structured background-lane blockers are currently recorded."
+				: blocked
+						.map(lane =>
+							[
+								`- ${lane.id}: status=${lane.status}`,
+								`agent=${lane.agent.status}`,
+								`required=${lane.contract.requiredBeforeParent}`,
+								`question=${lane.contract.question}`,
+								`blocks_if=${lane.contract.blocksIf}`,
+								lane.latestReportRef ? `latest_report=${lane.latestReportRef}` : undefined,
+							]
+								.filter((part): part is string => part !== undefined)
+								.join("; "),
+						)
+						.join("\n");
+		const memo = prompt.render(backgroundLaneIntakeTemplate, { blockedLaneSummary });
+		const packet = buildGoalContinuationPacket(
+			state,
+			"background-lane-blocked",
+			"Background lane blocker reported through structured lane_report.",
+			memo,
+		);
+		return renderPreparedGoalContinuation({
+			basePrompt: renderGoalPrompt("continuation", state.goal, state),
+			continuationMessage: [
+				memo,
 				"<goal_continuation_packet>",
 				JSON.stringify(packet, null, 2),
 				"</goal_continuation_packet>",
@@ -5082,16 +5343,18 @@ export class AgentSession {
 		await fs.promises.mkdir(artifactsDir, { recursive: true });
 		const sideAgentSettings = await this.settings.cloneForCwd(cwd);
 		sideAgentSettings.override("irc.enabled", false);
+		const goalSideAgentModel = this.settings.get("goal.sideAgentModel")?.trim();
+		const agent = goalSideAgentModel ? { ...options.agent, model: [goalSideAgentModel] } : options.agent;
 		const result = await taskExecutor.runSubprocess({
 			cwd,
-			agent: options.agent,
+			agent,
 			task: options.assignment,
 			assignment: options.assignment,
 			description: options.description,
 			index: 0,
 			id: `goal-${options.agent.name}-${Snowflake.next()}`,
 			parentActiveModelPattern: this.model ? formatModelString(this.model) : undefined,
-			outputSchema: options.agent.output,
+			outputSchema: agent.output,
 			strictToolNames: true,
 			enableLsp: true,
 			enableMCP: false,
@@ -7272,10 +7535,16 @@ export class AgentSession {
 				throw new Error("Handoff cancelled");
 			}
 
-			const model = this.model;
-			if (!model) {
+			const activeModel = this.model;
+			if (!activeModel) {
 				throw new Error("No model selected for handoff");
 			}
+			const handoffSelection = this.#resolveConfiguredOperationModel(
+				this.settings.get("handoff.model"),
+				activeModel,
+				"Handoff",
+			);
+			const model = handoffSelection.model;
 			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
@@ -7309,7 +7578,7 @@ export class AgentSession {
 					// path. Clamped per-model inside generateHandoff via
 					// resolveCompactionEffort so unsupported-effort models don't
 					// trip requireSupportedEffort.
-					thinkingLevel: this.thinkingLevel,
+					thinkingLevel: handoffSelection.thinkingLevel ?? this.thinkingLevel,
 				},
 				handoffSignal,
 			);
@@ -8011,6 +8280,39 @@ export class AgentSession {
 		});
 	}
 
+	#resolveConfiguredOperationModel(
+		selector: string | undefined,
+		fallbackModel: Model,
+		operation: string,
+	): { model: Model; thinkingLevel?: ThinkingLevel } {
+		const trimmed = selector?.trim();
+		if (!trimmed) return { model: fallbackModel };
+
+		const resolved = resolveModelRoleValue(trimmed, this.#modelRegistry.getAll(), {
+			settings: this.settings,
+			matchPreferences: { usageOrder: this.settings.getStorage()?.getModelUsageOrder() },
+			modelRegistry: this.#modelRegistry,
+		});
+		if (!resolved.model) {
+			throw new Error(`${operation} model selector did not match any known model: ${trimmed}`);
+		}
+		return {
+			model: resolved.model,
+			thinkingLevel: resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined,
+		};
+	}
+
+	#getConfiguredCompactionModelSelections(
+		availableModels: Model[],
+	): Array<{ model: Model; thinkingLevel?: ThinkingLevel }> {
+		const configured = this.settings.get("compaction.model");
+		if (configured?.trim()) {
+			if (!this.model) throw new Error("No model selected");
+			return [this.#resolveConfiguredOperationModel(configured, this.model, "Compaction")];
+		}
+		return this.#getCompactionModelCandidates(availableModels).map(model => ({ model }));
+	}
+
 	#getCompactionModelCandidates(availableModels: Model[]): Model[] {
 		const candidates: Model[] = [];
 		const seen = new Set<string>();
@@ -8082,24 +8384,24 @@ export class AgentSession {
 		signal: AbortSignal,
 		options?: SummaryOptions,
 	): Promise<CompactionResult> {
-		const candidates = this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
+		const candidates = this.#getConfiguredCompactionModelSelections(this.#modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 
 		for (const candidate of candidates) {
-			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+			const apiKey = await this.#modelRegistry.getApiKey(candidate.model, this.sessionId);
 			if (!apiKey) continue;
 
 			try {
-				return await compact(preparation, candidate, apiKey, customInstructions, signal, {
+				return await compact(preparation, candidate.model, apiKey, customInstructions, signal, {
 					...options,
-					metadata: this.agent.metadataForProvider(candidate.provider),
+					metadata: this.agent.metadataForProvider(candidate.model.provider),
 					convertToLlm,
 					telemetry,
 					// Honor the user's /model thinking selection (incl. `off`) on
 					// the manual `/compact` path. Clamped per-model inside compact()
 					// via resolveCompactionEffort so unsupported-effort models
 					// (xai-oauth/grok-build) don't trip requireSupportedEffort.
-					thinkingLevel: this.thinkingLevel,
+					thinkingLevel: candidate.thinkingLevel ?? this.thinkingLevel,
 				});
 			} catch (error) {
 				if (!this.#isCompactionAuthFailure(error)) {
@@ -8136,6 +8438,11 @@ export class AgentSession {
 			transition = "verification-rejected";
 			reason = "Context compaction occurred while verifier blockers are awaiting repair.";
 			guidance = "Repair verifier blockers or gather direct evidence before retrying parent completion.";
+		} else if (state.runMode === "awaiting-background-lane-intake") {
+			transition = "background-lane-blocked";
+			reason = "Context compaction occurred while a structured background-lane blocker requires intake.";
+			guidance =
+				"Use background_lane list/snapshot/message/close for lane intake before ordinary implementation resumes.";
 		} else if (state.runMode === "awaiting-user-input") {
 			guidance = "Preserve the blocked state and wait for user, check, or external-control input.";
 		}
@@ -8419,33 +8726,40 @@ export class AgentSession {
 				details = compactionPrep.details;
 				preserveData = compactionPrep.preserveData;
 			} else {
-				const candidates = this.#getCompactionModelCandidates(availableModels);
+				const candidates = this.#getConfiguredCompactionModelSelections(availableModels);
 				const retrySettings = this.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
 
 				for (const candidate of candidates) {
-					const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+					const apiKey = await this.#modelRegistry.getApiKey(candidate.model, this.sessionId);
 					if (!apiKey) continue;
 
 					let attempt = 0;
 					while (true) {
 						try {
-							compactResult = await compact(preparation, candidate, apiKey, undefined, autoCompactionSignal, {
-								promptOverride: compactionPrep.hookPrompt,
-								extraContext: compactionPrep.hookContext,
-								remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
-								metadata: this.agent.metadataForProvider(candidate.provider),
-								initiatorOverride: "agent",
-								convertToLlm,
-								telemetry,
-								// Honor the user's /model thinking selection on the
-								// auto-compaction path — the most-fired compaction
-								// site. Clamped per-model inside compact() via
-								// resolveCompactionEffort.
-								thinkingLevel: this.thinkingLevel,
-							});
+							compactResult = await compact(
+								preparation,
+								candidate.model,
+								apiKey,
+								undefined,
+								autoCompactionSignal,
+								{
+									promptOverride: compactionPrep.hookPrompt,
+									extraContext: compactionPrep.hookContext,
+									remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
+									metadata: this.agent.metadataForProvider(candidate.model.provider),
+									initiatorOverride: "agent",
+									convertToLlm,
+									telemetry,
+									// Honor the user's /model thinking selection on the
+									// auto-compaction path — the most-fired compaction
+									// site. Clamped per-model inside compact() via
+									// resolveCompactionEffort.
+									thinkingLevel: candidate.thinkingLevel ?? this.thinkingLevel,
+								},
+							);
 							break;
 						} catch (error) {
 							if (autoCompactionSignal.aborted) {
@@ -8481,7 +8795,7 @@ export class AgentSession {
 										delayMs,
 										retryAfterMs,
 										error: message,
-										model: `${candidate.provider}/${candidate.id}`,
+										model: `${candidate.model.provider}/${candidate.model.id}`,
 									});
 									lastError = error;
 									break; // Exit retry loop, continue to next candidate
@@ -8496,7 +8810,7 @@ export class AgentSession {
 								delayMs,
 								retryAfterMs,
 								error: message,
-								model: `${candidate.provider}/${candidate.id}`,
+								model: `${candidate.model.provider}/${candidate.model.id}`,
 							});
 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
 						}
@@ -10251,12 +10565,19 @@ export class AgentSession {
 		let summaryText: string | undefined;
 		let summaryDetails: unknown;
 		if (options.summarize && entriesToSummarize.length > 0 && !hookSummary) {
-			const model = this.model!;
+			const activeModel = this.model;
+			if (!activeModel) throw new Error("No model selected for branch summary");
+			const branchSummarySettings = this.settings.getGroup("branchSummary");
+			const branchSummarySelection = this.#resolveConfiguredOperationModel(
+				branchSummarySettings.model,
+				activeModel,
+				"Branch summary",
+			);
+			const model = branchSummarySelection.model;
 			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
-			const branchSummarySettings = this.settings.getGroup("branchSummary");
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey,
@@ -10266,6 +10587,7 @@ export class AgentSession {
 				metadata: this.agent.metadataForProvider(model.provider),
 				convertToLlm,
 				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
+				thinkingLevel: branchSummarySelection.thinkingLevel ?? this.thinkingLevel,
 			});
 			this.#branchSummaryAbortController = undefined;
 			if (result.aborted) {

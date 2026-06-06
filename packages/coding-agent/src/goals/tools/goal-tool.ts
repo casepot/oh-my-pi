@@ -222,6 +222,26 @@ const gateDeltaSchema = z
 	})
 	.strict();
 
+const backgroundLaneSpawnRequestSchema = z
+	.object({
+		from: z
+			.object({
+				checkpoint_id: z.string().optional(),
+				source_ref: z.string(),
+			})
+			.strict(),
+		contract: z
+			.object({
+				question: z.string(),
+				blocks_if: z.string(),
+				required_before_parent: z.boolean(),
+			})
+			.strict(),
+		assignment: z.string(),
+		agent: z.string().optional(),
+	})
+	.strict();
+
 const parentDeltaSchema = z
 	.object({
 		admitted_claims: z.array(claimSchema).optional(),
@@ -234,6 +254,7 @@ const parentDeltaSchema = z
 		stale_refs: z.array(refSchema).optional(),
 		external_record_refs: z.array(refSchema).optional(),
 		authority_decision_refs: z.array(refSchema).optional(),
+		background_lanes_to_spawn: z.array(backgroundLaneSpawnRequestSchema).optional(),
 	})
 	.strict();
 
@@ -502,6 +523,19 @@ function mapParentDelta(input: z.infer<typeof parentDeltaSchema> | undefined): G
 		staleRefs: (input.stale_refs ?? []).map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
 		externalRecordRefs: (input.external_record_refs ?? []).map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
 		authorityDecisionRefs: input.authority_decision_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+		backgroundLanesToSpawn: input.background_lanes_to_spawn?.map(lane => ({
+			from: {
+				checkpointId: lane.from.checkpoint_id,
+				sourceRef: lane.from.source_ref,
+			},
+			contract: {
+				question: lane.contract.question,
+				blocksIf: lane.contract.blocks_if,
+				requiredBeforeParent: lane.contract.required_before_parent,
+			},
+			assignment: lane.assignment,
+			agent: lane.agent,
+		})),
 	};
 }
 
@@ -619,6 +653,15 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
 	if (goal.pendingCheckpointId) text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
 	if (goal.verificationRepair) text += `\nVerifier repair: ${goal.verificationRepair.verificationAttemptId}`;
+	if (goal.backgroundLanes?.length) {
+		const requiredOpen = goal.backgroundLanes.filter(
+			lane => lane.contract.requiredBeforeParent && lane.status !== "closed",
+		);
+		const blocked = goal.backgroundLanes.filter(lane => lane.status === "blocked");
+		text += `\nBackground lanes: ${goal.backgroundLanes.length}`;
+		if (requiredOpen.length) text += ` (${requiredOpen.length} required undispositioned)`;
+		if (blocked.length) text += ` (${blocked.length} blocked)`;
+	}
 	if (op === "checkpoint" && response.checkpoint) {
 		if (response.checkpointReview?.status === "rejected") {
 			text += `\n\nCheckpoint rejected. Target remains active; no checkpoint is pending resolution. Continue repairing the current target closure evidence.\n\nReviewer feedback:\n${response.checkpointReview.feedback}`;

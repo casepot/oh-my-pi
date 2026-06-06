@@ -8,8 +8,9 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
+import type { ThinkingLevel } from "../thinking";
 import type { AgentMessage } from "../types";
-import { estimateTokens } from "./compaction";
+import { estimateTokens, resolveCompactionEffort } from "./compaction";
 import type { ReadonlySessionManager, SessionEntry } from "./entries";
 import {
 	type ConvertToLlm,
@@ -81,6 +82,8 @@ export interface GenerateBranchSummaryOptions {
 	metadata?: Record<string, unknown>;
 	/** Convert app-specific messages before serializing the branch summary prompt. */
 	convertToLlm?: ConvertToLlm;
+	/** Optional thinking level for the branch summary call. */
+	thinkingLevel?: ThinkingLevel;
 	/**
 	 * Optional telemetry handle. When provided, the branch summary LLM call is
 	 * wrapped in an OTEL chat span tagged with `pi.gen_ai.oneshot.kind = "branch_summary"`.
@@ -274,7 +277,7 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, signal, customInstructions, reserveTokens = 16384, metadata } = options;
+	const { model, apiKey, signal, customInstructions, reserveTokens = 16384, metadata, thinkingLevel } = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
@@ -307,7 +310,7 @@ export async function generateBranchSummary(
 	const response = await instrumentedCompleteSimple(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
-		{ apiKey, signal, maxTokens: 2048, metadata },
+		{ apiKey, signal, maxTokens: 2048, metadata, reasoning: resolveCompactionEffort(model, thinkingLevel) },
 		{ telemetry: options.telemetry, oneshotKind: "branch_summary" },
 	);
 

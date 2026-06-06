@@ -1175,6 +1175,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			label: "Compaction Model",
+			description:
+				"Optional model selector for manual and automatic compaction; defaults to the active session model",
+		},
+	},
+
 	"compaction.thresholdPercent": {
 		type: "number",
 		default: -1,
@@ -1226,6 +1237,15 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			label: "Save Handoff Docs",
 			description: "Save generated handoff documents to markdown files for the auto-handoff flow",
+		},
+	},
+	"handoff.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			label: "Handoff Model",
+			description: "Optional model selector for handoff generation; defaults to the active session model",
 		},
 	},
 
@@ -1304,6 +1324,16 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"branchSummary.reserveTokens": { type: "number", default: 16384 },
+
+	"branchSummary.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			label: "Branch Summary Model",
+			description: "Optional model selector for branch summaries; defaults to the active session model",
+		},
+	},
 
 	// Memories
 	// Legacy local-memory enable flag kept only for back-compat migration.
@@ -2611,6 +2641,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Maximum rejected goal completion verification attempts before surfacing the rejection",
 		},
 	},
+	"goal.sideAgentModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			label: "Goal Side-Agent Model",
+			description:
+				"Optional model selector for goal rubric, checkpoint review, completion verification, and continuation preparation",
+		},
+	},
 
 	// Delegation
 	"task.isolation.mode": {
@@ -3385,6 +3425,7 @@ export interface CompactionSettings {
 	idleEnabled: boolean;
 	idleThresholdTokens: number;
 	idleTimeoutSeconds: number;
+	model: string | undefined;
 }
 
 export interface RetrySettings {
@@ -3420,6 +3461,7 @@ export interface TodoCompletionSettings {
 export interface BranchSummarySettings {
 	enabled: boolean;
 	reserveTokens: number;
+	model: string | undefined;
 }
 
 export interface SkillsSettings {

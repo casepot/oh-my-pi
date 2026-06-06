@@ -27,6 +27,7 @@ export {
 	createCompactionSummaryMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
+import type { BackgroundLane } from "../background-lanes/state";
 import type {
 	GoalCheckpointPacket,
 	GoalCheckpointResolution,
@@ -42,6 +43,10 @@ export const GOAL_RUBRIC_MESSAGE_TYPE = "goal-rubric";
 export const GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE = "goal-verification-feedback";
 export const GOAL_CHECKPOINT_MESSAGE_TYPE = "goal-checkpoint";
 export const GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE = "goal-checkpoint-resolution";
+export const BACKGROUND_LANE_CREATED_MESSAGE_TYPE = "background-lane-created";
+export const BACKGROUND_LANE_UPDATED_MESSAGE_TYPE = "background-lane-updated";
+export const BACKGROUND_LANE_REPORT_MESSAGE_TYPE = "background-lane-report";
+export const BACKGROUND_LANE_CLOSED_MESSAGE_TYPE = "background-lane-closed";
 
 export interface GoalRubricMessageDetails {
 	goalId: string;
@@ -76,6 +81,17 @@ export interface GoalCheckpointResolutionMessageDetails {
 	objective: string;
 	resolution: GoalCheckpointResolution;
 	parentGoalActive: boolean;
+	recordedAt: number;
+}
+
+export interface BackgroundLaneMessageDetails {
+	laneId: string;
+	reportId?: string;
+	goalId?: string;
+	lane: BackgroundLane;
+	kind: "created" | "updated" | "report" | "closed";
+	status: BackgroundLane["status"];
+	blocksIfFired: boolean;
 	recordedAt: number;
 }
 

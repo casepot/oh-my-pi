@@ -1,3 +1,4 @@
+import { areJsonValuesEqual } from "./equality";
 import {
 	CCA_UNSUPPORTED_SCHEMA_FIELDS,
 	COMBINATOR_KEYS,
@@ -5,6 +6,7 @@ import {
 	UNSUPPORTED_SCHEMA_FIELDS,
 } from "./fields";
 import { isValidJsonSchema } from "./meta-validator";
+import { normalizeOpenAIFunctionToolRootSchema } from "./normalize";
 import { isJsonObject, type JsonObject } from "./types";
 
 /**
@@ -418,13 +420,18 @@ export function validateStrictSchemaEnforcement(
 
 	const violations: SchemaCompatibilityViolation[] = [];
 	if (result.schema !== originalSchema) {
-		violations.push(
-			createViolation(
-				"root",
-				"strict-fail-open-original-schema",
-				"Strict fail-open must return the original schema object when strict=false",
-			),
-		);
+		const normalizedRoot = normalizeOpenAIFunctionToolRootSchema(originalSchema);
+		const isExpectedRootNormalization =
+			normalizedRoot !== originalSchema && areJsonValuesEqual(result.schema, normalizedRoot);
+		if (!isExpectedRootNormalization) {
+			violations.push(
+				createViolation(
+					"root",
+					"strict-fail-open-original-schema",
+					"Strict fail-open must return the original schema object unless only the OpenAI function-tool root was normalized",
+				),
+			);
+		}
 	}
 
 	return {

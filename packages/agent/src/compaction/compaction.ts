@@ -543,7 +543,7 @@ function effortFromThinkingLevel(level: ThinkingLevel): Effort {
  * openai-responses mapper where `modelOmitsReasoningEffort` short-circuits
  * the wire param — no `requireSupportedEffort` throw.
  */
-function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined): Effort | undefined {
+export function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined): Effort | undefined {
 	if (level === ThinkingLevel.Off) return undefined;
 	const requested: Effort =
 		level === undefined || level === ThinkingLevel.Inherit ? Effort.High : effortFromThinkingLevel(level);

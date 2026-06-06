@@ -3,6 +3,11 @@
  */
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
 import { $env, Snowflake } from "@oh-my-pi/pi-utils";
+import type {
+	BackgroundLaneCloseInput,
+	BackgroundLaneMessageInput,
+	BackgroundLaneSpawnInput,
+} from "../../background-lanes";
 import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
@@ -40,6 +45,8 @@ import {
 } from "./rpc-protocol";
 import type {
 	JsonObject,
+	RpcBackgroundLaneCommand,
+	RpcBackgroundLaneUpdateSummary,
 	RpcCommand,
 	RpcErrorInfo,
 	RpcExtensionUIRequest,
@@ -97,6 +104,7 @@ const STATE_EVENT_TYPES: Record<string, string[]> = {
 	auto_compaction_end: ["isCompacting", "sessionGraph"],
 	todo_reminder: ["todoPhases"],
 	todo_auto_clear: ["todoPhases"],
+	background_lane_update: ["goal", "backgroundLanes"],
 	goal_updated: ["goal"],
 	session_tree: ["sessionGraph", "messages"],
 };
@@ -267,7 +275,64 @@ function taskResultToRpcResult(result: SingleResult, parentId: string | null = n
 			}
 		}
 	}
+
 	return rows;
+}
+function backgroundLaneSummary(
+	lane: Extract<AgentSessionEvent, { type: "background_lane_update" }>["lane"],
+): RpcBackgroundLaneUpdateSummary {
+	return {
+		id: lane.id,
+		question: lane.contract.question,
+		status: lane.status,
+		agentStatus: lane.agent.status,
+		outcome: lane.outcome ?? null,
+		requiredBeforeParent: lane.contract.requiredBeforeParent,
+		blocksIfFired: lane.blocksIfFired,
+		latestReportRef: lane.latestReportRef,
+		latestPatchRef: lane.latestPatchRef,
+		branch: lane.branch.name,
+		worktreePath: lane.branch.worktreePath,
+	};
+}
+
+function backgroundLaneSpawnInput(
+	command: Extract<RpcBackgroundLaneCommand, { op: "spawn" }>,
+): BackgroundLaneSpawnInput {
+	return {
+		from: {
+			checkpointId: command.from.checkpoint_id,
+			sourceRef: command.from.source_ref,
+		},
+		contract: {
+			question: command.contract.question,
+			blocksIf: command.contract.blocks_if,
+			requiredBeforeParent: command.contract.required_before_parent,
+		},
+		assignment: command.assignment,
+		agent: command.agent,
+	};
+}
+
+function backgroundLaneMessageInput(
+	command: Extract<RpcBackgroundLaneCommand, { op: "message" }>,
+): BackgroundLaneMessageInput {
+	return {
+		laneId: command.lane_id,
+		message: command.message,
+	};
+}
+
+function backgroundLaneCloseInput(
+	command: Extract<RpcBackgroundLaneCommand, { op: "close" }>,
+): BackgroundLaneCloseInput {
+	return {
+		laneId: command.lane_id,
+		outcome: command.outcome,
+		reason: command.reason,
+		mergedSourceRef: command.merged_source_ref,
+		operatorStatement: command.operator_statement,
+	};
 }
 
 export function requestRpcEditor(
@@ -420,6 +485,7 @@ export async function runRpcMode(
 		contextUsage: session.getContextUsage(),
 		hostTools: hostToolBridge.getDefinitions(),
 		hostUriSchemes: hostUriBridge.getDefinitions(),
+		backgroundLanes: session.backgroundLaneList(),
 	});
 
 	const emitStateChanged = (changed: string[]) => {
@@ -785,7 +851,18 @@ export async function runRpcMode(
 	};
 
 	session.subscribe(event => {
-		output(event);
+		if (event.type === "background_lane_update") {
+			output({
+				type: "background_lane_update",
+				schemaVersion: 1,
+				laneId: event.lane.id,
+				status: event.lane.status,
+				blocksIfFired: event.lane.blocksIfFired,
+				summary: backgroundLaneSummary(event.lane),
+			});
+		} else {
+			output(event);
+		}
 		if (event.type === "tool_execution_end") emitTaskResultIfPresent(event);
 		const changed = STATE_EVENT_TYPES[event.type];
 		if (changed) emitStateChanged(changed);
@@ -983,6 +1060,8 @@ export async function runRpcMode(
 					"prompt",
 					"follow_up",
 					"abort_and_prompt",
+					"background_lane.spawn",
+					"background_lane.message",
 					"compact",
 					"handoff",
 					"login",
@@ -1016,6 +1095,37 @@ export async function runRpcMode(
 				observerRegistry.setMainSession(session.sessionFile);
 				emitStateChanged(["session", "messages", "sessionGraph", "todoPhases"]);
 				return success(id, "new_session", { cancelled });
+			}
+			case "background_lane": {
+				switch (command.op) {
+					case "spawn":
+						return success(
+							id,
+							"background_lane",
+							startOperation("background_lane.spawn", id, context =>
+								session.backgroundLaneSpawn(backgroundLaneSpawnInput(command), context.signal),
+							),
+						);
+					case "list":
+						return success(id, "background_lane", { lanes: session.backgroundLaneList() });
+					case "message":
+						return success(
+							id,
+							"background_lane",
+							startOperation("background_lane.message", id, context =>
+								session.backgroundLaneMessage(backgroundLaneMessageInput(command), context.signal),
+							),
+						);
+					case "snapshot":
+						return success(id, "background_lane", await session.backgroundLaneSnapshot(command.lane_id));
+					case "close":
+						return success(
+							id,
+							"background_lane",
+							await session.backgroundLaneClose(backgroundLaneCloseInput(command)),
+						);
+				}
+				return error(id, "background_lane", rpcErrorInfo("invalid_arguments", "Unsupported background_lane op"));
 			}
 			case "set_todos":
 				session.setTodoPhases(command.phases as TodoPhase[]);

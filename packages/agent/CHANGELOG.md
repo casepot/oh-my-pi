@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed branch summaries to accept the same explicit thinking-level override used by compaction and handoff summarizers.
+
 ## [15.8.0] - 2026-06-02
 
 ### Fixed

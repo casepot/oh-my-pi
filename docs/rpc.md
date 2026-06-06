@@ -84,8 +84,8 @@ Oversized inbound or outbound payloads produce typed protocol errors instead of 
   "server": { "packageName": "@oh-my-pi/pi-coding-agent", "packageVersion": "15.8.1", "pid": 12345 },
   "mode": "rpc-ui",
   "capabilities": {
-    "commands": ["get_protocol_info", "get_state", "prompt", "bash", "cancel_operation"],
-    "events": ["operation_start", "operation_end", "state_changed", "task_progress"],
+    "commands": ["get_protocol_info", "get_state", "prompt", "bash", "background_lane", "cancel_operation"],
+    "events": ["operation_start", "operation_end", "state_changed", "background_lane_update", "task_progress"],
     "frameMetadata": true,
     "operationEvents": true,
     "typedErrors": true,
@@ -98,7 +98,8 @@ Oversized inbound or outbound payloads produce typed protocol errors instead of 
     "hostUris": true,
     "chunkedPayloads": false,
     "oneShot": true,
-    "heartbeat": true
+    "heartbeat": true,
+    "backgroundLanes": true
   },
   "limits": {
     "maxFrameBytes": 1048576,
@@ -120,7 +121,7 @@ Oversized inbound or outbound payloads produce typed protocol errors instead of 
     "settingOverrides": []
   },
   "security": {
-    "enabledCommandCategories": ["protocol", "prompting", "state", "model", "thinking", "queue", "compaction", "retry", "bash", "session", "messages", "login"],
+    "enabledCommandCategories": ["protocol", "prompting", "state", "model", "thinking", "queue", "compaction", "retry", "bash", "background_lanes", "session", "messages", "login"],
     "disabledTools": [],
     "hostToolPermissionMode": "host-owned",
     "hostUriAllowedSchemes": [],
@@ -185,7 +186,7 @@ Stable error-code family:
 
 Long-running commands return an ACK with `operationId`; completion is observed only through terminal operation frames.
 
-Long-running commands include `prompt`, `follow_up`, `abort_and_prompt`, `compact`, `bash`, `handoff`, and `login`.
+Long-running commands include `prompt`, `follow_up`, `abort_and_prompt`, `compact`, `bash`, `handoff`, `login`, `background_lane` `spawn`, and `background_lane` `message`.
 
 ```json
 { "id": "bash_1", "type": "bash", "command": "sleep 10" }
@@ -255,9 +256,12 @@ Every accepted operation emits exactly one terminal `operation_end` or `operatio
   "dumpTools": [],
   "contextUsage": {},
   "hostTools": [],
-  "hostUriSchemes": []
+  "hostUriSchemes": [],
+  "backgroundLanes": []
 }
 ```
+
+`backgroundLanes` mirrors the durable goal/session lane ledger in compact form for hosts that need topology or blocker displays. It is observational: hosts must not infer accepted parent truth from lane, branch, patch, check, or child-session existence.
 
 Material mutations emit `state_changed` with monotonic `stateSeq` and an embedded snapshot matching `get_state`.
 
@@ -280,6 +284,91 @@ Task/subagent orchestration is first-class:
 - `observable_session_update` — dashboard-friendly session list with labels, status, summary, and timestamps.
 
 These frames are additive and do not replace existing `tool_execution_*` events or task tool details.
+
+## Background lanes
+
+`ready.capabilities.backgroundLanes === true` advertises the generic background-lane command family and update stream.
+
+Immediate command:
+
+```json
+{ "id": "lanes", "type": "background_lane", "op": "list" }
+```
+
+Response data:
+
+```json
+{
+  "lanes": [
+    {
+      "id": "lane_...",
+      "question": "What condition is this lane checking?",
+      "agentStatus": "running",
+      "status": "open",
+      "outcome": null,
+      "requiredBeforeParent": true,
+      "blocksIfFired": false,
+      "branch": "omp/lane/lane_..."
+    }
+  ]
+}
+```
+
+Long-running commands:
+
+```json
+{
+  "id": "spawn_lane",
+  "type": "background_lane",
+  "op": "spawn",
+  "from": { "checkpoint_id": "goal-1-checkpoint-1", "source_ref": "abc123..." },
+  "contract": {
+    "question": "What could invalidate this accepted checkpoint?",
+    "blocks_if": "The checkpoint claim is false or stale.",
+    "required_before_parent": true
+  },
+  "assignment": "Inspect independently and report through lane_report."
+}
+```
+
+```json
+{ "id": "message_lane", "type": "background_lane", "op": "message", "lane_id": "lane_...", "message": "Follow-up context." }
+```
+
+Both return `data.ack: "accepted"` plus `operationId`; success/failure is only the later terminal operation frame. ACK does not imply lane completion, child completion, evidence acceptance, or parent acceptance.
+
+Observation and disposition:
+
+```json
+{ "id": "snapshot_lane", "type": "background_lane", "op": "snapshot", "lane_id": "lane_..." }
+{ "id": "close_lane", "type": "background_lane", "op": "close", "lane_id": "lane_...", "outcome": "deferred", "reason": "Operator disposition." }
+```
+
+`snapshot` records diff/patch/report state against the lane source ref without accepting or closing anything. `close` records an explicit disposition only; it does not mutate parent truth except by satisfying the lane-obligation guard.
+
+Lane state changes emit:
+
+```json
+{
+  "type": "background_lane_update",
+  "schemaVersion": 1,
+  "laneId": "lane_...",
+  "status": "blocked",
+  "blocksIfFired": true,
+  "summary": {
+    "id": "lane_...",
+    "question": "What condition is this lane checking?",
+    "agentStatus": "running",
+    "status": "blocked",
+    "outcome": null,
+    "requiredBeforeParent": true,
+    "blocksIfFired": true,
+    "branch": "omp/lane/lane_..."
+  }
+}
+```
+
+Hosts should surface `blocksIfFired`, required-before-parent, branch/worktree/session refs, latest reports, and close outcome as audit/control state. They must not parse child prose for blockers; blocker state comes from structured `lane_report` handling in the parent session.
 
 ## Host tools
 
