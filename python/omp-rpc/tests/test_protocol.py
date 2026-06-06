@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import unittest
 
 from omp_rpc import (
     AgentEndEvent,
     ExtensionUiRequest,
+    ReadyEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -233,11 +236,13 @@ class ProtocolParsingTests(unittest.TestCase):
                 }
             )
 
-    def test_parse_extension_ui_request_rejects_invalid_method(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_notification(
-                {"type": "extension_ui_request", "id": "ui-1", "method": "launch"}
-            )
+    def test_parse_extension_ui_request_preserves_unknown_methods(self) -> None:
+        notification = parse_notification(
+            {"type": "extension_ui_request", "id": "ui-1", "method": "launch", "expectsResponse": True}
+        )
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertEqual(notification.method, "launch")
+        self.assertTrue(notification.requires_response())
 
     def test_parse_message_update_rejects_invalid_assistant_done_reason(self) -> None:
         with self.assertRaises(ValueError):
@@ -333,6 +338,35 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertIsInstance(notification, AgentEndEvent)
         self.assertEqual(notification.messages[0]["content"][0]["text"], "hello")
 
+
+    def test_parse_golden_frames_preserves_future_metadata(self) -> None:
+        repo_root = Path(__file__).resolve().parents[3]
+        fixture = repo_root / "packages" / "coding-agent" / "test" / "fixtures" / "rpc-golden-frames.jsonl"
+        frames = [
+            json.loads(line)
+            for line in fixture.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        response_count = sum(1 for frame in frames if frame.get("type") == "response")
+        parsed_notifications = [
+            parse_notification(frame)
+            for frame in frames
+            if frame.get("type") not in {"response"}
+        ]
+        self.assertEqual(len(parsed_notifications), len(frames) - response_count)
+
+        ready = parse_notification(frames[0])
+        self.assertIsInstance(ready, ReadyEvent)
+        self.assertEqual(ready.protocol["name"] if ready.protocol else None, "omp-rpc")
+        self.assertEqual(ready.mode, "rpc")
+        self.assertEqual(ready.seq, 1)
+        self.assertEqual(ready.raw["protocol"]["schemaVersion"] if ready.raw else None, 1)
+
+        ui = parse_notification(frames[8])
+        self.assertIsInstance(ui, ExtensionUiRequest)
+        self.assertEqual(ui.method, "confirm")
+        self.assertTrue(ui.requires_response())
+        self.assertEqual(ui.response_schema["kind"] if ui.response_schema else None, "boolean")
 
 if __name__ == "__main__":
     unittest.main()

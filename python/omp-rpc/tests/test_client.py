@@ -243,14 +243,51 @@ FAKE_SERVER = textwrap.dedent(
                 "set_host_tools",
                 {"toolNames": [tool.get("name", "") for tool in registered_host_tools]},
             )
+        elif command_type == "add_host_tools":
+            by_name = {tool.get("name", ""): tool for tool in registered_host_tools}
+            for tool in command.get("tools", []):
+                by_name[tool.get("name", "")] = tool
+            registered_host_tools = list(by_name.values())
+            respond(
+                request_id,
+                "add_host_tools",
+                {"toolNames": [tool.get("name", "") for tool in registered_host_tools]},
+            )
+        elif command_type == "remove_host_tools":
+            remove = set(command.get("toolNames", []))
+            registered_host_tools = [tool for tool in registered_host_tools if tool.get("name", "") not in remove]
+            respond(
+                request_id,
+                "remove_host_tools",
+                {"toolNames": [tool.get("name", "") for tool in registered_host_tools]},
+            )
         elif command_type == "set_todos":
             todo_phases = command.get("phases", [])
             respond(request_id, "set_todos", {"todoPhases": todo_phases})
         elif command_type == "get_messages":
             respond(request_id, "get_messages", {"messages": messages})
-        elif command_type == "set_host_tools":
-            tool_names = [tool.get("name", "") for tool in command.get("tools", [])]
-            respond(request_id, "set_host_tools", {"toolNames": tool_names})
+        elif command_type == "get_session_entries":
+            respond(
+                request_id,
+                "get_session_entries",
+                {
+                    "entries": [{"id": "entry-1", "parentId": None, "type": "message", "label": "First", "timestamp": "2026-06-05T00:00:00.000Z"}],
+                    "total": 1,
+                    "offset": command.get("offset", 0),
+                    "limit": 1,
+                    "currentLeafId": "entry-1",
+                },
+            )
+        elif command_type == "get_session_tree":
+            respond(
+                request_id,
+                "get_session_tree",
+                {"root": [{"id": "entry-1", "parentId": None, "type": "message", "label": "First", "timestamp": "2026-06-05T00:00:00.000Z", "children": []}], "currentLeafId": "entry-1"},
+            )
+        elif command_type == "get_observable_sessions":
+            respond(request_id, "get_observable_sessions", {"sessions": [{"id": "main", "status": "running"}]})
+        elif command_type == "cancel_operation":
+            respond(request_id, "cancel_operation", {"operationId": command.get("operationId")})
         elif command_type == "set_model":
             model_provider = command["provider"]
             model_id = command["modelId"]
@@ -447,6 +484,7 @@ IDLESS_ERROR_SERVER = textwrap.dedent(
                     "command": command["type"],
                     "success": False,
                     "error": f"unsupported: {command['type']}",
+                    "errorInfo": {"code": "unknown_command", "message": f"unsupported: {command['type']}", "retryable": False},
                 }
             ),
             flush=True,
@@ -518,6 +556,46 @@ LATE_PROMPT_FAILURE_SERVER = textwrap.dedent(
                 ),
                 flush=True,
             )
+    """
+)
+
+FOLLOW_UP_IDLE_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+    import threading
+    import time
+
+    def send(frame):
+        print(json.dumps(frame), flush=True)
+
+    def finish(label, delay):
+        def run():
+            time.sleep(delay)
+            send({"type": "agent_start"})
+            send({"type": "agent_end", "messages": [{"role": "assistant", "content": [{"type": "text", "text": label}]}]})
+        threading.Thread(target=run, daemon=True).start()
+
+    send({"type": "ready"})
+
+    for raw_line in sys.stdin:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        command = json.loads(raw_line)
+        request_id = command.get("id")
+        if command["type"] == "set_host_tools":
+            send({"id": request_id, "type": "response", "command": "set_host_tools", "success": True, "data": {"toolNames": []}})
+            continue
+        if command["type"] == "prompt":
+            send({"id": request_id, "type": "response", "command": "prompt", "success": True, "data": {"ack": "accepted", "operationId": "op_prompt"}})
+            finish("prompt", 0.05)
+            continue
+        if command["type"] == "follow_up":
+            send({"id": request_id, "type": "response", "command": "follow_up", "success": True, "data": {"ack": "accepted", "operationId": "op_follow"}})
+            finish("follow-up", 0.2)
+            continue
+        send({"id": request_id, "type": "response", "command": command["type"], "success": True})
     """
 )
 
@@ -683,6 +761,43 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(len(end_events), 1)
             self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
 
+    def test_incremental_custom_tool_registration_preserves_metadata(self) -> None:
+        with self.make_client() as client:
+            names = client.add_custom_tools(
+                (
+                    host_tool(
+                        name="meta_host",
+                        description="Metadata host tool",
+                        parameters={"type": "object"},
+                        execute=lambda _args, _context: "ok",
+                        side_effect_class="writes-file",
+                        trust_class="workspace",
+                        display={"kind": "inline"},
+                        input_size_hint_bytes=10,
+                        output_size_hint_bytes=20,
+                        default_timeout_ms=1000,
+                        max_result_bytes=4096,
+                        max_update_bytes=1024,
+                    ),
+                )
+            )
+            self.assertIn("meta_host", names)
+            state = client.get_state()
+            meta_tool = next(tool for tool in state.dump_tools if tool.name == "meta_host")
+            self.assertEqual(meta_tool.description, "Metadata host tool")
+            self.assertEqual(client.remove_custom_tools(("meta_host",)), ())
+
+    def test_session_graph_helpers_and_cancel_operation(self) -> None:
+        with self.make_client() as client:
+            entries = client.get_session_entries(include_content=False)
+            self.assertEqual(entries["currentLeafId"], "entry-1")
+            self.assertEqual(entries["entries"][0]["label"], "First")
+            tree = client.get_session_tree(include_entries=True)
+            self.assertEqual(tree["currentLeafId"], "entry-1")
+            sessions = client.get_observable_sessions()
+            self.assertEqual(sessions[0]["id"], "main")
+            self.assertEqual(client.cancel_operation("op_1")["operationId"], "op_1")
+
     def test_extension_ui_round_trip(self) -> None:
         with self.make_client() as client:
             client.prompt("needs ui")
@@ -818,6 +933,14 @@ class RpcClientTests(unittest.TestCase):
             client.abort_and_prompt("say hello")
             client.wait_for_idle(timeout=2.0)
             self.assertEqual(client.get_last_assistant_text(), "pong")
+
+    def test_wait_for_idle_waits_for_queued_follow_up_completion(self) -> None:
+        with self.make_client(server=FOLLOW_UP_IDLE_SERVER) as client:
+            client.prompt("first")
+            client.follow_up("second")
+            started = time.time()
+            client.wait_for_idle(timeout=2.0)
+            self.assertGreaterEqual(time.time() - started, 0.15)
 
     def test_collect_events_returns_turn_events(self) -> None:
         with self.make_client() as client:
@@ -962,6 +1085,8 @@ class RpcClientTests(unittest.TestCase):
 
         self.assertEqual(ctx.exception.command, "unknown")
         self.assertEqual(ctx.exception.error, "unsupported: unknown")
+        self.assertEqual(ctx.exception.code, "unknown_command")
+        self.assertFalse(ctx.exception.retryable)
 
     def test_prompt_and_wait_raises_for_late_prompt_failure(self) -> None:
         protocol_errors: list[str] = []
