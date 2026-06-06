@@ -25,7 +25,9 @@ Write guidance for the next main-agent turn. It MUST say:
 - parent-state changes require `resolve_checkpoint.parent_delta`; prose does not mutate the parent frame;
 - domain-specific records should be referenced as external refs, not copied into goal state;
 - next targets should be desired-future claims, not cleanup checklist items;
-- parent completion requires `goal({op:"complete"})` and verifier-worthy parent-level evidence.
+- parent completion requires `goal({op:"complete"})` and verifier-worthy parent-level evidence;
+- if recommending `parent_completion_candidate`, show an exact valid `resolve_checkpoint` JSON object that omits `next_target`, followed by `goal({op:"complete"})` as the next action;
+- if recommending `next_target`, show an exact valid `resolve_checkpoint` JSON object that includes `next_target`.
 
 Controller outcomes may include: start next target; update parent frame through `parent_delta`; request user input; request broader checks; preserve lessons; or select `parent_completion_candidate` only when the parent goal is genuinely verifier-ready.
 

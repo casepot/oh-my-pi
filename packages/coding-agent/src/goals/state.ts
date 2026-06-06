@@ -8,6 +8,7 @@ export type GoalModeLifecycle = "active" | "exiting";
 export type GoalRunMode =
 	| "working-target"
 	| "awaiting-checkpoint-resolution"
+	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
 	| "awaiting-user-input";
 
@@ -488,6 +489,7 @@ function normalizeRunMode(value: unknown): GoalRunMode {
 	switch (value) {
 		case "working-target":
 		case "awaiting-checkpoint-resolution":
+		case "awaiting-parent-completion":
 		case "awaiting-verification-repair":
 		case "awaiting-user-input":
 			return value;

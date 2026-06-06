@@ -276,6 +276,7 @@ function isGoalContinuationSubmissionType(customType: string | undefined): boole
 	return (
 		customType === "goal-continuation" ||
 		customType === "goal-checkpoint-resolution" ||
+		customType === "goal-parent-completion" ||
 		customType === "goal-verification-repair"
 	);
 }
@@ -1338,11 +1339,15 @@ export class InteractiveMode implements InteractiveModeContext {
 				? this.#goalContinuationTurnInFlight
 					? "Goal resolving checkpoint"
 					: "Goal checkpoint pending"
-				: state?.runMode === "awaiting-verification-repair"
+				: state?.runMode === "awaiting-parent-completion"
 					? this.#goalContinuationTurnInFlight
-						? "Goal repairing verifier blockers"
-						: "Goal verifier repair pending"
-					: undefined;
+						? "Goal verifying parent completion"
+						: "Goal completion verification pending"
+					: state?.runMode === "awaiting-verification-repair"
+						? this.#goalContinuationTurnInFlight
+							? "Goal repairing verifier blockers"
+							: "Goal verifier repair pending"
+						: undefined;
 		const status =
 			this.goalModeEnabled || this.goalModePaused
 				? { enabled: this.goalModeEnabled, paused: this.goalModePaused, label }
@@ -2390,6 +2395,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			activeItems.push("Resume checkpoint resolution");
 			pausedItems.push("Resume checkpoint resolution");
 		}
+		if (goalState?.runMode === "awaiting-parent-completion") {
+			activeItems.push("Resume parent completion verification");
+			pausedItems.push("Resume parent completion verification");
+		}
 		if (goal.rubric) {
 			activeItems.push("Show rubric");
 			pausedItems.push("Show rubric");
@@ -2429,6 +2438,14 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#resetGoalContinuationSuppression();
 				this.#scheduleGoalContinuation();
 				this.showStatus("Checkpoint resolution continuation scheduled.");
+				return;
+			case "Resume parent completion verification":
+				if (!this.goalModeEnabled && this.#getPausedGoalState()) {
+					await this.#enterGoalMode({ resume: true, silent: true });
+				}
+				this.#resetGoalContinuationSuppression();
+				this.#scheduleGoalContinuation();
+				this.showStatus("Parent completion verification continuation scheduled.");
 				return;
 			case "Show rubric":
 				await this.#showGoalRubric();

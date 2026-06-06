@@ -9,7 +9,7 @@ Use a single `op` field:
 - `resume`: reactivate a paused parent goal without changing its run mode.
 - `start_target`: start a bounded current target. Requires `title`, `desired_future_claim`, and `closure_standard`. Optional: `expected_parent_contribution`, `baseline_refs`, `gate_refs`, `evidence_expectation`, `non_goals`, `forbidden_claims`, `stale_if`, `linked_verifier_blocker_ids`.
 - `checkpoint`: close the current target with evidence and prepare a controller turn. Requires `status:"closed_with_evidence"`, `summary`, `local_claims`, `evidence`, `not_claimed`, and `remaining_questions`. Optional: `checks_run`, `artifacts_touched`, `risks_or_caveats`, `stale_if`, `suggested_controller_questions`, `retrospective_target` for legacy sessions only.
-- `resolve_checkpoint`: record the fresh controller decision after an accepted checkpoint. Requires `checkpoint_id`, `decision`, `parent_reading`, `not_propagated`, and `remaining_parent_work`. Optional: `parent_delta`, `broader_checks_or_inputs`, `lessons_for_future`, `next_target`.
+- `resolve_checkpoint`: record the fresh controller decision after an accepted checkpoint. Requires `checkpoint_id`, `decision`, `parent_reading`, `not_propagated`, and `remaining_parent_work`. Optional: `parent_delta`, `broader_checks_or_inputs`, `lessons_for_future`. `next_target` is legal only when `decision:"next_target"`; omit the field for every other decision, especially `parent_completion_candidate`.
 - `complete`: attempt verified parent-goal completion. This remains parent-scoped and invokes the independent verifier.
 - `drop`: drop the parent goal without completing it.
 
@@ -28,6 +28,10 @@ Examples:
 ```
 
 ```json
+{"op":"resolve_checkpoint","checkpoint_id":"goal-1-checkpoint-1","decision":"parent_completion_candidate","parent_reading":"The closed target plus prior accepted evidence appears to satisfy the parent objective; the independent verifier must decide.","not_propagated":["Parent goal is complete without verifier acceptance"],"remaining_parent_work":["Call goal({op:\"complete\"}) for parent completion verification."]}
+```
+
+```json
 {"op":"resolve_checkpoint","checkpoint_id":"goal-1-checkpoint-1","decision":"next_target","parent_reading":"The local smoke target is closed, but parent release reliability still needs distribution-path evidence.","parent_delta":{"admitted_claims":[{"id":"compiled-installer-smoke-starts-worker","claim":"Compiled installer smoke path has local evidence for stats worker startup.","status":"accepted","evidence_refs":[{"id":"checkpoint:goal-1-checkpoint-1","kind":"artifact"}],"non_implications":["Release is ready","Tarball install path is verified"]}],"candidate_claims_added":[],"rejected_claims":[],"boundaries_added":[{"id":"source-link-not-tarball","kind":"forbidden-inference","statement":"Local source-link smoke success does not prove tarball install success."}],"residuals_added_or_updated":[{"id":"tarball-smoke-evidence","statement":"Tarball install path still needs equivalent smoke evidence.","classification":"current-parent-blocker","required_evidence":["tarball install smoke output"]}],"gate_deltas":[{"gate_id":"install-smoke","status":"passed","evidence_refs":[{"id":"checkpoint:goal-1-checkpoint-1","kind":"artifact"}]}],"frontier_deltas":[{"id":"tarball-install-smoke-frontier","statement":"Tarball install verification is the next release-reliability frontier.","evidence_required":["tarball install smoke output"]}],"stale_refs":[],"external_record_refs":[]},"next_target":{"title":"Prove tarball install exercises the same smoke path","desired_future_claim":"Tarball installs run the smoke path that catches stats worker startup failure.","closure_standard":"Tarball install test runs omp --smoke-test and fails on worker startup errors."},"not_propagated":["Local source-link smoke success does not prove tarball install success."],"remaining_parent_work":["Tarball install path evidence","CI evidence"],"broader_checks_or_inputs":["Run install test matrix when target closes."],"lessons_for_future":["Worker smoke probes should cover every install surface."]}
 ```
 
@@ -43,6 +47,7 @@ Invalid uses:
 
 - Do not call `checkpoint` for fatigue, low budget, partial work, or arbitrary phase boundaries.
 - Do not treat `checkpoint` or `resolve_checkpoint` as parent completion.
-- Do not call `complete` while a checkpoint is pending unless the checkpoint resolution selected `parent_completion_candidate` and parent evidence is verifier-ready.
+- Do not call `complete` while a checkpoint is pending. First resolve the checkpoint; if the resolution selected `parent_completion_candidate`, immediately call `complete`.
 - Do not mutate parent frame through prose. Use `resolve_checkpoint.parent_delta`.
+- Do not include `next_target` unless `decision` is exactly `next_target`; for `parent_completion_candidate`, omit `next_target` entirely.
 - Do not retry `complete` after verifier rejection until the blockers have been fixed or directly evidenced.

@@ -159,21 +159,59 @@ const evidenceSchema = z
 	})
 	.strict();
 
-const targetSchema = z
-	.object({
-		title: z.string(),
-		desired_future_claim: z.string(),
-		closure_standard: z.string(),
-		expected_parent_contribution: z.string().optional(),
-		baseline_refs: z.array(refSchema).optional(),
-		gate_refs: z.array(z.string()).optional(),
-		evidence_expectation: z.array(z.string()).optional(),
-		non_goals: z.array(z.string()).optional(),
-		forbidden_claims: z.array(z.string()).optional(),
-		stale_if: z.array(z.string()).optional(),
-		linked_verifier_blocker_ids: z.array(z.string()).optional(),
-	})
-	.strict();
+const targetFields = {
+	title: z.string(),
+	desired_future_claim: z.string(),
+	closure_standard: z.string(),
+	expected_parent_contribution: z.string().optional(),
+	baseline_refs: z.array(refSchema).optional(),
+	gate_refs: z.array(z.string()).optional(),
+	evidence_expectation: z.array(z.string()).optional(),
+	non_goals: z.array(z.string()).optional(),
+	forbidden_claims: z.array(z.string()).optional(),
+	stale_if: z.array(z.string()).optional(),
+	linked_verifier_blocker_ids: z.array(z.string()).optional(),
+};
+const targetSchema = z.object(targetFields).strict();
+const resolveTargetSchema = z.object(targetFields);
+const emptyTargetSchema = z.record(z.string(), z.never());
+const maybeTargetSchema = z.union([resolveTargetSchema, emptyTargetSchema]);
+type TargetParams = z.infer<typeof targetSchema>;
+type MaybeTargetParams = z.infer<typeof maybeTargetSchema>;
+
+function hasNonWhitespace(value: string | undefined): boolean {
+	if (!value) return false;
+	for (let index = 0; index < value.length; index++) {
+		const char = value.charCodeAt(index);
+		if (char !== 9 && char !== 10 && char !== 11 && char !== 12 && char !== 13 && char !== 32) return true;
+	}
+	return false;
+}
+
+function hasArrayEntries(value: readonly unknown[] | undefined): boolean {
+	return value !== undefined && value.length > 0;
+}
+
+function isTargetParams(value: MaybeTargetParams): value is TargetParams {
+	return "title" in value && "desired_future_claim" in value && "closure_standard" in value;
+}
+
+function isEffectivelyEmptyTarget(value: MaybeTargetParams): boolean {
+	if (!isTargetParams(value)) return true;
+	return (
+		!hasNonWhitespace(value.title) &&
+		!hasNonWhitespace(value.desired_future_claim) &&
+		!hasNonWhitespace(value.closure_standard) &&
+		!hasNonWhitespace(value.expected_parent_contribution) &&
+		!hasArrayEntries(value.baseline_refs) &&
+		!hasArrayEntries(value.gate_refs) &&
+		!hasArrayEntries(value.evidence_expectation) &&
+		!hasArrayEntries(value.non_goals) &&
+		!hasArrayEntries(value.forbidden_claims) &&
+		!hasArrayEntries(value.stale_if) &&
+		!hasArrayEntries(value.linked_verifier_blocker_ids)
+	);
+}
 
 const gateDeltaSchema = z
 	.object({
@@ -247,17 +285,27 @@ const resolveCheckpointSchema = z
 		remaining_parent_work: z.array(z.string()),
 		broader_checks_or_inputs: z.array(z.string()).optional(),
 		lessons_for_future: z.array(z.string()).optional(),
-		next_target: targetSchema.optional(),
+		next_target: maybeTargetSchema.optional(),
 	})
 	.strict()
-	.refine(value => value.decision !== "next_target" || value.next_target !== undefined, {
-		message: "next_target is required when decision is next_target",
-		path: ["next_target"],
-	})
-	.refine(value => value.decision === "next_target" || value.next_target === undefined, {
-		message: "next_target is only allowed when decision is next_target",
-		path: ["next_target"],
-	});
+	.refine(
+		value =>
+			value.decision !== "next_target" || (value.next_target !== undefined && isTargetParams(value.next_target)),
+		{
+			message: "next_target is required when decision is next_target",
+			path: ["next_target"],
+		},
+	)
+	.refine(
+		value =>
+			value.decision === "next_target" ||
+			value.next_target === undefined ||
+			isEffectivelyEmptyTarget(value.next_target),
+		{
+			message: "next_target is only allowed when decision is next_target",
+			path: ["next_target"],
+		},
+	);
 
 const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	createSchema,
@@ -467,7 +515,10 @@ function mapResolutionInput(params: z.infer<typeof resolveCheckpointSchema>): Go
 		remainingParentWork: params.remaining_parent_work,
 		broaderChecksOrInputs: params.broader_checks_or_inputs,
 		lessonsForFuture: params.lessons_for_future,
-		nextTarget: params.next_target ? mapTargetInput(params.next_target) : undefined,
+		nextTarget:
+			params.decision === "next_target" && params.next_target && isTargetParams(params.next_target)
+				? mapTargetInput(params.next_target)
+				: undefined,
 	};
 }
 
@@ -580,6 +631,8 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 		text += `\n\nCheckpoint resolution recorded: ${response.checkpointResolution.decision}.`;
 		if (response.checkpointResolution.nextTarget) {
 			text += `\nNext target: ${response.checkpointResolution.nextTarget.title}`;
+		} else if (response.checkpointResolution.decision === "parent_completion_candidate") {
+			text += `\nNext action: call goal({op:"complete"}) for parent completion verification.`;
 		}
 	}
 	if (response.completionVerification?.status === "rejected") {

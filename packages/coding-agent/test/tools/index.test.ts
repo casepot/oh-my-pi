@@ -250,6 +250,25 @@ describe("createTools", () => {
 		expect(names).toEqual(["read", "goal", "resolve"]);
 	});
 
+	it("blocks ordinary tools while parent completion verification is pending", async () => {
+		const session = createTestSession({
+			settings: createSettingsWithOverrides({
+				"goal.enabled": true,
+			}),
+			getGoalModeState: () => ({
+				...createActiveGoalState(),
+				runMode: "awaiting-parent-completion" as const,
+			}),
+		});
+		const tools = await createTools(session, ["read"]);
+		const readTool = tools.find(tool => tool.name === "read");
+		if (!readTool) throw new Error("expected read tool");
+
+		await expect(readTool.execute("read-parent-candidate", { path: "package.json" })).rejects.toThrow(
+			"parent completion verification is pending",
+		);
+	});
+
 	it("includes search_tool_bm25 when MCP tool discovery is enabled and executable", async () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({

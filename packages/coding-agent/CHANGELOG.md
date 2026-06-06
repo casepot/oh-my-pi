@@ -42,6 +42,7 @@
 - Fixed hashline edit regression coverage for stale-snapshot delimiter repair and multi-section no-op preflight behavior.
 - Fixed goal side agents so explicit read-only tool lists are strict active-tool allowlists, preventing image/custom/extension tools from leaking into rubric/verifier/continuation agents.
 - Fixed goal-mode compaction so maintenance aborts do not pause active goals or convert open targets into paused parent-goal state.
+- Fixed goal checkpoint resolution ergonomics so `parent_completion_candidate` tolerates empty provider-emitted `next_target` shells, transitions into an explicit parent-completion-verification run mode, and keeps verifier-repair blockers linked to current blocker IDs before completion can be retried.
 
 ## [15.8.1] - 2026-06-02
 

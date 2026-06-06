@@ -132,7 +132,7 @@ export interface GoalSideAgentExpectation {
 }
 
 export interface GoalContinuationPacket {
-	transition: "target-checkpoint" | "context-compaction" | "verification-rejected";
+	transition: "target-checkpoint" | "context-compaction" | "verification-rejected" | "parent-completion-candidate";
 	reason: string;
 	stateVersion: number;
 	runMode: GoalRunMode;
@@ -291,6 +291,8 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
 		case "awaiting-checkpoint-resolution":
 			return ["Inspect checkpoint guidance", 'Call goal({ op: "resolve_checkpoint", ... })'];
+		case "awaiting-parent-completion":
+			return ['Call goal({ op: "complete" }) for parent completion verification'];
 		case "awaiting-verification-repair":
 			return ["Repair verifier blockers", "Start a blocker-scoped target", "Gather fresh evidence"];
 		case "awaiting-user-input":
@@ -308,6 +310,8 @@ function disallowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
 		case "awaiting-checkpoint-resolution":
 			return ["Continue local implementation", "Mutate parent frame in prose", "Call complete before resolution"];
+		case "awaiting-parent-completion":
+			return ["Continue local implementation", "Start another target", "Checkpoint target work"];
 		case "awaiting-verification-repair":
 			return ["Retry complete without fresh repair/evidence", "Choose unrelated work"];
 		case "awaiting-user-input":
@@ -426,10 +430,52 @@ function blockerIds(blockers: GoalVerificationGap[]): Set<string> {
 	return new Set(blockers.map(blocker => blocker.id));
 }
 
-function targetLinksBlockers(target: GoalTarget | undefined, blockers: GoalVerificationGap[]): boolean {
-	if (!target?.linkedVerifierBlockerIds?.length) return false;
+function targetLinkedCurrentBlockerIds(target: GoalTarget | undefined, blockers: GoalVerificationGap[]): string[] {
+	if (!target?.linkedVerifierBlockerIds?.length || blockers.length === 0) return [];
 	const ids = blockerIds(blockers);
-	return target.linkedVerifierBlockerIds.some(id => ids.has(id));
+	return target.linkedVerifierBlockerIds.filter(id => ids.has(id));
+}
+
+function targetLinksBlockers(target: GoalTarget | undefined, blockers: GoalVerificationGap[]): boolean {
+	return targetLinkedCurrentBlockerIds(target, blockers).length > 0;
+}
+
+function validateVerifierRepairLinks(
+	linkedVerifierBlockerIds: string[] | undefined,
+	blockers: GoalVerificationGap[],
+	action: string,
+): void {
+	if (blockers.length === 0) return;
+	const currentIds = blockerIds(blockers);
+	if (!linkedVerifierBlockerIds?.length) {
+		throw new Error(
+			`${action} during verifier repair must link current verifier blocker ids: ${[...currentIds].join(", ")}`,
+		);
+	}
+	const staleIds = linkedVerifierBlockerIds.filter(id => !currentIds.has(id));
+	if (staleIds.length > 0) {
+		throw new Error(
+			`${action} during verifier repair referenced stale verifier blocker ids: ${staleIds.join(", ")}; current verifier blocker ids: ${[...currentIds].join(", ")}`,
+		);
+	}
+}
+
+function updateVerificationRepairForClosedTarget(
+	repair: GoalVerificationRepairState,
+	target: GoalTarget,
+): GoalVerificationRepairState | undefined {
+	if (repair.blockers.length === 0) {
+		return target.createdBy === "verification-repair" ||
+			target.createdFromVerificationAttemptId === repair.verificationAttemptId
+			? undefined
+			: repair;
+	}
+	const repairedIds = new Set(targetLinkedCurrentBlockerIds(target, repair.blockers));
+	if (repairedIds.size === 0) return repair;
+	const remainingBlockers = repair.blockers.filter(blocker => !repairedIds.has(blocker.id));
+	if (remainingBlockers.length === 0) return undefined;
+	if (remainingBlockers.length === repair.blockers.length) return repair;
+	return { ...repair, blockers: remainingBlockers };
 }
 
 function targetFromInput(
@@ -1051,17 +1097,21 @@ export class GoalRuntime {
 			if (state.goal.pendingCheckpointId || state.runMode === "awaiting-checkpoint-resolution") {
 				throw new Error("cannot start a target while a checkpoint is pending resolution");
 			}
+			if (state.runMode === "awaiting-parent-completion") {
+				throw new Error("cannot start a target after parent_completion_candidate; call complete for verification");
+			}
+			const repair = state.goal.verificationRepair;
 			const activeTarget = state.goal.currentTarget?.status === "active" ? state.goal.currentTarget : undefined;
+			if (repair?.blockers.length) {
+				validateVerifierRepairLinks(input.linkedVerifierBlockerIds, repair.blockers, "start_target");
+			}
 			const replacingForVerifierRepair =
 				activeTarget !== undefined &&
 				state.runMode === "awaiting-verification-repair" &&
-				(state.goal.verificationRepair?.blockers.length ?? 0) > 0 &&
+				repair !== undefined &&
 				(input.linkedVerifierBlockerIds?.length ?? 0) > 0;
 			if (activeTarget && !replacingForVerifierRepair) {
 				throw new Error("cannot start a target because another target is already active");
-			}
-			if (state.goal.verificationRepair?.blockers.length && !input.linkedVerifierBlockerIds?.length) {
-				throw new Error("start_target during verifier repair must link verifier blocker ids");
 			}
 			const createdBy =
 				input.createdBy ??
@@ -1070,9 +1120,13 @@ export class GoalRuntime {
 					: state.goal.targets?.length
 						? "operator"
 						: "initial");
+			const targetInput =
+				createdBy === "verification-repair" && repair && !input.createdFromVerificationAttemptId
+					? { ...input, createdFromVerificationAttemptId: repair.verificationAttemptId }
+					: input;
 			const target = targetFromInput(
 				state.goal,
-				input,
+				targetInput,
 				nextTargetSequence(state.goal),
 				state.parentFrameVersion,
 				this.#now(),
@@ -1171,12 +1225,10 @@ export class GoalRuntime {
 			state.goal.checkpoints = [...(state.goal.checkpoints ?? []), committedPacket];
 			state.goal.pendingCheckpointId = committedPacket.id;
 			state.goal.lastCheckpointRejection = undefined;
-			if (
-				state.goal.verificationRepair &&
-				targetLinksBlockers(closedTarget, state.goal.verificationRepair.blockers)
-			) {
-				state.goal.verificationRepair = undefined;
-				state.goal.failedCompletionAttempts = undefined;
+			if (state.goal.verificationRepair) {
+				const nextRepair = updateVerificationRepairForClosedTarget(state.goal.verificationRepair, closedTarget);
+				state.goal.verificationRepair = nextRepair;
+				if (!nextRepair) state.goal.failedCompletionAttempts = undefined;
 			}
 			state.runMode = "awaiting-checkpoint-resolution";
 			this.#bumpState(state);
@@ -1215,6 +1267,12 @@ export class GoalRuntime {
 			if (input.decision === "next_target" && !input.nextTarget) {
 				throw new Error("next_target is required when decision is next_target");
 			}
+			const repair = state.goal.verificationRepair;
+			if (repair && input.decision === "parent_completion_candidate") {
+				throw new Error(
+					"cannot select parent_completion_candidate until verifier blockers have fresh repair evidence",
+				);
+			}
 			const sequence = nextResolutionSequence(state.goal);
 			const resolutionId = `${state.goal.id}-checkpoint-resolution-${sequence}`;
 			let parentFrameChanged = false;
@@ -1226,12 +1284,18 @@ export class GoalRuntime {
 			let runMode: GoalRunMode = "awaiting-user-input";
 			let clearPending = false;
 			if (input.decision === "next_target") {
+				const nextTargetInput = input.nextTarget as GoalStartTargetInput;
+				if (repair?.blockers.length) {
+					validateVerifierRepairLinks(nextTargetInput.linkedVerifierBlockerIds, repair.blockers, "next_target");
+				}
 				nextTarget = targetFromInput(
 					state.goal,
 					{
-						...(input.nextTarget as GoalStartTargetInput),
+						...nextTargetInput,
 						createdBy: "checkpoint-resolution",
 						createdFromCheckpointId: input.checkpointId,
+						createdFromVerificationAttemptId:
+							nextTargetInput.createdFromVerificationAttemptId ?? repair?.verificationAttemptId,
 					},
 					nextTargetSequence(state.goal),
 					parentFrameChanged ? state.parentFrameVersion + 1 : state.parentFrameVersion,
@@ -1242,7 +1306,7 @@ export class GoalRuntime {
 				runMode = "working-target";
 				clearPending = true;
 			} else if (input.decision === "parent_completion_candidate") {
-				runMode = "working-target";
+				runMode = "awaiting-parent-completion";
 				clearPending = true;
 			}
 			const resolution: GoalCheckpointResolution = {

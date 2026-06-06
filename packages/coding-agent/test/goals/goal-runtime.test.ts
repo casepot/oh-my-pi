@@ -834,13 +834,21 @@ describe("goal runtime", () => {
 			reviewedAt: 20,
 		});
 		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow("checkpoint is pending resolution");
-		await harness.runtime.recordCheckpointResolution({
+		const parentCandidate = await harness.runtime.recordCheckpointResolution({
 			checkpointId: candidate.id,
 			decision: "parent_completion_candidate",
 			parentReading: "Parent might be complete; verifier must decide.",
 			notPropagated: ["Parent goal complete"],
 			remainingParentWork: ["Independent verifier acceptance"],
 		});
+		expect(parentCandidate.runMode).toBe("awaiting-parent-completion");
+		await expect(
+			harness.runtime.startTarget({
+				title: "Do more work before verification",
+				desiredFutureClaim: "More work is done.",
+				closureStandard: "More work exists.",
+			}),
+		).rejects.toThrow("parent_completion_candidate");
 		await harness.runtime.recordFailedCompletionVerification(created.goal.id, "Missing tarball evidence", {
 			structuredFeedback: {
 				summary: "Missing evidence",
@@ -869,6 +877,14 @@ describe("goal runtime", () => {
 		expect(harness.getState()?.goal.verificationRepair?.feedback).toBe("Missing tarball evidence");
 		expect(harness.getState()?.runMode).toBe("awaiting-verification-repair");
 
+		await expect(
+			harness.runtime.startTarget({
+				title: "Repair stale blocker",
+				desiredFutureClaim: "Stale blocker evidence is current.",
+				closureStandard: "Current evidence is recorded.",
+				linkedVerifierBlockerIds: ["old-tarball-evidence"],
+			}),
+		).rejects.toThrow("stale verifier blocker ids");
 		await harness.runtime.startTarget({
 			title: "Repair tarball evidence",
 			desiredFutureClaim: "Tarball install evidence is current.",
@@ -895,6 +911,86 @@ describe("goal runtime", () => {
 		expect(repaired.goal.verificationRepair).toBeUndefined();
 		expect(repaired.goal.failedCompletionAttempts).toBeUndefined();
 		expect(repaired.runMode).toBe("awaiting-checkpoint-resolution");
+	});
+
+	it("keeps verifier repair open until every current blocker has repair evidence", async () => {
+		const harness = createHarness();
+		const created = await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.recordFailedCompletionVerification(created.goal.id, "Missing release evidence", {
+			structuredFeedback: {
+				summary: "Missing evidence",
+				score: 2,
+				deliverableResults: [],
+				evidenceChecked: [],
+				completionBlockers: [
+					{
+						id: "source-evidence",
+						severity: "blocking",
+						problem: "Source install evidence missing.",
+						requiredEvidenceOrFix: "Run source install smoke.",
+					},
+					{
+						id: "tarball-evidence",
+						severity: "blocking",
+						problem: "Tarball install evidence missing.",
+						requiredEvidenceOrFix: "Run tarball install smoke.",
+					},
+				],
+			},
+		});
+		const repairAttemptId = harness.getState()?.goal.verificationRepair?.verificationAttemptId;
+		if (!repairAttemptId) throw new Error("expected repair attempt id");
+
+		await harness.runtime.startTarget({
+			title: "Repair source evidence",
+			desiredFutureClaim: "Source install evidence is current.",
+			closureStandard: "A current source install smoke result is recorded.",
+			linkedVerifierBlockerIds: ["source-evidence"],
+		});
+		const repairCandidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Source smoke evidence was collected.",
+			localClaims: ["Source install evidence is current"],
+			evidence: [
+				{ claim: "Source install evidence is current", evidence: "Observed source smoke output", current: true },
+			],
+			notClaimed: ["Parent goal is complete"],
+			remainingQuestions: ["Which verifier blocker remains?"],
+		});
+		const partiallyRepaired = await harness.runtime.commitCheckpoint(repairCandidate, {
+			status: "accepted",
+			feedback: "One repair target closed with evidence.",
+			evidenceChecked: repairCandidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+		expect(partiallyRepaired.goal.failedCompletionAttempts).toBe(1);
+		expect(partiallyRepaired.goal.verificationRepair?.blockers.map(blocker => blocker.id)).toEqual([
+			"tarball-evidence",
+		]);
+		await expect(
+			harness.runtime.recordCheckpointResolution({
+				checkpointId: repairCandidate.id,
+				decision: "parent_completion_candidate",
+				parentReading: "Only one blocker was repaired.",
+				notPropagated: ["Parent goal is complete"],
+				remainingParentWork: ["Repair tarball blocker"],
+			}),
+		).rejects.toThrow("verifier blockers have fresh repair evidence");
+		const nextRepair = await harness.runtime.recordCheckpointResolution({
+			checkpointId: repairCandidate.id,
+			decision: "next_target",
+			parentReading: "Tarball blocker still needs repair.",
+			notPropagated: ["Parent goal is complete"],
+			remainingParentWork: ["Repair tarball blocker"],
+			nextTarget: {
+				title: "Repair tarball evidence",
+				desiredFutureClaim: "Tarball install evidence is current.",
+				closureStandard: "A current tarball install smoke result is recorded.",
+				linkedVerifierBlockerIds: ["tarball-evidence"],
+			},
+		});
+		expect(nextRepair.goal.currentTarget?.createdFromVerificationAttemptId).toBe(repairAttemptId);
 	});
 
 	it("rejects stale side-agent output when state, target, checkpoint, or parent frame changes", async () => {
@@ -958,7 +1054,7 @@ describe("goal runtime", () => {
 		expect(harness.runtime.canCommitSideAgentResult(checkpointExpectation)).toBe(false);
 	});
 
-	it("renders prompt guardrails for checkpoint and verifier-repair run modes", () => {
+	it("renders prompt guardrails for checkpoint, parent-completion, and verifier-repair run modes", () => {
 		const goal = createGoal({ objective: "Improve release reliability", rubric: "Do the whole goal." });
 		const checkpointState = createGoalModeState({
 			goal: createGoal({
@@ -966,6 +1062,10 @@ describe("goal runtime", () => {
 				pendingCheckpointId: "checkpoint-1",
 			}),
 			runMode: "awaiting-checkpoint-resolution",
+		});
+		const parentCompletionState = createGoalModeState({
+			goal,
+			runMode: "awaiting-parent-completion",
 		});
 		const repairState = createGoalModeState({
 			goal: createGoal({
@@ -985,6 +1085,9 @@ describe("goal runtime", () => {
 
 		expect(renderGoalPrompt("active", goal, createGoalModeState({ goal }))).toContain("start_target");
 		expect(renderGoalPrompt("continuation", checkpointState.goal, checkpointState)).toContain("resolve_checkpoint");
+		expect(renderGoalPrompt("continuation", parentCompletionState.goal, parentCompletionState)).toContain(
+			'Call `goal({op:"complete"})` now',
+		);
 		expect(renderGoalPrompt("continuation", repairState.goal, repairState)).toContain("Do not retry");
 		expect(systemPromptTemplate).toContain("Goal mode exception");
 		expect(systemPromptTemplate).toContain("It is not parent completion");

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal, GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { cloneGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
@@ -278,6 +279,62 @@ describe("GoalTool", () => {
 				},
 			}).success,
 		).toBe(false);
+		const emptyNextTargetParentCandidate = {
+			op: "resolve_checkpoint",
+			checkpoint_id: "checkpoint-1",
+			decision: "parent_completion_candidate",
+			parent_reading: "Ready for verifier.",
+			not_propagated: [],
+			remaining_parent_work: [],
+			next_target: {
+				title: "",
+				desired_future_claim: "",
+				closure_standard: "",
+				baseline_refs: [],
+				gate_refs: [],
+				evidence_expectation: [],
+				non_goals: [],
+				forbidden_claims: [],
+				stale_if: [],
+				linked_verifier_blocker_ids: [],
+			},
+		};
+		expect(tool.parameters.safeParse(emptyNextTargetParentCandidate).success).toBe(true);
+		expect(
+			tool.parameters.safeParse({
+				...emptyNextTargetParentCandidate,
+				next_target: {},
+			}).success,
+		).toBe(true);
+		const pollutedParentCandidate = {
+			...emptyNextTargetParentCandidate,
+			objective: "",
+			status: "",
+			summary: "",
+		};
+		const validatedPollutedParentCandidate = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-polluted-parent-candidate",
+			name: "goal",
+			arguments: pollutedParentCandidate,
+		}) as { op: string };
+		expect(validatedPollutedParentCandidate.op).toBe("resolve_checkpoint");
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-non-empty-parent-candidate",
+				name: "goal",
+				arguments: {
+					op: "resolve_checkpoint",
+					checkpoint_id: "checkpoint-1",
+					decision: "parent_completion_candidate",
+					parent_reading: "Ready for verifier.",
+					not_propagated: [],
+					remaining_parent_work: [],
+					next_target: { objective: "Do more work" },
+				},
+			}),
+		).toThrow("next_target");
 		expect(
 			tool.parameters.safeParse({
 				op: "checkpoint",

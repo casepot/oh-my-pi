@@ -1128,7 +1128,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const repairCheckpointId = repairCheckpoint.details?.checkpoint?.id;
 		if (!repairCheckpointId) throw new Error("expected repair checkpoint id");
 		expect(harness.session.getGoalModeState()?.goal.verificationRepair).toBeUndefined();
-		await goalTool.execute("repair-resolution", {
+		const repairResolution = await goalTool.execute("repair-resolution", {
 			op: "resolve_checkpoint",
 			checkpoint_id: repairCheckpointId,
 			decision: "parent_completion_candidate",
@@ -1136,6 +1136,10 @@ describe("InteractiveMode goal mode integration", () => {
 			not_propagated: ["Parent goal is complete without verifier acceptance"],
 			remaining_parent_work: ["Run parent completion verifier."],
 		});
+		expect(repairResolution.details?.state?.runMode).toBe("awaiting-parent-completion");
+		const parentCompletionDispatch = await harness.session.prepareGoalContinuationDispatch();
+		expect(parentCompletionDispatch?.kind).toBe("parent-completion");
+		expect(parentCompletionDispatch?.prompt).toContain('goal({op:"complete"})');
 		goalSideAgentMock.completionStatus = "verified";
 		goalSideAgentMock.feedback = "Verifier accepted the repaired release-reliability evidence.";
 		const finalCompletion = await goalTool.execute("complete-after-repair", { op: "complete" });

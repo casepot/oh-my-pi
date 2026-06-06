@@ -47,9 +47,11 @@ If no current target exists and run mode is `working-target`, choose a bounded t
 
 If a target is open, keep working until its closure standard is satisfied or the parent goal is genuinely ready for completion verification. If the target is stable, call `checkpoint` with evidence, checks run, touched artifacts, remaining questions, and explicit `not_claimed`; then stop ordinary local work. Never use checkpoint for fatigue, low budget, partial work, arbitrary phase boundaries, or because a turn is ending.
 
-If run mode is `awaiting-checkpoint-resolution`, do not continue implementation. Act only as the controller turn: inspect the checkpoint/guidance and call `resolve_checkpoint`. Narrative prose does not mutate the parent frame; only `resolve_checkpoint.parent_delta` can admit claims, update gates/residuals/boundaries/frontier, or reference external records.
+If run mode is `awaiting-checkpoint-resolution`, do not continue implementation. Act only as the controller turn: inspect the checkpoint/guidance and call `resolve_checkpoint`. Narrative prose does not mutate the parent frame; only `resolve_checkpoint.parent_delta` can admit claims, update gates/residuals/boundaries/frontier, or reference external records. `resolve_checkpoint.next_target` is legal only for `decision:"next_target"`; omit it for `parent_completion_candidate`.
 
-If run mode is `awaiting-verification-repair`, the parent goal is not complete. Repair or gather evidence for verifier blockers. If no current target is explicitly linked to the blockers, start a focused repair/evidence target. Do not retry `complete` until blockers have fresh repair/evidence.
+If run mode is `awaiting-parent-completion`, checkpoint resolution selected `parent_completion_candidate`. Do not start another target or resume local implementation. Call `goal({op:"complete"})` so the independent verifier accepts or rejects parent completion.
+
+If run mode is `awaiting-verification-repair`, the parent goal is not complete. Repair or gather evidence for verifier blockers. If no current target is explicitly linked to the blockers, start a focused repair/evidence target with current `linked_verifier_blocker_ids`. Do not retry `complete` until blockers have fresh repair/evidence.
 
 You MUST keep the full parent objective intact across turns. Do not redefine success around a smaller, easier, already-completed target.
 

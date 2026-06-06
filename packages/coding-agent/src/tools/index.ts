@@ -375,20 +375,22 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 
 export type ToolName = keyof typeof BUILTIN_TOOLS;
 
-const GOAL_CHECKPOINT_ALLOWED_TOOLS = new Set(["goal", "yield"]);
+const GOAL_CONTROL_ALLOWED_TOOLS: Record<string, true> = { goal: true, yield: true };
 const kGoalRunModeGuard: unique symbol = Symbol("GoalRunModeGuard");
 
 type GoalRunModeGuardedTool = AgentTool & { [kGoalRunModeGuard]?: true };
 
-function isBlockedByPendingGoalCheckpoint(session: ToolSession, toolName: string): boolean {
-	if (GOAL_CHECKPOINT_ALLOWED_TOOLS.has(toolName)) return false;
+function goalRunModeBlockMessage(session: ToolSession, toolName: string): string | undefined {
+	if (GOAL_CONTROL_ALLOWED_TOOLS[toolName]) return undefined;
 	const state = session.getGoalModeState?.();
-	return (
-		state?.enabled === true &&
-		state.goal.status === "active" &&
-		state.runMode === "awaiting-checkpoint-resolution" &&
-		state.goal.pendingCheckpointId !== undefined
-	);
+	if (state?.enabled !== true || state.goal.status !== "active") return undefined;
+	if (state.runMode === "awaiting-checkpoint-resolution" && state.goal.pendingCheckpointId !== undefined) {
+		return 'Goal checkpoint is pending resolution; ordinary tool work is blocked until goal({ op: "resolve_checkpoint", ... }) records the controller decision.';
+	}
+	if (state.runMode === "awaiting-parent-completion") {
+		return 'Goal parent completion verification is pending; ordinary tool work is blocked until goal({ op: "complete" }) runs the verifier.';
+	}
+	return undefined;
 }
 
 function wrapToolWithGoalRunModeGuard<T extends Tool>(tool: T, session: ToolSession): T {
@@ -410,10 +412,9 @@ function wrapToolWithGoalRunModeGuard<T extends Tool>(tool: T, session: ToolSess
 				onUpdate?: AgentToolUpdateCallback,
 				context?: AgentToolContext,
 			): Promise<AgentToolResult> {
-				if (isBlockedByPendingGoalCheckpoint(session, this.name)) {
-					throw new Error(
-						'Goal checkpoint is pending resolution; ordinary tool work is blocked until goal({ op: "resolve_checkpoint", ... }) records the controller decision.',
-					);
+				const goalBlockMessage = goalRunModeBlockMessage(session, this.name);
+				if (goalBlockMessage) {
+					throw new Error(goalBlockMessage);
 				}
 				return await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
 			},

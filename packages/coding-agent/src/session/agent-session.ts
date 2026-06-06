@@ -4530,7 +4530,12 @@ export class AgentSession {
 
 	async prepareGoalContinuationDispatch(signal?: AbortSignal): Promise<
 		| {
-				kind: "ordinary" | "checkpoint-resolution" | "verification-repair" | "post-compaction";
+				kind:
+					| "ordinary"
+					| "checkpoint-resolution"
+					| "parent-completion"
+					| "verification-repair"
+					| "post-compaction";
 				customType: string;
 				prompt: string;
 		  }
@@ -4546,6 +4551,12 @@ export class AgentSession {
 			const latest = this.#goalModeState;
 			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
 			return { kind: "checkpoint-resolution", customType: "goal-checkpoint-resolution", prompt: promptText };
+		}
+		if (state.runMode === "awaiting-parent-completion") {
+			const promptText = this.#prepareGoalParentCompletionPrompt(state);
+			const latest = this.#goalModeState;
+			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
+			return { kind: "parent-completion", customType: "goal-parent-completion", prompt: promptText };
 		}
 		if (state.runMode === "awaiting-verification-repair") {
 			const promptText = await this.#prepareGoalVerificationRepairPrompt(state, signal);
@@ -4893,6 +4904,26 @@ export class AgentSession {
 			basePrompt,
 			continuationMessage: [
 				output.continuationMessage,
+				"<goal_continuation_packet>",
+				JSON.stringify(packet, null, 2),
+				"</goal_continuation_packet>",
+			].join("\n"),
+		});
+	}
+
+	#prepareGoalParentCompletionPrompt(state: GoalModeState): string {
+		const memo =
+			'Checkpoint resolution selected `parent_completion_candidate`. Call `goal({op:"complete"})` now so the parent completion verifier decides. Do not start another target or continue local implementation unless completion verification rejects and goal mode enters verifier repair.';
+		const packet = buildGoalContinuationPacket(
+			state,
+			"parent-completion-candidate",
+			"Checkpoint resolution selected parent_completion_candidate.",
+			memo,
+		);
+		return renderPreparedGoalContinuation({
+			basePrompt: renderGoalPrompt("continuation", state.goal, state),
+			continuationMessage: [
+				memo,
 				"<goal_continuation_packet>",
 				JSON.stringify(packet, null, 2),
 				"</goal_continuation_packet>",
@@ -8097,6 +8128,10 @@ export class AgentSession {
 			transition = "target-checkpoint";
 			reason = "Context compaction occurred while an accepted target checkpoint is awaiting controller resolution.";
 			guidance = "Prepare checkpoint guidance and require resolve_checkpoint before local implementation resumes.";
+		} else if (state.runMode === "awaiting-parent-completion") {
+			transition = "parent-completion-candidate";
+			reason = "Context compaction occurred after checkpoint resolution selected parent completion verification.";
+			guidance = 'Call goal({ op: "complete" }) next; do not resume local implementation first.';
 		} else if (state.runMode === "awaiting-verification-repair") {
 			transition = "verification-rejected";
 			reason = "Context compaction occurred while verifier blockers are awaiting repair.";
