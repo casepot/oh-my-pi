@@ -1,22 +1,183 @@
 /**
  * RPC protocol types for headless operation.
  *
- * Commands are sent as JSON lines on stdin.
- * Responses and events are emitted as JSON lines on stdout.
+ * The wire protocol is NDJSON over stdio. Types in this file intentionally
+ * describe protocol-only payloads so embedders can import them without pulling
+ * the runtime server/client implementation into their program.
  */
-import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Effort, ImageContent, Model } from "@oh-my-pi/pi-ai";
-import type { BashResult } from "../../exec/bash-executor";
-import type { ContextUsage } from "../../extensibility/extensions/types";
-import type { SessionStats } from "../../session/agent-session";
+import type { AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import type { SessionEntry, SessionTreeNode } from "../../session/session-manager";
+import type { AgentProgress } from "../../task";
 import type { TodoPhase } from "../../tools/todo-write";
+
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
+
+// ============================================================================
+// Protocol identity and metadata
+// ============================================================================
+
+export const RPC_PROTOCOL_NAME = "omp-rpc";
+export const RPC_PROTOCOL_VERSION = "1.1.0";
+export const RPC_SCHEMA_VERSION = 1;
+
+export type RpcMode = "rpc" | "rpc-ui";
+
+export interface RpcProtocolIdentity {
+	name: typeof RPC_PROTOCOL_NAME;
+	version: typeof RPC_PROTOCOL_VERSION;
+	schemaVersion: typeof RPC_SCHEMA_VERSION;
+}
+
+export interface RpcServerInfo {
+	packageName: "@oh-my-pi/pi-coding-agent";
+	packageVersion: string;
+	pid: number;
+}
+
+export interface RpcCapabilities {
+	commands: string[];
+	events: string[];
+	frameMetadata: true;
+	operationEvents: true;
+	typedErrors: true;
+	stateChanges: true;
+	sessionGraph: true;
+	taskEvents: true;
+	observableSessions: true;
+	extensionUi: true;
+	hostTools: true;
+	hostUris: true;
+	chunkedPayloads: boolean;
+	oneShot: true;
+	heartbeat: true;
+}
+
+export interface RpcLimits {
+	maxFrameBytes: number;
+	maxPartialLineBytes: number;
+	maxOutboundFrameBytes: number;
+	maxHostToolResultBytes: number;
+	maxHostToolUpdateBytes: number;
+	maxHostUriContentBytes: number;
+	maxSessionEntryContentBytes: number;
+	maxUiPayloadBytes: number;
+	defaultOperationTimeoutMs: number | null;
+	defaultHostToolTimeoutMs: number | null;
+	defaultHostUriTimeoutMs: number | null;
+	defaultExtensionUiTimeoutMs: number;
+}
+
+export interface RpcResetProfileSettingOverride {
+	path: string;
+	source: string;
+	valueKind: "boolean" | "number" | "string" | "array" | "object" | "null";
+}
+
+export interface RpcResetProfile {
+	name: string;
+	ambientUserConfigApplied: boolean;
+	settingOverrides: RpcResetProfileSettingOverride[];
+}
+
+export interface RpcSecurityProfile {
+	enabledCommandCategories: string[];
+	disabledTools: string[];
+	hostToolPermissionMode: "host-owned" | "disabled";
+	hostUriAllowedSchemes: string[];
+	hostUriReservedSchemes: string[];
+	bash: {
+		enabled: boolean;
+		cwd: string | null;
+		rootPolicy: "session-cwd" | "unknown";
+	};
+	sessionMutation: boolean;
+	loginProviders: string[];
+	extensionsEnabled: boolean;
+	redactionPolicy: string;
+}
+
+export interface RpcProtocolInfo {
+	protocol: RpcProtocolIdentity;
+	server: RpcServerInfo;
+	mode: RpcMode;
+	capabilities: RpcCapabilities;
+	limits: RpcLimits;
+	resetProfile: RpcResetProfile;
+	security: RpcSecurityProfile;
+}
+
+export interface RpcFrameMetadata {
+	seq: number;
+	timestamp: string;
+	sessionId: string | null;
+}
+
+export interface RpcCorrelation {
+	requestId?: string;
+	operationId?: string;
+	turnId?: string;
+	messageId?: string;
+	toolCallId?: string;
+	taskRunId?: string;
+	subagentId?: string;
+	hostRequestId?: string;
+	uiRequestId?: string;
+	stateSeq?: number;
+}
+
+export type RpcErrorCode =
+	| "invalid_json"
+	| "invalid_frame"
+	| "invalid_command"
+	| "unknown_command"
+	| "invalid_arguments"
+	| "unsupported_capability"
+	| "operation_not_found"
+	| "operation_cancelled"
+	| "operation_timeout"
+	| "peer_closed"
+	| "host_tool_not_found"
+	| "host_tool_timeout"
+	| "host_tool_failed"
+	| "host_tool_too_large"
+	| "host_uri_scheme_not_found"
+	| "host_uri_denied"
+	| "host_uri_too_large"
+	| "extension_ui_timeout"
+	| "model_not_found"
+	| "session_not_found"
+	| "internal_error";
+
+export interface RpcErrorInfo {
+	code: RpcErrorCode;
+	message: string;
+	details?: JsonObject;
+	retryable: boolean;
+}
+
+export interface RpcLargeContentRef {
+	kind: "artifact";
+	uri: string;
+	bytes: number;
+	preview: string;
+}
 
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
 
 export type RpcCommand =
+	// Protocol / transport
+	| { id?: string; type: "get_protocol_info" }
+	| { id?: string; type: "get_state" }
+	| { id?: string; type: "ping"; payload?: JsonValue }
+	| { id?: string; type: "cancel_operation"; operationId: string }
+	| { id?: string; type: "shutdown"; reason?: string }
+	| { id?: string; type: "shutdown_after"; command: RpcCommand }
+
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
@@ -25,11 +186,14 @@ export type RpcCommand =
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
-	// State
-	| { id?: string; type: "get_state" }
+	// State / host extension registration
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
+	| { id?: string; type: "add_host_tools"; tools: RpcHostToolDefinition[] }
+	| { id?: string; type: "remove_host_tools"; toolNames: string[] }
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
+	| { id?: string; type: "add_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
+	| { id?: string; type: "remove_host_uri_schemes"; schemes: string[] }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -66,164 +230,319 @@ export type RpcCommand =
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
 	| { id?: string; type: "handoff"; customInstructions?: string }
-
-	// Messages
 	| { id?: string; type: "get_messages" }
+	| {
+			id?: string;
+			type: "get_session_entries";
+			offset?: number;
+			limit?: number;
+			entryTypes?: string[];
+			includeContent?: boolean;
+	  }
+	| { id?: string; type: "get_session_tree"; includeEntries?: boolean }
+	| { id?: string; type: "get_observable_sessions" }
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
 	| { id?: string; type: "login"; providerId: string };
 
+export type RpcCommandType = RpcCommand["type"];
+
 // ============================================================================
-// RPC State
+// RPC State / sessions / operations
 // ============================================================================
 
+export type RpcOperationStatus =
+	| "running"
+	| "completed"
+	| "failed"
+	| "cancelled"
+	| "rejected"
+	| "superseded"
+	| "peer_closed";
+
+export interface RpcOperationSnapshot {
+	operationId: string;
+	command: string;
+	requestId?: string;
+	turnId?: string;
+	status: RpcOperationStatus;
+	startedAt: string;
+	endedAt?: string;
+	cancelRequestedAt?: string;
+	errorInfo?: RpcErrorInfo;
+}
+
 export interface RpcSessionState {
-	model?: Model;
+	stateSeq: number;
+	protocol: RpcProtocolIdentity;
+	capabilities: RpcCapabilities;
+	limits: RpcLimits;
+	resetProfile: RpcResetProfile;
+	security: RpcSecurityProfile;
+	activeOperations: RpcOperationSnapshot[];
+	model: Model | undefined;
 	thinkingLevel: ThinkingLevel | undefined;
 	isStreaming: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	interruptMode: "immediate" | "wait";
-	sessionFile?: string;
+	sessionFile: string | undefined;
 	sessionId: string;
 	sessionName?: string;
 	autoCompactionEnabled: boolean;
+	autoRetryEnabled: boolean;
 	messageCount: number;
 	queuedMessageCount: number;
 	todoPhases: TodoPhase[];
-	/** For session dump / export (plain-text parity with /dump). */
-	systemPrompt?: string[];
+	systemPrompt?: string | string[];
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown }>;
-	/** Current context window usage. Null tokens/percent when unknown (e.g. right after compaction). */
-	contextUsage?: ContextUsage;
+	contextUsage?: unknown;
+	hostTools: RpcHostToolDefinition[];
+	hostUriSchemes: RpcHostUriSchemeDefinition[];
 }
 
 export interface RpcHandoffResult {
 	savedPath?: string;
 }
 
+export interface RpcOperationAck {
+	ack: "accepted";
+	operationId: string;
+	turnId?: string;
+	queued: boolean;
+}
+
+export interface RpcSessionEntryView {
+	id: string;
+	parentId: string | null;
+	type: string;
+	timestamp: string;
+	label?: string;
+	preview?: string;
+	entry?: SessionEntry;
+	contentRef?: RpcLargeContentRef;
+}
+
+export interface RpcSessionTreeNodeView {
+	id: string;
+	parentId: string | null;
+	type: string;
+	label?: string;
+	timestamp: string;
+	children: RpcSessionTreeNodeView[];
+	entry?: RpcSessionEntryView;
+}
+
+export interface RpcObservableSessionView {
+	id: string;
+	parentId?: string;
+	sessionFile?: string;
+	label?: string;
+	status: string;
+	agentType?: string;
+	summary?: string;
+	startedAt?: string;
+	updatedAt?: string;
+}
+
 // ============================================================================
-// RPC Responses (stdout)
+// RPC Responses and stdout frames
 // ============================================================================
 
-// Success responses with data
 export type RpcResponse =
-	// Prompting (async - events follow)
-	| { id?: string; type: "response"; command: "prompt"; success: true }
-	| { id?: string; type: "response"; command: "steer"; success: true }
-	| { id?: string; type: "response"; command: "follow_up"; success: true }
-	| { id?: string; type: "response"; command: "abort"; success: true }
-	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
-	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
-
-	// State
-	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
-	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
-	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
-	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
-
-	// Model
-	| {
+	| (Partial<RpcFrameMetadata> & {
 			id?: string;
 			type: "response";
-			command: "set_model";
+			command: string;
 			success: true;
-			data: Model;
-	  }
-	| {
+			data?: unknown;
+	  })
+	| (Partial<RpcFrameMetadata> & {
 			id?: string;
 			type: "response";
-			command: "cycle_model";
-			success: true;
-			data: { model: Model; thinkingLevel: ThinkingLevel | undefined; isScoped: boolean } | null;
-	  }
-	| {
-			id?: string;
-			type: "response";
-			command: "get_available_models";
-			success: true;
-			data: { models: Model[] };
-	  }
+			command: string;
+			success: false;
+			error: string;
+			errorInfo: RpcErrorInfo;
+	  });
 
-	// Thinking
-	| { id?: string; type: "response"; command: "set_thinking_level"; success: true }
-	| {
-			id?: string;
-			type: "response";
-			command: "cycle_thinking_level";
-			success: true;
-			data: { level: Effort } | null;
-	  }
+export type RpcReadyFrame = RpcFrameMetadata & { type: "ready" } & RpcProtocolInfo;
 
-	// Queue modes
-	| { id?: string; type: "response"; command: "set_steering_mode"; success: true }
-	| { id?: string; type: "response"; command: "set_follow_up_mode"; success: true }
-	| { id?: string; type: "response"; command: "set_interrupt_mode"; success: true }
+export type RpcProtocolErrorFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "protocol_error";
+		error: string;
+		errorInfo: RpcErrorInfo;
+	};
 
-	// Compaction
-	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
-	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
+export type RpcTransportWarningFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "transport_warning";
+		warning: string;
+		details?: JsonObject;
+	};
 
-	// Retry
-	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
-	| { id?: string; type: "response"; command: "abort_retry"; success: true }
+export type RpcOperationStartFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "operation_start";
+		operationId: string;
+		command: string;
+		requestId?: string;
+		turnId?: string;
+		startedAt: string;
+	};
 
-	// Bash
-	| { id?: string; type: "response"; command: "bash"; success: true; data: BashResult }
-	| { id?: string; type: "response"; command: "abort_bash"; success: true }
+export type RpcOperationEndFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "operation_end";
+		operationId: string;
+		command: string;
+		status: Exclude<RpcOperationStatus, "running" | "failed" | "rejected">;
+		requestId?: string;
+		turnId?: string;
+		startedAt: string;
+		endedAt: string;
+		data?: unknown;
+	};
 
-	// Session
-	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
-	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
-	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
-	| { id?: string; type: "response"; command: "branch"; success: true; data: { text: string; cancelled: boolean } }
-	| {
-			id?: string;
-			type: "response";
-			command: "get_branch_messages";
-			success: true;
-			data: { messages: Array<{ entryId: string; text: string }> };
-	  }
-	| {
-			id?: string;
-			type: "response";
-			command: "get_last_assistant_text";
-			success: true;
-			data: { text: string | null };
-	  }
-	| { id?: string; type: "response"; command: "set_session_name"; success: true }
-	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
+export type RpcOperationErrorFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "operation_error";
+		operationId: string;
+		command: string;
+		status: "failed" | "cancelled" | "rejected" | "peer_closed";
+		requestId?: string;
+		turnId?: string;
+		startedAt: string;
+		endedAt: string;
+		error: string;
+		errorInfo: RpcErrorInfo;
+	};
 
-	// Messages
-	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
+export type RpcStateChangedFrame = RpcFrameMetadata & {
+	type: "state_changed";
+	stateSeq: number;
+	changed: string[];
+	state: RpcSessionState;
+};
 
-	// Login
-	| {
-			id?: string;
-			type: "response";
-			command: "get_login_providers";
-			success: true;
-			data: { providers: Array<{ id: string; name: string; available: boolean; authenticated: boolean }> };
-	  }
-	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
+export type RpcTaskProgressFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "task_progress";
+		schemaVersion: 1;
+		taskRunId: string;
+		toolCallId?: string;
+		subagentId?: string;
+		parentTaskRunId?: string;
+		agents: RpcTaskAgentProgress[];
+	};
 
-	// Error response (any command can fail)
-	| { id?: string; type: "response"; command: string; success: false; error: string };
+export interface RpcTaskAgentProgress {
+	id: string;
+	parentId: string | null;
+	index: number;
+	agentType: string;
+	description?: string;
+	status: AgentProgress["status"];
+	currentTool?: string;
+	preview?: string;
+	tokens: number;
+	contextTokens?: number;
+	contextWindow?: number;
+	outputRef?: RpcLargeContentRef;
+}
+
+export type RpcTaskResultFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "task_result";
+		schemaVersion: 1;
+		taskRunId: string;
+		toolCallId?: string;
+		subagentId?: string;
+		parentTaskRunId?: string;
+		results: RpcTaskResult[];
+	};
+
+export interface RpcTaskResult {
+	id: string;
+	parentId: string | null;
+	index: number;
+	agentType: string;
+	status: "completed" | "failed" | "aborted";
+	summary: string;
+	truncated: boolean;
+	outputRef?: RpcLargeContentRef;
+}
+
+export type RpcSubagentLifecycleFrame = RpcFrameMetadata &
+	RpcCorrelation & {
+		type: "subagent_lifecycle";
+		schemaVersion: 1;
+		subagentId: string;
+		parentSubagentId: string | null;
+		toolCallId?: string;
+		taskRunId?: string;
+		parentTaskRunId?: string;
+		status: "started" | "completed" | "failed" | "aborted";
+		agentType: string;
+		description?: string;
+		sessionFile?: string;
+		index: number;
+	};
+
+export type RpcObservableSessionUpdateFrame = RpcFrameMetadata & {
+	type: "observable_session_update";
+	schemaVersion: 1;
+	sessions: RpcObservableSessionView[];
+};
+
+export type RpcHeartbeatFrame = RpcFrameMetadata & { type: "heartbeat" };
+export type RpcPongFrame = RpcFrameMetadata & { type: "pong"; payload?: JsonValue };
+export type RpcShutdownFrame = RpcFrameMetadata & {
+	type: "shutdown";
+	reason: string;
+	status: "graceful" | "peer_closed" | "one_shot_complete";
+};
 
 // ============================================================================
-// Extension UI Events (stdout)
+// Extension UI Events (stdout) and responses (stdin)
 // ============================================================================
 
-/** Emitted when an extension needs user input */
+export type RpcExtensionUIResponseSchema =
+	| { kind: "string"; nullable?: boolean }
+	| { kind: "boolean" }
+	| { kind: "cancel" }
+	| { kind: "none" };
+
 export type RpcExtensionUIRequest =
-	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
-	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "select";
+			expectsResponse: true;
+			responseSchema: RpcExtensionUIResponseSchema;
+			title: string;
+			options: string[];
+			timeout?: number;
+	  }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "confirm";
+			expectsResponse: true;
+			responseSchema: RpcExtensionUIResponseSchema;
+			title: string;
+			message: string;
+			timeout?: number;
+	  }
 	| {
 			type: "extension_ui_request";
 			id: string;
 			method: "input";
+			expectsResponse: true;
+			responseSchema: RpcExtensionUIResponseSchema;
 			title: string;
 			placeholder?: string;
 			timeout?: number;
@@ -232,15 +551,19 @@ export type RpcExtensionUIRequest =
 			type: "extension_ui_request";
 			id: string;
 			method: "editor";
+			expectsResponse: true;
+			responseSchema: RpcExtensionUIResponseSchema;
 			title: string;
 			prefill?: string;
 			promptStyle?: boolean;
+			timeout?: number;
 	  }
-	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
+	| { type: "extension_ui_request"; id: string; method: "cancel"; expectsResponse: false; targetId: string }
 	| {
 			type: "extension_ui_request";
 			id: string;
 			method: "notify";
+			expectsResponse: false;
 			message: string;
 			notifyType?: "info" | "warning" | "error";
 	  }
@@ -248,24 +571,49 @@ export type RpcExtensionUIRequest =
 			type: "extension_ui_request";
 			id: string;
 			method: "setStatus";
+			expectsResponse: false;
 			statusKey: string;
-			statusText: string | undefined;
+			statusText?: string;
 	  }
 	| {
 			type: "extension_ui_request";
 			id: string;
 			method: "setWidget";
+			expectsResponse: false;
 			widgetKey: string;
-			widgetLines: string[] | undefined;
-			widgetPlacement?: "aboveEditor" | "belowEditor";
+			widgetLines?: string[];
+			widgetPlacement?: "header" | "footer" | "aboveEditor" | "belowEditor";
 	  }
-	| { type: "extension_ui_request"; id: string; method: "setTitle"; title: string }
-	| { type: "extension_ui_request"; id: string; method: "set_editor_text"; text: string }
-	| { type: "extension_ui_request"; id: string; method: "open_url"; url: string; instructions?: string };
+	| { type: "extension_ui_request"; id: string; method: "setTitle"; expectsResponse: false; title: string }
+	| { type: "extension_ui_request"; id: string; method: "set_editor_text"; expectsResponse: false; text: string }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "open_url";
+			expectsResponse: false;
+			url: string;
+			instructions?: string;
+	  };
+
+export type RpcExtensionUIResponse =
+	| { type: "extension_ui_response"; id: string; value: string }
+	| { type: "extension_ui_response"; id: string; confirmed: boolean }
+	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
+
+export type RpcExtensionErrorFrame = RpcFrameMetadata & {
+	type: "extension_error";
+	extensionPath: string;
+	event: string;
+	error: string;
+	errorInfo?: RpcErrorInfo;
+};
 
 // ============================================================================
 // Host Tool Frames (bidirectional)
 // ============================================================================
+
+export type RpcSideEffectClass = "none" | "read" | "write" | "network" | "process" | "unknown";
+export type RpcTrustClass = "host" | "workspace" | "user-approved" | "untrusted";
 
 export interface RpcHostToolDefinition {
 	name: string;
@@ -273,37 +621,60 @@ export interface RpcHostToolDefinition {
 	description: string;
 	parameters: Record<string, unknown>;
 	hidden?: boolean;
+	sideEffectClass?: RpcSideEffectClass;
+	trustClass?: RpcTrustClass;
+	display?: { title?: string; description?: string; icon?: string };
+	inputSizeHintBytes?: number;
+	outputSizeHintBytes?: number;
+	defaultTimeoutMs?: number | null;
+	maxResultBytes?: number;
+	maxUpdateBytes?: number;
 }
 
-/** Emitted by the RPC server when it needs the host to execute a registered tool. */
 export interface RpcHostToolCallRequest {
 	type: "host_tool_call";
 	id: string;
 	toolCallId: string;
 	toolName: string;
 	arguments: Record<string, unknown>;
+	metadata?: Pick<
+		RpcHostToolDefinition,
+		"sideEffectClass" | "trustClass" | "display" | "inputSizeHintBytes" | "outputSizeHintBytes"
+	>;
+	deadlineMs?: number;
+	maxResultBytes: number;
+	maxUpdateBytes: number;
 }
 
-/** Emitted by the RPC server when a pending host tool call should be aborted. */
 export interface RpcHostToolCancelRequest {
 	type: "host_tool_cancel";
 	id: string;
 	targetId: string;
+	expectsAck?: boolean;
+	errorInfo?: RpcErrorInfo;
 }
 
-/** Sent by the host to stream partial tool updates back to the RPC server. */
+export interface RpcHostToolCancelAck {
+	type: "host_tool_cancel_ack";
+	id: string;
+	targetId: string;
+	accepted: boolean;
+	errorInfo?: RpcErrorInfo;
+}
+
 export interface RpcHostToolUpdate {
 	type: "host_tool_update";
 	id: string;
 	partialResult: AgentToolResult<unknown>;
 }
 
-/** Sent by the host to complete a pending tool call. */
 export interface RpcHostToolResult {
 	type: "host_tool_result";
 	id: string;
 	result: AgentToolResult<unknown>;
 	isError?: boolean;
+	errorInfo?: RpcErrorInfo;
+	contentRef?: RpcLargeContentRef;
 }
 
 // ============================================================================
@@ -311,68 +682,127 @@ export interface RpcHostToolResult {
 // ============================================================================
 
 export interface RpcHostUriSchemeDefinition {
-	/** URL scheme without trailing `://` (e.g. `db`, `notion`). */
 	scheme: string;
-	/** Optional human-readable description for logs/diagnostics. */
 	description?: string;
-	/** When true, the write tool is allowed to dispatch writes to this scheme. */
 	writable?: boolean;
-	/** When true, downstream callers suppress hashline anchors for resolved content. */
 	immutable?: boolean;
+	trustClass?: RpcTrustClass;
+	defaultTimeoutMs?: number | null;
+	maxContentBytes?: number;
+	contentTypes?: string[];
+	binary?: boolean;
+	range?: boolean;
 }
 
 export type RpcHostUriOperation = "read" | "write";
 
-/** Emitted by the RPC server when it needs the host to satisfy a URI operation. */
+export interface RpcHostUriRange {
+	start: number;
+	end?: number;
+	unit?: "line" | "byte";
+}
+
 export interface RpcHostUriRequest {
 	type: "host_uri_request";
 	id: string;
 	operation: RpcHostUriOperation;
 	url: string;
-	/** Present for write operations. */
 	content?: string;
+	contentLength?: number;
+	contentType?: string;
+	deadlineMs?: number;
+	maxContentBytes: number;
+	range?: RpcHostUriRange;
+	acceptsBase64?: boolean;
 }
 
-/** Emitted by the RPC server when a pending URI request should be aborted. */
 export interface RpcHostUriCancelRequest {
 	type: "host_uri_cancel";
 	id: string;
 	targetId: string;
+	expectsAck?: boolean;
+	errorInfo?: RpcErrorInfo;
 }
 
-/** Sent by the host to complete a pending URI request. */
+export interface RpcHostUriCancelAck {
+	type: "host_uri_cancel_ack";
+	id: string;
+	targetId: string;
+	accepted: boolean;
+	errorInfo?: RpcErrorInfo;
+}
+
 export interface RpcHostUriResult {
 	type: "host_uri_result";
 	id: string;
-	/**
-	 * Required for successful `read` results. Ignored for `write` success.
-	 * Set on errors when a textual explanation accompanies `isError`.
-	 */
 	content?: string;
-	/** Defaults to `text/plain` when omitted. */
-	contentType?: "text/markdown" | "application/json" | "text/plain";
-	/** Optional resolution notes propagated to the read tool. */
+	bytesBase64?: string;
+	contentType?: "text/markdown" | "application/json" | "text/plain" | string;
+	contentLength?: number;
+	contentRef?: RpcLargeContentRef;
 	notes?: string[];
-	/** Overrides the scheme-level `immutable` flag for this single resolution. */
 	immutable?: boolean;
-	/** When true, surface the result content as an error to the caller. */
 	isError?: boolean;
-	/** Optional error message; preferred over `content` for error surfacing. */
 	error?: string;
+	errorInfo?: RpcErrorInfo;
 }
 
-// ============================================================================
-// Extension UI Commands (stdin)
-// ============================================================================
+export type RpcExtensionUIRequestFrame = RpcFrameMetadata & RpcExtensionUIRequest;
+export type RpcHostToolCallRequestFrame = RpcFrameMetadata & RpcHostToolCallRequest;
+export type RpcHostToolCancelRequestFrame = RpcFrameMetadata & RpcHostToolCancelRequest;
+export type RpcHostUriRequestFrame = RpcFrameMetadata & RpcHostUriRequest;
+export type RpcHostUriCancelRequestFrame = RpcFrameMetadata & RpcHostUriCancelRequest;
 
-/** Response to an extension UI request */
-export type RpcExtensionUIResponse =
-	| { type: "extension_ui_response"; id: string; value: string }
-	| { type: "extension_ui_response"; id: string; confirmed: boolean }
-	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
+export type RpcNotificationFrame =
+	| RpcReadyFrame
+	| RpcProtocolErrorFrame
+	| RpcTransportWarningFrame
+	| RpcOperationStartFrame
+	| RpcOperationEndFrame
+	| RpcOperationErrorFrame
+	| RpcStateChangedFrame
+	| RpcTaskProgressFrame
+	| RpcTaskResultFrame
+	| RpcSubagentLifecycleFrame
+	| RpcObservableSessionUpdateFrame
+	| RpcHeartbeatFrame
+	| RpcPongFrame
+	| RpcShutdownFrame
+	| RpcExtensionUIRequestFrame
+	| RpcExtensionErrorFrame
+	| RpcHostToolCallRequestFrame
+	| RpcHostToolCancelRequestFrame
+	| RpcHostUriRequestFrame
+	| RpcHostUriCancelRequestFrame;
 
-// ============================================================================
-// Helper type for extracting command types
-// ============================================================================
+export type RpcFrame = RpcResponse | RpcNotificationFrame;
 
-export type RpcCommandType = RpcCommand["type"];
+export function isRpcResponseFrame(value: unknown): value is RpcResponse {
+	if (!value || typeof value !== "object") return false;
+	const frame = value as { type?: unknown; command?: unknown; success?: unknown; error?: unknown; id?: unknown };
+	if (frame.type !== "response") return false;
+	if (typeof frame.command !== "string") return false;
+	if (typeof frame.success !== "boolean") return false;
+	if (frame.id !== undefined && typeof frame.id !== "string") return false;
+	return frame.success || typeof frame.error === "string";
+}
+
+export function isRpcOperationTerminalFrame(value: unknown): value is RpcOperationEndFrame | RpcOperationErrorFrame {
+	if (!value || typeof value !== "object") return false;
+	const frame = value as { type?: unknown; operationId?: unknown };
+	return (frame.type === "operation_end" || frame.type === "operation_error") && typeof frame.operationId === "string";
+}
+
+export function flattenSessionTreeNodes(nodes: SessionTreeNode[]): SessionEntry[] {
+	const entries: SessionEntry[] = [];
+	const stack = [...nodes].reverse();
+	while (stack.length > 0) {
+		const node = stack.pop();
+		if (!node) continue;
+		entries.push(node.entry);
+		for (let index = node.children.length - 1; index >= 0; index--) {
+			stack.push(node.children[index]);
+		}
+	}
+	return entries;
+}

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added OMP RPC protocol v1.1 metadata, typed errors, operation lifecycle frames, state/session graph queries, task/subagent frames, host URI/tool hardening, schema/golden fixtures, one-shot probing, and dashboard/gateway integration docs.
 - Added project-aware skillsets that detect project facets from markers/globs, load JSON/YAML skillset definitions, activate session-local skill directories, and render compact Active Project Skillsets prompt metadata.
 - Added skillset `ruleDirectories` ingestion so active project skillsets can load flat `*.md` / `*.mdc` rule and TTSR packs with project/user path safety.
 - Added a built-in Rust skillset with a small project-gated native `rs-*` TTSR guardrail pack for generated Rust edits.
@@ -14,6 +15,7 @@
 
 ### Changed
 
+- Changed RPC long-running commands to ACK accepted operations and report completion/cancel/failure through correlated terminal operation frames while keeping legacy response fields.
 - Changed default capability discovery to a lean OMP profile: project-level provider configs remain discoverable, but user/home capability sources stay off unless `discovery.enableUserSources` is enabled.
 - Changed bundled default rules to use native source metadata and centralized `bucketRules` filtering.
 - Changed bundled Rust defaults from global interruptions into audited, strong-marker-gated Rust skillset rules.
@@ -25,6 +27,7 @@
 
 ### Fixed
 
+- Fixed RPC frame emission to go through a centralized stdout writer with monotonic metadata and bounded transport/error handling.
 - Fixed `ttsr.enabled: false` so it prevents TTSR registration and matching instead of only being stored in settings.
 - Fixed marketplace plugin discovery so OMP only loads plugins from OMP-owned registries or explicit `--plugin-dir` roots; Claude Code's `~/.claude/plugins/installed_plugins.json` is ignored.
 - Fixed workflow notices to describe the current session's spawn capabilities instead of recommending forbidden nested `agent()`/`task` calls.

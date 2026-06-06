@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { defineRpcClientTool, RpcClient } from "@oh-my-pi/pi-coding-agent/modes";
 import { RpcHostToolBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-tools";
+import { RPC_LIMITS } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-protocol";
 import type {
 	RpcHostToolCallRequest,
 	RpcHostToolCancelRequest,
@@ -112,6 +113,101 @@ describe("RpcHostToolBridge", () => {
 		});
 		await expect(execution).rejects.toThrow('Host tool "host_wait" was aborted');
 	});
+
+	it("adds and removes host tools incrementally without replacing unrelated registrations", () => {
+		const bridge = new RpcHostToolBridge(() => {});
+		bridge.setTools([
+			{
+				name: "alpha",
+				description: "Alpha",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+			},
+		]);
+
+		bridge.addTools([
+			{
+				name: "beta",
+				description: "Beta",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+			},
+		]);
+		expect(bridge.getToolNames()).toEqual(["alpha", "beta"]);
+
+		bridge.removeTools(["alpha"]);
+		expect(bridge.getToolNames()).toEqual(["beta"]);
+
+		bridge.setTools([
+			{
+				name: "gamma",
+				description: "Gamma",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+			},
+		]);
+		expect(bridge.getToolNames()).toEqual(["gamma"]);
+	});
+
+	it("rejects oversized host tool results with a typed error", async () => {
+		const frames: Array<RpcHostToolCallRequest | RpcHostToolCancelRequest> = [];
+		const bridge = new RpcHostToolBridge(frame => {
+			frames.push(frame);
+		});
+		const [tool] = bridge.setTools([
+			{
+				name: "tiny",
+				description: "Tiny result budget",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+				maxResultBytes: 32,
+			},
+		]);
+		const execution = tool.execute("toolu_tiny", {});
+		const request = frames[0];
+		if (request?.type !== "host_tool_call") throw new Error("Expected host_tool_call frame");
+
+		bridge.handleResult({
+			type: "host_tool_result",
+			id: request.id,
+			result: { content: [{ type: "text", text: "x".repeat(128) }] },
+		});
+
+		await expect(execution).rejects.toMatchObject({ errorInfo: { code: "host_tool_too_large" } });
+	});
+
+	it("rejects oversized outbound host tool requests before creating pending state", async () => {
+		const frames: Array<RpcHostToolCallRequest | RpcHostToolCancelRequest> = [];
+		const bridge = new RpcHostToolBridge(frame => {
+			frames.push(frame);
+		});
+		const [tool] = bridge.setTools([
+			{
+				name: "large-input",
+				description: "Rejects large input",
+				parameters: { type: "object", properties: {}, additionalProperties: true },
+			},
+		]);
+
+		await expect(
+			tool.execute("toolu_large", { payload: "x".repeat(RPC_LIMITS.maxOutboundFrameBytes) }),
+		).rejects.toMatchObject({
+			errorInfo: { code: "host_tool_too_large" },
+		});
+		expect(frames).toHaveLength(0);
+	});
+
+	it("rejects timed-out host tool calls with a typed deadline error", async () => {
+		const bridge = new RpcHostToolBridge(() => {});
+		const [tool] = bridge.setTools([
+			{
+				name: "deadline",
+				description: "Times out",
+				parameters: { type: "object", properties: {}, additionalProperties: false },
+				defaultTimeoutMs: 1,
+			},
+		]);
+
+		await expect(tool.execute("toolu_deadline", {})).rejects.toMatchObject({
+			errorInfo: { code: "host_tool_timeout" },
+		});
+	});
 });
 
 describe("RpcClient custom tools", () => {
@@ -153,7 +249,8 @@ function handle(frame) {
 		return;
 	}
 	if (frame.type === "prompt") {
-		write({ id: frame.id, type: "response", command: "prompt", success: true });
+		write({ id: frame.id, type: "response", command: "prompt", success: true, data: { ack: "accepted", operationId: "op_prompt" } });
+		write({ type: "operation_start", operationId: "op_prompt", command: "prompt", startedAt: new Date().toISOString() });
 		write({ type: "agent_start" });
 		write({
 			type: "host_tool_call",
@@ -182,6 +279,7 @@ function handle(frame) {
 			result: frame.result,
 			isError: frame.isError === true,
 		});
+		write({ type: "operation_end", operationId: "op_prompt", command: "prompt", status: "success", data: {}, startedAt: new Date().toISOString(), endedAt: new Date().toISOString() });
 		write({ type: "agent_end", messages: [] });
 	}
 }

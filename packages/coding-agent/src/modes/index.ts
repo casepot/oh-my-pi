@@ -12,22 +12,20 @@ export {
 	type ModelInfo,
 	RpcClient,
 	type RpcClientCustomTool,
+	type RpcClientHostUri,
+	type RpcClientHostUriContext,
 	type RpcClientOptions,
 	type RpcClientToolContext,
 	type RpcClientToolResult,
 	type RpcEventListener,
+	type RpcExtensionErrorListener,
+	type RpcProtocolErrorListener,
+	type RpcRawFrameListener,
+	type RpcSessionEventListener,
+	type RpcUnknownFrameListener,
 } from "./rpc/rpc-client";
 export { runRpcMode } from "./rpc/rpc-mode";
-export type {
-	RpcCommand,
-	RpcHostToolCallRequest,
-	RpcHostToolCancelRequest,
-	RpcHostToolDefinition,
-	RpcHostToolResult,
-	RpcHostToolUpdate,
-	RpcResponse,
-	RpcSessionState,
-} from "./rpc/rpc-types";
+export * from "./rpc/rpc-types";
 
 postmortem.register("terminal-restore", () => {
 	emergencyTerminalRestore();
