@@ -549,6 +549,42 @@ describe("RPC orchestration contract", () => {
 		expect(frameErrorInfo(terminals[0] ?? {}).code).toBe("operation_cancelled");
 	});
 
+	test("operation manager enforces lifecycle ordering for every long-running command family", async () => {
+		const commands = ["prompt", "follow_up", "abort_and_prompt", "compact", "login"] as const;
+		for (const command of commands) {
+			const frames: RpcFrameRecord[] = [];
+			const manager = new RpcOperationManager(
+				frame => frames.push(frame as RpcFrameRecord),
+				() => {},
+			);
+			const ack = manager.start({
+				command,
+				requestId: `req_${command}`,
+				run: () => ({ command }),
+			});
+			expect(ack.ack).toBe("accepted");
+			expect(typeof ack.operationId).toBe("string");
+			await Bun.sleep(20);
+			const start = frames.find(frame => frame.type === "operation_start" && frame.operationId === ack.operationId);
+			const terminal = frames.find(
+				frame =>
+					(frame.type === "operation_end" || frame.type === "operation_error") &&
+					frame.operationId === ack.operationId,
+			);
+			expect(start).toBeDefined();
+			expect(terminal).toBeDefined();
+			if (!start || !terminal) throw new Error(`Missing lifecycle frames for ${command}`);
+			expect(frames.indexOf(start)).toBeLessThan(frames.indexOf(terminal));
+			expect(
+				frames.filter(
+					frame =>
+						(frame.type === "operation_end" || frame.type === "operation_error") &&
+						frame.operationId === ack.operationId,
+				),
+			).toHaveLength(1);
+		}
+	});
+
 	test("shutdown emits terminal outcomes for active operations before the shutdown frame", async () => {
 		const child = launchRpc();
 		await child.next(frame => frame.type === "ready");
@@ -567,22 +603,39 @@ describe("RPC orchestration contract", () => {
 	test("state mutations emit state_changed and get_state matches the latest state sequence", async () => {
 		const child = launchRpc();
 		await child.next(frame => frame.type === "ready");
+		const waitForStateChange = (field: string): Promise<RpcFrameRecord> =>
+			child.next(
+				frame => frame.type === "state_changed" && Array.isArray(frame.changed) && frame.changed.includes(field),
+			);
 		await child.write({
 			id: "todos",
 			type: "set_todos",
 			phases: [{ id: "phase-1", name: "Work", tasks: [{ id: "task-1", content: "Map RPC", status: "pending" }] }],
 		});
-		const response = await child.next(frame => frame.type === "response" && frame.id === "todos");
-		expect(response.success).toBe(true);
-		const changed = await child.next(frame => frame.type === "state_changed");
-		expect(Array.isArray(changed.changed)).toBe(true);
-		expect(changed.changed as unknown[]).toContain("todoPhases");
+		expect((await child.next(frame => frame.type === "response" && frame.id === "todos")).success).toBe(true);
+		const todoChanged = await waitForStateChange("todoPhases");
+		await child.write({ id: "thinking", type: "set_thinking_level", level: "high" });
+		expect((await child.next(frame => frame.type === "response" && frame.id === "thinking")).success).toBe(true);
+		await waitForStateChange("thinkingLevel");
+		await child.write({ id: "queue", type: "set_follow_up_mode", mode: "all" });
+		expect((await child.next(frame => frame.type === "response" && frame.id === "queue")).success).toBe(true);
+		await waitForStateChange("followUpMode");
+		await child.write({ id: "compaction", type: "set_auto_compaction", enabled: false });
+		expect((await child.next(frame => frame.type === "response" && frame.id === "compaction")).success).toBe(true);
+		await waitForStateChange("autoCompactionEnabled");
+		await child.write({ id: "retry", type: "set_auto_retry", enabled: false });
+		expect((await child.next(frame => frame.type === "response" && frame.id === "retry")).success).toBe(true);
+		const latestChanged = await waitForStateChange("autoRetryEnabled");
 		await child.write({ id: "state", type: "get_state" });
 		const stateResponse = await child.next(frame => frame.type === "response" && frame.id === "state");
 		const state = responseData(stateResponse);
-		expect(state.stateSeq).toBe(changed.stateSeq);
+		expect(state.stateSeq).toBe(latestChanged.stateSeq);
+		expect(Array.isArray(state.todoPhases) ? state.todoPhases.length : 0).toBe(1);
+		expect(state.autoCompactionEnabled).toBe(false);
+		expect(state.autoRetryEnabled).toBe(false);
 		expect(state.activeOperations).toEqual([]);
 		expect(isObject(state.security)).toBe(true);
+		expect(todoChanged.stateSeq as number).toBeLessThan(latestChanged.stateSeq as number);
 		await child.write({ id: "shutdown", type: "shutdown" });
 		await child.next(frame => frame.type === "shutdown");
 	});

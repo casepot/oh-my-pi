@@ -139,6 +139,65 @@ describe("RPC schema artifact", () => {
 		}
 	});
 
+	test("golden frames can be normalized into dashboard backend models without private tool internals", async () => {
+		const frames = await readGoldenFrames();
+		const rawLog = [...frames];
+		const operations = new Map<string, JsonObject>();
+		const taskRuns = new Map<string, JsonObject>();
+		const hostTools = new Map<string, JsonObject>();
+		const pendingUi = new Map<string, JsonObject>();
+		for (const frame of frames) {
+			if (frame.type === "operation_start" && typeof frame.operationId === "string") {
+				operations.set(frame.operationId, { command: frame.command, status: "running" });
+			}
+			if (
+				(frame.type === "operation_end" || frame.type === "operation_error") &&
+				typeof frame.operationId === "string"
+			) {
+				operations.set(frame.operationId, {
+					command: frame.command,
+					status: frame.status,
+					errorInfo: frame.errorInfo,
+				});
+			}
+			if (frame.type === "task_progress" && typeof frame.taskRunId === "string") {
+				taskRuns.set(frame.taskRunId, {
+					toolCallId: frame.toolCallId,
+					parentTaskRunId: frame.parentTaskRunId,
+					agents: frame.agents,
+				});
+			}
+			if (frame.type === "task_result" && typeof frame.taskRunId === "string") {
+				const existing = taskRuns.get(frame.taskRunId) ?? {};
+				taskRuns.set(frame.taskRunId, { ...existing, results: frame.results });
+			}
+			if (frame.type === "host_tool_call" && typeof frame.id === "string") {
+				hostTools.set(frame.id, { toolCallId: frame.toolCallId, metadata: frame.metadata });
+			}
+			if (frame.type === "extension_ui_request" && typeof frame.id === "string" && frame.expectsResponse === true) {
+				pendingUi.set(frame.id, {
+					method: frame.method,
+					responseSchema: frame.responseSchema,
+					timeout: frame.timeout,
+				});
+			}
+		}
+		expect(rawLog).toHaveLength(frames.length);
+		expect(operations.get("op_1")).toMatchObject({ command: "bash", status: "cancelled" });
+		expect(taskRuns.get("task_1")).toMatchObject({
+			toolCallId: "tool_task",
+			parentTaskRunId: "parent_task_0",
+		});
+		const taskResults = taskRuns.get("task_1")?.results;
+		if (!Array.isArray(taskResults)) throw new Error("Expected task results");
+		expect(taskResults[0]).toMatchObject({
+			id: "agent_1",
+			outputRef: { kind: "artifact", uri: "agent://agent_1" },
+		});
+		expect(hostTools.get("host_1")).toMatchObject({ toolCallId: "tool_1" });
+		expect(pendingUi.get("ui_1")).toMatchObject({ method: "confirm", responseSchema: { kind: "boolean" } });
+	});
+
 	test("known stdout frame types cannot validate through the unknown-frame fallback", async () => {
 		const schema = (await Bun.file(
 			path.join(import.meta.dir, "..", "src", "modes", "rpc", "rpc.schema.json"),
@@ -167,6 +226,112 @@ describe("RPC schema artifact", () => {
 		expect(validate({ type: "cancel_operation" }, inbound, schema)).not.toEqual([]);
 		expect(validate({ type: "host_tool_result", id: "host_1", result: {} }, hostOrUi, schema)).toEqual([]);
 		expect(validate({ type: "host_tool_result", id: "host_1" }, hostOrUi, schema)).not.toEqual([]);
+	});
+
+	test("extension UI event and request method frames validate without creating ambiguous pending state", async () => {
+		const schema = (await Bun.file(
+			path.join(import.meta.dir, "..", "src", "modes", "rpc", "rpc.schema.json"),
+		).json()) as JsonSchemaObject;
+		const base = { seq: 100, timestamp: "2026-06-05T12:00:00.100Z", sessionId: "session_abc" };
+		const frames: JsonObject[] = [
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_select",
+				method: "select",
+				expectsResponse: true,
+				timeout: 30000,
+				responseSchema: { kind: "string", nullable: true },
+				title: "Pick",
+				options: ["a"],
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_confirm",
+				method: "confirm",
+				expectsResponse: true,
+				timeout: 30000,
+				responseSchema: { kind: "boolean" },
+				title: "Confirm",
+				message: "Continue?",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_input",
+				method: "input",
+				expectsResponse: true,
+				timeout: 30000,
+				responseSchema: { kind: "string", nullable: true },
+				title: "Input",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_editor",
+				method: "editor",
+				expectsResponse: true,
+				timeout: 30000,
+				responseSchema: { kind: "string", nullable: true },
+				title: "Editor",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_notify",
+				method: "notify",
+				expectsResponse: false,
+				message: "ok",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_status",
+				method: "setStatus",
+				expectsResponse: false,
+				statusKey: "auth",
+				statusText: "waiting",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_title",
+				method: "setTitle",
+				expectsResponse: false,
+				title: "T",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_text",
+				method: "set_editor_text",
+				expectsResponse: false,
+				text: "prefill",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_open",
+				method: "open_url",
+				expectsResponse: false,
+				url: "https://example.invalid/login",
+			},
+			{
+				...base,
+				type: "extension_ui_request",
+				id: "ui_cancel",
+				method: "cancel",
+				expectsResponse: false,
+				targetId: "ui_editor",
+			},
+		];
+		for (const frame of frames) expect(validate(frame, schema, schema)).toEqual([]);
+		const pendingIds = frames
+			.filter(frame => frame.expectsResponse === true)
+			.map(frame => frame.id)
+			.sort();
+		expect(pendingIds).toEqual(["ui_confirm", "ui_editor", "ui_input", "ui_select"]);
 	});
 
 	test("schema exposes the stable error-code family used by protocol errors", async () => {

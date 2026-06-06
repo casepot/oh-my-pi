@@ -339,6 +339,49 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertEqual(notification.messages[0]["content"][0]["text"], "hello")
 
 
+
+    def test_extension_ui_methods_preserve_event_vs_request_semantics(self) -> None:
+        frames = [
+            {
+                "type": "extension_ui_request",
+                "id": "select-1",
+                "method": "select",
+                "expectsResponse": True,
+                "responseSchema": {"kind": "string", "nullable": True},
+                "title": "Pick",
+                "options": ["a"],
+            },
+            {
+                "type": "extension_ui_request",
+                "id": "open-1",
+                "method": "open_url",
+                "expectsResponse": False,
+                "url": "https://example.invalid/login",
+            },
+            {
+                "type": "extension_ui_request",
+                "id": "notify-1",
+                "method": "notify",
+                "expectsResponse": False,
+                "message": "done",
+            },
+            {
+                "type": "extension_ui_request",
+                "id": "cancel-1",
+                "method": "cancel",
+                "expectsResponse": False,
+                "targetId": "select-1",
+            },
+        ]
+        parsed = [parse_notification(frame) for frame in frames]
+
+        self.assertTrue(parsed[0].requires_response())
+        self.assertFalse(parsed[1].requires_response())
+        self.assertFalse(parsed[2].requires_response())
+        self.assertFalse(parsed[3].requires_response())
+        self.assertEqual(parsed[1].url, "https://example.invalid/login")
+        self.assertEqual(parsed[3].target_id, "select-1")
+
     def test_parse_golden_frames_preserves_future_metadata(self) -> None:
         repo_root = Path(__file__).resolve().parents[3]
         fixture = repo_root / "packages" / "coding-agent" / "test" / "fixtures" / "rpc-golden-frames.jsonl"
