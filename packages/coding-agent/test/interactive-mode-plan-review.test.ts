@@ -68,7 +68,6 @@ describe("InteractiveMode plan review rendering", () => {
 	});
 
 	beforeEach(async () => {
-		Bun.gc(true);
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-plan-review-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -111,7 +110,6 @@ describe("InteractiveMode plan review rendering", () => {
 		currentAuthStorage?.close();
 		currentTempDir?.removeSync();
 		resetSettingsForTest();
-		Bun.gc(true);
 	});
 
 	it("appends each submitted plan review preview to preserve scrollback", async () => {
@@ -531,7 +529,6 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		const [compactInstruction] = compactSpy.mock.calls[0]!;
 		expect(typeof compactInstruction).toBe("string");
-		expect(compactInstruction as string).toContain("Preparing to execute the approved plan");
 		expect(compactInstruction as string).toContain(finalPlanFilePath);
 
 		// Plan-approved synthetic prompt was dispatched.

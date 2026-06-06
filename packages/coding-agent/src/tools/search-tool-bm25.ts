@@ -6,10 +6,12 @@ import * as z from "zod/v4";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import searchToolBm25Description from "../prompts/tools/search-tool-bm25.md" with { type: "text" };
+import { resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
 import {
 	buildDiscoverableToolSearchIndex,
 	type DiscoverableTool,
 	type DiscoverableToolSearchIndex,
+	filterBySource,
 	formatDiscoverableToolServerSummary,
 	searchDiscoverableTools,
 	summarizeDiscoverableTools,
@@ -141,10 +143,15 @@ function isDiscoveryEnabled(session: ToolSession): boolean {
 
 export function renderSearchToolBm25Description(discoverableTools: DiscoverableTool[] = []): string {
 	const summary = summarizeDiscoverableTools(discoverableTools);
+	const builtinToolNames = filterBySource(discoverableTools, "builtin")
+		.map(t => t.name)
+		.sort();
 	return prompt.render(searchToolBm25Description, {
-		discoverableMCPToolCount: summary.toolCount,
+		discoverableToolCount: summary.toolCount,
 		discoverableMCPServerSummaries: summary.servers.map(formatDiscoverableToolServerSummary),
 		hasDiscoverableMCPServers: summary.servers.length > 0,
+		discoverableBuiltinToolNames: builtinToolNames,
+		hasDiscoverableBuiltinTools: builtinToolNames.length > 0,
 	});
 }
 
@@ -192,12 +199,9 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): SearchToolBm25Tool | null {
-		// Active when new tools.discoveryMode is non-"off" or legacy mcp.discoveryMode is true
-		const toolsDiscoveryMode = session.settings.get("tools.discoveryMode");
-		const active =
-			(toolsDiscoveryMode !== undefined && toolsDiscoveryMode !== "off") ||
-			session.settings.get("mcp.discoveryMode") === true;
-		if (!active) return null;
+		// Direct createTools() calls do not know the final MCP/extension catalog yet, so
+		// auto mode is activated later by createAgentSession after the full registry exists.
+		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off") return null;
 		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session) : null;
 	}
 

@@ -49,9 +49,15 @@ export class EventController {
 	#lastIntent: string | undefined = undefined;
 	#backgroundToolCallIds = new Set<string>();
 	#assistantMessageStreaming = false;
+	#agentTurnActive = false;
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
 	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
 	#lastAssistantComponent: AssistantMessageComponent | undefined = undefined;
+	// Assistant component whose turn-ending error is currently mirrored in the
+	// pinned banner. Its inline `Error: …` line is suppressed while pinned and
+	// restored when the banner clears at the next `agent_start` (see
+	// #handleMessageEnd / #handleAgentStart).
+	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
 	#idleCompactionTimer?: NodeJS.Timeout;
 	#ircExpiryTimers = new Map<string, NodeJS.Timeout>();
 	#handlers: AgentSessionEventHandlers;
@@ -173,21 +179,21 @@ export class EventController {
 
 		const run = this.#handlers[event.type] as (e: AgentSessionEvent) => Promise<void>;
 		await run(event);
-		// While assistant text or a foreground tool is streaming, rows above the
-		// viewport can re-layout after they have already entered native scrollback
-		// (Markdown fences, wrapping, previews). Let the TUI rebuild history on
-		// those offscreen edits instead of deferring, which otherwise leaves stale
-		// tail rows duplicated above the live viewport.
-		// Background-running tools are excluded so late async updates outside the
-		// active foreground stream keep the no-yank deferral; agent_start resets
-		// the mode at every turn boundary.
+		// While an assistant turn is active, visible status chrome and foreground
+		// transcript blocks can re-render after rows have entered native scrollback
+		// (idle Working loader, Markdown fences, wrapping, tool previews). Let the
+		// TUI use its foreground live-region path instead of idle deferral, which
+		// can otherwise leave the loader/status frame frozen until the next input.
+		// Background-running tools after the turn ends are excluded so late async
+		// updates keep the no-yank deferral; agent_start/agent_end bracket the
+		// foreground turn.
 		if (STREAM_RENDER_MODE_EVENTS[event.type]) {
 			this.#refreshToolRenderMode();
 		}
 	}
 
 	#refreshToolRenderMode(): void {
-		let foregroundToolActive = this.#assistantMessageStreaming;
+		let foregroundToolActive = this.#agentTurnActive || this.#assistantMessageStreaming;
 		if (!foregroundToolActive) {
 			for (const toolCallId of this.ctx.pendingTools.keys()) {
 				if (!this.#backgroundToolCallIds.has(toolCallId)) {
@@ -200,11 +206,17 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
+		this.#agentTurnActive = true;
 		this.#lastIntent = undefined;
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#assistantMessageStreaming = false;
 		this.#lastAssistantComponent = undefined;
+		// Restore the previous turn's inline error in the transcript before dropping
+		// the banner, so the error stays in history once the banner is gone.
+		this.#pinnedErrorComponent?.setErrorPinned(false);
+		this.#pinnedErrorComponent = undefined;
+		this.ctx.clearPinnedError();
 		if (this.ctx.retryEscapeHandler) {
 			this.ctx.editor.onEscape = this.ctx.retryEscapeHandler;
 			this.ctx.retryEscapeHandler = undefined;
@@ -215,6 +227,7 @@ export class EventController {
 			this.ctx.statusContainer.clear();
 		}
 		this.#cancelIdleCompaction();
+		this.#refreshToolRenderMode();
 		this.ctx.ensureLoadingAnimation();
 		this.ctx.ui.requestRender();
 	}
@@ -242,16 +255,28 @@ export class EventController {
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "user") {
 			const textContent = this.ctx.getUserMessageText(event.message);
-			const imageCount =
+			const imageBlocks =
 				typeof event.message.content === "string"
-					? 0
-					: event.message.content.filter(content => content.type === "image").length;
+					? []
+					: event.message.content.filter(
+							(content): content is ImageContent =>
+								content.type === "image" &&
+								typeof content.data === "string" &&
+								typeof content.mimeType === "string",
+						);
+			const imageCount = imageBlocks.length;
 			const signature = `${textContent}\u0000${imageCount}`;
 
 			this.#resetReadGroup();
 			const wasOptimistic = this.ctx.optimisticUserMessageSignature === signature;
 			const wasLocallySubmitted = this.ctx.locallySubmittedUserSignatures.delete(signature) || wasOptimistic;
 			if (!wasOptimistic) {
+				// Append synchronously: #emit dispatches to this listener fire-and-forget
+				// (see AgentSession.#emit), so any await between the user message_start and
+				// addMessageToChat lets later events (assistant message_start, tool execution
+				// start/end) append their components first and scramble transcript order /
+				// live-region block boundaries. addMessageToChat materializes clickable image
+				// links via the synchronous putBlobSync fallback, so no await is needed here.
 				this.ctx.addMessageToChat(event.message);
 			}
 			if (wasOptimistic) {
@@ -283,6 +308,7 @@ export class EventController {
 				this.ctx.hideThinkingBlock,
 				() => this.ctx.ui.requestRender(),
 				this.ctx.session.extensionRunner?.getAssistantThinkingRenderers(),
+				this.ctx.ui.imageBudget,
 			);
 			this.ctx.streamingMessage = event.message;
 			this.ctx.chatContainer.addChild(this.ctx.streamingComponent);
@@ -462,11 +488,35 @@ export class EventController {
 				for (const [toolCallId, component] of this.ctx.pendingTools.entries()) {
 					component.setArgsComplete(toolCallId);
 				}
+			} else {
+				// The turn ended without running these calls (abort/error/TTSR rewind),
+				// so they will never produce a result. Seal them so they stop animating
+				// and freeze instead of pinning the transcript live region while a retry
+				// streams fresh blocks below them. Background tools keep updating.
+				for (const [toolCallId, component] of this.ctx.pendingTools.entries()) {
+					if (!this.#backgroundToolCallIds.has(toolCallId) && component instanceof ToolExecutionComponent) {
+						component.seal();
+					}
+				}
 			}
 			this.#lastAssistantComponent = this.ctx.streamingComponent;
 			this.#lastAssistantComponent.setUsageInfo(event.message.usage);
+			this.#lastAssistantComponent.markTranscriptBlockFinalized();
 			this.ctx.streamingComponent = undefined;
 			this.ctx.streamingMessage = undefined;
+			// Pin a turn-ending provider error (e.g. Anthropic content-filter block)
+			// above the editor so it survives transcript scroll. Cleared at the next
+			// turn's agent_start. Suppress the transcript's inline `Error: …` line for
+			// the same message while pinned so the error isn't rendered twice.
+			if (
+				event.message.stopReason === "error" &&
+				event.message.errorMessage &&
+				!isSilentAbort(event.message.errorMessage)
+			) {
+				this.#lastAssistantComponent?.setErrorPinned(true);
+				this.#pinnedErrorComponent = this.#lastAssistantComponent;
+				this.ctx.showPinnedError(event.message.errorMessage);
+			}
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorTopBorder();
 		}
@@ -587,18 +637,18 @@ export class EventController {
 				this.ctx.ui.requestRender();
 			}
 		}
-		// Update todo display when todo_write tool completes
-		if (event.toolName === "todo_write" && !event.isError) {
+		// Update todo display when todo tool completes
+		if (event.toolName === "todo" && !event.isError) {
 			const details = event.result.details as { phases?: TodoPhase[] } | undefined;
 			if (details?.phases) {
 				this.ctx.setTodos(details.phases);
 			}
-		} else if (event.toolName === "todo_write" && event.isError) {
+		} else if (event.toolName === "todo" && event.isError) {
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;
 			this.ctx.showWarning(
-				`Todo update failed${textContent ? `: ${textContent}` : ". Progress may be stale until todo_write succeeds."}`,
+				`Todo update failed${textContent ? `: ${textContent}` : ". Progress may be stale until todo succeeds."}`,
 			);
 		}
 		if (event.toolName === "resolve" && !event.isError) {
@@ -612,6 +662,7 @@ export class EventController {
 		}
 	}
 	async #handleAgentEnd(_event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
+		this.#agentTurnActive = false;
 		this.#assistantMessageStreaming = false;
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
@@ -626,6 +677,11 @@ export class EventController {
 		await this.ctx.flushPendingModelSwitch();
 		for (const toolCallId of Array.from(this.ctx.pendingTools.keys())) {
 			if (!this.#backgroundToolCallIds.has(toolCallId)) {
+				// A foreground tool still pending at turn end never delivered a result;
+				// seal it so it freezes (and stops animating) rather than lingering in
+				// the transcript live region as a streaming preview until the next thaw.
+				const component = this.ctx.pendingTools.get(toolCallId);
+				if (component instanceof ToolExecutionComponent) component.seal();
 				this.ctx.pendingTools.delete(toolCallId);
 			}
 		}
@@ -848,9 +904,13 @@ export class EventController {
 		const last = this.ctx.session.getLastAssistantMessage?.();
 		if (last?.stopReason === "aborted" || last?.stopReason === "error") return;
 
-		const title = this.ctx.sessionManager.getSessionName();
-		const message = title ? `${title}: Complete` : "Complete";
-		TERMINAL.sendNotification(message);
+		const sessionName = this.ctx.sessionManager.getSessionName();
+		TERMINAL.sendNotification({
+			title: sessionName || "Oh My Pi",
+			body: "Complete",
+			type: "completion",
+			actions: "focus",
+		});
 	}
 
 	async handleBackgroundEvent(event: AgentSessionEvent): Promise<void> {

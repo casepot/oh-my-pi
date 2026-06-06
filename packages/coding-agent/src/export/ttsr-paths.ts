@@ -1,7 +1,7 @@
 import * as path from "node:path";
-import { HL_FILE_PREFIX } from "@oh-my-pi/hashline";
+import { HL_FILE_PREFIX, HL_FILE_SUFFIX } from "@oh-my-pi/hashline";
 
-const HASHLINE_FILE_PREFIXES = new Set<string>([HL_FILE_PREFIX, "§", "@"]);
+const HASHLINE_FILE_PREFIXES = new Set<string>([HL_FILE_PREFIX, "¶", "§", "@"]);
 const APPLY_PATCH_FILE_RE = /^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$/;
 
 export interface ExtractTtsrToolFilePathsOptions {
@@ -9,7 +9,8 @@ export interface ExtractTtsrToolFilePathsOptions {
 }
 
 function normalizeHashlineHeaderPath(rawPath: string): string {
-	const trimmed = rawPath.trim();
+	let trimmed = rawPath.trim();
+	if (trimmed.endsWith(HL_FILE_SUFFIX)) trimmed = trimmed.slice(0, -HL_FILE_SUFFIX.length).trimEnd();
 	const hashStart = /#[0-9a-fA-F]{4}$/u.exec(trimmed)?.index;
 	const withoutHash = hashStart === undefined ? trimmed : trimmed.slice(0, hashStart).trimEnd();
 	if (withoutHash.length < 2) return withoutHash;

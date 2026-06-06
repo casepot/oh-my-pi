@@ -37,6 +37,7 @@ import { formatPathRelativeToCwd, isInternalUrlPath } from "./path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import {
 	formatDiagnostics,
+	formatErrorDetail,
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
@@ -58,7 +59,7 @@ import {
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
-const LOOSE_HASHLINE_HEADER_RE = /^\s*¶\S+#[^ \t\r\n]*\s*$/;
+const LOOSE_HASHLINE_HEADER_RE = /^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$/;
 
 let fflateModulePromise: Promise<typeof import("fflate")> | undefined;
 async function loadFflate(): Promise<typeof import("fflate")> {
@@ -115,7 +116,7 @@ function stripWriteContentWithPotentialLooseHeader(lines: string[]): { text: str
 /**
  * Strip hashline display prefixes from write content.
  *
- * Only active when hashline edit mode is enabled — the model sees `¶PATH#HASH`
+ * Only active when hashline edit mode is enabled — the model sees `[PATH#HASH]`
  * headers plus `LINE:` prefixes in read output and sometimes copies them into write content.
  */
 function stripWriteContent(session: ToolSession, content: string): { text: string; stripped: boolean } {
@@ -128,7 +129,7 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
 /**
  * Record a snapshot of the freshly-written `content` for `absolutePath`
  * so subsequent hashline edits address the new file with a current tag,
- * and return the matching `¶displayPath#TAG` header. Returns `undefined`
+ * and return the matching `[displayPath#TAG]` header. Returns `undefined`
  * when the session is not in hashline mode so callers can no-op cheaply.
  *
  * Mirrors the post-commit snapshot recording the hashline patcher performs
@@ -139,6 +140,15 @@ function maybeWriteSnapshotHeader(session: ToolSession, absolutePath: string, co
 	const normalized = normalizeToLF(content);
 	const tag = getFileSnapshotStore(session).record(absolutePath, normalized);
 	return formatHashlineHeader(formatPathRelativeToCwd(absolutePath, session.cwd), tag);
+}
+
+function shouldRouteWriteThroughBridge(session: ToolSession, requestedPath: string, absolutePath: string): boolean {
+	if (isInternalUrlPath(requestedPath)) return false;
+
+	const state = session.getPlanModeState?.();
+	if (!state?.enabled || !isInternalUrlPath(state.planFilePath)) return true;
+
+	return absolutePath !== resolvePlanPath(session, state.planFilePath);
 }
 
 /**
@@ -278,6 +288,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	readonly concurrency = "exclusive";
 	readonly loadMode = "discoverable";
 	readonly summary = "Write content to a file (creates or overwrites)";
+
+	/** Stream matchers should see the real file content, not its JSON-escaped argument encoding. */
+	matcherDigest(args: unknown): string | undefined {
+		const content = (args as Partial<WriteParams>).content;
+		return typeof content === "string" ? content : undefined;
+	}
 
 	readonly #writethrough: WritethroughCallback;
 
@@ -776,7 +792,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		return untilAborted(signal, async () => {
-			// Strip hashline display prefixes (¶PATH#HASH + LINE:) if the model copied them from read output
+			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
 			const internalRouter = InternalUrlRouter.instance();
 			if (internalRouter.canHandle(path)) {
@@ -860,8 +876,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				await assertEditableFile(absolutePath, path);
 			}
 
-			// Try ACP bridge first — no disk write when client handles it
-			const bridgePromise = this.#routeWriteThroughBridge(absolutePath, cleanContent);
+			// Try ACP bridge first for editor-visible filesystem paths. Internal
+			// artifacts such as local:// plans are owned by OMP, not the editor.
+			const bridgePromise = shouldRouteWriteThroughBridge(this.session, path, absolutePath)
+				? this.#routeWriteThroughBridge(absolutePath, cleanContent)
+				: undefined;
 			if (bridgePromise !== undefined) {
 				try {
 					await bridgePromise;
@@ -953,11 +972,20 @@ function normalizeDisplayText(text: string): string {
 	return text.replace(/\r/g, "");
 }
 
-function formatStreamingContent(content: string, language: string | undefined, uiTheme: Theme): string {
+function formatStreamingContent(
+	content: string,
+	expanded: boolean,
+	language: string | undefined,
+	uiTheme: Theme,
+): string {
 	if (!content) return "";
 	const lines = normalizeDisplayText(content).split("\n");
 	const totalLines = lines.length;
-	const startIndex = Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
+	// Collapsed: follow the streaming edge with a bounded tail window so the box
+	// stays short enough not to strand its scrolled-off head above the viewport
+	// while the block is volatile. `Ctrl+O` (expanded) lifts the cap for a
+	// deliberate full view — matching the eval streaming preview.
+	const startIndex = expanded ? 0 : Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
 	const visibleLines = lines.slice(startIndex);
 	const hidden = startIndex;
 	const highlighted = highlightCode(visibleLines.join("\n"), language);
@@ -1023,14 +1051,25 @@ export const writeToolRenderer = {
 			return new Text(text, 0, 0);
 		}
 
-		// Show streaming preview of content (tail)
-		text += formatStreamingContent(args.content, lang, uiTheme);
+		// Show streaming preview of content — bounded tail while collapsed, full on Ctrl+O.
+		text += formatStreamingContent(args.content, Boolean(options?.expanded), lang, uiTheme);
 
 		return new Text(text, 0, 0);
 	},
 
+	// Only the expanded (Ctrl+O) preview is append-only: it renders the whole
+	// content top-anchored, so streamed chunks only append rows at the bottom.
+	// The collapsed preview slides a bounded tail window (`formatStreamingContent`
+	// with `WRITE_STREAMING_PREVIEW_LINES`) whose visible rows re-layout as the
+	// window moves — not append-only, but it never overflows the viewport, so its
+	// head is never at risk of being dropped regardless. `write` has no partial
+	// result (content streams as args), so `result` is ignored here.
+	isStreamingPreviewAppendOnly(args: WriteRenderArgs, options: RenderResultOptions, _result?: unknown): boolean {
+		return Boolean(options?.expanded && args.content);
+	},
+
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails },
+		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
 		options: RenderResultOptions,
 		uiTheme: Theme,
 		args?: WriteRenderArgs,
@@ -1041,6 +1080,15 @@ export const writeToolRenderer = {
 		const lang = getLanguageFromPath(rawPath);
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
 		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+
+		if (result.isError) {
+			const errorText = result.content?.find(c => c.type === "text")?.text ?? "";
+			const errorHeader = renderStatusLine(
+				{ icon: "error", title: "Write", description: `${langIcon} ${pathDisplay}` },
+				uiTheme,
+			);
+			return new Text(`${errorHeader}\n${formatErrorDetail(errorText, uiTheme)}`, 0, 0);
+		}
 		const lineCount = countLines(fileContent);
 		const lineSuffix = formatLineCountSuffix(lineCount, uiTheme);
 		const execSuffix = result.details?.madeExecutable

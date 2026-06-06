@@ -65,15 +65,15 @@ Use `task` directly for independent subagent work. Batch the full decomposed wor
 </task-tool-workflow>
 {{else}}
 <inline-workflow>
-Run the workflow inline with direct tools and eval computation. Use `todo_write` for phases, `read`/`search`/`find`/`lsp` for evidence, and `llm()` in eval only if eval is available and useful. Record where independent/adversarial coverage would have run if capabilities allowed it; do not silently pretend it ran.
+Run the workflow inline with direct tools and eval computation. Use `todo` for phases, `read`/`search`/`find`/`lsp` for evidence, and `llm()` in eval only if eval is available and useful. Record where independent/adversarial coverage would have run if capabilities allowed it; do not silently pretend it ran.
 </inline-workflow>
 {{/if}}
 {{/if}}
 
 <execution>
-- Decompose first; capture phases in `todo_write` when useful.
-- Prefer `schema=` for outputs you branch on.
-- After a fan-out returns, YOU own correctness: inspect artifacts/results, run gates, verify before acting.
+- Decompose the surface first; capture it in `todo` when it spans phases.
+- Prefer `schema=` for any agent whose output you branch on.
+- After a fan-out returns, YOU own correctness: read the artifacts, run the gate, verify before acting. Subagents do the legwork; they don't get the last word.
 - Eval file edits are allowed; choose edit/write/eval based on reliability semantics and recovery needs.
 - Keep going until the task is closed — a returned fan-out is a step, not a stopping point.
 </execution>

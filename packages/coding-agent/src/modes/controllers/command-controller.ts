@@ -6,14 +6,13 @@ import {
 	getEnvApiKey,
 	getProviderDetails,
 	type ProviderDetails,
-	type ToolCall,
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import { loadCustomShare } from "../../export/custom-share";
+import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import {
 	diffMentalModelContent,
@@ -131,6 +130,7 @@ export class CommandController {
 		}
 
 		try {
+			const { loadCustomShare } = await import("../../export/custom-share");
 			const customShare = await loadCustomShare();
 			if (customShare) {
 				const loader = new BorderedLoader(this.ctx.ui, theme, "Sharing...");
@@ -238,121 +238,6 @@ export class CommandController {
 		}
 	}
 
-	handleCopyCommand(sub?: string) {
-		switch (sub) {
-			case "code":
-				return this.#copyCode();
-			case "all":
-				return this.#copyAllCode();
-			case "cmd":
-				return this.#copyLastCommand();
-			case "last":
-			case undefined:
-				return this.#copyLastMessage();
-			default:
-				this.ctx.showError(`Unknown subcommand: ${sub}. Use code, all, cmd, or last.`);
-		}
-	}
-
-	#copyLastMessage() {
-		const assistantText = this.ctx.session.getLastAssistantText();
-		if (assistantText) {
-			this.#doCopy(assistantText, "Copied last agent message to clipboard");
-			return;
-		}
-
-		if (!this.ctx.session.hasCopyCandidateAssistantMessage()) {
-			const handoffText = this.ctx.session.getLastVisibleHandoffText();
-			if (handoffText) {
-				this.#doCopy(handoffText, "Copied handoff context to clipboard");
-				return;
-			}
-		}
-
-		this.ctx.showError("No agent messages to copy yet.");
-	}
-
-	#copyCode() {
-		const text = this.ctx.session.getLastAssistantText();
-		if (!text) {
-			this.ctx.showError("No agent messages to copy yet.");
-			return;
-		}
-		const matches = [...text.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)];
-		const lastMatch = matches.at(-1);
-		if (!lastMatch) {
-			this.ctx.showWarning("No code block found in the last agent message.");
-			return;
-		}
-		this.#doCopy(lastMatch[1].replace(/\n$/, ""), "Copied last code block to clipboard");
-	}
-
-	#copyAllCode() {
-		const text = this.ctx.session.getLastAssistantText();
-		if (!text) {
-			this.ctx.showError("No agent messages to copy yet.");
-			return;
-		}
-		const matches = [...text.matchAll(/^```[^\n]*\n([\s\S]*?)^```/gm)];
-		if (matches.length === 0) {
-			this.ctx.showWarning("No code blocks found in the last agent message.");
-			return;
-		}
-		const combined = matches.map(m => m[1].replace(/\n$/, "")).join("\n\n");
-		this.#doCopy(combined, `Copied ${matches.length} code block${matches.length > 1 ? "s" : ""} to clipboard`);
-	}
-
-	#extractEvalCode(args: unknown): string | undefined {
-		if (!args || typeof args !== "object") return undefined;
-		const cells = (args as { cells?: unknown }).cells;
-		if (!Array.isArray(cells)) return undefined;
-
-		const codeBlocks: string[] = [];
-		for (const cell of cells) {
-			if (!cell || typeof cell !== "object") continue;
-			const code = (cell as { code?: unknown }).code;
-			if (typeof code === "string" && code.length > 0) {
-				codeBlocks.push(code);
-			}
-		}
-
-		return codeBlocks.length > 0 ? codeBlocks.join("\n\n") : undefined;
-	}
-
-	#copyLastCommand() {
-		const messages = this.ctx.session.messages;
-		// Walk backwards to find the last bash/eval tool call
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role !== "assistant") continue;
-			const toolCalls = msg.content.filter((c): c is ToolCall => c.type === "toolCall");
-			for (let j = toolCalls.length - 1; j >= 0; j--) {
-				const tc = toolCalls[j];
-				if (tc.name === "bash" && typeof tc.arguments.command === "string") {
-					this.#doCopy(tc.arguments.command, "Copied last bash command to clipboard");
-					return;
-				}
-				if (tc.name === "eval") {
-					const code = this.#extractEvalCode(tc.arguments);
-					if (code) {
-						this.#doCopy(code, "Copied last eval code to clipboard");
-						return;
-					}
-				}
-			}
-		}
-		this.ctx.showWarning("No bash or eval command found in the conversation.");
-	}
-
-	#doCopy(content: string, label: string) {
-		try {
-			copyToClipboard(content);
-			this.ctx.showStatus(label);
-		} catch (error) {
-			this.ctx.showError(error instanceof Error ? error.message : String(error));
-		}
-	}
-
 	async handleSessionCommand(): Promise<void> {
 		const stats = this.ctx.session.getSessionStats();
 		const premiumRequests =
@@ -397,10 +282,10 @@ export class CommandController {
 		// Append-only context
 		{
 			const setting = this.ctx.settings.get("provider.appendOnlyContext") ?? "auto";
-			const provider = this.ctx.session.model?.provider;
-			const mode = setting === "on" ? true : setting === "off" ? false : provider === "deepseek";
+			const model = this.ctx.session.model;
+			const mode = shouldEnableAppendOnlyContext(setting, model);
 			const activeLabel = mode ? theme.fg("success", "active") : theme.fg("dim", "inactive");
-			const settingLabel = setting === "auto" ? `${setting} (${provider ?? "?"})` : setting;
+			const settingLabel = setting === "auto" ? `${setting} (${model?.provider ?? "?"})` : setting;
 			info += `${theme.fg("dim", "Append-Only:")} ${activeLabel} (setting: ${settingLabel})\n`;
 		}
 		info += `${theme.bold("Tokens")}\n`;
@@ -580,7 +465,7 @@ export class CommandController {
 		const argumentText = text.slice(7).trim();
 		const action = argumentText.split(/\s+/, 1)[0]?.toLowerCase() || "view";
 		const agentDir = this.ctx.settings.getAgentDir();
-		const backend = resolveMemoryBackend(this.ctx.settings);
+		const backend = await resolveMemoryBackend(this.ctx.settings);
 
 		if (action === "view") {
 			const payload = await backend.buildDeveloperInstructions(agentDir, this.ctx.settings, this.ctx.session);
@@ -1387,6 +1272,8 @@ function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: numbe
 	if (email) return email;
 	const accountId = (report.metadata?.accountId as string | undefined) ?? limit.scope.accountId;
 	if (accountId) return accountId;
+	const projectId = (report.metadata?.projectId as string | undefined) ?? limit.scope.projectId;
+	if (projectId) return projectId;
 	return `account ${index + 1}`;
 }
 
@@ -1395,6 +1282,8 @@ function formatUnlimitedReportLabel(report: UsageReport, index: number): string 
 	if (email) return email;
 	const accountId = report.metadata?.accountId as string | undefined;
 	if (accountId) return accountId;
+	const projectId = report.metadata?.projectId as string | undefined;
+	if (projectId) return projectId;
 	return `account ${index + 1}`;
 }
 
@@ -1480,6 +1369,13 @@ function formatAggregateAmount(limits: UsageLimit[]): string {
 		return `${formatNumber(remainingPct)}% free`;
 	}
 
+	// Count unique accounts from limit scopes — not limits.length.
+	const uniqueAccountIds = new Set(
+		limits.map(limit => limit.scope.accountId).filter((id): id is string => typeof id === "string" && id.length > 0),
+	);
+	if (uniqueAccountIds.size > 0) return `${uniqueAccountIds.size} ${uniqueAccountIds.size === 1 ? "acct" : "accts"}`;
+	// No account IDs available — keep the pre-existing fallback so providers
+	// that don't populate scope.accountId still show a summary.
 	return `${limits.length} accts`;
 }
 

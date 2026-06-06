@@ -48,6 +48,12 @@ describe("Settings", () => {
 			fs.rmSync(testDir, { recursive: true });
 		}
 	});
+	describe("defaults", () => {
+		it("keeps eight inline images live by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("tui.maxInlineImages")).toBe(8);
+		});
+	});
 
 	it("defaults to lean project-local capability discovery", async () => {
 		const settings = await Settings.init({ cwd: projectDir, agentDir });

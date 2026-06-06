@@ -148,6 +148,12 @@ export interface ExecutorOptions {
 	task: string;
 	assignment?: string;
 	context?: string;
+	/**
+	 * The session's active overall plan, handed off so subagents spawned during
+	 * plan execution share the same plan context as the main agent. Omitted when
+	 * the session did not start with a plan (or while plan mode is still active).
+	 */
+	planReference?: { path: string; content: string };
 	description?: string;
 	index: number;
 	id: string;
@@ -167,6 +173,13 @@ export interface ExecutorOptions {
 	enableMCP?: boolean;
 	disableExtensionDiscovery?: boolean;
 	taskDepth?: number;
+	/**
+	 * Override the `task.maxRuntimeMs` wall-clock cap for this run. When provided
+	 * it wins over the settings value; `0` disables the per-subagent wall-clock
+	 * limit entirely. Used by the eval `agent()` bridge, whose parent cell
+	 * watchdog is already suspended for the call's duration.
+	 */
+	maxRuntimeMs?: number;
 	enableLsp?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
@@ -532,7 +545,7 @@ function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	});
 }
 
-function createSubagentSettings(baseSettings: Settings): Settings {
+function createSubagentSettings(baseSettings: Settings, overrides?: Partial<Record<SettingPath, unknown>>): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
@@ -546,6 +559,7 @@ function createSubagentSettings(baseSettings: Settings): Settings {
 		// the parent task approval is the authorization boundary. Use yolo mode
 		// to preserve unattended subagent execution. User `tools.approval` policies still apply.
 		"tools.approvalMode": "yolo",
+		...overrides,
 	});
 }
 
@@ -620,9 +634,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	const subagentSettings = createSubagentSettings(settings);
+	const subagentSettings = createSubagentSettings(
+		settings,
+		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
+	);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	const maxRuntimeMs = Math.max(0, Math.trunc(Number(settings.get("task.maxRuntimeMs") ?? 0) || 0));
+	const maxRuntimeMs = Math.max(
+		0,
+		Math.trunc(Number(options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs") ?? 0) || 0),
+	);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -1291,6 +1311,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 							agent: agent.systemPrompt,
 							context: options.context?.trim() ?? "",
+							planReference: options.planReference?.content ?? "",
+							planReferencePath: options.planReference?.path ?? "",
 							worktree: worktree ?? "",
 							outputSchema: normalizedOutputSchema,
 							contextFile: contextFileForPrompt,
@@ -1341,7 +1363,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const subagentToolNames = session.getActiveToolNames();
-			const parentOwnedToolNames = new Set(["todo_write"]);
+			const parentOwnedToolNames = new Set(["todo"]);
 			const filteredSubagentTools = subagentToolNames.filter(name => !parentOwnedToolNames.has(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
@@ -1549,7 +1571,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				if (lastAssistant.stopReason === "aborted") {
 					aborted = abortReason === "signal" || runtimeLimitExceeded || abortReason === undefined;
 					if (aborted) {
-						abortReasonText ??= resolveAbortReasonText();
+						// A real caller signal or the wall-clock timer carries a precise
+						// reason (signal.reason / "runtime limit exceeded"). An internal
+						// turn abort (abortReason === undefined) does NOT — prefer the
+						// assistant message's own errorMessage ("Request was aborted" or a
+						// specific stream error) over the misleading "Cancelled by caller".
+						abortReasonText ??=
+							abortReason === "signal" || runtimeLimitExceeded
+								? resolveAbortReasonText()
+								: lastAssistant.errorMessage?.trim() || resolveAbortReasonText();
 					}
 					exitCode = 1;
 				} else if (lastAssistant.stopReason === "error") {

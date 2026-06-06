@@ -1,10 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
@@ -24,6 +26,25 @@ describe("createAgentSession skills option", () => {
 	let skillsDir: string;
 	let tempHomeDir = "";
 	let originalHome: string | undefined;
+	// Auth storage (SQLite DB) and the model registry are immutable across these tests: skill
+	// discovery never touches models, and building them per test would make createAgentSession call
+	// modelRegistry.refreshInBackground(), whose online model discovery saturates the event loop and
+	// serializes the otherwise-parallel capability scans (~340ms/call). Supplying a prebuilt registry
+	// skips that refresh entirely (~24ms/call).
+	let sharedDir: string;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		sharedDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sdk-skills-shared-"));
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir, "auth.db"));
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir, "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		fs.rmSync(sharedDir, { recursive: true, force: true });
+	});
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -117,6 +138,7 @@ Loaded via symbolic link.
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			enableMCP: false,
+			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
 
@@ -165,6 +187,7 @@ Loaded via symbolic link.
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			enableMCP: false,
+			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
 
@@ -181,6 +204,7 @@ Loaded via symbolic link.
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			enableMCP: false,
+			modelRegistry: sharedModelRegistry,
 			settings: createIsolatedSkillsSettings(),
 		});
 
@@ -192,6 +216,7 @@ Loaded via symbolic link.
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			enableMCP: false,
+			modelRegistry: sharedModelRegistry,
 			skills: [], // Explicitly empty - like --no-skills
 			settings: createIsolatedSkillsSettings(),
 		});
@@ -216,6 +241,7 @@ Loaded via symbolic link.
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 			enableMCP: false,
+			modelRegistry: sharedModelRegistry,
 			skills: [customSkill],
 			settings: createIsolatedSkillsSettings(),
 		});

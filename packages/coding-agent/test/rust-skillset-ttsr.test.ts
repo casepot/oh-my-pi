@@ -78,6 +78,43 @@ const RULE_CASES: RuleCase[] = [
 		positive: "let (_tx, _rx) = mpsc::unbounded_channel();",
 		negatives: ["let (_tx, _rx) = mpsc::channel(32);", "let sender: Sender<Event> = tx;"],
 	},
+	{
+		name: "rs-future-prelude",
+		positive: "fn fetch() -> impl std::future::Future<Output = Result<Data>> { async { Ok(Data) } }",
+		negatives: [
+			"fn fetch() -> impl Future<Output = Result<Data>> { async { Ok(Data) } }",
+			"fn poll(fut: Pin<&mut dyn Future<Output = i32>>) {}",
+		],
+	},
+	{
+		name: "rs-lazylock",
+		positive: 'use once_cell::sync::Lazy;\nstatic CONFIG: Lazy<String> = Lazy::new(|| String::from("value"));',
+		negatives: [
+			'use std::sync::LazyLock;\nstatic CONFIG: LazyLock<String> = LazyLock::new(|| String::from("value"));',
+			"let cell = OnceLock::default();",
+		],
+	},
+	{
+		name: "rs-match-ergonomics",
+		positive: 'match value { Some(ref item) => println!("{item}"), None => {} }',
+		negatives: [
+			'match &value { Some(item) => println!("{item}"), None => {} }',
+			"if let Some(item) = &mut value { *item += 1; }",
+		],
+	},
+	{
+		name: "rs-parking-lot",
+		positive: "let guard = data.lock().unwrap();",
+		negatives: ["let guard = data.lock();", "let guard = data.lock().await;"],
+	},
+	{
+		name: "rs-result-type",
+		positive: "pub type Result<T> = std::result::Result<T, anyhow::Error>;",
+		negatives: [
+			"pub type Result<T, E = anyhow::Error> = std::result::Result<T, E>;",
+			"pub type ApiResult<T> = std::result::Result<T, ApiError>;",
+		],
+	},
 ];
 const EXPECTED_RUST_RULE_NAMES = RULE_CASES.map(rule => rule.name).sort();
 

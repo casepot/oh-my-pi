@@ -10,7 +10,7 @@ import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { BackgroundLane, BackgroundLaneCloseOutcome, BackgroundLaneListItem } from "../../background-lanes/state";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-manager";
 import type { AgentProgress } from "../../task";
-import type { TodoPhase } from "../../tools/todo-write";
+import type { TodoPhase } from "../../tools/todo";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };

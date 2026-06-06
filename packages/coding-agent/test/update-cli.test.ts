@@ -40,6 +40,7 @@ async function runGit(cwd: string, args: string[]): Promise<void> {
 afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
+
 describe("update-cli install target detection", () => {
 	it("detects when the prioritized omp is inside bun global bin", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.bun/bin/omp", "/Users/test/.bun/bin");

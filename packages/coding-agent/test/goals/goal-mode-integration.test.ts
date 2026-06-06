@@ -1,7 +1,8 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
@@ -45,8 +46,8 @@ function createToolSession(cwd: string, settings: Settings, overrides: Partial<T
 
 type GoalHarness = {
 	tempDir: TempDir;
-	authStorage: AuthStorage;
 	settings: Settings;
+	authStorage: AuthStorage;
 	session: AgentSession;
 	mode: InteractiveMode;
 	toolSession: ToolSession;
@@ -195,16 +196,38 @@ function installGoalSideAgentMock(): void {
 	});
 }
 
-async function createGoalHarness(options: { extensionRunner?: ExtensionRunner } = {}): Promise<GoalHarness> {
-	resetSettingsForTest();
-	const tempDir = TempDir.createSync("@pi-goal-mode-");
-	await Settings.init({ inMemory: true, cwd: tempDir.path() });
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+// Immutable, expensive fixtures shared across every test. `new ModelRegistry`
+// alone is ~110ms (loads + parses the bundled model catalog), which dominated
+// this file's wall time when rebuilt per test. The registry, its auth storage,
+// and the resolved model are never mutated by goal-mode flows, and
+// AgentSession.dispose() never closes authStorage — so a single shared instance
+// is safe and drops repeated pure setup overhead.
+type SharedFixture = {
+	authStorage: AuthStorage;
+	modelRegistry: ModelRegistry;
+	model: Model;
+	baseDir: TempDir;
+};
+
+async function createSharedFixture(): Promise<SharedFixture> {
+	const baseDir = TempDir.createSync("@pi-goal-mode-shared-");
+	const authStorage = await AuthStorage.create(path.join(baseDir.path(), "testauth.db"));
 	const modelRegistry = new ModelRegistry(authStorage);
 	const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 	if (!model) {
 		throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 	}
+	return { authStorage, modelRegistry, model, baseDir };
+}
+
+async function createGoalHarness(
+	shared: SharedFixture,
+	options: { extensionRunner?: ExtensionRunner } = {},
+): Promise<GoalHarness> {
+	resetSettingsForTest();
+	const tempDir = TempDir.createSync("@pi-goal-mode-");
+	await Settings.init({ inMemory: true, cwd: tempDir.path() });
+	const { modelRegistry, model } = shared;
 
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
@@ -245,7 +268,7 @@ async function createGoalHarness(options: { extensionRunner?: ExtensionRunner } 
 
 	return {
 		tempDir,
-		authStorage,
+		authStorage: shared.authStorage,
 		settings,
 		session,
 		mode,
@@ -253,7 +276,6 @@ async function createGoalHarness(options: { extensionRunner?: ExtensionRunner } 
 		cleanup: async () => {
 			mode.stop();
 			await session.dispose();
-			authStorage.close();
 			tempDir.removeSync();
 			resetSettingsForTest();
 		},
@@ -366,14 +388,21 @@ function createRestoredSession(
 
 describe("InteractiveMode goal mode integration", () => {
 	let harness: GoalHarness;
+	let shared: SharedFixture;
 
-	beforeAll(() => {
+	beforeAll(async () => {
 		initTheme();
+		shared = await createSharedFixture();
+	});
+
+	afterAll(() => {
+		shared.authStorage.close();
+		shared.baseDir.removeSync();
 	});
 
 	beforeEach(async () => {
 		installGoalSideAgentMock();
-		harness = await createGoalHarness();
+		harness = await createGoalHarness(shared);
 	});
 
 	afterEach(async () => {

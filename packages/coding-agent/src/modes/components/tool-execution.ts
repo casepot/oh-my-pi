@@ -31,9 +31,9 @@ import {
 	renderJsonTreeLines,
 } from "../../tools/json-tree";
 import { formatExpandHint, replaceTabs, resolveImageOptions, truncateToWidth } from "../../tools/render-utils";
-import { toolRenderers } from "../../tools/renderers";
-import { TODO_WRITE_STRIKE_TOTAL_FRAMES } from "../../tools/todo-write";
-import { renderStatusLine } from "../../tui";
+import { type ToolRenderer, toolRenderers } from "../../tools/renderers";
+import { TODO_STRIKE_TOTAL_FRAMES } from "../../tools/todo";
+import { isFramedBlockComponent, renderStatusLine } from "../../tui";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
 
@@ -43,6 +43,18 @@ function ensureInvalidate(component: unknown): Component {
 		c.invalidate = () => {};
 	}
 	return c as Component;
+}
+
+function addBoxChild(box: Box, component: unknown): boolean {
+	const child = ensureInvalidate(component);
+	box.addChild(child);
+	return isFramedBlockComponent(child);
+}
+
+function setBoxPaddingForFramedBlock(box: Box, hasFramedBlock: boolean): void {
+	const padding = hasFramedBlock ? 0 : 1;
+	box.setPaddingX(padding);
+	box.setPaddingY(padding);
 }
 
 /**
@@ -107,7 +119,7 @@ function rawTextInputFromPartialJson(partialJson: unknown): string | undefined {
 	// Function-tool arguments stream as JSON. Custom/free-form tools stream raw
 	// text in the same transport field; only the raw form is a valid fallback for
 	// the conventional `input` parameter.
-	if (first === "{" || first === "[" || first === '"') return undefined;
+	if (first === "{" || first === '"') return undefined;
 	return partialJson;
 }
 
@@ -149,6 +161,10 @@ const SPINNER_RENDER_INTERVAL_MS = 16;
  * 60fps render cadence (mirrors `Loader`). */
 const SPINNER_GLYPH_ADVANCE_MS = 80;
 
+// Stable per-instance counter so each tool execution's inline images get a
+// graphics id that survives child re-creation (the image budget keys off it).
+let toolExecutionInstanceSeq = 0;
+
 /**
  * Component that renders a tool call with its result (updateable)
  */
@@ -158,6 +174,7 @@ export class ToolExecutionComponent extends Container {
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
 	#imageComponents: Image[] = [];
 	#imageSpacers: Spacer[] = [];
+	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
 	#toolLabel: string;
 	#args: any;
@@ -192,6 +209,11 @@ export class ToolExecutionComponent extends Container {
 	#todoStrikeInterval?: NodeJS.Timeout;
 	// Track if args are still being streamed (for edit/write spinner)
 	#argsComplete = false;
+	// Sealed once the tool reaches a terminal state (result delivered, or the
+	// turn abandoned it without one). Drives `isTranscriptBlockFinalized`: until
+	// sealed the block stays in the transcript's repaintable live region so a
+	// late result still repaints instead of stranding the streaming preview.
+	#sealed = false;
 	#renderState: {
 		spinnerFrame?: number;
 		expanded: boolean;
@@ -443,11 +465,18 @@ export class ToolExecutionComponent extends Container {
 		} else if (!needsSpinner && this.#spinnerInterval) {
 			clearInterval(this.#spinnerInterval);
 			this.#spinnerInterval = undefined;
+			// Clear the last drawn frame so a non-live renderCall (e.g. a write whose
+			// args just completed) stops showing a frozen spinner glyph. Skip when a
+			// todo strike owns the frame — it sets its own value right after this.
+			if (!this.#todoStrikeInterval) {
+				this.#spinnerFrame = undefined;
+				this.#renderState.spinnerFrame = undefined;
+			}
 		}
 	}
 
 	#updateTodoStrikeAnimation(): void {
-		if (this.#toolName !== "todo_write" || this.#isPartial || this.#result?.isError) {
+		if (this.#toolName !== "todo" || this.#isPartial || this.#result?.isError) {
 			this.#stopTodoStrikeAnimation();
 			return;
 		}
@@ -462,7 +491,7 @@ export class ToolExecutionComponent extends Container {
 		this.#renderState.spinnerFrame = 0;
 		this.#todoStrikeInterval = setInterval(() => {
 			const nextFrame = (this.#spinnerFrame ?? 0) + 1;
-			if (nextFrame > TODO_WRITE_STRIKE_TOTAL_FRAMES) {
+			if (nextFrame > TODO_STRIKE_TOTAL_FRAMES) {
 				this.#stopTodoStrikeAnimation();
 			} else {
 				this.#spinnerFrame = nextFrame;
@@ -484,6 +513,70 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * Whether this block has reached a terminal state for transcript freezing.
+	 * Reports `false` while it can still visually change so the
+	 * {@link TranscriptContainer} keeps it inside the repaintable live region:
+	 * a foreground tool awaiting its result, or one streaming partial output.
+	 * A final (non-partial) result, a background-async tool the agent has moved
+	 * past, or an explicit {@link seal} flips it to `true`.
+	 */
+	isTranscriptBlockFinalized(): boolean {
+		if (this.#sealed) return true;
+		if (this.#result === undefined) return false;
+		if (!this.#isPartial) return true;
+		// Partial result: a background async tool is accepted to freeze (the agent
+		// continues while it runs and would otherwise pin an unbounded live region);
+		// a foreground tool streaming partial output stays live until it finishes.
+		return (this.#result.details as { async?: { state?: string } } | undefined)?.async?.state === "running";
+	}
+
+	/**
+	 * While a tool's preview is still streaming, a block whose preview is
+	 * append-only (rows only grow at the bottom, never re-layout) lets the
+	 * renderer commit the scrolled-off head of an over-tall preview to native
+	 * scrollback instead of dropping it — the same anti-yank path a streaming
+	 * assistant reply uses (see {@link TranscriptContainer} +
+	 * `NativeScrollbackLiveRegion`). Covers both phases: a pre-result call preview
+	 * (a `write` whose content streams in) and a partial-result preview that
+	 * streams output below fixed input (an `eval`/`bash` whose stdout grows under
+	 * its code cell). Gated on {@link isTranscriptBlockFinalized} so the boundary
+	 * closes the instant the block reaches a terminal state — a final result that
+	 * may collapse to a compact view, a backgrounded async tool, or a seal — and
+	 * the renderer decides whether its current preview shape qualifies via
+	 * `isStreamingPreviewAppendOnly` (typically: only the expanded full view,
+	 * which is top-anchored; the collapsed tail window re-layouts but is bounded
+	 * so it never overflows anyway).
+	 */
+	isTranscriptBlockAppendOnly(): boolean {
+		// A finalized block's preview can collapse/re-layout; only a live,
+		// still-streaming block is a candidate.
+		if (this.isTranscriptBlockFinalized()) return false;
+		const predicate =
+			(this.#tool as { isStreamingPreviewAppendOnly?: ToolRenderer["isStreamingPreviewAppendOnly"] } | undefined)
+				?.isStreamingPreviewAppendOnly ?? toolRenderers[this.#toolName]?.isStreamingPreviewAppendOnly;
+		if (!predicate) return false;
+		try {
+			return predicate(this.#getCallArgsForRender(), this.#renderState, this.#result);
+		} catch (err) {
+			logger.warn("Tool append-only predicate failed", { tool: this.#toolName, error: String(err) });
+			return false;
+		}
+	}
+
+	/**
+	 * Mark the tool terminal even though no result arrived (the turn aborted or
+	 * abandoned it) and stop animating, so it can freeze and stops pinning the
+	 * transcript live region.
+	 */
+	seal(): void {
+		if (this.#sealed) return;
+		this.#sealed = true;
+		this.stopAnimation();
+		this.#updateDisplay();
+		this.#ui.requestRender();
+	}
+
+	/**
 	 * Stop spinner animation and cleanup resources.
 	 */
 	stopAnimation(): void {
@@ -491,6 +584,7 @@ export class ToolExecutionComponent extends Container {
 			clearInterval(this.#spinnerInterval);
 			this.#spinnerInterval = undefined;
 			this.#spinnerFrame = undefined;
+			this.#renderState.spinnerFrame = undefined;
 		}
 		this.#stopTodoStrikeAnimation();
 		this.#editDiffAbort?.abort();
@@ -533,28 +627,35 @@ export class ToolExecutionComponent extends Container {
 			const inline = Boolean((tool as { inline?: boolean }).inline);
 			this.#contentBox.setBgFn(inline ? undefined : bgFn);
 			this.#contentBox.clear();
+			let contentBoxHasFramedBlock = false;
 			// Mirror the built-in renderer branch so custom renderers (notably the
 			// task tool, whose live instance routes through here) receive the same
 			// render context — e.g. the `hasResult` flag that suppresses the task
 			// call preview once result lines exist.
 			this.#renderState.renderContext = this.#buildRenderContext();
 
-			// Render call component
+			// Render call component. The fallback label only stands in for a
+			// missing `renderCall`; when the call is intentionally suppressed
+			// (mergeCallAndResult once a result exists) we render nothing here so
+			// the result component isn't preceded by a redundant tool-name line.
 			const shouldRenderCall = !this.#result || !mergeCallAndResult;
-			if (shouldRenderCall && tool.renderCall) {
-				try {
-					const callComponent = tool.renderCall(this.#getCallArgsForRender(), this.#renderState, theme);
-					if (callComponent) {
-						this.#contentBox.addChild(ensureInvalidate(callComponent));
+			if (shouldRenderCall) {
+				if (tool.renderCall) {
+					try {
+						const callComponent = tool.renderCall(this.#getCallArgsForRender(), this.#renderState, theme);
+						if (callComponent) {
+							contentBoxHasFramedBlock =
+								addBoxChild(this.#contentBox, callComponent) || contentBoxHasFramedBlock;
+						}
+					} catch (err) {
+						logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
+						// Fall back to default on error
+						addBoxChild(this.#contentBox, new Text(theme.fg("toolTitle", theme.bold(this.#toolLabel)), 0, 0));
 					}
-				} catch (err) {
-					logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
-					// Fall back to default on error
-					this.#contentBox.addChild(new Text(theme.fg("toolTitle", theme.bold(this.#toolLabel)), 0, 0));
+				} else {
+					// No custom renderCall, show tool name
+					addBoxChild(this.#contentBox, new Text(theme.fg("toolTitle", theme.bold(this.#toolLabel)), 0, 0));
 				}
-			} else {
-				// No custom renderCall, show tool name
-				this.#contentBox.addChild(new Text(theme.fg("toolTitle", theme.bold(this.#toolLabel)), 0, 0));
 			}
 
 			// Render result component if we have a result
@@ -577,23 +678,24 @@ export class ToolExecutionComponent extends Container {
 						this.#args,
 					);
 					if (resultComponent) {
-						this.#contentBox.addChild(ensureInvalidate(resultComponent));
+						contentBoxHasFramedBlock = addBoxChild(this.#contentBox, resultComponent) || contentBoxHasFramedBlock;
 					}
 				} catch (err) {
 					logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
 					// Fall back to showing raw output on error
 					const output = this.#getTextOutput();
 					if (output) {
-						this.#contentBox.addChild(new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0));
+						addBoxChild(this.#contentBox, new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0));
 					}
 				}
 			} else if (this.#result) {
 				// Has result but no custom renderResult
 				const output = this.#getTextOutput();
 				if (output) {
-					this.#contentBox.addChild(new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0));
+					addBoxChild(this.#contentBox, new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0));
 				}
 			}
+			setBoxPaddingForFramedBlock(this.#contentBox, contentBoxHasFramedBlock);
 		} else if (this.#toolName in toolRenderers) {
 			// Built-in tools with renderers
 			const renderer = toolRenderers[this.#toolName];
@@ -612,6 +714,7 @@ export class ToolExecutionComponent extends Container {
 				// Multi-file: render each file as its own Box (identical to separate tool calls)
 				this.#contentBox.setBgFn(undefined);
 				this.#contentBox.clear();
+				this.#contentBox.setPaddingX(1);
 
 				const renderContext = this.#buildRenderContext();
 				this.#renderState.renderContext = renderContext;
@@ -634,7 +737,8 @@ export class ToolExecutionComponent extends Container {
 							theme,
 						);
 						if (resultComponent) {
-							fileBox.addChild(ensureInvalidate(resultComponent));
+							const fileBoxHasFramedBlock = addBoxChild(fileBox, resultComponent);
+							setBoxPaddingForFramedBlock(fileBox, fileBoxHasFramedBlock);
 						}
 					} catch (err) {
 						logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
@@ -670,6 +774,7 @@ export class ToolExecutionComponent extends Container {
 				// Inline renderers skip background styling
 				this.#contentBox.setBgFn(renderer.inline ? undefined : bgFn);
 				this.#contentBox.clear();
+				let contentBoxHasFramedBlock = false;
 
 				const renderContext = this.#buildRenderContext();
 				this.#renderState.renderContext = renderContext;
@@ -680,12 +785,13 @@ export class ToolExecutionComponent extends Container {
 					try {
 						const callComponent = renderer.renderCall(this.#getCallArgsForRender(), this.#renderState, theme);
 						if (callComponent) {
-							this.#contentBox.addChild(ensureInvalidate(callComponent));
+							contentBoxHasFramedBlock =
+								addBoxChild(this.#contentBox, callComponent) || contentBoxHasFramedBlock;
 						}
 					} catch (err) {
 						logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
 						// Fall back to default on error
-						this.#contentBox.addChild(new Text(theme.fg("toolTitle", theme.bold(this.#toolLabel)), 0, 0));
+						addBoxChild(this.#contentBox, new Text(theme.fg("toolTitle", theme.bold(this.#toolLabel)), 0, 0));
 					}
 				}
 
@@ -703,17 +809,19 @@ export class ToolExecutionComponent extends Container {
 							this.#getCallArgsForRender(),
 						);
 						if (resultComponent) {
-							this.#contentBox.addChild(ensureInvalidate(resultComponent));
+							contentBoxHasFramedBlock =
+								addBoxChild(this.#contentBox, resultComponent) || contentBoxHasFramedBlock;
 						}
 					} catch (err) {
 						logger.warn("Tool renderer failed", { tool: this.#toolName, error: String(err) });
 						// Fall back to showing raw output on error
 						const output = this.#getTextOutput();
 						if (output) {
-							this.#contentBox.addChild(new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0));
+							addBoxChild(this.#contentBox, new Text(theme.fg("toolOutput", replaceTabs(output)), 0, 0));
 						}
 					}
 				}
+				setBoxPaddingForFramedBlock(this.#contentBox, contentBoxHasFramedBlock);
 			}
 		} else {
 			// Other built-in tools: use Text directly with caching
@@ -754,7 +862,7 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						resolveImageOptions(),
+						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
 					);
 					this.#imageComponents.push(imageComponent);
 					this.addChild(imageComponent);
