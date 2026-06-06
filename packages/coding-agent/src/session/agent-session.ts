@@ -154,14 +154,30 @@ import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
-import { completionBudgetReport, GoalRuntime, remainingTokens, renderGoalPrompt } from "../goals/runtime";
 import {
+	buildGoalContinuationPacket,
+	completionBudgetReport,
+	type GoalCheckpointInput,
+	type GoalCheckpointResolutionInput,
+	type GoalContinuationPacket,
+	GoalRuntime,
+	remainingTokens,
+	renderGoalPrompt,
+	renderGoalStateSnapshot,
+} from "../goals/runtime";
+import {
+	type GoalCheckpointGuidanceOutput,
+	type GoalCheckpointReviewerOutput,
 	type GoalCompletionVerifierOutput,
 	type GoalContinuationCompactorOutput,
 	type GoalRubricOutput,
+	goalCheckpointGuidanceAgent,
+	goalCheckpointReviewerAgent,
 	goalCompletionVerifierAgent,
 	goalContinuationCompactorAgent,
 	goalRubricAgent,
+	renderGoalCheckpointGuidanceAssignment,
+	renderGoalCheckpointReviewerAssignment,
 	renderGoalCompletionVerifierAssignment,
 	renderGoalContinuationCompactorAssignment,
 	renderGoalRubricAssignment,
@@ -169,15 +185,20 @@ import {
 } from "../goals/side-agents";
 import type {
 	Goal,
+	GoalCheckpointPacket,
+	GoalCheckpointResolution,
+	GoalCheckpointReview,
 	GoalCompletionVerificationDetails,
 	GoalCompletionVerifierStructuredOutput,
 	GoalContinuationFocus,
 	GoalModeState,
+	GoalParentFrame,
 	GoalTokenUsage,
 	GoalVerificationDeliverableResult,
 	GoalVerificationEvidenceItem,
 	GoalVerificationGap,
 } from "../goals/state";
+import { parseGoalModeState, serializeGoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -189,6 +210,7 @@ import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import type { PlanModeState } from "../plan-mode/state";
+import goalCompactionContextTemplate from "../prompts/goals/goal-compaction-context.md" with { type: "text" };
 import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
 import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
@@ -246,8 +268,12 @@ import {
 	type CustomMessage,
 	convertToLlm,
 	type FileMentionMessage,
+	GOAL_CHECKPOINT_MESSAGE_TYPE,
+	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+	type GoalCheckpointMessageDetails,
+	type GoalCheckpointResolutionMessageDetails,
 	type GoalRubricMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 	type PythonExecutionMessage,
@@ -833,6 +859,18 @@ function isStringRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function checkpointArtifactDetailsMatch(details: unknown, goalId: string, checkpointId: string): boolean {
+	if (!isStringRecord(details) || details.goalId !== goalId) return false;
+	const checkpoint = details.checkpoint;
+	return isStringRecord(checkpoint) && checkpoint.id === checkpointId;
+}
+
+function checkpointResolutionArtifactDetailsMatch(details: unknown, goalId: string, resolutionId: string): boolean {
+	if (!isStringRecord(details) || details.goalId !== goalId) return false;
+	const resolution = details.resolution;
+	return isStringRecord(resolution) && resolution.id === resolutionId;
+}
+
 function parseStructuredSideAgentOutput(output: string): unknown {
 	const parsed: unknown = JSON.parse(output);
 	if (isStringRecord(parsed) && "data" in parsed) {
@@ -912,6 +950,33 @@ function parseGoalContinuationFocus(value: unknown): GoalContinuationFocus | und
 		openGaps: stringArray(value.openGaps),
 		nextActions: stringArray(value.nextActions),
 		evidenceToCollect: stringArray(value.evidenceToCollect),
+		avoidRepeating: stringArray(value.avoidRepeating),
+	};
+}
+
+function parseGoalCheckpointReviewerOutput(value: unknown): GoalCheckpointReviewerOutput | undefined {
+	if (!isStringRecord(value)) return undefined;
+	if (value.status !== "accepted" && value.status !== "rejected") return undefined;
+	if (typeof value.feedback !== "string") return undefined;
+	return {
+		status: value.status,
+		feedback: value.feedback,
+		evidenceChecked: parseGoalVerificationEvidenceItems(value.evidenceChecked),
+		blockers: parseGoalVerificationGaps(value.blockers),
+		continuationFocus: parseGoalContinuationFocus(value.continuationFocus),
+	};
+}
+
+function parseGoalCheckpointGuidanceOutput(value: unknown): GoalCheckpointGuidanceOutput | undefined {
+	if (!isStringRecord(value) || typeof value.continuationMessage !== "string") return undefined;
+	return {
+		continuationMessage: value.continuationMessage,
+		checkpointSummary: typeof value.checkpointSummary === "string" ? value.checkpointSummary : "",
+		controllerQuestions: stringArray(value.controllerQuestions),
+		possibleNextTargets: stringArray(value.possibleNextTargets),
+		broaderChecksOrInputs: stringArray(value.broaderChecksOrInputs),
+		parentDeltaConsiderations: stringArray(value.parentDeltaConsiderations),
+		lessonsForFuture: stringArray(value.lessonsForFuture),
 		avoidRepeating: stringArray(value.avoidRepeating),
 	};
 }
@@ -1433,7 +1498,7 @@ export class AgentSession {
 				if (mode === "none") {
 					this.sessionManager.appendModeChange("none");
 				} else if (state) {
-					this.sessionManager.appendModeChange(mode, { goal: state.goal });
+					this.sessionManager.appendModeChange(mode, { ...serializeGoalModeState(state) });
 				}
 			},
 			sendHiddenMessage: async message => {
@@ -2262,14 +2327,21 @@ export class AgentSession {
 
 	#scheduleAutoContinuePrompt(generation: number): void {
 		const continuePrompt = async () => {
+			let promptText = autoContinuePrompt;
+			const goalState = this.#goalModeState;
+			if (goalState?.enabled && goalState.goal.status === "active") {
+				const dispatch = await this.prepareGoalContinuationDispatch();
+				if (!dispatch) return;
+				promptText = dispatch.prompt;
+			}
 			await this.#promptWithMessage(
 				{
 					role: "developer",
-					content: [{ type: "text", text: autoContinuePrompt }],
+					content: [{ type: "text", text: promptText }],
 					attribution: "agent",
 					timestamp: Date.now(),
 				},
-				autoContinuePrompt,
+				promptText,
 				{ skipPostPromptRecoveryWait: true },
 			);
 		};
@@ -4071,12 +4143,52 @@ export class AgentSession {
 		this.#goalModeState = state;
 	}
 
+	recoverGoalArtifactsFromState(): void {
+		const goal = this.#goalModeState?.goal;
+		if (!goal) return;
+		for (const checkpoint of goal.checkpoints ?? []) {
+			if (this.#hasGoalCheckpointArtifact(goal.id, checkpoint.id)) continue;
+			const details: GoalCheckpointMessageDetails = {
+				goalId: goal.id,
+				objective: goal.objective,
+				checkpoint,
+				review: checkpoint.review,
+				parentGoalActive: goal.status === "active",
+				recordedAt: checkpoint.createdAt,
+			};
+			this.#appendGoalArtifactMessage({
+				customType: GOAL_CHECKPOINT_MESSAGE_TYPE,
+				content: this.#renderGoalCheckpointContent(checkpoint, checkpoint.review),
+				display: true,
+				details,
+				attribution: "agent",
+			});
+		}
+		for (const resolution of goal.checkpointResolutions ?? []) {
+			if (this.#hasGoalCheckpointResolutionArtifact(goal.id, resolution.id)) continue;
+			const details: GoalCheckpointResolutionMessageDetails = {
+				goalId: goal.id,
+				objective: goal.objective,
+				resolution,
+				parentGoalActive: goal.status === "active",
+				recordedAt: resolution.createdAt,
+			};
+			this.#appendGoalArtifactMessage({
+				customType: GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
+				content: this.#renderGoalCheckpointResolutionContent(resolution),
+				display: true,
+				details,
+				attribution: "agent",
+			});
+		}
+	}
+
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
 	}
 
 	async createGoalWithRubric(
-		input: { objective: string; tokenBudget?: number },
+		input: { objective: string; tokenBudget?: number; parentFrame?: GoalParentFrame },
 		signal?: AbortSignal,
 	): Promise<GoalModeState> {
 		const objective = input.objective.trim();
@@ -4092,7 +4204,11 @@ export class AgentSession {
 		if (latest?.goal.id !== initialGoalId || latest?.goal.status !== initialGoalStatus) {
 			throw new Error("cannot create goal because the active goal changed while generating the rubric");
 		}
-		const state = await this.#goalRuntime.createGoal({ objective, tokenBudget: input.tokenBudget });
+		const state = await this.#goalRuntime.createGoal({
+			objective,
+			tokenBudget: input.tokenBudget,
+			parentFrame: input.parentFrame,
+		});
 		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
 		if (current) {
 			await this.#publishGoalRubricArtifact(current, rubric);
@@ -4102,7 +4218,7 @@ export class AgentSession {
 	}
 
 	async replaceGoalWithRubric(
-		input: { objective: string; tokenBudget?: number },
+		input: { objective: string; tokenBudget?: number; parentFrame?: GoalParentFrame },
 		signal?: AbortSignal,
 	): Promise<GoalModeState> {
 		const existing = this.#goalModeState;
@@ -4118,7 +4234,11 @@ export class AgentSession {
 		if (!latest?.enabled || latest.goal.status !== existingGoalStatus || latest.goal.id !== existingGoalId) {
 			throw new Error("cannot replace goal because the active goal changed while generating the rubric");
 		}
-		const state = await this.#goalRuntime.replaceGoal({ objective, tokenBudget: input.tokenBudget });
+		const state = await this.#goalRuntime.replaceGoal({
+			objective,
+			tokenBudget: input.tokenBudget,
+			parentFrame: input.parentFrame,
+		});
 		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
 		if (current) {
 			await this.#publishGoalRubricArtifact(current, rubric);
@@ -4127,8 +4247,63 @@ export class AgentSession {
 		return state;
 	}
 
+	async requestGoalCheckpoint(
+		input: GoalCheckpointInput,
+		signal?: AbortSignal,
+	): Promise<{
+		goal: Goal | null;
+		state?: GoalModeState | null;
+		remainingTokens: number | null;
+		completionBudgetReport: string | null;
+		checkpoint?: GoalCheckpointPacket;
+		checkpointReview?: GoalCheckpointReview;
+	}> {
+		const candidate = this.#goalRuntime.buildCheckpointCandidate(input);
+		const expected = this.#goalRuntime.captureSideAgentExpectation({ includeParentFrame: true });
+		const review = await this.#reviewGoalCheckpoint(candidate, signal);
+		if (!this.#goalRuntime.canCommitSideAgentResult(expected)) {
+			throw new Error("checkpoint review result is stale because goal state changed");
+		}
+		const state =
+			review.status === "accepted"
+				? await this.#goalRuntime.commitCheckpoint(candidate, review)
+				: await this.#goalRuntime.rejectCheckpoint(candidate, review);
+		const checkpoint = review.status === "accepted" ? state.goal.checkpoints?.at(-1) : candidate;
+		if (checkpoint) await this.#publishGoalCheckpointArtifact(state.goal, checkpoint, review);
+		return {
+			goal: state.goal,
+			state,
+			remainingTokens: remainingTokens(state.goal),
+			completionBudgetReport: null,
+			checkpoint,
+			checkpointReview: review,
+		};
+	}
+
+	async requestGoalCheckpointResolution(
+		input: GoalCheckpointResolutionInput,
+		_signal?: AbortSignal,
+	): Promise<{
+		goal: Goal | null;
+		state?: GoalModeState | null;
+		remainingTokens: number | null;
+		completionBudgetReport: string | null;
+		checkpointResolution?: GoalCheckpointResolution;
+	}> {
+		const state = await this.#goalRuntime.recordCheckpointResolution(input);
+		const resolution = state.goal.checkpointResolutions?.at(-1);
+		if (resolution) await this.#publishGoalCheckpointResolutionArtifact(state.goal, resolution);
+		return {
+			goal: state.goal,
+			state,
+			remainingTokens: remainingTokens(state.goal),
+			completionBudgetReport: null,
+			checkpointResolution: resolution,
+		};
+	}
 	async requestGoalCompletion(signal?: AbortSignal): Promise<{
 		goal: Goal | null;
+		state?: GoalModeState | null;
 		remainingTokens: number | null;
 		completionBudgetReport: string | null;
 		completionVerification: GoalCompletionVerificationDetails;
@@ -4137,6 +4312,12 @@ export class AgentSession {
 		if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
 		if (state.goal.status === "complete") throw new Error("goal is already complete");
 		if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
+		if (state.goal.pendingCheckpointId) {
+			throw new Error("cannot complete parent goal while a checkpoint is pending resolution");
+		}
+		if (state.goal.verificationRepair) {
+			throw new Error("cannot retry parent completion until verifier blockers have fresh repair evidence");
+		}
 		const goalId = state.goal.id;
 		const maxAttempts = goalMaxCompletionAttempts(this.settings);
 		const failedAttempts = state.goal.failedCompletionAttempts ?? 0;
@@ -4144,6 +4325,7 @@ export class AgentSession {
 		if (failedAttempts >= maxAttempts) {
 			return {
 				goal: state.goal,
+				state,
 				remainingTokens: remainingTokens(state.goal),
 				completionBudgetReport: null,
 				completionVerification: {
@@ -4159,13 +4341,18 @@ export class AgentSession {
 
 		const attempt = failedAttempts + 1;
 		const totalAttempt = totalAttempts + 1;
+		const expected = this.#goalRuntime.captureSideAgentExpectation({ includeParentFrame: true });
 		const verification = await this.#verifyGoalCompletion(state.goal, attempt, maxAttempts, signal);
 		const structuredFeedback = structuredFeedbackFromVerification(verification);
 		const latest = this.#goalModeState;
-		if (!isGoalCompletionStateStillCurrent(state.goal, latest)) {
+		if (
+			!this.#goalRuntime.canCommitSideAgentResult(expected) ||
+			!isGoalCompletionStateStillCurrent(state.goal, latest)
+		) {
 			const staleGoal = latest?.goal ?? state.goal;
 			return {
 				goal: staleGoal,
+				state: latest ?? state,
 				remainingTokens: remainingTokens(staleGoal),
 				completionBudgetReport: null,
 				completionVerification: {
@@ -4188,10 +4375,12 @@ export class AgentSession {
 				},
 			);
 			const completed = await this.#goalRuntime.completeGoalFromTool();
+			const completedState = this.#goalModeState;
 			const completedTotalAttempts =
 				recorded?.totalVerificationAttempts ?? completed.totalVerificationAttempts ?? totalAttempt;
 			return {
 				goal: completed,
+				state: completedState ?? null,
 				remainingTokens: remainingTokens(completed),
 				completionBudgetReport: completionBudgetReport(completed),
 				completionVerification: {
@@ -4216,41 +4405,69 @@ export class AgentSession {
 		let continuation: { prompt: string; memo: string | undefined };
 		try {
 			if (directContinuationMemo) {
-				const basePrompt = renderGoalPrompt("continuation", continuationGoal);
+				const basePrompt = renderGoalPrompt("continuation", continuationGoal, latest ?? state);
 				continuation = {
-					prompt: renderPreparedGoalContinuation({
-						basePrompt,
-						continuationMessage: directContinuationMemo,
-					}),
+					prompt: renderPreparedGoalContinuation({ basePrompt, continuationMessage: directContinuationMemo }),
 					memo: directContinuationMemo,
 				};
 			} else {
 				continuation = await this.#buildGoalContinuationMessage(continuationGoal, verification.feedback, signal);
 			}
-		} catch (error) {
+		} catch {
 			const recorded = await this.#goalRuntime.recordFailedCompletionVerification(goalId, verification.feedback, {
 				attempt,
 				maxAttempts,
 				structuredFeedback,
 			});
-			if (recorded) {
-				await this.#publishGoalVerificationFeedbackArtifact({
-					goal: recorded,
-					attempt: recorded.lastVerificationAttempt ?? attempt,
+			if (!recorded) {
+				const currentState = this.#goalModeState;
+				const currentGoal = currentState?.goal ?? latestGoal;
+				return {
+					goal: currentGoal,
+					state: currentState ?? null,
+					remainingTokens: remainingTokens(currentGoal),
+					completionBudgetReport: null,
+					completionVerification: {
+						status: "rejected",
+						attempt,
+						maxAttempts,
+						totalAttempts: totalAttempt,
+						feedback: goalCompletionStaleFeedback.trim(),
+					},
+				};
+			}
+			const recordedAttempt = recorded.lastVerificationAttempt ?? attempt;
+			const recordedTotalAttempts = recorded.totalVerificationAttempts ?? totalAttempt;
+			await this.#publishGoalVerificationFeedbackArtifact({
+				goal: recorded,
+				attempt: recordedAttempt,
+				maxAttempts,
+				totalAttempts: recordedTotalAttempts,
+				feedback: verification.feedback,
+				structuredFeedback,
+				compactorMemo: undefined,
+			});
+			return {
+				goal: recorded,
+				state: this.#goalModeState ?? null,
+				remainingTokens: remainingTokens(recorded),
+				completionBudgetReport: null,
+				completionVerification: {
+					status: "rejected",
+					attempt: recordedAttempt,
 					maxAttempts,
-					totalAttempts: recorded.totalVerificationAttempts ?? totalAttempt,
+					totalAttempts: recordedTotalAttempts,
 					feedback: verification.feedback,
 					structuredFeedback,
-					compactorMemo: undefined,
-				});
-			}
-			throw error;
+				},
+			};
 		}
 		const currentState = this.#goalModeState;
 		const currentGoal = currentState?.goal ?? latestGoal;
 		if (!isGoalCompletionStateStillCurrent(state.goal, currentState)) {
 			return {
 				goal: currentGoal,
+				state: currentState ?? null,
 				remainingTokens: remainingTokens(currentGoal),
 				completionBudgetReport: null,
 				completionVerification: {
@@ -4271,6 +4488,7 @@ export class AgentSession {
 		if (!recorded) {
 			return {
 				goal: currentGoal,
+				state: currentState ?? null,
 				remainingTokens: remainingTokens(currentGoal),
 				completionBudgetReport: null,
 				completionVerification: {
@@ -4295,6 +4513,7 @@ export class AgentSession {
 		});
 		return {
 			goal: recorded,
+			state: this.#goalModeState ?? null,
 			remainingTokens: remainingTokens(recorded),
 			completionBudgetReport: null,
 			completionVerification: {
@@ -4309,16 +4528,41 @@ export class AgentSession {
 		};
 	}
 
-	async prepareGoalContinuationPrompt(signal?: AbortSignal): Promise<string | undefined> {
+	async prepareGoalContinuationDispatch(signal?: AbortSignal): Promise<
+		| {
+				kind: "ordinary" | "checkpoint-resolution" | "verification-repair" | "post-compaction";
+				customType: string;
+				prompt: string;
+		  }
+		| undefined
+	> {
 		const state = this.#goalModeState;
 		if (!state?.enabled || state.goal.status !== "active") return undefined;
+		if (state.runMode === "awaiting-user-input") return undefined;
 		const goalId = state.goal.id;
+		const stateVersion = state.stateVersion;
+		if (state.runMode === "awaiting-checkpoint-resolution") {
+			const promptText = await this.#prepareGoalCheckpointGuidancePrompt(state, signal);
+			const latest = this.#goalModeState;
+			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
+			return { kind: "checkpoint-resolution", customType: "goal-checkpoint-resolution", prompt: promptText };
+		}
+		if (state.runMode === "awaiting-verification-repair") {
+			const promptText = await this.#prepareGoalVerificationRepairPrompt(state, signal);
+			const latest = this.#goalModeState;
+			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
+			return { kind: "verification-repair", customType: "goal-verification-repair", prompt: promptText };
+		}
 		if (state.goal.failedCompletionAttempts && state.goal.lastVerificationCompactorMemo) {
-			const basePrompt = renderGoalPrompt("continuation", state.goal);
-			return renderPreparedGoalContinuation({
-				basePrompt,
-				continuationMessage: state.goal.lastVerificationCompactorMemo,
-			});
+			const basePrompt = renderGoalPrompt("continuation", state.goal, state);
+			return {
+				kind: "ordinary",
+				customType: "goal-continuation",
+				prompt: renderPreparedGoalContinuation({
+					basePrompt,
+					continuationMessage: state.goal.lastVerificationCompactorMemo,
+				}),
+			};
 		}
 		const continuation = await this.#buildGoalContinuationMessage(
 			state.goal,
@@ -4326,8 +4570,19 @@ export class AgentSession {
 			signal,
 		);
 		const latest = this.#goalModeState;
-		if (!latest?.enabled || latest.goal.status !== "active" || latest.goal.id !== goalId) return undefined;
-		return continuation.prompt;
+		if (
+			!latest?.enabled ||
+			latest.goal.status !== "active" ||
+			latest.goal.id !== goalId ||
+			latest.stateVersion !== stateVersion
+		) {
+			return undefined;
+		}
+		return { kind: "ordinary", customType: "goal-continuation", prompt: continuation.prompt };
+	}
+
+	async prepareGoalContinuationPrompt(signal?: AbortSignal): Promise<string | undefined> {
+		return (await this.prepareGoalContinuationDispatch(signal))?.prompt;
 	}
 
 	async #publishGoalRubricArtifact(goal: Goal, rubric: string): Promise<void> {
@@ -4379,6 +4634,45 @@ export class AgentSession {
 		});
 	}
 
+	async #publishGoalCheckpointArtifact(
+		goal: Goal,
+		checkpoint: GoalCheckpointPacket,
+		review: GoalCheckpointReview,
+	): Promise<void> {
+		const details: GoalCheckpointMessageDetails = {
+			goalId: goal.id,
+			objective: goal.objective,
+			checkpoint,
+			review,
+			parentGoalActive: goal.status === "active",
+			recordedAt: Date.now(),
+		};
+		await this.#sendGoalArtifactMessage<GoalCheckpointMessageDetails>({
+			customType: GOAL_CHECKPOINT_MESSAGE_TYPE,
+			content: this.#renderGoalCheckpointContent(checkpoint, review),
+			display: true,
+			details,
+			attribution: "agent",
+		});
+	}
+
+	async #publishGoalCheckpointResolutionArtifact(goal: Goal, resolution: GoalCheckpointResolution): Promise<void> {
+		const details: GoalCheckpointResolutionMessageDetails = {
+			goalId: goal.id,
+			objective: goal.objective,
+			resolution,
+			parentGoalActive: goal.status === "active",
+			recordedAt: Date.now(),
+		};
+		await this.#sendGoalArtifactMessage<GoalCheckpointResolutionMessageDetails>({
+			customType: GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
+			content: this.#renderGoalCheckpointResolutionContent(resolution),
+			display: true,
+			details,
+			attribution: "agent",
+		});
+	}
+
 	async #sendGoalArtifactMessage<T>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 	): Promise<void> {
@@ -4394,6 +4688,40 @@ export class AgentSession {
 		for (const message of messages) {
 			this.#appendGoalArtifactMessage(message);
 		}
+	}
+
+	#hasGoalCheckpointArtifact(goalId: string, checkpointId: string): boolean {
+		if (
+			this.#pendingGoalArtifactMessages.some(
+				message =>
+					message.customType === GOAL_CHECKPOINT_MESSAGE_TYPE &&
+					checkpointArtifactDetailsMatch(message.details, goalId, checkpointId),
+			)
+		) {
+			return true;
+		}
+		return this.sessionManager.getEntries().some(entry => {
+			if (entry.type !== "custom_message" || entry.customType !== GOAL_CHECKPOINT_MESSAGE_TYPE) return false;
+			return checkpointArtifactDetailsMatch(entry.details, goalId, checkpointId);
+		});
+	}
+
+	#hasGoalCheckpointResolutionArtifact(goalId: string, resolutionId: string): boolean {
+		if (
+			this.#pendingGoalArtifactMessages.some(
+				message =>
+					message.customType === GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE &&
+					checkpointResolutionArtifactDetailsMatch(message.details, goalId, resolutionId),
+			)
+		) {
+			return true;
+		}
+		return this.sessionManager.getEntries().some(entry => {
+			if (entry.type !== "custom_message" || entry.customType !== GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE) {
+				return false;
+			}
+			return checkpointResolutionArtifactDetailsMatch(entry.details, goalId, resolutionId);
+		});
 	}
 
 	#appendGoalArtifactMessage(
@@ -4428,6 +4756,60 @@ export class AgentSession {
 		return sections.join("\n\n");
 	}
 
+	#renderGoalCheckpointContent(checkpoint: GoalCheckpointPacket, review: GoalCheckpointReview | undefined): string {
+		const heading =
+			review?.status === "rejected"
+				? "## Checkpoint rejected; target remains active"
+				: "## Target closed; parent goal still active";
+		const sections = [
+			heading,
+			`## Target\n\n${checkpoint.targetSnapshot.title}`,
+			`## Summary\n\n${checkpoint.summary}`,
+		];
+		if (checkpoint.evidence.length > 0) {
+			sections.push(
+				`## Evidence\n\n${checkpoint.evidence.map(item => `- ${item.claim}: ${item.evidence} (current: ${item.current})`).join("\n")}`,
+			);
+		}
+		if (checkpoint.notClaimed.length > 0) {
+			sections.push(`## Not claimed\n\n${checkpoint.notClaimed.map(item => `- ${item}`).join("\n")}`);
+		}
+		if (checkpoint.remainingQuestions.length > 0) {
+			sections.push(
+				`## Remaining questions\n\n${checkpoint.remainingQuestions.map(item => `- ${item}`).join("\n")}`,
+			);
+		}
+		if (review) {
+			sections.push(`## Checkpoint review\n\n${review.feedback}`);
+		} else {
+			sections.push("## Checkpoint review\n\nReview details were not present in restored goal state.");
+		}
+		return sections.join("\n\n");
+	}
+
+	#renderGoalCheckpointResolutionContent(resolution: GoalCheckpointResolution): string {
+		const sections = [
+			"## Checkpoint resolution",
+			`## Decision\n\n${resolution.decision}`,
+			`## Parent reading\n\n${resolution.parentReading}`,
+		];
+		if (resolution.nextTarget) sections.push(`## Next target\n\n${resolution.nextTarget.title}`);
+		if (resolution.notPropagated.length > 0) {
+			sections.push(`## Not propagated\n\n${resolution.notPropagated.map(item => `- ${item}`).join("\n")}`);
+		}
+		if (resolution.remainingParentWork.length > 0) {
+			sections.push(
+				`## Remaining parent work\n\n${resolution.remainingParentWork.map(item => `- ${item}`).join("\n")}`,
+			);
+		}
+		if (resolution.broaderChecksOrInputs.length > 0) {
+			sections.push(
+				`## Broader checks or inputs\n\n${resolution.broaderChecksOrInputs.map(item => `- ${item}`).join("\n")}`,
+			);
+		}
+		return sections.join("\n\n");
+	}
+
 	async #generateGoalRubric(objective: string, signal?: AbortSignal): Promise<string> {
 		return await this.#withSerializedGoalSideAgent(async () => {
 			const contextFile = await this.#writeGoalTranscriptFile("rubric", "pending");
@@ -4446,6 +4828,107 @@ export class AgentSession {
 		});
 	}
 
+	async #reviewGoalCheckpoint(candidate: GoalCheckpointPacket, signal?: AbortSignal): Promise<GoalCheckpointReview> {
+		return await this.#withSerializedGoalSideAgent(async () => {
+			const state = this.#goalModeState;
+			if (!state?.goal) throw new Error("cannot review checkpoint because no goal is active");
+			const contextFile = await this.#writeGoalTranscriptFile("checkpoint-review", state.goal.id);
+			const goalStateFile = await this.#writeGoalStateSnapshotFile("checkpoint-review", state);
+			const goalStateSnapshot = renderGoalStateSnapshot(state, state.goal);
+			const output = await this.#runGoalSideAgent({
+				agent: goalCheckpointReviewerAgent,
+				assignment: renderGoalCheckpointReviewerAssignment({
+					contextFile,
+					goalStateFile,
+					goalStateSnapshot,
+					candidateCheckpoint: JSON.stringify(candidate, null, 2),
+				}),
+				description: "Goal checkpoint review",
+				contextFile,
+				parse: parseGoalCheckpointReviewerOutput,
+				signal,
+			});
+			return {
+				status: output.status,
+				feedback: output.feedback,
+				evidenceChecked: output.evidenceChecked,
+				blockers: output.blockers,
+				continuationFocus: output.continuationFocus,
+				reviewedAt: Date.now(),
+			};
+		});
+	}
+
+	async #prepareGoalCheckpointGuidancePrompt(state: GoalModeState, signal?: AbortSignal): Promise<string> {
+		const checkpoint = state.goal.pendingCheckpointId
+			? state.goal.checkpoints?.find(packet => packet.id === state.goal.pendingCheckpointId)
+			: undefined;
+		if (!checkpoint) throw new Error("cannot prepare checkpoint guidance because no checkpoint is pending");
+		const output = await this.#withSerializedGoalSideAgent(async () => {
+			const contextFile = await this.#writeGoalTranscriptFile("checkpoint-guidance", state.goal.id);
+			const goalStateFile = await this.#writeGoalStateSnapshotFile("checkpoint-guidance", state);
+			const goalStateSnapshot = renderGoalStateSnapshot(state, state.goal);
+			return await this.#runGoalSideAgent({
+				agent: goalCheckpointGuidanceAgent,
+				assignment: renderGoalCheckpointGuidanceAssignment({
+					contextFile,
+					goalStateFile,
+					goalStateSnapshot,
+					checkpointPacket: JSON.stringify(checkpoint, null, 2),
+				}),
+				description: "Goal checkpoint guidance",
+				contextFile,
+				parse: parseGoalCheckpointGuidanceOutput,
+				signal,
+			});
+		});
+		const basePrompt = renderGoalPrompt("continuation", state.goal, state);
+		const packet = buildGoalContinuationPacket(
+			state,
+			"target-checkpoint",
+			"Accepted target checkpoint requires a controller decision.",
+			output.continuationMessage,
+		);
+		return renderPreparedGoalContinuation({
+			basePrompt,
+			continuationMessage: [
+				output.continuationMessage,
+				"<goal_continuation_packet>",
+				JSON.stringify(packet, null, 2),
+				"</goal_continuation_packet>",
+			].join("\n"),
+		});
+	}
+
+	async #prepareGoalVerificationRepairPrompt(state: GoalModeState, _signal?: AbortSignal): Promise<string> {
+		const repair = state.goal.verificationRepair;
+		if (!repair) return renderGoalPrompt("continuation", state.goal, state);
+		const focus: GoalContinuationFocus = {
+			openGaps: repair.blockers.map(blocker => `${blocker.id}: ${blocker.problem}`),
+			nextActions: repair.blockers.map(blocker => blocker.requiredEvidenceOrFix),
+			evidenceToCollect: [...repair.evidenceToCollect],
+			avoidRepeating: [...repair.avoidRepeating],
+		};
+		const memo =
+			renderGoalContinuationFocus(focus) ??
+			"The parent goal is not complete. Repair verifier blockers or gather direct evidence before retrying complete.";
+		const packet = buildGoalContinuationPacket(
+			state,
+			"verification-rejected",
+			"Parent completion verifier rejected the completion claim.",
+			memo,
+		);
+		return renderPreparedGoalContinuation({
+			basePrompt: renderGoalPrompt("continuation", state.goal, state),
+			continuationMessage: [
+				memo,
+				"<goal_continuation_packet>",
+				JSON.stringify(packet, null, 2),
+				"</goal_continuation_packet>",
+			].join("\n"),
+		});
+	}
+
 	async #verifyGoalCompletion(
 		goal: Goal,
 		attempt: number,
@@ -4453,11 +4936,15 @@ export class AgentSession {
 		signal?: AbortSignal,
 	): Promise<GoalCompletionVerifierOutput> {
 		return await this.#withSerializedGoalSideAgent(async () => {
+			const state = this.#goalModeState;
 			const contextFile = await this.#writeGoalTranscriptFile("verify", goal.id);
+			const goalStateFile = state ? await this.#writeGoalStateSnapshotFile("verify", state) : undefined;
 			const assignment = renderGoalCompletionVerifierAssignment({
 				objective: goal.objective,
 				rubric: goal.rubric ?? "",
 				contextFile,
+				goalStateFile,
+				goalStateSnapshot: state ? renderGoalStateSnapshot(state, state.goal) : undefined,
 				attempt,
 				maxAttempts,
 			});
@@ -4478,11 +4965,15 @@ export class AgentSession {
 		signal?: AbortSignal,
 	): Promise<{ prompt: string; memo: string | undefined }> {
 		return await this.#withSerializedGoalSideAgent(async () => {
+			const state = this.#goalModeState;
 			const contextFile = await this.#writeGoalTranscriptFile("continue", goal.id);
+			const goalStateFile = state ? await this.#writeGoalStateSnapshotFile("continue", state) : undefined;
 			const assignment = renderGoalContinuationCompactorAssignment({
 				objective: goal.objective,
 				rubric: goal.rubric ?? "",
 				contextFile,
+				goalStateFile,
+				goalStateSnapshot: state ? renderGoalStateSnapshot(state, state.goal) : undefined,
 				verificationFeedback,
 			});
 			const output = await this.#runGoalSideAgent({
@@ -4494,7 +4985,7 @@ export class AgentSession {
 				signal,
 			});
 			const memo = output.continuationMessage.trim();
-			const basePrompt = renderGoalPrompt("continuation", goal);
+			const basePrompt = renderGoalPrompt("continuation", goal, state);
 			if (!memo) return { prompt: basePrompt, memo: undefined };
 			return {
 				prompt: renderPreparedGoalContinuation({
@@ -4536,6 +5027,14 @@ export class AgentSession {
 		const safeGoalId = goalId.replace(/[^A-Za-z0-9_-]/g, "_");
 		const filePath = path.join(dir, `${Date.now()}-${safeGoalId}-${kind}-transcript.txt`);
 		await Bun.write(filePath, this.formatSessionAsText());
+		return filePath;
+	}
+
+	async #writeGoalStateSnapshotFile(kind: string, state: GoalModeState): Promise<string> {
+		const dir = await this.#createGoalSideAgentArtifactsDir();
+		const safeGoalId = state.goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
+		const filePath = path.join(dir, `${Date.now()}-${safeGoalId}-${kind}-goal-state.json`);
+		await Bun.write(filePath, `${JSON.stringify(serializeGoalModeState(state), null, 2)}\n`);
 		return filePath;
 	}
 
@@ -6488,7 +6987,7 @@ export class AgentSession {
 			throw new Error("Compaction already in progress");
 		}
 		this.#disconnectFromAgent();
-		await this.abort();
+		await this.abort({ goalReason: "internal" });
 		const compactionAbortController = new AbortController();
 		this.#compactionAbortController = compactionAbortController;
 
@@ -6751,6 +7250,18 @@ export class AgentSession {
 				throw new Error(`No API key for ${model.provider}`);
 			}
 
+			const goalHandoffContext = this.#buildGoalCompactionContext();
+			const serializedGoalState = goalHandoffContext?.preserveData.goalMode;
+			const carriedGoalState =
+				serializedGoalState === undefined ? undefined : parseGoalModeState(serializedGoalState);
+			const activeToolsBeforeHandoff = this.getActiveToolNames();
+			const effectiveCustomInstructions =
+				goalHandoffContext && goalHandoffContext.context.trim().length > 0
+					? [customInstructions, goalHandoffContext.context]
+							.filter((item): item is string => typeof item === "string" && item.length > 0)
+							.join("\n\n")
+					: customInstructions;
+
 			const handoffText = await generateHandoff(
 				this.agent.state.messages,
 				model,
@@ -6758,7 +7269,7 @@ export class AgentSession {
 				{
 					systemPrompt: this.#baseSystemPrompt,
 					tools: this.agent.state.tools,
-					customInstructions,
+					customInstructions: effectiveCustomInstructions,
 					convertToLlm,
 					initiatorOverride: "agent",
 					metadata: this.agent.metadataForProvider(model.provider),
@@ -6799,6 +7310,13 @@ export class AgentSession {
 			// Inject the handoff document as a custom message
 			const handoffContent = createHandoffContext(handoffText);
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
+			if (carriedGoalState) {
+				this.#goalModeState = carriedGoalState;
+				this.sessionManager.appendModeChange(carriedGoalState.enabled ? "goal" : "goal_paused", {
+					...serializeGoalModeState(carriedGoalState),
+				});
+				await this.setActiveToolsByName([...new Set([...activeToolsBeforeHandoff, "goal"])]);
+			}
 			await this.sessionManager.ensureOnDisk();
 			let savedPath: string | undefined;
 			if (options?.autoTriggered && this.settings.get("compaction.handoffSaveToDisk")) {
@@ -7562,6 +8080,48 @@ export class AgentSession {
 		throw this.#buildCompactionAuthError();
 	}
 
+	#buildGoalCompactionContext():
+		| {
+				context: string;
+				preserveData: Record<string, unknown>;
+		  }
+		| undefined {
+		const state = this.#goalModeState;
+		if (!state?.goal) return undefined;
+		if (state.goal.status === "complete" || state.goal.status === "dropped") return undefined;
+		let transition: GoalContinuationPacket["transition"] = "context-compaction";
+		let reason =
+			"Context compaction must preserve the active goal state without changing checkpoint or target authority.";
+		let guidance = "Resume the same open target after compaction.";
+		if (state.runMode === "awaiting-checkpoint-resolution") {
+			transition = "target-checkpoint";
+			reason = "Context compaction occurred while an accepted target checkpoint is awaiting controller resolution.";
+			guidance = "Prepare checkpoint guidance and require resolve_checkpoint before local implementation resumes.";
+		} else if (state.runMode === "awaiting-verification-repair") {
+			transition = "verification-rejected";
+			reason = "Context compaction occurred while verifier blockers are awaiting repair.";
+			guidance = "Repair verifier blockers or gather direct evidence before retrying parent completion.";
+		} else if (state.runMode === "awaiting-user-input") {
+			guidance = "Preserve the blocked state and wait for user, check, or external-control input.";
+		}
+		const continuationPacket = buildGoalContinuationPacket(state, transition, reason, guidance);
+		const serializedState = serializeGoalModeState(state);
+		const context = prompt.render(goalCompactionContextTemplate, {
+			transition,
+			reason,
+			stateSnapshot: renderGoalStateSnapshot(state, state.goal),
+			serializedState: JSON.stringify(serializedState, null, 2),
+			continuationPacket: JSON.stringify(continuationPacket, null, 2),
+		});
+		return {
+			context,
+			preserveData: {
+				goalMode: serializedState,
+				goalContinuationPacket: continuationPacket,
+			},
+		};
+	}
+
 	async #prepareCompactionFromHooks(
 		preparation: CompactionPreparation,
 		hookCompaction: CompactionResult | undefined,
@@ -7597,6 +8157,12 @@ export class AgentSession {
 			hookContext = result?.context;
 			hookPrompt = result?.prompt;
 			preserveData = result?.preserveData;
+		}
+
+		const goalCompactionContext = this.#buildGoalCompactionContext();
+		if (goalCompactionContext) {
+			hookContext = hookContext ? [...hookContext, goalCompactionContext.context] : [goalCompactionContext.context];
+			preserveData = { ...(preserveData ?? {}), ...goalCompactionContext.preserveData };
 		}
 
 		const memoryBackendContext = await this.#collectMemoryBackendContext(preparation);

@@ -60,7 +60,12 @@ import type {
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
 import { BUILTIN_SLASH_COMMANDS, loadSlashCommands } from "../extensibility/slash-commands";
-import type { Goal, GoalCompletionVerifierStructuredOutput, GoalModeState } from "../goals/state";
+import {
+	type Goal,
+	type GoalCompletionVerifierStructuredOutput,
+	type GoalModeState,
+	parseGoalModeState,
+} from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
@@ -78,8 +83,12 @@ import type { AgentSession, AgentSessionEvent, ResolvedRoleModel } from "../sess
 import { HistoryStorage } from "../session/history-storage";
 import {
 	type CustomMessage,
+	GOAL_CHECKPOINT_MESSAGE_TYPE,
+	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+	type GoalCheckpointMessageDetails,
+	type GoalCheckpointResolutionMessageDetails,
 	type GoalRubricMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 } from "../session/messages";
@@ -219,10 +228,25 @@ function formatHudNoteMarker(count: number): string {
 	return theme.fg("dim", chalk.italic(` \u207a${sub}`));
 }
 
-type GoalSubcommand = "set" | "show" | "rubric" | "feedback" | "pause" | "resume" | "drop" | "budget";
+type GoalSubcommand =
+	| "set"
+	| "show"
+	| "target"
+	| "frame"
+	| "gates"
+	| "checkpoint"
+	| "resolution"
+	| "rubric"
+	| "feedback"
+	| "pause"
+	| "resume"
+	| "drop"
+	| "budget";
 type GoalArtifactMessage =
 	| CustomMessage<GoalRubricMessageDetails>
-	| CustomMessage<GoalVerificationFeedbackMessageDetails>;
+	| CustomMessage<GoalVerificationFeedbackMessageDetails>
+	| CustomMessage<GoalCheckpointMessageDetails>
+	| CustomMessage<GoalCheckpointResolutionMessageDetails>;
 
 interface PendingGoalArtifactMessage {
 	message: GoalArtifactMessage;
@@ -233,6 +257,11 @@ interface PendingGoalArtifactMessage {
 const GOAL_SUBCOMMANDS: Record<GoalSubcommand, true> = {
 	set: true,
 	show: true,
+	target: true,
+	frame: true,
+	gates: true,
+	checkpoint: true,
+	resolution: true,
 	rubric: true,
 	feedback: true,
 	pause: true,
@@ -242,6 +271,14 @@ const GOAL_SUBCOMMANDS: Record<GoalSubcommand, true> = {
 };
 const PLAN_KEEP_CONTEXT_OPTION_INDEX = 2;
 const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
+
+function isGoalContinuationSubmissionType(customType: string | undefined): boolean {
+	return (
+		customType === "goal-continuation" ||
+		customType === "goal-checkpoint-resolution" ||
+		customType === "goal-verification-repair"
+	);
+}
 
 function isGoalSubcommand(value: string): value is GoalSubcommand {
 	return Object.hasOwn(GOAL_SUBCOMMANDS, value);
@@ -781,7 +818,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.editor.getText().trim().length > 0) return false;
 		if ((this.pendingImages?.length ?? 0) > 0) return false;
 		const state = this.session.getGoalModeState();
-		return state?.enabled === true && state.goal.status === "active";
+		if (state?.enabled !== true || state.goal.status !== "active") return false;
+		return state.runMode !== "awaiting-user-input";
 	}
 
 	#scheduleGoalContinuation(): void {
@@ -805,23 +843,34 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		const state = this.session.getGoalModeState();
-		if (!state?.enabled || state.goal.status !== "active") return;
+		if (!state?.enabled || state.goal.status !== "active" || state.runMode === "awaiting-user-input") return;
 		const goalId = state.goal.id;
-		const prompt = await this.session.prepareGoalContinuationPrompt();
-		if (!prompt) return;
+		const stateVersion = state.stateVersion;
+		const runMode = state.runMode;
+		const dispatch = await this.session.prepareGoalContinuationDispatch();
+		if (!dispatch) return;
 		if (!this.#canConsiderGoalContinuation()) return;
 		if (this.#isGoalContinuationBlocked()) {
 			this.#scheduleGoalContinuation();
 			return;
 		}
 		const latestState = this.session.getGoalModeState();
-		if (!latestState?.enabled || latestState.goal.status !== "active" || latestState.goal.id !== goalId) return;
+		if (
+			!latestState?.enabled ||
+			latestState.goal.status !== "active" ||
+			latestState.goal.id !== goalId ||
+			latestState.stateVersion !== stateVersion ||
+			latestState.runMode !== runMode
+		) {
+			return;
+		}
 		if (!this.onInputCallback) return;
 		this.#goalContinuationTurnInFlight = true;
+		this.#updateGoalModeStatus();
 		this.onInputCallback(
 			this.startPendingSubmission({
-				text: prompt,
-				customType: "goal-continuation",
+				text: dispatch.prompt,
+				customType: dispatch.customType,
 				display: false,
 			}),
 		);
@@ -993,8 +1042,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#pendingSubmissionDispose?.();
 		this.#pendingSubmissionDispose = undefined;
 		this.#pendingWorkingMessage = undefined;
-		if (submission.customType === "goal-continuation") {
+		if (isGoalContinuationSubmissionType(submission.customType)) {
 			this.#goalContinuationTurnInFlight = false;
+			this.#updateGoalModeStatus();
 		}
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
@@ -1026,8 +1076,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#pendingSubmittedInput = undefined;
 			this.#pendingSubmissionDispose = undefined;
 		}
-		if (input.customType === "goal-continuation") {
+		if (isGoalContinuationSubmissionType(input.customType)) {
 			this.#goalContinuationTurnInFlight = false;
+			this.#updateGoalModeStatus();
 		}
 
 		if (wasPendingSubmission && !this.session.isStreaming && !this.streamingComponent) {
@@ -1281,9 +1332,20 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#updateGoalModeStatus(): void {
+		const state = this.session.getGoalModeState();
+		const label =
+			state?.runMode === "awaiting-checkpoint-resolution"
+				? this.#goalContinuationTurnInFlight
+					? "Goal resolving checkpoint"
+					: "Goal checkpoint pending"
+				: state?.runMode === "awaiting-verification-repair"
+					? this.#goalContinuationTurnInFlight
+						? "Goal repairing verifier blockers"
+						: "Goal verifier repair pending"
+					: undefined;
 		const status =
 			this.goalModeEnabled || this.goalModePaused
-				? { enabled: this.goalModeEnabled, paused: this.goalModePaused }
+				? { enabled: this.goalModeEnabled, paused: this.goalModePaused, label }
 				: undefined;
 		this.statusLine.setGoalModeStatus(status);
 		this.updateEditorTopBorder();
@@ -1300,51 +1362,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			return undefined;
 		}
 		return state;
-	}
-
-	#goalFromModeData(modeData: SessionContext["modeData"]): Goal | undefined {
-		const goal = modeData?.goal;
-		if (!goal || typeof goal !== "object") return undefined;
-		const value = goal as Record<string, unknown>;
-		if (
-			typeof value.id !== "string" ||
-			typeof value.objective !== "string" ||
-			typeof value.status !== "string" ||
-			typeof value.tokensUsed !== "number" ||
-			typeof value.timeUsedSeconds !== "number" ||
-			typeof value.createdAt !== "number" ||
-			typeof value.updatedAt !== "number"
-		) {
-			return undefined;
-		}
-		const verificationAttempts = Array.isArray(value.verificationAttempts)
-			? (value.verificationAttempts as Goal["verificationAttempts"])
-			: undefined;
-		return {
-			id: value.id,
-			objective: value.objective,
-			status: value.status as Goal["status"],
-			tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
-			tokensUsed: value.tokensUsed,
-			timeUsedSeconds: value.timeUsedSeconds,
-			createdAt: value.createdAt,
-			updatedAt: value.updatedAt,
-			rubric: typeof value.rubric === "string" ? value.rubric : undefined,
-			workEpoch: typeof value.workEpoch === "number" ? value.workEpoch : undefined,
-			totalVerificationAttempts:
-				typeof value.totalVerificationAttempts === "number" ? value.totalVerificationAttempts : undefined,
-			verificationAttempts,
-			failedCompletionAttempts:
-				typeof value.failedCompletionAttempts === "number" ? value.failedCompletionAttempts : undefined,
-			lastVerificationFeedback:
-				typeof value.lastVerificationFeedback === "string" ? value.lastVerificationFeedback : undefined,
-			lastVerificationCompactorMemo:
-				typeof value.lastVerificationCompactorMemo === "string" ? value.lastVerificationCompactorMemo : undefined,
-			lastVerificationAttempt:
-				typeof value.lastVerificationAttempt === "number" ? value.lastVerificationAttempt : undefined,
-			lastVerificationAttemptId:
-				typeof value.lastVerificationAttemptId === "string" ? value.lastVerificationAttemptId : undefined,
-		};
 	}
 
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
@@ -1454,17 +1471,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused") {
-			const goal = this.#goalFromModeData(sessionContext.modeData);
-			if (!goal) {
+			const parsed = parseGoalModeState(sessionContext.modeData, sessionContext.mode === "goal");
+			if (!parsed) {
 				this.sessionManager.appendModeChange("none");
 				return;
 			}
-			this.session.setGoalModeState({
-				enabled: sessionContext.mode === "goal",
-				mode: "active",
-				goal,
-			});
+			this.session.setGoalModeState(parsed);
 			const restored = await this.session.goalRuntime.onThreadResumed();
+			this.session.recoverGoalArtifactsFromState();
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
 			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
@@ -2056,6 +2070,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			const details = message.details as GoalRubricMessageDetails | undefined;
 			return [message.customType, details?.goalId ?? "", details?.rubric ?? ""].join("\0");
 		}
+		if (message.customType === GOAL_CHECKPOINT_MESSAGE_TYPE) {
+			const details = message.details as GoalCheckpointMessageDetails | undefined;
+			return [message.customType, details?.goalId ?? "", details?.checkpoint.id ?? ""].join("\0");
+		}
+		if (message.customType === GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE) {
+			const details = message.details as GoalCheckpointResolutionMessageDetails | undefined;
+			return [message.customType, details?.goalId ?? "", details?.resolution.id ?? ""].join("\0");
+		}
 		const details = message.details as GoalVerificationFeedbackMessageDetails | undefined;
 		return [
 			message.customType,
@@ -2281,7 +2303,42 @@ export class InteractiveMode implements InteractiveModeContext {
 					await this.#showGoalVerificationFeedback();
 					return;
 				}
+				if (rest === "target") {
+					this.#showGoalTarget();
+					return;
+				}
+				if (rest === "frame") {
+					this.#showGoalParentFrame();
+					return;
+				}
+				if (rest === "gates") {
+					this.#showGoalGatesResidualsBoundaries();
+					return;
+				}
+				if (rest === "checkpoint") {
+					this.#showLatestGoalCheckpoint();
+					return;
+				}
+				if (rest === "resolution") {
+					this.#showLatestGoalCheckpointResolution();
+					return;
+				}
 				this.#showGoalDetails();
+				return;
+			case "target":
+				this.#showGoalTarget();
+				return;
+			case "frame":
+				this.#showGoalParentFrame();
+				return;
+			case "gates":
+				this.#showGoalGatesResidualsBoundaries();
+				return;
+			case "checkpoint":
+				this.#showLatestGoalCheckpoint();
+				return;
+			case "resolution":
+				this.#showLatestGoalCheckpointResolution();
 				return;
 			case "rubric":
 				await this.#showGoalRubric();
@@ -2315,12 +2372,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #openGoalMenu(state: "active" | "paused"): Promise<void> {
-		const goal = this.session.getGoalModeState()?.goal;
+		const goalState = this.session.getGoalModeState();
+		const goal = goalState?.goal;
 		if (!goal) return;
 		const summary = goal.objective.length > 48 ? `${goal.objective.slice(0, 47)}…` : goal.objective;
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
-		const activeItems = ["Show details"];
-		const pausedItems = ["Resume", "Show details"];
+		const activeItems = [
+			"Show details",
+			"Show current target",
+			"Show parent frame",
+			"Show gates, residuals, and boundaries",
+			"Show latest checkpoint",
+			"Show latest checkpoint resolution",
+		];
+		const pausedItems = ["Resume", ...activeItems];
+		if (goalState?.runMode === "awaiting-checkpoint-resolution") {
+			activeItems.push("Resume checkpoint resolution");
+			pausedItems.push("Resume checkpoint resolution");
+		}
 		if (goal.rubric) {
 			activeItems.push("Show rubric");
 			pausedItems.push("Show rubric");
@@ -2337,6 +2406,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		switch (choice) {
 			case "Show details":
 				this.#showGoalDetails();
+				return;
+			case "Show current target":
+				this.#showGoalTarget();
+				return;
+			case "Show parent frame":
+				this.#showGoalParentFrame();
+				return;
+			case "Show gates, residuals, and boundaries":
+				this.#showGoalGatesResidualsBoundaries();
+				return;
+			case "Show latest checkpoint":
+				this.#showLatestGoalCheckpoint();
+				return;
+			case "Show latest checkpoint resolution":
+				this.#showLatestGoalCheckpointResolution();
+				return;
+			case "Resume checkpoint resolution":
+				if (!this.goalModeEnabled && this.#getPausedGoalState()) {
+					await this.#enterGoalMode({ resume: true, silent: true });
+				}
+				this.#resetGoalContinuationSuppression();
+				this.#scheduleGoalContinuation();
+				this.showStatus("Checkpoint resolution continuation scheduled.");
 				return;
 			case "Show rubric":
 				await this.#showGoalRubric();
@@ -2373,10 +2465,116 @@ export class InteractiveMode implements InteractiveModeContext {
 				: `${used} (no budget)`;
 		const lines = [
 			`Objective: ${goal.objective}`,
-			`Status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
+			`Parent status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
+			`Run mode: ${state?.runMode ?? "working-target"}`,
+			`Current target: ${goal.currentTarget?.title ?? "(none)"}`,
+			`Pending checkpoint: ${goal.pendingCheckpointId ?? "(none)"}`,
+			`Verifier repair: ${goal.verificationRepair ? goal.verificationRepair.verificationAttemptId : "(none)"}`,
 			`Tokens: ${budgetLine}`,
 			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
 		];
+		this.showStatus(lines.join("\n"));
+	}
+
+	#showGoalTarget(): void {
+		const target = this.session.getGoalModeState()?.goal.currentTarget;
+		if (!target) {
+			this.showStatus("No current target.");
+			return;
+		}
+		const lines = [
+			`Target: ${target.title}`,
+			`Status: ${target.status}`,
+			`Desired claim: ${target.desiredFutureClaim}`,
+			`Closure standard: ${target.closureStandard}`,
+		];
+		if (target.expectedParentContribution) {
+			lines.push(`Parent contribution: ${target.expectedParentContribution}`);
+		}
+		if (target.nonGoals.length > 0) lines.push(`Non-goals: ${target.nonGoals.join("; ")}`);
+		if (target.forbiddenClaims.length > 0) {
+			lines.push(`Forbidden claims: ${target.forbiddenClaims.join("; ")}`);
+		}
+		if (target.staleIf.length > 0) lines.push(`Stale if: ${target.staleIf.join("; ")}`);
+		this.showStatus(lines.join("\n"));
+	}
+
+	#showGoalParentFrame(): void {
+		const frame = this.session.getGoalModeState()?.goal.parentFrame;
+		if (!frame) {
+			this.showStatus("No parent-state frame recorded.");
+			return;
+		}
+		const lines = [
+			`Frame: ${frame.kind}`,
+			`Desired future: ${frame.desiredFuture}`,
+			`Current truth: ${frame.currentTruth ?? "(not recorded)"}`,
+			`Accepted claims: ${frame.acceptedClaims.length}`,
+			`Candidate claims: ${frame.candidateClaims.length}`,
+			`Rejected/stale claims: ${frame.rejectedOrStaleClaims.length}`,
+			`External refs: ${frame.externalRefs.map(ref => ref.id).join(", ") || "(none)"}`,
+		];
+		if (frame.authority?.parentStateAuthority) {
+			lines.push(`Parent-state authority: ${frame.authority.parentStateAuthority}`);
+		}
+		if (frame.staleIf.length > 0) lines.push(`Stale if: ${frame.staleIf.join("; ")}`);
+		this.showStatus(lines.join("\n"));
+	}
+
+	#showGoalGatesResidualsBoundaries(): void {
+		const frame = this.session.getGoalModeState()?.goal.parentFrame;
+		if (!frame) {
+			this.showStatus("No parent-state frame recorded.");
+			return;
+		}
+		const gateLines = frame.gates.map(gate => `- ${gate.id}: ${gate.name} (${gate.status})`);
+		const residualLines = frame.residuals.map(residual => `- ${residual.id}: ${residual.statement}`);
+		const boundaryLines = frame.boundaries.map(boundary => `- ${boundary.id}: ${boundary.statement}`);
+		const sections = [
+			`Gates:\n${gateLines.join("\n") || "(none)"}`,
+			`Residuals:\n${residualLines.join("\n") || "(none)"}`,
+			`Boundaries and non-claims:\n${boundaryLines.join("\n") || "(none)"}`,
+		];
+		this.showStatus(sections.join("\n\n"));
+	}
+
+	#showLatestGoalCheckpoint(): void {
+		const state = this.session.getGoalModeState();
+		const checkpoint =
+			state?.goal.pendingCheckpointId !== undefined
+				? state.goal.checkpoints?.find(packet => packet.id === state.goal.pendingCheckpointId)
+				: state?.goal.checkpoints?.at(-1);
+		if (!checkpoint) {
+			this.showStatus("No goal checkpoint recorded.");
+			return;
+		}
+		const lines = [
+			`Checkpoint: ${checkpoint.id}`,
+			"Target closed; parent goal still active.",
+			`Target: ${checkpoint.targetSnapshot.title}`,
+			`Summary: ${checkpoint.summary}`,
+			`Evidence: ${checkpoint.evidence.map(item => item.claim).join("; ") || "(none)"}`,
+			`Not claimed: ${checkpoint.notClaimed.join("; ") || "(none)"}`,
+			`Remaining questions: ${checkpoint.remainingQuestions.join("; ") || "(none)"}`,
+		];
+		this.showStatus(lines.join("\n"));
+	}
+
+	#showLatestGoalCheckpointResolution(): void {
+		const resolution = this.session.getGoalModeState()?.goal.checkpointResolutions?.at(-1);
+		if (!resolution) {
+			this.showStatus("No checkpoint resolution recorded.");
+			return;
+		}
+		const lines = [
+			`Resolution: ${resolution.id}`,
+			`Decision: ${resolution.decision}`,
+			`Checkpoint: ${resolution.checkpointId}`,
+			`Parent reading: ${resolution.parentReading}`,
+			`Not propagated: ${resolution.notPropagated.join("; ") || "(none)"}`,
+			`Remaining parent work: ${resolution.remainingParentWork.join("; ") || "(none)"}`,
+		];
+		if (resolution.nextTarget) lines.push(`Next target: ${resolution.nextTarget.title}`);
 		this.showStatus(lines.join("\n"));
 	}
 

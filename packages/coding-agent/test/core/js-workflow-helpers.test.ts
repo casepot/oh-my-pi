@@ -59,6 +59,9 @@ describe("executeJs workflow helpers", () => {
 			getGoalModeState: () => ({
 				enabled: true,
 				mode: "active",
+				runMode: "working-target",
+				stateVersion: 1,
+				parentFrameVersion: 0,
 				goal: {
 					id: "g1",
 					objective: "x",

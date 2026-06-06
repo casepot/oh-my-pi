@@ -11,6 +11,7 @@
 - Added goal-mode side agents for rubric generation, completion verification, and goal-aware continuation compaction.
 - Added expandable TUI artifacts and `/goal` affordances for goal rubrics and verification feedback.
 - Added `parallel_settled()` to Python and JavaScript eval runtimes so workflow fan-outs can preserve successful sibling results when one child fails.
+- Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
 
@@ -22,6 +23,7 @@
 - Changed subagent model auth handling so parent-model substitution requires `task.fallbackToParentModelOnAuthFailure`; otherwise an unauthenticated configured subagent model fails visibly.
 - Changed `omp update` and fork installers to use the `casepot/oh-my-pi` source checkout channel instead of npm/upstream release metadata for Bun-capable installs.
 - Changed goal-mode rubrics/verifiers/continuations to favor evergreen deliverable IDs, structured evidence/blocker output, durable verification history, and delta-focused continuation guidance.
+- Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
 
@@ -39,6 +41,7 @@
 - Fixed ACP bridge writes to report read-back verification/uncertainty and skipped diagnostics, and fixed provider URL/port transport messages to surface as provider-network failures.
 - Fixed hashline edit regression coverage for stale-snapshot delimiter repair and multi-section no-op preflight behavior.
 - Fixed goal side agents so explicit read-only tool lists are strict active-tool allowlists, preventing image/custom/extension tools from leaking into rubric/verifier/continuation agents.
+- Fixed goal-mode compaction so maintenance aborts do not pause active goals or convert open targets into paused parent-goal state.
 
 ## [15.8.1] - 2026-06-02
 

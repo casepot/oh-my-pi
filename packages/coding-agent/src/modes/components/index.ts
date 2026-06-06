@@ -10,6 +10,8 @@ export * from "./custom-message";
 export * from "./diff";
 export * from "./dynamic-border";
 export * from "./footer";
+export * from "./goal-checkpoint-message";
+export * from "./goal-checkpoint-resolution-message";
 export * from "./goal-rubric-message";
 export * from "./goal-verification-feedback-message";
 export * from "./hook-editor";

@@ -1,6 +1,6 @@
-<!-- Hidden continuation steer. role=user, suppressed from visible transcript. -->
+<!-- Hidden goal continuation steer. role=user, suppressed from visible transcript. -->
 
-Continue work on the active goal.
+Continue according to the active goal run mode.
 
 <objective>
 {{objective}}
@@ -10,11 +10,20 @@ Continue work on the active goal.
 <completion_rubric>
 {{rubric}}
 </completion_rubric>
-The rubric is a verification aid; the objective remains the source of truth.
+The rubric is a verification aid; the objective remains the parent goal source of truth.
 {{/if}}
 
+<goal_mode_state>
+Run mode: {{runMode}}
+State version: {{stateVersion}}
+Parent frame version: {{parentFrameVersion}}
+
+Structured snapshot:
+{{goalStateSnapshot}}
+</goal_mode_state>
+
 {{#if lastVerificationFeedback}}
-Previous completion verification rejected attempt {{failedCompletionAttempts}}. Address this feedback before trying again:
+Previous parent-completion verification rejected attempt {{failedCompletionAttempts}}. Address this feedback before trying parent completion again:
 <verifier_feedback>
 {{lastVerificationFeedback}}
 </verifier_feedback>
@@ -26,17 +35,22 @@ Budget:
 - Tokens remaining: {{remainingTokens}}
 - Time used: {{timeUsedSeconds}} seconds
 
-This is an autonomous continuation. The objective persists across turns; do not redefine success around a smaller, easier, or already-completed subset.
+Run-mode policy:
 
-Before calling `goal({op:"complete"})`, you MUST perform a completion audit against the current repo state:
+- `working-target`: continue local work on the current target. If no target exists, call `goal({op:"start_target", …})` before substantial implementation. If the target is stable under its closure standard, call `goal({op:"checkpoint", …})` with evidence and stop ordinary local work. Do not choose a new target merely because context was compacted.
+- `awaiting-checkpoint-resolution`: do not continue implementation. Act as a fresh controller turn. Read checkpoint guidance and call `goal({op:"resolve_checkpoint", …})` before any local work resumes. Parent-state changes must be recorded in `resolve_checkpoint.parent_delta`; narrative guidance is not accepted parent truth. Do not call `complete` unless the resolution explicitly selects `parent_completion_candidate` and parent-level evidence is verifier-ready.
+- `awaiting-verification-repair`: the parent completion verifier rejected the claim. Repair or gather current evidence for the listed blockers. If no current target is explicitly linked to those blockers, call `goal({op:"start_target", …})` for a focused repair/evidence target. Do not retry `complete` until the blockers have fresh repair/evidence. Do not choose unrelated work.
+- `awaiting-user-input`: do not auto-continue ordinary work. Wait for user input, broader checks, or external authority, then resolve or resume through the goal tool.
 
-1. **Restate the objective as concrete deliverables.** What files, behaviors, tests, gates, or artifacts must exist for the objective to be true? Write them down (todo_write, or in your reasoning).
-2. **Map each deliverable to evidence.** For every requirement, identify the authoritative source that would prove it: a file's contents, a command's output, a test's pass status, a PR/issue state.
-3. **Inspect the actual current state.** Read the files. Run the commands. Check the tests. Do not rely on memory of earlier work in this session — the repo may have changed.
-4. **Match verification scope to claim scope.** A narrow check (one file passes its unit test) does not prove a broad claim (the feature works end-to-end).
-5. **Treat uncertainty as not-yet-achieved.** Indirect evidence, partial coverage, missing artifacts, or "looks right" without inspection mean continue working. Gather stronger evidence or do more work.
-6. **Budget exhaustion is not completion.** Do not call complete merely because tokens are nearly out. If the budget is tight and the work is unfinished, leave the goal active and stop the turn — the user or runtime decides next steps.
+If `pendingCheckpointId` exists, ordinary implementation remains blocked until `resolve_checkpoint` records the controller decision. A checkpoint is not parent completion and cannot mutate the parent frame through prose.
 
-Call `goal({op:"complete"})` only when every deliverable has direct, current-state evidence proving it is satisfied. The completion call is a load-bearing claim; it ends the autonomous loop and surfaces a "done" report to the user.
+Before calling `goal({op:"complete"})`, perform a parent-completion audit against current repo state:
 
-If the work is not done, just keep working. Do not narrate that you are continuing — execute.
+1. Restate the parent objective as concrete deliverables.
+2. Map each deliverable to authoritative current evidence.
+3. Inspect the actual current state. Read files and run the relevant checks; do not rely on memory.
+4. Match verification scope to claim scope.
+5. Treat uncertainty as not-yet-achieved.
+6. Do not retry completion after verifier rejection without fresh repair/evidence.
+
+Call `goal({op:"complete"})` only when every parent deliverable has direct, current-state evidence. If the work is not done, execute the next valid run-mode action.

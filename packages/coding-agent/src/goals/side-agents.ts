@@ -1,4 +1,12 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import goalCheckpointGuidanceAssignment from "../prompts/goals/goal-checkpoint-guidance-assignment.md" with {
+	type: "text",
+};
+import goalCheckpointGuidanceSystem from "../prompts/goals/goal-checkpoint-guidance-system.md" with { type: "text" };
+import goalCheckpointReviewerAssignment from "../prompts/goals/goal-checkpoint-reviewer-assignment.md" with {
+	type: "text",
+};
+import goalCheckpointReviewerSystem from "../prompts/goals/goal-checkpoint-reviewer-system.md" with { type: "text" };
 import goalCompletionVerifierAssignment from "../prompts/goals/goal-completion-verifier-assignment.md" with {
 	type: "text",
 };
@@ -13,7 +21,12 @@ import goalPreparedContinuation from "../prompts/goals/goal-prepared-continuatio
 import goalRubricAssignment from "../prompts/goals/goal-rubric-assignment.md" with { type: "text" };
 import goalRubricSystem from "../prompts/goals/goal-rubric-system.md" with { type: "text" };
 import type { AgentDefinition } from "../task/types";
-import type { GoalCompletionVerifierStructuredOutput, GoalContinuationFocus } from "./state";
+import type {
+	GoalCheckpointEvidenceItem,
+	GoalCompletionVerifierStructuredOutput,
+	GoalContinuationFocus,
+	GoalVerificationGap,
+} from "./state";
 
 export const GOAL_SIDE_AGENT_TOOLS = ["read", "search", "find", "yield"] as const;
 
@@ -90,6 +103,31 @@ const goalContinuationOutputSchema = {
 	},
 } as const;
 
+const goalCheckpointReviewOutputSchema = {
+	properties: {
+		status: { enum: ["accepted", "rejected"] },
+		feedback: { type: "string" },
+		evidenceChecked: { elements: evidenceItemSchema },
+		blockers: { elements: completionBlockerSchema },
+	},
+	optionalProperties: {
+		continuationFocus: continuationFocusSchema,
+	},
+} as const;
+
+const goalCheckpointGuidanceOutputSchema = {
+	properties: {
+		continuationMessage: { type: "string" },
+		checkpointSummary: { type: "string" },
+		controllerQuestions: { elements: { type: "string" } },
+		possibleNextTargets: { elements: { type: "string" } },
+		broaderChecksOrInputs: { elements: { type: "string" } },
+		parentDeltaConsiderations: { elements: { type: "string" } },
+		lessonsForFuture: { elements: { type: "string" } },
+		avoidRepeating: { elements: { type: "string" } },
+	},
+} as const;
+
 export const goalRubricAgent = {
 	name: "goal-rubric",
 	description: "Read-only goal rubric generator",
@@ -117,6 +155,24 @@ export const goalContinuationCompactorAgent = {
 	source: "bundled",
 } satisfies AgentDefinition;
 
+export const goalCheckpointReviewerAgent = {
+	name: "goal-checkpoint-reviewer",
+	description: "Read-only goal checkpoint reviewer",
+	systemPrompt: goalCheckpointReviewerSystem,
+	tools: [...GOAL_SIDE_AGENT_TOOLS],
+	output: goalCheckpointReviewOutputSchema,
+	source: "bundled",
+} satisfies AgentDefinition;
+
+export const goalCheckpointGuidanceAgent = {
+	name: "goal-checkpoint-guidance",
+	description: "Read-only goal checkpoint guidance writer",
+	systemPrompt: goalCheckpointGuidanceSystem,
+	tools: [...GOAL_SIDE_AGENT_TOOLS],
+	output: goalCheckpointGuidanceOutputSchema,
+	source: "bundled",
+} satisfies AgentDefinition;
+
 export interface GoalRubricOutput {
 	rubric: string;
 }
@@ -132,6 +188,25 @@ export interface GoalContinuationCompactorOutput {
 	continuationFocus?: GoalContinuationFocus;
 }
 
+export interface GoalCheckpointReviewerOutput {
+	status: "accepted" | "rejected";
+	feedback: string;
+	evidenceChecked: GoalCheckpointEvidenceItem[];
+	blockers: GoalVerificationGap[];
+	continuationFocus?: GoalContinuationFocus;
+}
+
+export interface GoalCheckpointGuidanceOutput {
+	continuationMessage: string;
+	checkpointSummary: string;
+	controllerQuestions: string[];
+	possibleNextTargets: string[];
+	broaderChecksOrInputs: string[];
+	parentDeltaConsiderations: string[];
+	lessonsForFuture: string[];
+	avoidRepeating: string[];
+}
+
 export function renderGoalRubricAssignment(input: { objective: string; contextFile: string }): string {
 	return prompt.render(goalRubricAssignment, input);
 }
@@ -140,6 +215,8 @@ export function renderGoalCompletionVerifierAssignment(input: {
 	objective: string;
 	rubric: string;
 	contextFile: string;
+	goalStateFile?: string;
+	goalStateSnapshot?: string;
 	attempt: number;
 	maxAttempts: number;
 }): string {
@@ -154,9 +231,29 @@ export function renderGoalContinuationCompactorAssignment(input: {
 	objective: string;
 	rubric: string;
 	contextFile: string;
+	goalStateFile?: string;
+	goalStateSnapshot?: string;
 	verificationFeedback?: string;
 }): string {
 	return prompt.render(goalContinuationCompactorAssignment, input);
+}
+
+export function renderGoalCheckpointReviewerAssignment(input: {
+	contextFile: string;
+	goalStateFile: string;
+	goalStateSnapshot: string;
+	candidateCheckpoint: string;
+}): string {
+	return prompt.render(goalCheckpointReviewerAssignment, input);
+}
+
+export function renderGoalCheckpointGuidanceAssignment(input: {
+	contextFile: string;
+	goalStateFile: string;
+	goalStateSnapshot: string;
+	checkpointPacket: string;
+}): string {
+	return prompt.render(goalCheckpointGuidanceAssignment, input);
 }
 
 export function renderPreparedGoalContinuation(input: { basePrompt: string; continuationMessage: string }): string {

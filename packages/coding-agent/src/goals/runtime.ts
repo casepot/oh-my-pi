@@ -5,12 +5,33 @@ import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { t
 import type {
 	Goal,
 	GoalBudgetSteering,
+	GoalCheckpointEvidenceItem,
+	GoalCheckpointPacket,
+	GoalCheckpointResolution,
+	GoalCheckpointResolutionDecision,
+	GoalCheckpointReview,
+	GoalCheckpointStatus,
 	GoalCompletionVerifierStructuredOutput,
 	GoalModeState,
+	GoalParentFrame,
+	GoalParentStateDelta,
+	GoalRef,
+	GoalRunMode,
 	GoalRuntimeEvent,
+	GoalTarget,
 	GoalTokenUsage,
 	GoalVerificationAttempt,
+	GoalVerificationGap,
+	GoalVerificationRepairState,
 	GoalVerificationStatus,
+} from "./state";
+import {
+	cloneCheckpoint,
+	cloneGoal,
+	cloneGoalModeState,
+	cloneParentFrame,
+	cloneTarget,
+	normalizeParentFrame,
 } from "./state";
 
 export interface GoalRuntimeHost {
@@ -56,44 +77,89 @@ export interface GoalRuntimeSnapshot {
 
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
 
-function cloneStructuredFeedback(
-	structuredFeedback: GoalCompletionVerifierStructuredOutput | undefined,
-): GoalCompletionVerifierStructuredOutput | undefined {
-	if (!structuredFeedback) return undefined;
-	return {
-		...structuredFeedback,
-		deliverableResults: structuredFeedback.deliverableResults.map(result => ({
-			...result,
-			evidence: result.evidence?.map(item => ({ ...item })),
-		})),
-		evidenceChecked: structuredFeedback.evidenceChecked.map(item => ({ ...item })),
-		completionBlockers: structuredFeedback.completionBlockers.map(item => ({ ...item })),
-		continuationFocus: structuredFeedback.continuationFocus
-			? {
-					openGaps: [...structuredFeedback.continuationFocus.openGaps],
-					nextActions: [...structuredFeedback.continuationFocus.nextActions],
-					evidenceToCollect: [...structuredFeedback.continuationFocus.evidenceToCollect],
-					avoidRepeating: structuredFeedback.continuationFocus.avoidRepeating
-						? [...structuredFeedback.continuationFocus.avoidRepeating]
-						: undefined,
-				}
-			: undefined,
-	};
+export interface GoalStartTargetInput {
+	title: string;
+	desiredFutureClaim: string;
+	closureStandard: string;
+	expectedParentContribution?: string;
+	baselineRefs?: GoalRef[];
+	gateRefs?: string[];
+	evidenceExpectation?: string[];
+	nonGoals?: string[];
+	forbiddenClaims?: string[];
+	staleIf?: string[];
+	createdBy?: GoalTarget["createdBy"];
+	createdFromCheckpointId?: string;
+	createdFromVerificationAttemptId?: string;
+	linkedVerifierBlockerIds?: string[];
 }
 
-function cloneGoal(goal: Goal): Goal {
-	return {
-		...goal,
-		verificationAttempts: goal.verificationAttempts?.map(attempt => ({
-			...attempt,
-			structuredFeedback: cloneStructuredFeedback(attempt.structuredFeedback),
-		})),
-	};
+export interface GoalCheckpointInput {
+	status: GoalCheckpointStatus;
+	summary: string;
+	localClaims: string[];
+	evidence: GoalCheckpointEvidenceItem[];
+	notClaimed: string[];
+	remainingQuestions: string[];
+	checksRun?: string[];
+	artifactsTouched?: string[];
+	risksOrCaveats?: string[];
+	staleIf?: string[];
+	suggestedControllerQuestions?: string[];
+	retrospectiveTarget?: GoalStartTargetInput;
 }
 
-function cloneState(state: GoalModeState): GoalModeState {
-	return { ...state, goal: cloneGoal(state.goal) };
+export interface GoalCheckpointResolutionInput {
+	checkpointId: string;
+	decision: GoalCheckpointResolutionDecision;
+	parentReading: string;
+	parentDelta?: GoalParentStateDelta;
+	notPropagated: string[];
+	remainingParentWork: string[];
+	broaderChecksOrInputs?: string[];
+	lessonsForFuture?: string[];
+	nextTarget?: GoalStartTargetInput;
 }
+
+export interface GoalSideAgentExpectation {
+	goalId: string;
+	stateVersion: number;
+	currentTargetId?: string;
+	pendingCheckpointId?: string;
+	parentFrameVersion?: number;
+	verificationAttemptId?: string;
+	checkpointId?: string;
+}
+
+export interface GoalContinuationPacket {
+	transition: "target-checkpoint" | "context-compaction" | "verification-rejected";
+	reason: string;
+	stateVersion: number;
+	runMode: GoalRunMode;
+	parentGoalId?: string;
+	parentFrameVersion?: number;
+	parentFrameKind?: GoalParentFrame["kind"];
+	currentTargetId?: string;
+	pendingCheckpointId?: string;
+	verificationAttemptId?: string;
+	parentGoalStillActive: boolean;
+	currentTargetStillOpen: boolean;
+	allowedNextActs: string[];
+	disallowedNextActs: string[];
+	continuationGuidance: string;
+	nonClaims: string[];
+	parentBoundaries: string[];
+	parentResiduals: string[];
+	parentGateStatuses: string[];
+}
+
+const DEFAULT_CHECKPOINT_NOT_CLAIMED = [
+	"Parent goal complete",
+	"External checks verified",
+	"Future target selected",
+	"Durable project memory or guidance updated",
+	"External/user authority granted",
+] as const;
 
 function budgetValue(goal: Goal): string {
 	return goal.tokenBudget === undefined ? "none" : String(goal.tokenBudget);
@@ -135,12 +201,6 @@ export function renderTrustedObjective(objective: string): string {
 }
 
 export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage): number {
-	// Diverges from codex-rs: codex omits cache creation because its target providers
-	// do not bill cache writes distinctly through the token-usage stream. Pi receives
-	// cacheWrite separately on Anthropic/Bedrock; rotating a 1h ephemeral cache or
-	// re-anchoring a changed system prompt can write 100K+ tokens, which the goal
-	// budget must account for. cacheRead is excluded because it is reused prefix,
-	// not new work consumed by the goal.
 	return (
 		Math.max(0, current.input - baseline.input) +
 		Math.max(0, current.cacheWrite - baseline.cacheWrite) +
@@ -152,7 +212,112 @@ function optionalPromptSection(value: string | undefined): string {
 	return value ? escapeXmlText(value) : "";
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+function escapeJsonForPrompt(value: unknown): string {
+	return escapeXmlText(JSON.stringify(value, null, 2));
+}
+
+function latestCheckpoint(goal: Goal): GoalCheckpointPacket | undefined {
+	if (goal.pendingCheckpointId) {
+		return goal.checkpoints?.find(packet => packet.id === goal.pendingCheckpointId);
+	}
+	return goal.checkpoints?.at(-1);
+}
+
+function latestResolution(goal: Goal): GoalCheckpointResolution | undefined {
+	if (goal.lastCheckpointResolutionId) {
+		return goal.checkpointResolutions?.find(resolution => resolution.id === goal.lastCheckpointResolutionId);
+	}
+	return goal.checkpointResolutions?.at(-1);
+}
+
+export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: Goal): string {
+	const snapshot = {
+		stateVersion: state?.stateVersion ?? 0,
+		parentFrameVersion: state?.parentFrameVersion ?? (goal.parentFrame ? 1 : 0),
+		runMode: state?.runMode ?? "working-target",
+		parentGoal: {
+			id: goal.id,
+			objective: goal.objective,
+			status: goal.status,
+			rubric: goal.rubric,
+		},
+		parentFrame: goal.parentFrame,
+		currentTarget: goal.currentTarget,
+		pendingCheckpoint: latestCheckpoint(goal),
+		latestCheckpointResolution: latestResolution(goal),
+		lastCheckpointRejection: goal.lastCheckpointRejection,
+		verificationRepair: goal.verificationRepair,
+	};
+	return escapeJsonForPrompt(snapshot);
+}
+
+export function buildGoalContinuationPacket(
+	state: GoalModeState,
+	transition: GoalContinuationPacket["transition"],
+	reason: string,
+	continuationGuidance: string,
+): GoalContinuationPacket {
+	const goal = state.goal;
+	const frame = goal.parentFrame;
+	const checkpoint = latestCheckpoint(goal);
+	return {
+		transition,
+		reason,
+		stateVersion: state.stateVersion,
+		runMode: state.runMode,
+		parentGoalId: goal.id,
+		parentFrameVersion: state.parentFrameVersion,
+		parentFrameKind: frame?.kind,
+		currentTargetId: goal.currentTarget?.id,
+		pendingCheckpointId: goal.pendingCheckpointId,
+		verificationAttemptId: goal.verificationRepair?.verificationAttemptId,
+		parentGoalStillActive: goal.status === "active" || goal.status === "budget-limited",
+		currentTargetStillOpen: goal.currentTarget?.status === "active",
+		allowedNextActs: allowedActsForRunMode(state.runMode),
+		disallowedNextActs: disallowedActsForRunMode(state.runMode),
+		continuationGuidance,
+		nonClaims: [
+			...(checkpoint?.notClaimed ?? []),
+			...(goal.currentTarget?.forbiddenClaims ?? []),
+			...(frame?.boundaries.map(boundary => boundary.statement) ?? []),
+		],
+		parentBoundaries: frame?.boundaries.map(boundary => `${boundary.id}: ${boundary.statement}`) ?? [],
+		parentResiduals: frame?.residuals.map(residual => `${residual.id}: ${residual.statement}`) ?? [],
+		parentGateStatuses: frame?.gates.map(gate => `${gate.id}: ${gate.status}`) ?? [],
+	};
+}
+
+function allowedActsForRunMode(runMode: GoalRunMode): string[] {
+	switch (runMode) {
+		case "awaiting-checkpoint-resolution":
+			return ["Inspect checkpoint guidance", 'Call goal({ op: "resolve_checkpoint", ... })'];
+		case "awaiting-verification-repair":
+			return ["Repair verifier blockers", "Start a blocker-scoped target", "Gather fresh evidence"];
+		case "awaiting-user-input":
+			return ["Wait for user input, broader checks, or external authority"];
+		default:
+			return [
+				"Continue current target",
+				"Start a target if none exists",
+				"Checkpoint only after target closure evidence",
+			];
+	}
+}
+
+function disallowedActsForRunMode(runMode: GoalRunMode): string[] {
+	switch (runMode) {
+		case "awaiting-checkpoint-resolution":
+			return ["Continue local implementation", "Mutate parent frame in prose", "Call complete before resolution"];
+		case "awaiting-verification-repair":
+			return ["Retry complete without fresh repair/evidence", "Choose unrelated work"];
+		case "awaiting-user-input":
+			return ["Auto-continue ordinary work"];
+		default:
+			return ["Checkpoint partial/fatigue/budget work", "Treat target closure as parent completion"];
+	}
+}
+
+export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal, state?: GoalModeState): string {
 	const template =
 		kind === "active"
 			? goalModeActivePrompt
@@ -169,6 +334,15 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
+		runMode: state?.runMode ?? "working-target",
+		stateVersion: String(state?.stateVersion ?? 0),
+		parentFrameVersion: String(state?.parentFrameVersion ?? (goal.parentFrame ? 1 : 0)),
+		goalStateSnapshot: renderGoalStateSnapshot(state, goal),
+		parentFrame: escapeJsonForPrompt(goal.parentFrame ?? null),
+		currentTarget: escapeJsonForPrompt(goal.currentTarget ?? null),
+		pendingCheckpoint: escapeJsonForPrompt(latestCheckpoint(goal) ?? null),
+		latestCheckpointResolution: escapeJsonForPrompt(latestResolution(goal) ?? null),
+		verificationRepair: escapeJsonForPrompt(goal.verificationRepair ?? null),
 	});
 }
 
@@ -192,6 +366,103 @@ function validateTokenBudget(tokenBudget: number | undefined): void {
 
 function isAccountingStatus(goal: Goal): boolean {
 	return goal.status === "active" || goal.status === "budget-limited";
+}
+
+function trimmed(value: string, field: string): string {
+	const result = value.trim();
+	if (!result) throw new Error(`${field} is required`);
+	return result;
+}
+
+function cloneRefs(refs: GoalRef[] | undefined): GoalRef[] {
+	return refs?.map(ref => ({ ...ref })) ?? [];
+}
+
+function cloneStringArray(value: string[] | undefined): string[] {
+	return value ? [...value] : [];
+}
+
+function includesEquivalentClaim(values: string[], candidate: string): boolean {
+	const normalizedCandidate = candidate.toLowerCase();
+	return values.some(value => {
+		const normalized = value.toLowerCase();
+		return normalized === normalizedCandidate || normalized.includes(normalizedCandidate);
+	});
+}
+
+function withDefaultNotClaimed(values: string[]): string[] {
+	const output = [...values];
+	for (const claim of DEFAULT_CHECKPOINT_NOT_CLAIMED) {
+		if (!includesEquivalentClaim(output, claim)) output.push(claim);
+	}
+	return output;
+}
+
+function nextTargetSequence(goal: Goal): number {
+	const current = goal.currentTarget?.sequence ?? 0;
+	const history = goal.targets?.reduce((max, target) => Math.max(max, target.sequence), 0) ?? 0;
+	return Math.max(current, history) + 1;
+}
+
+function nextCheckpointSequence(goal: Goal): number {
+	return (goal.checkpoints?.reduce((max, packet) => Math.max(max, packet.sequence), 0) ?? 0) + 1;
+}
+
+function nextResolutionSequence(goal: Goal): number {
+	return (goal.checkpointResolutions?.reduce((max, resolution) => Math.max(max, resolution.sequence), 0) ?? 0) + 1;
+}
+
+function upsertById<T extends { id: string }>(values: T[], additions: T[]): T[] {
+	const output = [...values];
+	for (const addition of additions) {
+		const index = output.findIndex(value => value.id === addition.id);
+		if (index === -1) output.push(addition);
+		else output[index] = addition;
+	}
+	return output;
+}
+
+function blockerIds(blockers: GoalVerificationGap[]): Set<string> {
+	return new Set(blockers.map(blocker => blocker.id));
+}
+
+function targetLinksBlockers(target: GoalTarget | undefined, blockers: GoalVerificationGap[]): boolean {
+	if (!target?.linkedVerifierBlockerIds?.length) return false;
+	const ids = blockerIds(blockers);
+	return target.linkedVerifierBlockerIds.some(id => ids.has(id));
+}
+
+function targetFromInput(
+	goal: Goal,
+	input: GoalStartTargetInput,
+	sequence: number,
+	parentFrameVersion: number,
+	now: number,
+	createdBy: GoalTarget["createdBy"],
+): GoalTarget {
+	return {
+		id: `${goal.id}-target-${sequence}`,
+		sequence,
+		status: "active",
+		title: trimmed(input.title, "title"),
+		desiredFutureClaim: trimmed(input.desiredFutureClaim, "desired_future_claim"),
+		closureStandard: trimmed(input.closureStandard, "closure_standard"),
+		expectedParentContribution: input.expectedParentContribution?.trim() || undefined,
+		parentFrameVersion,
+		baselineRefs: input.baselineRefs?.length
+			? cloneRefs(input.baselineRefs)
+			: cloneRefs(goal.parentFrame?.baselineRefs),
+		gateRefs: cloneStringArray(input.gateRefs),
+		evidenceExpectation: cloneStringArray(input.evidenceExpectation),
+		nonGoals: cloneStringArray(input.nonGoals),
+		forbiddenClaims: cloneStringArray(input.forbiddenClaims),
+		staleIf: cloneStringArray(input.staleIf),
+		createdAt: now,
+		createdBy,
+		createdFromCheckpointId: input.createdFromCheckpointId,
+		createdFromVerificationAttemptId: input.createdFromVerificationAttemptId,
+		linkedVerifierBlockerIds: input.linkedVerifierBlockerIds ? [...input.linkedVerifierBlockerIds] : undefined,
+	};
 }
 
 export class GoalRuntime {
@@ -242,20 +513,26 @@ export class GoalRuntime {
 
 	#getStateClone(): GoalModeState | undefined {
 		const state = this.#host.getState();
-		return state ? cloneState(state) : undefined;
+		return state ? cloneGoalModeState(state) : undefined;
 	}
 
 	async #commitState(
 		state: GoalModeState | undefined,
 		options?: { persist?: "goal" | "goal_paused" | "none"; emit?: boolean },
 	): Promise<void> {
-		this.#host.setState(state ? cloneState(state) : undefined);
+		this.#host.setState(state ? cloneGoalModeState(state) : undefined);
 		if (options?.persist) {
 			this.#host.persist(options.persist, state);
 		}
 		if (options?.emit !== false) {
 			await this.#host.emit({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
 		}
+	}
+
+	#bumpState(state: GoalModeState, options?: { parentFrameChanged?: boolean }): void {
+		state.stateVersion += 1;
+		if (options?.parentFrameChanged) state.parentFrameVersion += 1;
+		state.goal.updatedAt = this.#now();
 	}
 
 	#markActiveAccounting(goal: Goal): void {
@@ -290,21 +567,6 @@ export class GoalRuntime {
 		if (toolName === "goal") return;
 		if (!this.#hasAccountingState()) return;
 		await this.flushUsage("allowed");
-		if (toolName !== "yield") {
-			await this.#recordWorkAfterVerification();
-		}
-	}
-
-	async #recordWorkAfterVerification(): Promise<void> {
-		await this.#withAccounting(async () => {
-			const state = this.#getStateClone();
-			if (!state?.enabled || !isAccountingStatus(state.goal)) return;
-			if (!state.goal.failedCompletionAttempts) return;
-			state.goal.failedCompletionAttempts = undefined;
-			state.goal.workEpoch = (state.goal.workEpoch ?? 0) + 1;
-			state.goal.updatedAt = this.#now();
-			await this.#commitState(state, { persist: "goal" });
-		});
 	}
 
 	async onGoalToolCompleted(): Promise<void> {
@@ -337,7 +599,7 @@ export class GoalRuntime {
 			if (!cloned?.enabled || cloned.goal.status !== "active") return;
 			cloned.enabled = false;
 			cloned.goal.status = "paused";
-			cloned.goal.updatedAt = this.#now();
+			this.#bumpState(cloned);
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(cloned, { persist: "goal_paused" });
@@ -350,7 +612,7 @@ export class GoalRuntime {
 		if (state.goal.status === "active") {
 			state.enabled = false;
 			state.goal.status = "paused";
-			state.goal.updatedAt = this.#now();
+			this.#bumpState(state);
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(state, { persist: "goal_paused" });
@@ -375,16 +637,20 @@ export class GoalRuntime {
 			state.goal.tokenBudget = newBudget;
 			state.goal.updatedAt = this.#now();
 			let shouldSteer = false;
+			let semantic = false;
 			if (newBudget !== undefined && state.goal.tokensUsed >= newBudget) {
 				if (state.goal.status === "active") {
 					state.goal.status = "budget-limited";
+					semantic = true;
 					shouldSteer = true;
 				}
 			} else if (state.goal.status === "budget-limited") {
 				state.goal.status = "active";
 				state.enabled = true;
+				semantic = true;
 				this.#markActiveAccounting(state.goal);
 			}
+			if (semantic) this.#bumpState(state);
 			await this.#commitState(state, { persist: state.enabled ? "goal" : "goal_paused" });
 			if (shouldSteer) {
 				await this.#sendBudgetLimitSteer(state.goal);
@@ -420,6 +686,7 @@ export class GoalRuntime {
 			state.goal.status === "active";
 		if (flippedToBudgetLimited) {
 			state.goal.status = "budget-limited";
+			this.#bumpState(state);
 		}
 
 		if (this.#turnSnapshot?.activeGoalId === state.goal.id) {
@@ -452,7 +719,7 @@ export class GoalRuntime {
 			const state = this.#getStateClone();
 			if (!state?.enabled || state.goal.id !== goalId || state.goal.status !== "active") return undefined;
 			state.goal.rubric = trimmedRubric || undefined;
-			state.goal.updatedAt = this.#now();
+			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
 			return state.goal;
 		});
@@ -468,7 +735,7 @@ export class GoalRuntime {
 			maxAttempts: input.maxAttempts,
 			status: input.status,
 			feedback: input.feedback.trim(),
-			structuredFeedback: cloneStructuredFeedback(input.structuredFeedback),
+			structuredFeedback: input.structuredFeedback,
 			compactorMemo,
 			createdAt: this.#now(),
 			workEpoch: goal.workEpoch ?? 0,
@@ -502,7 +769,7 @@ export class GoalRuntime {
 			const currentAttempts = state.goal.failedCompletionAttempts ?? 0;
 			const nextAttempt =
 				options?.attempt === undefined ? currentAttempts + 1 : Math.max(currentAttempts + 1, options.attempt);
-			this.#appendVerificationAttempt(state.goal, {
+			const attempt = this.#appendVerificationAttempt(state.goal, {
 				status: "rejected",
 				attempt: nextAttempt,
 				maxAttempts: options?.maxAttempts ?? nextAttempt,
@@ -512,20 +779,45 @@ export class GoalRuntime {
 				sideAgentTokensUsed: options?.sideAgentTokensUsed,
 			});
 			state.goal.failedCompletionAttempts = nextAttempt;
-			state.goal.updatedAt = this.#now();
+			state.goal.verificationRepair = this.#buildVerificationRepair(
+				attempt,
+				trimmedFeedback,
+				options?.structuredFeedback,
+			);
 			if (!wasBudgetLimited) {
 				state.goal.status = "active";
 			}
 			state.enabled = true;
 			state.mode = "active";
 			state.reason = undefined;
+			state.runMode = targetLinksBlockers(state.goal.currentTarget, state.goal.verificationRepair.blockers)
+				? "working-target"
+				: "awaiting-verification-repair";
 			this.#budgetReportedFor = undefined;
 			if (!wasBudgetLimited) {
 				this.#markActiveAccounting(state.goal);
 			}
+			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
 			return state.goal;
 		});
+	}
+
+	#buildVerificationRepair(
+		attempt: GoalVerificationAttempt,
+		feedback: string,
+		structuredFeedback: GoalCompletionVerifierStructuredOutput | undefined,
+	): GoalVerificationRepairState {
+		const focus = structuredFeedback?.continuationFocus;
+		return {
+			verificationAttemptId: attempt.id,
+			feedback,
+			blockers: structuredFeedback?.completionBlockers.map(blocker => ({ ...blocker })) ?? [],
+			evidenceToCollect: focus?.evidenceToCollect ? [...focus.evidenceToCollect] : [],
+			avoidRepeating: focus?.avoidRepeating ? [...focus.avoidRepeating] : [],
+			createdAt: this.#now(),
+			workEpoch: attempt.workEpoch,
+		};
 	}
 
 	async recordSuccessfulCompletionVerification(
@@ -555,7 +847,8 @@ export class GoalRuntime {
 			state.goal.lastVerificationAttemptId = undefined;
 			state.goal.lastVerificationFeedback = undefined;
 			state.goal.lastVerificationCompactorMemo = undefined;
-			state.goal.updatedAt = this.#now();
+			state.goal.verificationRepair = undefined;
+			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
 			return state.goal;
 		});
@@ -582,6 +875,7 @@ export class GoalRuntime {
 				state.goal.status === "active";
 			if (flippedToBudgetLimited) {
 				state.goal.status = "budget-limited";
+				this.#bumpState(state);
 			}
 			await this.#commitState(state, { persist: "goal" });
 			if (state.goal.status !== "budget-limited") {
@@ -593,7 +887,7 @@ export class GoalRuntime {
 		});
 	}
 
-	#createGoalState(objective: string, tokenBudget: number | undefined): GoalModeState {
+	#createGoalState(objective: string, tokenBudget: number | undefined, parentFrame?: GoalParentFrame): GoalModeState {
 		const now = this.#now();
 		const goal: Goal = {
 			id: String(Snowflake.next()),
@@ -607,11 +901,20 @@ export class GoalRuntime {
 			workEpoch: 0,
 			totalVerificationAttempts: 0,
 			verificationAttempts: [],
+			parentFrame: cloneParentFrame(parentFrame),
+			targets: [],
+			checkpoints: [],
+			checkpointResolutions: [],
 		};
-		return { enabled: true, mode: "active", goal };
+		const parentFrameVersion = parentFrame ? 1 : 0;
+		return { enabled: true, mode: "active", runMode: "working-target", stateVersion: 1, parentFrameVersion, goal };
 	}
 
-	async createGoal(input: { objective: string; tokenBudget?: number }): Promise<GoalModeState> {
+	async createGoal(input: {
+		objective: string;
+		tokenBudget?: number;
+		parentFrame?: GoalParentFrame;
+	}): Promise<GoalModeState> {
 		const objective = input.objective.trim();
 		if (!objective) throw new Error("objective is required when op=create");
 		validateTokenBudget(input.tokenBudget);
@@ -620,7 +923,11 @@ export class GoalRuntime {
 			if (existing?.goal && existing.goal.status !== "dropped" && existing.goal.status !== "complete") {
 				throw new Error("cannot create a new goal because this session already has a goal");
 			}
-			const state = this.#createGoalState(objective, input.tokenBudget);
+			const state = this.#createGoalState(
+				objective,
+				input.tokenBudget,
+				normalizeParentFrame(input.parentFrame, objective),
+			);
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);
 			await this.#commitState(state, { persist: "goal" });
@@ -628,7 +935,11 @@ export class GoalRuntime {
 		});
 	}
 
-	async replaceGoal(input: { objective: string; tokenBudget?: number }): Promise<GoalModeState> {
+	async replaceGoal(input: {
+		objective: string;
+		tokenBudget?: number;
+		parentFrame?: GoalParentFrame;
+	}): Promise<GoalModeState> {
 		const objective = input.objective.trim();
 		if (!objective) throw new Error("objective is required when op=replace");
 		validateTokenBudget(input.tokenBudget);
@@ -638,7 +949,11 @@ export class GoalRuntime {
 				throw new Error("cannot replace goal because no goal is active");
 			}
 			await this.#flushUsageLocked("suppressed");
-			const state = this.#createGoalState(objective, input.tokenBudget);
+			const state = this.#createGoalState(
+				objective,
+				input.tokenBudget,
+				normalizeParentFrame(input.parentFrame, objective),
+			);
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);
 			await this.#commitState(state, { persist: "goal" });
@@ -655,7 +970,7 @@ export class GoalRuntime {
 			state.mode = "active";
 			state.reason = undefined;
 			state.goal.status = "active";
-			state.goal.updatedAt = this.#now();
+			this.#bumpState(state);
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);
 			await this.#commitState(state, { persist: "goal" });
@@ -674,7 +989,7 @@ export class GoalRuntime {
 			if (state.goal.status === "active" || state.goal.status === "budget-limited") {
 				state.goal.status = "paused";
 			}
-			state.goal.updatedAt = this.#now();
+			this.#bumpState(state);
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(state, { persist: "goal_paused" });
@@ -688,13 +1003,15 @@ export class GoalRuntime {
 			const state = this.#getStateClone();
 			if (!state?.goal) return undefined;
 			const dropped = { ...state.goal, status: "dropped" as const, updatedAt: this.#now() };
+			const droppedState: GoalModeState = {
+				...state,
+				enabled: false,
+				goal: dropped,
+				stateVersion: state.stateVersion + 1,
+			};
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
-			await this.#host.emit({
-				type: "goal_updated",
-				goal: dropped,
-				state: { ...state, enabled: false, goal: dropped },
-			});
+			await this.#host.emit({ type: "goal_updated", goal: dropped, state: droppedState });
 			await this.#commitState(undefined, { persist: "none", emit: false });
 			return dropped;
 		});
@@ -704,20 +1021,21 @@ export class GoalRuntime {
 		return await this.#withAccounting(async () => {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
-			if (!state?.goal) {
-				throw new Error("cannot complete goal because no goal is active");
+			if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
+			if (state.goal.status === "complete") throw new Error("goal is already complete");
+			if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
+			if (state.goal.pendingCheckpointId) {
+				throw new Error("cannot complete parent goal while a checkpoint is pending resolution");
 			}
-			if (state.goal.status === "complete") {
-				throw new Error("goal is already complete");
-			}
-			if (state.goal.status === "dropped") {
-				throw new Error("cannot complete a dropped goal");
+			if (state.goal.verificationRepair) {
+				throw new Error("cannot retry parent completion until verifier blockers have fresh repair evidence");
 			}
 			state.enabled = false;
 			state.goal.status = "complete";
-			state.goal.updatedAt = this.#now();
 			state.mode = "exiting";
 			state.reason = "completed";
+			state.runMode = "working-target";
+			this.#bumpState(state);
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
 			await this.#commitState(state, { persist: "goal" });
@@ -725,17 +1043,393 @@ export class GoalRuntime {
 		});
 	}
 
+	async startTarget(input: GoalStartTargetInput): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot start target because no active parent goal exists");
+			if (state.goal.pendingCheckpointId || state.runMode === "awaiting-checkpoint-resolution") {
+				throw new Error("cannot start a target while a checkpoint is pending resolution");
+			}
+			const activeTarget = state.goal.currentTarget?.status === "active" ? state.goal.currentTarget : undefined;
+			const replacingForVerifierRepair =
+				activeTarget !== undefined &&
+				state.runMode === "awaiting-verification-repair" &&
+				(state.goal.verificationRepair?.blockers.length ?? 0) > 0 &&
+				(input.linkedVerifierBlockerIds?.length ?? 0) > 0;
+			if (activeTarget && !replacingForVerifierRepair) {
+				throw new Error("cannot start a target because another target is already active");
+			}
+			if (state.goal.verificationRepair?.blockers.length && !input.linkedVerifierBlockerIds?.length) {
+				throw new Error("start_target during verifier repair must link verifier blocker ids");
+			}
+			const createdBy =
+				input.createdBy ??
+				(state.runMode === "awaiting-verification-repair"
+					? "verification-repair"
+					: state.goal.targets?.length
+						? "operator"
+						: "initial");
+			const target = targetFromInput(
+				state.goal,
+				input,
+				nextTargetSequence(state.goal),
+				state.parentFrameVersion,
+				this.#now(),
+				createdBy,
+			);
+			if (replacingForVerifierRepair && activeTarget) {
+				state.goal.targets = upsertById(state.goal.targets ?? [], [{ ...activeTarget, status: "superseded" }]);
+			}
+			state.goal.currentTarget = target;
+			state.runMode = "working-target";
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	buildCheckpointCandidate(input: GoalCheckpointInput): GoalCheckpointPacket {
+		const state = this.#getStateClone();
+		if (!state?.enabled || state.goal.status !== "active")
+			throw new Error("cannot checkpoint because no active parent goal exists");
+		if (state.runMode === "awaiting-checkpoint-resolution" || state.goal.pendingCheckpointId) {
+			throw new Error("cannot checkpoint while another checkpoint is pending resolution");
+		}
+		if (input.status !== "closed_with_evidence") throw new Error("checkpoint status must be closed_with_evidence");
+		if (input.localClaims.length === 0) throw new Error("checkpoint local_claims must not be empty");
+		if (!input.evidence.some(item => item.current && item.claim.trim() && item.evidence.trim())) {
+			throw new Error("checkpoint requires positive current evidence for the closed target");
+		}
+		if (input.notClaimed.length === 0) throw new Error("checkpoint not_claimed must not be empty");
+		let target = cloneTarget(state.goal.currentTarget);
+		if (!target) {
+			if (!input.retrospectiveTarget) throw new Error("checkpoint requires an active target");
+			target = targetFromInput(
+				state.goal,
+				{ ...input.retrospectiveTarget, createdBy: "retrospective" },
+				nextTargetSequence(state.goal),
+				state.parentFrameVersion,
+				this.#now(),
+				"retrospective",
+			);
+		}
+		if (target.status !== "active") throw new Error("checkpoint requires an active target");
+		const sequence = nextCheckpointSequence(state.goal);
+		const packet: GoalCheckpointPacket = {
+			id: `${state.goal.id}-checkpoint-${sequence}`,
+			sequence,
+			goalId: state.goal.id,
+			targetId: target.id,
+			targetSnapshot: target,
+			parentFrameVersion: state.parentFrameVersion,
+			baselineRefs: cloneRefs(target.baselineRefs),
+			gateRefs: [...target.gateRefs],
+			workEpoch: state.goal.workEpoch ?? 0,
+			status: input.status,
+			summary: trimmed(input.summary, "summary"),
+			localClaims: input.localClaims.map(claim => trimmed(claim, "local_claims[]")),
+			evidence: input.evidence.map(item => ({
+				claim: trimmed(item.claim, "evidence[].claim"),
+				evidence: trimmed(item.evidence, "evidence[].evidence"),
+				current: item.current,
+			})),
+			checksRun: cloneStringArray(input.checksRun),
+			artifactsTouched: cloneStringArray(input.artifactsTouched),
+			notClaimed: withDefaultNotClaimed(input.notClaimed.map(claim => trimmed(claim, "not_claimed[]"))),
+			remainingQuestions: input.remainingQuestions.map(question => trimmed(question, "remaining_questions[]")),
+			risksOrCaveats: cloneStringArray(input.risksOrCaveats),
+			staleIf: [...target.staleIf, ...cloneStringArray(input.staleIf)],
+			suggestedControllerQuestions: cloneStringArray(input.suggestedControllerQuestions),
+			createdAt: this.#now(),
+		};
+		return packet;
+	}
+
+	async commitCheckpoint(packet: GoalCheckpointPacket, review: GoalCheckpointReview): Promise<GoalModeState> {
+		if (review.status !== "accepted") throw new Error("cannot commit checkpoint with a rejected review");
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot checkpoint because no active parent goal exists");
+			if (state.goal.pendingCheckpointId)
+				throw new Error("cannot checkpoint while another checkpoint is pending resolution");
+			let target = cloneTarget(state.goal.currentTarget);
+			if (!target && packet.targetSnapshot.createdBy === "retrospective")
+				target = cloneTarget(packet.targetSnapshot);
+			if (!target || target.id !== packet.targetId || target.status !== "active") {
+				throw new Error("checkpoint target is stale");
+			}
+			const closedTarget: GoalTarget = { ...target, status: "closed", closedAt: this.#now() };
+			const committedPacket: GoalCheckpointPacket = {
+				...(cloneCheckpoint(packet) ?? packet),
+				targetSnapshot: closedTarget,
+				review: { ...review },
+			};
+			state.goal.currentTarget = closedTarget;
+			state.goal.targets = upsertById(state.goal.targets ?? [], [closedTarget]);
+			state.goal.checkpoints = [...(state.goal.checkpoints ?? []), committedPacket];
+			state.goal.pendingCheckpointId = committedPacket.id;
+			state.goal.lastCheckpointRejection = undefined;
+			if (
+				state.goal.verificationRepair &&
+				targetLinksBlockers(closedTarget, state.goal.verificationRepair.blockers)
+			) {
+				state.goal.verificationRepair = undefined;
+				state.goal.failedCompletionAttempts = undefined;
+			}
+			state.runMode = "awaiting-checkpoint-resolution";
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	async rejectCheckpoint(candidate: GoalCheckpointPacket, review: GoalCheckpointReview): Promise<GoalModeState> {
+		if (review.status !== "rejected") throw new Error("checkpoint rejection requires a rejected review");
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot reject checkpoint because no active parent goal exists");
+			state.goal.lastCheckpointRejection = {
+				candidateSummary: candidate.summary,
+				review: { ...review },
+				createdAt: this.#now(),
+			};
+			state.runMode = "working-target";
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	async recordCheckpointResolution(input: GoalCheckpointResolutionInput): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot resolve checkpoint because no active parent goal exists");
+			if (!state.goal.pendingCheckpointId)
+				throw new Error("cannot resolve checkpoint because no checkpoint is pending");
+			if (state.goal.pendingCheckpointId !== input.checkpointId)
+				throw new Error("checkpoint_id does not match the pending checkpoint");
+			if (input.decision === "next_target" && !input.nextTarget) {
+				throw new Error("next_target is required when decision is next_target");
+			}
+			const sequence = nextResolutionSequence(state.goal);
+			const resolutionId = `${state.goal.id}-checkpoint-resolution-${sequence}`;
+			let parentFrameChanged = false;
+			if (input.parentDelta) {
+				state.goal.parentFrame = this.#applyParentStateDeltaToFrame(state.goal, input.parentDelta, resolutionId);
+				parentFrameChanged = true;
+			}
+			let nextTarget: GoalTarget | undefined;
+			let runMode: GoalRunMode = "awaiting-user-input";
+			let clearPending = false;
+			if (input.decision === "next_target") {
+				nextTarget = targetFromInput(
+					state.goal,
+					{
+						...(input.nextTarget as GoalStartTargetInput),
+						createdBy: "checkpoint-resolution",
+						createdFromCheckpointId: input.checkpointId,
+					},
+					nextTargetSequence(state.goal),
+					parentFrameChanged ? state.parentFrameVersion + 1 : state.parentFrameVersion,
+					this.#now(),
+					"checkpoint-resolution",
+				);
+				state.goal.currentTarget = nextTarget;
+				runMode = "working-target";
+				clearPending = true;
+			} else if (input.decision === "parent_completion_candidate") {
+				runMode = "working-target";
+				clearPending = true;
+			}
+			const resolution: GoalCheckpointResolution = {
+				id: resolutionId,
+				sequence,
+				goalId: state.goal.id,
+				checkpointId: input.checkpointId,
+				decision: input.decision,
+				parentReading: trimmed(input.parentReading, "parent_reading"),
+				parentDelta: input.parentDelta,
+				notPropagated: input.notPropagated.map(item => trimmed(item, "not_propagated[]")),
+				remainingParentWork: input.remainingParentWork.map(item => trimmed(item, "remaining_parent_work[]")),
+				broaderChecksOrInputs: cloneStringArray(input.broaderChecksOrInputs),
+				lessonsForFuture: cloneStringArray(input.lessonsForFuture),
+				nextTarget,
+				createdAt: this.#now(),
+			};
+			state.goal.checkpointResolutions = [...(state.goal.checkpointResolutions ?? []), resolution];
+			state.goal.lastCheckpointResolutionId = resolution.id;
+			if (clearPending) state.goal.pendingCheckpointId = undefined;
+			state.runMode = runMode;
+			this.#bumpState(state, { parentFrameChanged });
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	#applyParentStateDeltaToFrame(goal: Goal, delta: GoalParentStateDelta, deltaId: string): GoalParentFrame {
+		const base = cloneParentFrame(goal.parentFrame) ?? {
+			kind: "plain" as const,
+			desiredFuture: goal.objective,
+			baselineRefs: [],
+			acceptedClaims: [],
+			candidateClaims: [],
+			rejectedOrStaleClaims: [],
+			boundaries: [],
+			residuals: [],
+			gates: [],
+			frontier: [],
+			staleIf: [],
+			externalRefs: [],
+		};
+		base.acceptedClaims = upsertById(
+			base.acceptedClaims,
+			delta.admittedClaims.map(claim => ({ ...claim, status: "accepted" as const })),
+		);
+		base.candidateClaims = upsertById(
+			base.candidateClaims,
+			delta.candidateClaimsAdded.map(claim => ({ ...claim, status: "candidate" as const })),
+		);
+		base.rejectedOrStaleClaims = upsertById(
+			base.rejectedOrStaleClaims,
+			delta.rejectedClaims.map(claim => ({ ...claim, status: claim.status === "stale" ? "stale" : "rejected" })),
+		);
+		base.boundaries = upsertById(base.boundaries, delta.boundariesAdded);
+		base.residuals = upsertById(base.residuals, delta.residualsAddedOrUpdated);
+		base.frontier = upsertById(base.frontier, delta.frontierDeltas);
+		for (const gateDelta of delta.gateDeltas) {
+			const index = base.gates.findIndex(gate => gate.id === gateDelta.gateId);
+			if (index === -1) {
+				base.gates.push({
+					id: gateDelta.gateId,
+					name: gateDelta.gateId,
+					status: gateDelta.status,
+					requiredEvidence: [],
+					evidenceRefs: cloneRefs(gateDelta.evidenceRefs),
+				});
+			} else {
+				const existing = base.gates[index];
+				base.gates[index] = {
+					...existing,
+					status: gateDelta.status,
+					evidenceRefs: gateDelta.evidenceRefs ? cloneRefs(gateDelta.evidenceRefs) : existing.evidenceRefs,
+				};
+			}
+		}
+		base.externalRefs = upsertById(base.externalRefs, [
+			...delta.externalRecordRefs,
+			...delta.staleRefs,
+			...(delta.authorityDecisionRefs ?? []),
+		]);
+		base.lastParentDeltaId = deltaId;
+		return base;
+	}
+
+	applyParentStateDelta(delta: GoalParentStateDelta): GoalParentFrame {
+		const state = this.#getStateClone();
+		if (!state?.goal) throw new Error("cannot apply parent delta because no goal exists");
+		return this.#applyParentStateDeltaToFrame(state.goal, delta, `preview-${state.stateVersion + 1}`);
+	}
+
+	async recordVerificationRepairState(input: {
+		verificationAttemptId: string;
+		feedback: string;
+		blockers: GoalVerificationGap[];
+		evidenceToCollect?: string[];
+		avoidRepeating?: string[];
+	}): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot record verifier repair without active goal");
+			state.goal.verificationRepair = {
+				verificationAttemptId: input.verificationAttemptId,
+				feedback: input.feedback,
+				blockers: input.blockers.map(blocker => ({ ...blocker })),
+				evidenceToCollect: cloneStringArray(input.evidenceToCollect),
+				avoidRepeating: cloneStringArray(input.avoidRepeating),
+				createdAt: this.#now(),
+				workEpoch: state.goal.workEpoch ?? 0,
+			};
+			state.runMode = targetLinksBlockers(state.goal.currentTarget, state.goal.verificationRepair.blockers)
+				? "working-target"
+				: "awaiting-verification-repair";
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	async clearVerificationRepairAfterFreshEvidence(input?: {
+		verificationAttemptId?: string;
+	}): Promise<GoalModeState | undefined> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || !state.goal.verificationRepair) return state;
+			if (
+				input?.verificationAttemptId &&
+				input.verificationAttemptId !== state.goal.verificationRepair.verificationAttemptId
+			) {
+				return state;
+			}
+			state.goal.verificationRepair = undefined;
+			state.goal.failedCompletionAttempts = undefined;
+			if (state.runMode === "awaiting-verification-repair") state.runMode = "working-target";
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	captureSideAgentExpectation(options?: { includeParentFrame?: boolean }): GoalSideAgentExpectation | undefined {
+		const state = this.#host.getState();
+		if (!state?.goal) return undefined;
+		const expectation: GoalSideAgentExpectation = {
+			goalId: state.goal.id,
+			stateVersion: state.stateVersion,
+			currentTargetId: state.goal.currentTarget?.id,
+			pendingCheckpointId: state.goal.pendingCheckpointId,
+			verificationAttemptId: state.goal.lastVerificationAttemptId,
+			checkpointId: state.goal.pendingCheckpointId,
+		};
+		if (options?.includeParentFrame) expectation.parentFrameVersion = state.parentFrameVersion;
+		return expectation;
+	}
+
+	canCommitSideAgentResult(expected: GoalSideAgentExpectation | undefined): boolean {
+		if (!expected) return false;
+		const latest = this.#host.getState();
+		if (!latest?.goal || latest.goal.id !== expected.goalId) return false;
+		if (latest.stateVersion !== expected.stateVersion) return false;
+		if (latest.goal.currentTarget?.id !== expected.currentTargetId) return false;
+		if (latest.goal.pendingCheckpointId !== expected.pendingCheckpointId) return false;
+		if (expected.parentFrameVersion !== undefined && latest.parentFrameVersion !== expected.parentFrameVersion)
+			return false;
+		if (
+			expected.verificationAttemptId !== undefined &&
+			latest.goal.lastVerificationAttemptId !== expected.verificationAttemptId
+		) {
+			return false;
+		}
+		if (expected.checkpointId !== undefined && latest.goal.pendingCheckpointId !== expected.checkpointId)
+			return false;
+		return true;
+	}
+
 	buildActivePrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal && state.goal.status === "active"
-			? renderGoalPrompt("active", state.goal)
+			? renderGoalPrompt("active", state.goal, state)
 			: undefined;
 	}
 
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
+			? renderGoalPrompt("continuation", state.goal, state)
 			: undefined;
 	}
 
@@ -744,7 +1438,7 @@ export class GoalRuntime {
 		this.#budgetReportedFor = goal.id;
 		await this.#host.sendHiddenMessage({
 			customType: "goal-budget-limit",
-			content: renderGoalPrompt("budget-limit", goal),
+			content: renderGoalPrompt("budget-limit", goal, this.#host.getState()),
 			deliverAs: "steer",
 		});
 	}

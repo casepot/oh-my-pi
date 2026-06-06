@@ -66,15 +66,31 @@ const kJsonWireSchema = Symbol("pi.schema.json.wire");
  * The empty-schema normalization (`{}` → `true`, see `normalizeEmptySchemas`)
  * runs separately from `toolWireSchema` so both Zod and TypeBox tools get it.
  */
+
+function allVariantsAreObjects(value: unknown): boolean {
+	return (
+		Array.isArray(value) && value.length > 0 && value.every(item => isSchemaRecord(item) && item.type === "object")
+	);
+}
+
+function ensureProviderRootObjectType(schema: Record<string, unknown>): void {
+	if (schema.type !== undefined) return;
+	if (allVariantsAreObjects(schema.oneOf) || allVariantsAreObjects(schema.anyOf)) {
+		schema.type = "object";
+	}
+}
+
 function postProcess(schema: Record<string, unknown>): Record<string, unknown> {
 	delete schema.$schema;
 	walk(schema, true);
+	ensureProviderRootObjectType(schema);
 	normalizeEmptySchemas(schema);
 	return schema;
 }
 
 function postProcessJsonSchema(schema: Record<string, unknown>): Record<string, unknown> {
 	walk(schema, false);
+	ensureProviderRootObjectType(schema);
 	normalizeEmptySchemas(schema);
 	return schema;
 }

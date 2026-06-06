@@ -10,6 +10,8 @@ import { CompactionSummaryMessageComponent } from "../../modes/components/compac
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
+import { GoalCheckpointMessageComponent } from "../../modes/components/goal-checkpoint-message";
+import { GoalCheckpointResolutionMessageComponent } from "../../modes/components/goal-checkpoint-resolution-message";
 import { GoalRubricMessageComponent } from "../../modes/components/goal-rubric-message";
 import { GoalVerificationFeedbackMessageComponent } from "../../modes/components/goal-verification-feedback-message";
 import {
@@ -24,8 +26,12 @@ import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "../../modes/types";
 import {
 	type CustomMessage,
+	GOAL_CHECKPOINT_MESSAGE_TYPE,
+	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
+	type GoalCheckpointMessageDetails,
+	type GoalCheckpointResolutionMessageDetails,
 	type GoalRubricMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 	isSilentAbort,
@@ -162,6 +168,24 @@ export class UiHelpers {
 					}
 					if (message.customType === SKILL_PROMPT_MESSAGE_TYPE) {
 						const component = new SkillMessageComponent(message as CustomMessage<SkillPromptDetails>);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === GOAL_CHECKPOINT_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(new Spacer(1));
+						const component = new GoalCheckpointMessageComponent(
+							message as CustomMessage<GoalCheckpointMessageDetails>,
+						);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(new Spacer(1));
+						const component = new GoalCheckpointResolutionMessageComponent(
+							message as CustomMessage<GoalCheckpointResolutionMessageDetails>,
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;

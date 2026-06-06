@@ -117,10 +117,12 @@ function formatGoalBudget(current: number, budget?: number): string {
 	return `${used}/${formatNumber(budget)}`;
 }
 
-function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: boolean }): RenderedSegment {
+function renderGoalMode(
+	ctx: SegmentContext,
+	mode: { enabled: boolean; paused: boolean; label?: string },
+): RenderedSegment {
 	const goal = ctx.session.getGoalModeState()?.goal;
 	const status = goal?.status ?? (mode.paused ? "paused" : "active");
-
 	let icon: string = theme.icon.goal;
 	let color: ThemeColor = "accent";
 	switch (status) {
@@ -144,7 +146,7 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 			break;
 	}
 
-	const parts: string[] = [withIcon(icon, "Goal")];
+	const parts: string[] = [withIcon(icon, mode.label ?? "Goal")];
 	const showBudget = ctx.session.settings.get("goal.statusInFooter") === true;
 	if (showBudget && goal) {
 		parts.push(formatGoalBudget(goal.tokensUsed, goal.tokenBudget));

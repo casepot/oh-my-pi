@@ -117,6 +117,19 @@ describe("zodToWireSchema — nullable scalar normalization", () => {
 	});
 });
 
+describe("zodToWireSchema — root union object type", () => {
+	it("marks object-only discriminated unions as root objects for providers", () => {
+		const schema = z.discriminatedUnion("op", [
+			z.object({ op: z.literal("alpha"), value: z.string() }).strict(),
+			z.object({ op: z.literal("beta"), count: z.number().int() }).strict(),
+		]);
+		const wire = zodToWireSchema(schema);
+		expect(wire.type).toBe("object");
+		expect(Array.isArray(wire.oneOf)).toBe(true);
+		expect(JSON.stringify(wire.oneOf)).toContain('"const":"alpha"');
+	});
+});
+
 // ---------------------------------------------------------------------------
 // normalizeEmptySchemas — provider-agnostic post-pipeline normalization
 // ---------------------------------------------------------------------------

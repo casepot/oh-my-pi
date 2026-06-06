@@ -11,35 +11,303 @@ import type { ToolSession } from "../../tools";
 import { formatErrorMessage, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { renderStatusLine, truncateToWidth } from "../../tui";
-import { completionBudgetReport, remainingTokens } from "../runtime";
-import type { Goal, GoalCompletionVerificationDetails, GoalModeState, GoalStatus, GoalToolDetails } from "../state";
+import {
+	completionBudgetReport,
+	type GoalCheckpointInput,
+	type GoalCheckpointResolutionInput,
+	type GoalStartTargetInput,
+	remainingTokens,
+} from "../runtime";
+import type {
+	Goal,
+	GoalBoundaryKind,
+	GoalCheckpointPacket,
+	GoalCheckpointResolution,
+	GoalCheckpointReview,
+	GoalCompletionVerificationDetails,
+	GoalGateStatus,
+	GoalModeState,
+	GoalParentFrame,
+	GoalParentStateDelta,
+	GoalRefKind,
+	GoalResidualClassification,
+	GoalStatus,
+	GoalToolDetails,
+} from "../state";
+import { normalizeParentFrame } from "../state";
 
-const goalSchema = z.object({
-	op: z.enum(["create", "get", "complete", "resume", "drop"]).describe("goal operation"),
-	objective: z.string().describe("goal objective").optional(),
-	token_budget: z.number().int().describe("token budget").optional(),
-});
+const refKindSchema = z.enum(["doc", "issue", "artifact", "test", "commit", "external-record", "other"]);
+const refSchema = z
+	.object({
+		id: z.string(),
+		kind: refKindSchema,
+		label: z.string().optional(),
+		uri: z.string().optional(),
+	})
+	.strict();
+
+const claimSchema = z
+	.object({
+		id: z.string(),
+		claim: z.string(),
+		status: z.enum(["accepted", "candidate", "rejected", "stale"]),
+		scope: z.string().optional(),
+		evidence_refs: z.array(refSchema).optional(),
+		non_implications: z.array(z.string()).optional(),
+		accepted_by: z.string().optional(),
+		accepted_at: z.number().optional(),
+	})
+	.strict();
+
+const boundarySchema = z
+	.object({
+		id: z.string(),
+		kind: z.enum([
+			"non-claim",
+			"forbidden-inference",
+			"unsupported",
+			"local-only",
+			"mock-only",
+			"unavailable",
+			"stale-path",
+		]),
+		statement: z.string(),
+		refs: z.array(refSchema).optional(),
+	})
+	.strict();
+
+const residualSchema = z
+	.object({
+		id: z.string(),
+		statement: z.string(),
+		classification: z.enum([
+			"current-parent-blocker",
+			"accepted-risk",
+			"future-frontier",
+			"decision-needed",
+			"architecture-debt",
+			"anti-laundering-non-claim",
+			"local-shortcut",
+			"capability-gap",
+			"rejected-or-stale-path",
+			"unspecified",
+		]),
+		why_it_matters: z.string().optional(),
+		required_evidence: z.array(z.string()).optional(),
+		target_horizon: z.string().optional(),
+		authority_required: z.string().optional(),
+		non_implications: z.array(z.string()).optional(),
+		refs: z.array(refSchema).optional(),
+	})
+	.strict();
+
+const gateSchema = z
+	.object({
+		id: z.string(),
+		name: z.string(),
+		status: z.enum(["unknown", "passed", "failed", "stale", "not-applicable"]),
+		required_evidence: z.array(z.string()),
+		evidence_refs: z.array(refSchema).optional(),
+		non_claims: z.array(z.string()).optional(),
+		stale_if: z.array(z.string()).optional(),
+	})
+	.strict();
+
+const frontierSchema = z
+	.object({
+		id: z.string(),
+		statement: z.string(),
+		evidence_required: z.array(z.string()).optional(),
+		activation_trigger: z.string().optional(),
+		refs: z.array(refSchema).optional(),
+	})
+	.strict();
+
+const parentFrameSchema = z
+	.object({
+		kind: z.enum(["plain", "claim-gated"]).optional(),
+		desired_future: z.string().optional(),
+		current_truth: z.string().optional(),
+		baseline_refs: z.array(refSchema).optional(),
+		accepted_claims: z.array(claimSchema).optional(),
+		candidate_claims: z.array(claimSchema).optional(),
+		rejected_or_stale_claims: z.array(claimSchema).optional(),
+		boundaries: z.array(boundarySchema).optional(),
+		residuals: z.array(residualSchema).optional(),
+		gates: z.array(gateSchema).optional(),
+		frontier: z.array(frontierSchema).optional(),
+		stale_if: z.array(z.string()).optional(),
+		authority: z
+			.object({
+				parent_state_authority: z.string().optional(),
+				risk_acceptance_authority: z.string().optional(),
+				external_record_authority: z.string().optional(),
+				worker_may_only_propose: z.boolean().optional(),
+			})
+			.strict()
+			.optional(),
+		external_refs: z.array(refSchema).optional(),
+		last_parent_delta_id: z.string().optional(),
+	})
+	.strict();
+
+const evidenceSchema = z
+	.object({
+		claim: z.string(),
+		evidence: z.string(),
+		current: z.boolean(),
+	})
+	.strict();
+
+const targetSchema = z
+	.object({
+		title: z.string(),
+		desired_future_claim: z.string(),
+		closure_standard: z.string(),
+		expected_parent_contribution: z.string().optional(),
+		baseline_refs: z.array(refSchema).optional(),
+		gate_refs: z.array(z.string()).optional(),
+		evidence_expectation: z.array(z.string()).optional(),
+		non_goals: z.array(z.string()).optional(),
+		forbidden_claims: z.array(z.string()).optional(),
+		stale_if: z.array(z.string()).optional(),
+		linked_verifier_blocker_ids: z.array(z.string()).optional(),
+	})
+	.strict();
+
+const gateDeltaSchema = z
+	.object({
+		gate_id: z.string(),
+		status: z.enum(["unknown", "passed", "failed", "stale", "not-applicable"]),
+		evidence_refs: z.array(refSchema).optional(),
+		rationale: z.string().optional(),
+	})
+	.strict();
+
+const parentDeltaSchema = z
+	.object({
+		admitted_claims: z.array(claimSchema).optional(),
+		candidate_claims_added: z.array(claimSchema).optional(),
+		rejected_claims: z.array(claimSchema).optional(),
+		boundaries_added: z.array(boundarySchema).optional(),
+		residuals_added_or_updated: z.array(residualSchema).optional(),
+		gate_deltas: z.array(gateDeltaSchema).optional(),
+		frontier_deltas: z.array(frontierSchema).optional(),
+		stale_refs: z.array(refSchema).optional(),
+		external_record_refs: z.array(refSchema).optional(),
+		authority_decision_refs: z.array(refSchema).optional(),
+	})
+	.strict();
+
+const createSchema = z
+	.object({
+		op: z.literal("create"),
+		objective: z.string().describe("parent goal objective"),
+		token_budget: z.number().int().describe("token budget").optional(),
+		parent_frame: parentFrameSchema.optional(),
+	})
+	.strict();
+const getSchema = z.object({ op: z.literal("get") }).strict();
+const resumeSchema = z.object({ op: z.literal("resume") }).strict();
+const dropSchema = z.object({ op: z.literal("drop") }).strict();
+const completeSchema = z.object({ op: z.literal("complete") }).strict();
+const startTargetSchema = targetSchema.extend({ op: z.literal("start_target") }).strict();
+const checkpointSchema = z
+	.object({
+		op: z.literal("checkpoint"),
+		status: z.literal("closed_with_evidence"),
+		summary: z.string(),
+		local_claims: z.array(z.string()).min(1),
+		evidence: z.array(evidenceSchema).min(1),
+		not_claimed: z.array(z.string()).min(1),
+		remaining_questions: z.array(z.string()).min(1),
+		checks_run: z.array(z.string()).optional(),
+		artifacts_touched: z.array(z.string()).optional(),
+		risks_or_caveats: z.array(z.string()).optional(),
+		stale_if: z.array(z.string()).optional(),
+		suggested_controller_questions: z.array(z.string()).optional(),
+		retrospective_target: targetSchema.optional(),
+	})
+	.strict();
+const resolveCheckpointSchema = z
+	.object({
+		op: z.literal("resolve_checkpoint"),
+		checkpoint_id: z.string(),
+		decision: z.enum([
+			"next_target",
+			"parent_completion_candidate",
+			"needs_user_input",
+			"needs_broader_checks",
+			"pause_for_external_control",
+			"drop_or_replace_recommended",
+		]),
+		parent_reading: z.string(),
+		parent_delta: parentDeltaSchema.optional(),
+		not_propagated: z.array(z.string()),
+		remaining_parent_work: z.array(z.string()),
+		broader_checks_or_inputs: z.array(z.string()).optional(),
+		lessons_for_future: z.array(z.string()).optional(),
+		next_target: targetSchema.optional(),
+	})
+	.strict()
+	.refine(value => value.decision !== "next_target" || value.next_target !== undefined, {
+		message: "next_target is required when decision is next_target",
+		path: ["next_target"],
+	})
+	.refine(value => value.decision === "next_target" || value.next_target === undefined, {
+		message: "next_target is only allowed when decision is next_target",
+		path: ["next_target"],
+	});
+
+const goalDiscriminatedSchema = z.discriminatedUnion("op", [
+	createSchema,
+	getSchema,
+	resumeSchema,
+	dropSchema,
+	completeSchema,
+	startTargetSchema,
+	checkpointSchema,
+	resolveCheckpointSchema,
+]);
+
+const goalSchema = goalDiscriminatedSchema;
 
 export type GoalToolInput = z.infer<typeof goalSchema>;
 
 interface GoalSessionSupport {
 	createGoalWithRubric?(
-		input: { objective: string; tokenBudget?: number },
+		input: { objective: string; tokenBudget?: number; parentFrame?: GoalParentFrame },
 		signal?: AbortSignal,
 	): Promise<GoalModeState>;
 	requestGoalCompletion?(signal?: AbortSignal): Promise<GoalToolResponse>;
+	requestGoalCheckpoint?(input: GoalCheckpointInput, signal?: AbortSignal): Promise<GoalToolResponse>;
+	requestGoalCheckpointResolution?(
+		input: GoalCheckpointResolutionInput,
+		signal?: AbortSignal,
+	): Promise<GoalToolResponse>;
 }
 
 export interface GoalToolResponse {
 	goal: Goal | null;
+	state?: GoalModeState | null;
 	remainingTokens: number | null;
 	completionBudgetReport: string | null;
 	completionVerification?: GoalCompletionVerificationDetails;
+	checkpoint?: GoalCheckpointPacket;
+	checkpointReview?: GoalCheckpointReview;
+	checkpointResolution?: GoalCheckpointResolution;
 }
 
 export function buildGoalToolResponse(
 	goal: Goal | null | undefined,
-	options?: { includeCompletionReport?: boolean; completionVerification?: GoalCompletionVerificationDetails },
+	options?: {
+		state?: GoalModeState | null;
+		includeCompletionReport?: boolean;
+		completionVerification?: GoalCompletionVerificationDetails;
+		checkpoint?: GoalCheckpointPacket;
+		checkpointReview?: GoalCheckpointReview;
+		checkpointResolution?: GoalCheckpointResolution;
+	},
 ): GoalToolResponse {
 	const resolvedGoal = goal ?? null;
 	const completionVerification = normalizeCompletionVerification(resolvedGoal, options?.completionVerification);
@@ -51,9 +319,13 @@ export function buildGoalToolResponse(
 				: null;
 	return {
 		goal: resolvedGoal,
+		state: options?.state,
 		remainingTokens: remainingTokens(resolvedGoal),
 		completionBudgetReport: completionBudget,
 		completionVerification,
+		checkpoint: options?.checkpoint,
+		checkpointReview: options?.checkpointReview,
+		checkpointResolution: options?.checkpointResolution,
 	};
 }
 
@@ -73,16 +345,130 @@ function normalizeCompletionVerification(
 	return visibleVerification;
 }
 
-function validateCreateParams(params: GoalToolInput): { objective: string; tokenBudget?: number } {
+function validateCreateParams(params: z.infer<typeof createSchema>): {
+	objective: string;
+	tokenBudget?: number;
+	parentFrame?: GoalParentFrame;
+} {
 	const objective = params.objective?.trim();
-	if (!objective) {
-		throw new ToolError("objective is required when op=create");
-	}
+	if (!objective) throw new ToolError("objective is required when op=create");
 	const tokenBudget = params.token_budget;
 	if (tokenBudget !== undefined && (!Number.isInteger(tokenBudget) || tokenBudget <= 0)) {
 		throw new ToolError("token_budget must be a positive integer when provided");
 	}
-	return { objective, tokenBudget };
+	return { objective, tokenBudget, parentFrame: normalizeParentFrame(params.parent_frame, objective) };
+}
+
+function mapTargetInput(params: z.infer<typeof targetSchema>): GoalStartTargetInput {
+	return {
+		title: params.title,
+		desiredFutureClaim: params.desired_future_claim,
+		closureStandard: params.closure_standard,
+		expectedParentContribution: params.expected_parent_contribution,
+		baselineRefs: params.baseline_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+		gateRefs: params.gate_refs,
+		evidenceExpectation: params.evidence_expectation,
+		nonGoals: params.non_goals,
+		forbiddenClaims: params.forbidden_claims,
+		staleIf: params.stale_if,
+		linkedVerifierBlockerIds: params.linked_verifier_blocker_ids,
+	};
+}
+
+function mapCheckpointInput(params: z.infer<typeof checkpointSchema>): GoalCheckpointInput {
+	return {
+		status: params.status,
+		summary: params.summary,
+		localClaims: params.local_claims,
+		evidence: params.evidence.map(item => ({ ...item })),
+		notClaimed: params.not_claimed,
+		remainingQuestions: params.remaining_questions,
+		checksRun: params.checks_run,
+		artifactsTouched: params.artifacts_touched,
+		risksOrCaveats: params.risks_or_caveats,
+		staleIf: params.stale_if,
+		suggestedControllerQuestions: params.suggested_controller_questions,
+		retrospectiveTarget: params.retrospective_target ? mapTargetInput(params.retrospective_target) : undefined,
+	};
+}
+
+function mapParentDelta(input: z.infer<typeof parentDeltaSchema> | undefined): GoalParentStateDelta | undefined {
+	if (!input) return undefined;
+	return {
+		admittedClaims: (input.admitted_claims ?? []).map(claim => ({
+			id: claim.id,
+			claim: claim.claim,
+			status: claim.status,
+			scope: claim.scope,
+			evidenceRefs: claim.evidence_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+			nonImplications: claim.non_implications,
+			acceptedBy: claim.accepted_by,
+			acceptedAt: claim.accepted_at,
+		})),
+		candidateClaimsAdded: (input.candidate_claims_added ?? []).map(claim => ({
+			id: claim.id,
+			claim: claim.claim,
+			status: claim.status,
+			scope: claim.scope,
+			evidenceRefs: claim.evidence_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+			nonImplications: claim.non_implications,
+		})),
+		rejectedClaims: (input.rejected_claims ?? []).map(claim => ({
+			id: claim.id,
+			claim: claim.claim,
+			status: claim.status,
+			scope: claim.scope,
+			evidenceRefs: claim.evidence_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+			nonImplications: claim.non_implications,
+		})),
+		boundariesAdded: (input.boundaries_added ?? []).map(boundary => ({
+			id: boundary.id,
+			kind: boundary.kind as GoalBoundaryKind,
+			statement: boundary.statement,
+			refs: boundary.refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+		})),
+		residualsAddedOrUpdated: (input.residuals_added_or_updated ?? []).map(residual => ({
+			id: residual.id,
+			statement: residual.statement,
+			classification: residual.classification as GoalResidualClassification,
+			whyItMatters: residual.why_it_matters,
+			requiredEvidence: residual.required_evidence,
+			targetHorizon: residual.target_horizon,
+			authorityRequired: residual.authority_required,
+			nonImplications: residual.non_implications,
+			refs: residual.refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+		})),
+		gateDeltas: (input.gate_deltas ?? []).map(gate => ({
+			gateId: gate.gate_id,
+			status: gate.status as GoalGateStatus,
+			evidenceRefs: gate.evidence_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+			rationale: gate.rationale,
+		})),
+		frontierDeltas: (input.frontier_deltas ?? []).map(item => ({
+			id: item.id,
+			statement: item.statement,
+			evidenceRequired: item.evidence_required,
+			activationTrigger: item.activation_trigger,
+			refs: item.refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+		})),
+		staleRefs: (input.stale_refs ?? []).map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+		externalRecordRefs: (input.external_record_refs ?? []).map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+		authorityDecisionRefs: input.authority_decision_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+	};
+}
+
+function mapResolutionInput(params: z.infer<typeof resolveCheckpointSchema>): GoalCheckpointResolutionInput {
+	return {
+		checkpointId: params.checkpoint_id,
+		decision: params.decision,
+		parentReading: params.parent_reading,
+		parentDelta: mapParentDelta(params.parent_delta),
+		notPropagated: params.not_propagated,
+		remainingParentWork: params.remaining_parent_work,
+		broaderChecksOrInputs: params.broader_checks_or_inputs,
+		lessonsForFuture: params.lessons_for_future,
+		nextTarget: params.next_target ? mapTargetInput(params.next_target) : undefined,
+	};
 }
 
 export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
@@ -107,72 +493,107 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GoalToolDetails>> {
 		const runtime = this.#session.getGoalRuntime?.();
-		if (!runtime) {
-			throw new ToolError("Goal mode is not active.");
-		}
+		if (!runtime) throw new ToolError("Goal mode is not active.");
 
 		const goalSession: ToolSession & GoalSessionSupport = this.#session;
 		let response: GoalToolResponse;
 		if (params.op === "create") {
-			const createInput = validateCreateParams(params);
+			const createInput = validateCreateParams(createSchema.parse(params));
 			const created = goalSession.createGoalWithRubric
 				? await goalSession.createGoalWithRubric(createInput, signal)
 				: await runtime.createGoal(createInput);
-			response = buildGoalToolResponse(created.goal);
+			response = buildGoalToolResponse(created.goal, { state: created });
 		} else if (params.op === "get") {
 			const state = this.#session.getGoalModeState?.();
-			response = buildGoalToolResponse(state?.goal ?? null);
+			response = buildGoalToolResponse(state?.goal ?? null, { state: state ?? null });
 		} else if (params.op === "resume") {
 			const resumed = await runtime.resumeGoal();
-			response = buildGoalToolResponse(resumed.goal);
+			response = buildGoalToolResponse(resumed.goal, { state: resumed });
 		} else if (params.op === "drop") {
 			const dropped = await runtime.dropGoal();
-			response = buildGoalToolResponse(dropped ?? null);
+			response = buildGoalToolResponse(dropped ?? null, { state: null });
+		} else if (params.op === "start_target") {
+			const state = await runtime.startTarget(mapTargetInput(startTargetSchema.parse(params)));
+			response = buildGoalToolResponse(state.goal, { state });
+		} else if (params.op === "checkpoint") {
+			const input = mapCheckpointInput(checkpointSchema.parse(params));
+			if (!goalSession.requestGoalCheckpoint) {
+				throw new ToolError("checkpoint requires an AgentSession checkpoint review handler");
+			}
+			response = await goalSession.requestGoalCheckpoint(input, signal);
+		} else if (params.op === "resolve_checkpoint") {
+			const input = mapResolutionInput(resolveCheckpointSchema.parse(params));
+			response = goalSession.requestGoalCheckpointResolution
+				? await goalSession.requestGoalCheckpointResolution(input, signal)
+				: (() => {
+						throw new ToolError("resolve_checkpoint requires an AgentSession checkpoint resolution handler");
+					})();
 		} else {
 			response = goalSession.requestGoalCompletion
 				? await goalSession.requestGoalCompletion(signal)
 				: buildGoalToolResponse(await runtime.completeGoalFromTool(), { includeCompletionReport: true });
 		}
 		const completionVerification = normalizeCompletionVerification(response.goal, response.completionVerification);
-		if (completionVerification !== response.completionVerification) {
+		if (completionVerification !== response.completionVerification)
 			response = { ...response, completionVerification };
-		}
-		let text: string;
-		if (response.goal) {
-			text = `Goal: ${response.goal.objective}\nStatus: ${response.goal.status}\nTokens: ${response.goal.tokensUsed} used`;
-			if (response.goal.tokenBudget !== undefined) {
-				text += ` / ${response.goal.tokenBudget} budget`;
-			}
-			if (response.remainingTokens !== null) {
-				text += `\nRemaining tokens: ${response.remainingTokens}`;
-			}
-			if (response.completionVerification?.status === "rejected") {
-				const totalAttemptText =
-					response.completionVerification.totalAttempts === undefined
-						? ""
-						: `, total ${response.completionVerification.totalAttempts}`;
-				text += `\n\nCompletion verification rejected (attempt ${response.completionVerification.attempt}/${response.completionVerification.maxAttempts}${totalAttemptText}):\n${response.completionVerification.feedback}`;
-				if (response.completionVerification.compactorMemo) {
-					text += `\n\nCompactor memo:\n${response.completionVerification.compactorMemo}`;
-				}
-			} else if (response.completionBudgetReport) {
-				text += `\n\n${response.completionBudgetReport}`;
-			}
-		} else {
-			text = "No active goal.";
-		}
 		return {
-			content: [{ type: "text", text }],
+			content: [{ type: "text", text: renderGoalToolText(response, params.op) }],
 			details: {
 				op: params.op,
 				goal: response.goal,
+				state: response.state ?? null,
 				remainingTokens: response.remainingTokens,
 				completionBudgetReport:
 					response.completionVerification?.status === "rejected" ? null : response.completionBudgetReport,
 				completionVerification: response.completionVerification,
+				checkpoint: response.checkpoint,
+				checkpointReview: response.checkpointReview,
+				checkpointResolution: response.checkpointResolution,
 			},
 		};
 	}
+}
+
+function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
+	const goal = response.goal;
+	if (!goal) return "No active goal.";
+	let text = `Goal: ${goal.objective}\nStatus: ${goal.status}`;
+	const runMode = response.state?.runMode;
+	if (runMode) text += `\nRun mode: ${runMode}`;
+	text += `\nTokens: ${goal.tokensUsed} used`;
+	if (goal.tokenBudget !== undefined) text += ` / ${goal.tokenBudget} budget`;
+	if (response.remainingTokens !== null) text += `\nRemaining tokens: ${response.remainingTokens}`;
+	if (goal.parentFrame)
+		text += `\nParent frame: ${goal.parentFrame.kind} (version ${response.state?.parentFrameVersion ?? 0})`;
+	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
+	if (goal.pendingCheckpointId) text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
+	if (goal.verificationRepair) text += `\nVerifier repair: ${goal.verificationRepair.verificationAttemptId}`;
+	if (op === "checkpoint" && response.checkpoint) {
+		if (response.checkpointReview?.status === "rejected") {
+			text += `\n\nCheckpoint rejected. Target remains active; no checkpoint is pending resolution. Continue repairing the current target closure evidence.\n\nReviewer feedback:\n${response.checkpointReview.feedback}`;
+		} else {
+			text +=
+				"\n\nTarget checkpoint recorded. Parent goal remains active. Ordinary continuation is paused while checkpoint guidance is prepared.";
+		}
+	}
+	if (op === "resolve_checkpoint" && response.checkpointResolution) {
+		text += `\n\nCheckpoint resolution recorded: ${response.checkpointResolution.decision}.`;
+		if (response.checkpointResolution.nextTarget) {
+			text += `\nNext target: ${response.checkpointResolution.nextTarget.title}`;
+		}
+	}
+	if (response.completionVerification?.status === "rejected") {
+		const totalAttemptText =
+			response.completionVerification.totalAttempts === undefined
+				? ""
+				: `, total ${response.completionVerification.totalAttempts}`;
+		text += `\n\nCompletion verification rejected (attempt ${response.completionVerification.attempt}/${response.completionVerification.maxAttempts}${totalAttemptText}):\n${response.completionVerification.feedback}`;
+		if (response.completionVerification.compactorMemo)
+			text += `\n\nCompactor memo:\n${response.completionVerification.compactorMemo}`;
+	} else if (response.completionBudgetReport) {
+		text += `\n\n${response.completionBudgetReport}`;
+	}
+	return text;
 }
 
 function describeOp(op: string | undefined): string {
@@ -187,6 +608,12 @@ function describeOp(op: string | undefined): string {
 			return "resume";
 		case "drop":
 			return "drop";
+		case "start_target":
+			return "start target";
+		case "checkpoint":
+			return "checkpoint target";
+		case "resolve_checkpoint":
+			return "resolve checkpoint";
 		default:
 			return op ?? "?";
 	}
@@ -214,6 +641,9 @@ interface GoalRenderArgs {
 	op?: GoalToolInput["op"];
 	objective?: string;
 	token_budget?: number;
+	title?: string;
+	checkpoint_id?: string;
+	decision?: string;
 }
 
 export const goalToolRenderer = {
@@ -225,9 +655,11 @@ export const goalToolRenderer = {
 			const objective = truncateToWidth(trimmedObjective, TRUNCATE_LENGTHS.TITLE);
 			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${objective}"`)));
 		}
-		if (args.op === "create" && args.token_budget !== undefined) {
+		if (args.op === "start_target" && args.title)
+			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${humanPreview(args.title)}"`)));
+		if (args.op === "resolve_checkpoint" && args.decision) meta.push(args.decision);
+		if (args.op === "create" && args.token_budget !== undefined)
 			meta.push(`budget ${formatNumber(args.token_budget)}`);
-		}
 		const text = renderStatusLine({ icon: "pending", title: "Goal", description, meta }, uiTheme);
 		return new Text(text, 0, 0);
 	},
@@ -258,16 +690,21 @@ export const goalToolRenderer = {
 
 		const verification = details?.completionVerification;
 		const verificationRejected = verification?.status === "rejected";
+		const checkpointRejected = details?.checkpointReview?.status === "rejected";
 		const lines: string[] = [];
 		lines.push(
 			renderStatusLine(
 				{
-					icon: verificationRejected ? "warning" : "success",
+					icon: verificationRejected || checkpointRejected ? "warning" : "success",
 					title: "Goal",
 					description,
 					badge: {
-						label: verificationRejected ? "verification rejected" : goal.status,
-						color: verificationRejected ? "warning" : goalBadgeColor(goal.status),
+						label: verificationRejected
+							? "verification rejected"
+							: checkpointRejected
+								? "checkpoint rejected"
+								: goal.status,
+						color: verificationRejected || checkpointRejected ? "warning" : goalBadgeColor(goal.status),
 					},
 					meta: verificationRejected
 						? [
@@ -275,7 +712,9 @@ export const goalToolRenderer = {
 									? `attempt ${verification.attempt}/${verification.maxAttempts}`
 									: `attempt ${verification.attempt}/${verification.maxAttempts}, total ${verification.totalAttempts}`,
 							]
-						: undefined,
+						: details?.state?.runMode
+							? [details.state.runMode]
+							: undefined,
 				},
 				uiTheme,
 			),
@@ -283,6 +722,10 @@ export const goalToolRenderer = {
 
 		const objectiveText = truncateToWidth(goal.objective.trim(), TRUNCATE_LENGTHS.LONG);
 		lines.push(`  ${uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`))}`);
+		if (goal.currentTarget)
+			lines.push(`  ${uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`)}`);
+		if (goal.pendingCheckpointId)
+			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: ${goal.pendingCheckpointId}`)}`);
 
 		const used = formatNumber(goal.tokensUsed);
 		const tokensLine =
@@ -291,16 +734,19 @@ export const goalToolRenderer = {
 				: `${used} tokens`;
 		lines.push(`  ${uiTheme.fg("dim", tokensLine)}`);
 
-		if (goal.timeUsedSeconds > 0) {
+		if (goal.timeUsedSeconds > 0)
 			lines.push(`  ${uiTheme.fg("dim", `${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`)}`);
-		}
-
+		if (details?.checkpoint && !checkpointRejected)
+			lines.push(`  ${uiTheme.fg("muted", "Target closed; parent goal still active")}`);
+		if (details?.checkpointResolution)
+			lines.push(`  ${uiTheme.fg("muted", `checkpoint resolution: ${details.checkpointResolution.decision}`)}`);
 		if (verificationRejected) {
 			lines.push(`  ${uiTheme.fg("warning", humanPreview(verification.feedback))}`);
-			if (verification.compactorMemo) {
+			if (verification.compactorMemo)
 				lines.push(`  ${uiTheme.fg("muted", humanPreview(verification.compactorMemo))}`);
-			}
 		}
+		if (checkpointRejected && details?.checkpointReview)
+			lines.push(`  ${uiTheme.fg("warning", humanPreview(details.checkpointReview.feedback))}`);
 
 		const report = details?.completionBudgetReport;
 		if (report) {

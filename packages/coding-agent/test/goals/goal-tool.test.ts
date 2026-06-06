@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal, GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
-import { GoalTool, goalToolRenderer } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { cloneGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { buildGoalToolResponse, GoalTool, goalToolRenderer } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -29,16 +31,30 @@ function createGoal(overrides: Partial<Goal> = {}): Goal {
 	};
 }
 
+type TestGoalModeStateInput = Partial<Omit<GoalModeState, "goal">> & { goal: Goal };
+
+function createGoalModeState(input: TestGoalModeStateInput): GoalModeState {
+	return {
+		enabled: true,
+		mode: "active",
+		runMode: "working-target",
+		stateVersion: 0,
+		parentFrameVersion: input.goal.parentFrame ? 1 : 0,
+		...input,
+		goal: input.goal,
+	};
+}
+
 function cloneState(state: GoalModeState | undefined): GoalModeState | undefined {
-	return state ? { ...state, goal: { ...state.goal } } : undefined;
+	return state ? cloneGoalModeState(state) : undefined;
 }
 
 function createToolSession(overrides: Partial<ToolSession>): ToolSession {
 	return overrides as ToolSession;
 }
 
-function createRuntimeHarness(initialState?: GoalModeState) {
-	let state = cloneState(initialState);
+function createRuntimeHarness(initialState?: TestGoalModeStateInput) {
+	let state = initialState ? cloneState(createGoalModeState(initialState)) : undefined;
 	const runtime = new GoalRuntime({
 		getState: () => cloneState(state),
 		setState: next => {
@@ -58,16 +74,16 @@ function createRuntimeHarness(initialState?: GoalModeState) {
 
 describe("GoalTool", () => {
 	it("routes create/get/complete operations and returns completion budget details", async () => {
-		const createGoalState: GoalModeState = {
+		const createGoalState = createGoalModeState({
 			enabled: true,
 			mode: "active",
 			goal: createGoal({ objective: "Create route", tokenBudget: 10 }),
-		};
-		const getGoalState: GoalModeState = {
+		});
+		const getGoalState = createGoalModeState({
 			enabled: true,
 			mode: "active",
 			goal: createGoal({ objective: "Get route", tokensUsed: 4, tokenBudget: 10 }),
-		};
+		});
 		const completedGoal = createGoal({
 			objective: "Complete route",
 			status: "complete",
@@ -146,11 +162,12 @@ describe("GoalTool", () => {
 						createGoal: vi.fn(),
 						completeGoalFromTool: vi.fn(),
 					}) as unknown as GoalRuntime,
-				getGoalModeState: () => ({
-					enabled: true,
-					mode: "active",
-					goal: activeGoal,
-				}),
+				getGoalModeState: () =>
+					createGoalModeState({
+						enabled: true,
+						mode: "active",
+						goal: activeGoal,
+					}),
 				requestGoalCompletion: vi.fn(async () => ({
 					goal: activeGoal,
 					remainingTokens: 10,
@@ -201,9 +218,212 @@ describe("GoalTool", () => {
 		expect(rendered).toContain("attempt 1/3");
 		expect(rendered).toContain(feedback);
 		expect(rendered).toContain(compactorMemo);
+		const wireSchema = toolWireSchema(tool);
+		expect(wireSchema.type).toBe("object");
+		expect(Array.isArray(wireSchema.oneOf)).toBe(true);
+		expect(JSON.stringify(wireSchema.oneOf)).toContain('"const":"complete"');
+
 		expect(rendered).not.toContain("<goal_continuation_compaction>");
 		expect(rendered).not.toContain("Continue work on the active goal.");
 		expect(rendered).not.toContain("Hidden prepared continuation prompt.");
+	});
+
+	it("uses op-specific schemas for target, checkpoint, and resolution operations", () => {
+		const tool = new GoalTool(createToolSession({ getGoalRuntime: () => createRuntimeHarness().runtime }));
+		expect(tool.description).toContain("parent goal");
+		expect(tool.description).toContain("current target");
+		expect(tool.description).toContain("checkpoint");
+		expect(tool.description).toContain("resolve_checkpoint");
+		expect(tool.description).toContain("Invalid uses");
+
+		expect(
+			tool.parameters.safeParse({
+				op: "start_target",
+				title: "Prove smoke",
+				desired_future_claim: "Smoke path is exercised.",
+				closure_standard: "Current smoke output exists.",
+			}).success,
+		).toBe(true);
+		expect(
+			tool.parameters.safeParse({
+				op: "start_target",
+				title: "Prove smoke",
+				desired_future_claim: "Smoke path is exercised.",
+				closure_standard: "Current smoke output exists.",
+				summary: "not allowed on start_target",
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
+				op: "resolve_checkpoint",
+				checkpoint_id: "checkpoint-1",
+				decision: "next_target",
+				parent_reading: "Need another target.",
+				not_propagated: [],
+				remaining_parent_work: [],
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
+				op: "resolve_checkpoint",
+				checkpoint_id: "checkpoint-1",
+				decision: "parent_completion_candidate",
+				parent_reading: "Ready for verifier.",
+				not_propagated: [],
+				remaining_parent_work: [],
+				next_target: {
+					title: "Not allowed here",
+					desired_future_claim: "Should be rejected.",
+					closure_standard: "Only next_target decisions install targets.",
+				},
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
+				op: "checkpoint",
+				status: "closed_with_evidence",
+				summary: "Empty evidence cannot close a target.",
+				local_claims: [],
+				evidence: [],
+				not_claimed: [],
+				remaining_questions: [],
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
+				op: "complete",
+				checkpoint_id: "checkpoint-1",
+			}).success,
+		).toBe(false);
+	});
+
+	it("rejects checkpoint when the session review handler is unavailable", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+		await tool.execute("target", {
+			op: "start_target",
+			title: "Prove smoke",
+			desired_future_claim: "Smoke path is exercised.",
+			closure_standard: "Current smoke output exists.",
+		});
+
+		await expect(
+			tool.execute("checkpoint-without-reviewer", {
+				op: "checkpoint",
+				status: "closed_with_evidence",
+				summary: "Smoke passed.",
+				local_claims: ["Smoke path is exercised"],
+				evidence: [{ claim: "Smoke path is exercised", evidence: "Observed smoke output", current: true }],
+				not_claimed: ["Parent goal is complete"],
+				remaining_questions: ["Which target is next?"],
+			}),
+		).rejects.toThrow("checkpoint review handler");
+	});
+
+	it("records target checkpoints and exposes parent-active checkpoint state through get", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+				requestGoalCheckpoint: async input => {
+					const candidate = harness.runtime.buildCheckpointCandidate(input);
+					const review = {
+						status: "accepted" as const,
+						feedback: "Checkpoint is locally closed and bounded.",
+						evidenceChecked: candidate.evidence,
+						blockers: [],
+						reviewedAt: 10,
+					};
+					const state = await harness.runtime.commitCheckpoint(candidate, review);
+					return buildGoalToolResponse(state.goal, {
+						state,
+						checkpoint: state.goal.checkpoints?.at(-1),
+						checkpointReview: review,
+					});
+				},
+				requestGoalCheckpointResolution: async input => {
+					const state = await harness.runtime.recordCheckpointResolution(input);
+					return buildGoalToolResponse(state.goal, {
+						state,
+						checkpointResolution: state.goal.checkpointResolutions?.at(-1),
+					});
+				},
+			}),
+		);
+
+		await tool.execute("target", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+		});
+		const checkpoint = await tool.execute("checkpoint", {
+			op: "checkpoint",
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			local_claims: ["Source-link install exercises smoke path"],
+			evidence: [
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "Observed smoke output",
+					current: true,
+				},
+			],
+			not_claimed: ["Release is ready"],
+			remaining_questions: ["Which surface is next?"],
+		});
+
+		expect(checkpoint.details?.state?.runMode).toBe("awaiting-checkpoint-resolution");
+		expect(checkpoint.details?.checkpoint?.notClaimed).toContain("Parent goal complete");
+		const checkpointText = checkpoint.content[0]?.type === "text" ? checkpoint.content[0].text : "";
+		expect(checkpointText).toContain("Parent goal remains active");
+
+		const getCheckpoint = await tool.execute("get-checkpoint", { op: "get" });
+		expect(getCheckpoint.details?.state?.goal.pendingCheckpointId).toBe(checkpoint.details?.checkpoint?.id);
+		expect(getCheckpoint.details?.state?.goal.checkpoints?.[0]?.targetSnapshot.status).toBe("closed");
+
+		const resolved = await tool.execute("resolve", {
+			op: "resolve_checkpoint",
+			checkpoint_id: checkpoint.details?.checkpoint?.id ?? "",
+			decision: "next_target",
+			parent_reading: "Source-link smoke is local evidence; tarball evidence remains open.",
+			parent_delta: {
+				admitted_claims: [
+					{
+						id: "source-link-smoke",
+						claim: "Source-link smoke passed locally.",
+						status: "accepted",
+					},
+				],
+				residuals_added_or_updated: [
+					{
+						id: "tarball-smoke",
+						statement: "Tarball smoke remains unproven.",
+						classification: "current-parent-blocker",
+					},
+				],
+			},
+			not_propagated: ["Tarball path is verified"],
+			remaining_parent_work: ["Tarball evidence"],
+			next_target: {
+				title: "Prove tarball smoke",
+				desired_future_claim: "Tarball install exercises smoke path.",
+				closure_standard: "Current tarball smoke output exists.",
+			},
+		});
+
+		expect(resolved.details?.checkpointResolution?.decision).toBe("next_target");
+		expect(resolved.details?.state?.runMode).toBe("working-target");
+		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
+		expect(resolved.details?.state?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
 	});
 
 	it("rejects create when a goal already exists", async () => {

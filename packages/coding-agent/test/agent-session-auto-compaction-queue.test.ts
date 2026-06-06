@@ -197,6 +197,178 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
 	});
 
+	it("overflow recovery preserves pending goal checkpoints without resolving or creating checkpoints", async () => {
+		await session.goalRuntime.createGoal({ objective: "Improve release reliability" });
+		await session.goalRuntime.startTarget({
+			title: "Close one installer smoke target",
+			desiredFutureClaim: "Installer smoke has bounded current evidence.",
+			closureStandard: "Current smoke output is recorded.",
+		});
+		const candidate = session.goalRuntime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Installer smoke target closed.",
+			localClaims: ["Installer smoke has bounded current evidence"],
+			evidence: [
+				{ claim: "Installer smoke has bounded current evidence", evidence: "Observed smoke output", current: true },
+			],
+			notClaimed: ["Parent goal is complete"],
+			remainingQuestions: ["Which target follows?"],
+		});
+		const checkpointState = await session.goalRuntime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Checkpoint accepted.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: Date.now(),
+		});
+		const checkpointId = checkpointState.goal.pendingCheckpointId;
+		const checkpointCount = checkpointState.goal.checkpoints?.length ?? 0;
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+		const model = session.model;
+		if (!model) throw new Error("expected model");
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "pre-overflow context" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({ role: "user", content: "recent overflow prompt", timestamp: Date.now() });
+		const overflowAssistant = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "overflow" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "error" as const,
+			errorMessage: "maximum context length is 200000 tokens, however you requested 200001 tokens",
+			usage: {
+				input: 120_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: overflowAssistant });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [overflowAssistant] });
+		await withTimeout(compactionDone, 1000, "auto compaction did not finish");
+
+		const state = session.getGoalModeState();
+		expect(state?.runMode).toBe("awaiting-checkpoint-resolution");
+		expect(state?.goal.pendingCheckpointId).toBe(checkpointId);
+		expect(state?.goal.checkpoints?.length).toBe(checkpointCount);
+		expect(state?.goal.checkpointResolutions?.length ?? 0).toBe(0);
+		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
+		if (compactionEntry?.type !== "compaction") throw new Error("expected compaction entry");
+		expect(JSON.stringify(compactionEntry.preserveData?.goalMode)).toContain(
+			'"runMode":"awaiting-checkpoint-resolution"',
+		);
+		expect(JSON.stringify(compactionEntry.preserveData?.goalContinuationPacket)).toContain(
+			'"transition":"target-checkpoint"',
+		);
+		expect(getRuntimeSignals()).toContain("compaction:start:overflow");
+	});
+
+	it("incomplete-output recovery preserves verifier repair state without creating checkpoints", async () => {
+		const created = await session.goalRuntime.createGoal({ objective: "Improve release reliability" });
+		await session.goalRuntime.recordFailedCompletionVerification(created.goal.id, "Missing parent evidence", {
+			attempt: 1,
+			maxAttempts: 3,
+			structuredFeedback: {
+				summary: "Missing parent evidence",
+				score: 2,
+				deliverableResults: [],
+				evidenceChecked: [],
+				completionBlockers: [
+					{
+						id: "parent-evidence",
+						severity: "blocking",
+						problem: "Parent evidence is missing.",
+						requiredEvidenceOrFix: "Collect current parent evidence.",
+					},
+				],
+			},
+		});
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+		const model = session.model;
+		if (!model) throw new Error("expected model");
+		session.settings.set("compaction.keepRecentTokens", 1);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "pre-incomplete context" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({ role: "user", content: "recent incomplete prompt", timestamp: Date.now() });
+		const incompleteAssistant = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "length" as const,
+			usage: {
+				input: 10_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 11_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: incompleteAssistant });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [incompleteAssistant] });
+		await withTimeout(compactionDone, 1000, "auto compaction did not finish");
+
+		const state = session.getGoalModeState();
+		expect(state?.runMode).toBe("awaiting-verification-repair");
+		expect(state?.goal.verificationRepair?.feedback).toBe("Missing parent evidence");
+		expect(state?.goal.checkpoints?.length ?? 0).toBe(0);
+		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
+		if (compactionEntry?.type !== "compaction") throw new Error("expected compaction entry");
+		expect(JSON.stringify(compactionEntry.preserveData?.goalMode)).toContain(
+			'"runMode":"awaiting-verification-repair"',
+		);
+		expect(JSON.stringify(compactionEntry.preserveData?.goalContinuationPacket)).toContain(
+			'"transition":"verification-rejected"',
+		);
+		expect(getRuntimeSignals()).toContain("compaction:start:incomplete");
+	});
+
 	it("forwards todo reminder lifecycle signals to extensions", async () => {
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 

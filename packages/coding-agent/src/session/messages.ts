@@ -27,7 +27,12 @@ export {
 	createCompactionSummaryMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
-import type { GoalCompletionVerifierStructuredOutput } from "../goals/state";
+import type {
+	GoalCheckpointPacket,
+	GoalCheckpointResolution,
+	GoalCheckpointReview,
+	GoalCompletionVerifierStructuredOutput,
+} from "../goals/state";
 import type { OutputMeta } from "../tools/output-meta";
 
 import { formatOutputNotice } from "../tools/output-meta";
@@ -35,6 +40,8 @@ import { formatOutputNotice } from "../tools/output-meta";
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const GOAL_RUBRIC_MESSAGE_TYPE = "goal-rubric";
 export const GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE = "goal-verification-feedback";
+export const GOAL_CHECKPOINT_MESSAGE_TYPE = "goal-checkpoint";
+export const GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE = "goal-checkpoint-resolution";
 
 export interface GoalRubricMessageDetails {
 	goalId: string;
@@ -53,6 +60,23 @@ export interface GoalVerificationFeedbackMessageDetails {
 	structuredFeedback?: GoalCompletionVerifierStructuredOutput;
 	compactorMemo?: string;
 	rejectedAt: number;
+}
+
+export interface GoalCheckpointMessageDetails {
+	goalId: string;
+	objective: string;
+	checkpoint: GoalCheckpointPacket;
+	review?: GoalCheckpointReview;
+	parentGoalActive: boolean;
+	recordedAt: number;
+}
+
+export interface GoalCheckpointResolutionMessageDetails {
+	goalId: string;
+	objective: string;
+	resolution: GoalCheckpointResolution;
+	parentGoalActive: boolean;
+	recordedAt: number;
 }
 
 export interface SkillPromptDetails {

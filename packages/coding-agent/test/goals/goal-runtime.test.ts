@@ -7,7 +7,15 @@ import {
 	renderGoalPrompt,
 	renderTrustedObjective,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
-import type { Goal, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
+import type {
+	Goal,
+	GoalModeState,
+	GoalParentFrame,
+	GoalRuntimeEvent,
+	GoalTokenUsage,
+} from "@oh-my-pi/pi-coding-agent/goals/state";
+import { cloneGoalModeState, parseGoalModeState, serializeGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import systemPromptTemplate from "../../src/prompts/system/system-prompt.md" with { type: "text" };
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
 	return {
@@ -33,6 +41,38 @@ function createGoal(overrides: Partial<Goal> = {}): Goal {
 	};
 }
 
+type TestGoalModeStateInput = Partial<Omit<GoalModeState, "goal">> & { goal: Goal };
+
+function createGoalModeState(input: TestGoalModeStateInput): GoalModeState {
+	return {
+		enabled: true,
+		mode: "active",
+		runMode: "working-target",
+		stateVersion: 0,
+		parentFrameVersion: input.goal.parentFrame ? 1 : 0,
+		...input,
+		goal: input.goal,
+	};
+}
+
+function createParentFrame(overrides: Partial<GoalParentFrame> = {}): GoalParentFrame {
+	return {
+		kind: "plain",
+		desiredFuture: "Desired future",
+		baselineRefs: [],
+		acceptedClaims: [],
+		candidateClaims: [],
+		rejectedOrStaleClaims: [],
+		boundaries: [],
+		residuals: [],
+		gates: [],
+		frontier: [],
+		staleIf: [],
+		externalRefs: [],
+		...overrides,
+	};
+}
+
 function cloneGoal(goal: Goal): Goal {
 	return {
 		...goal,
@@ -54,7 +94,7 @@ function cloneGoal(goal: Goal): Goal {
 }
 
 function cloneState(state: GoalModeState | undefined): GoalModeState | undefined {
-	return state ? { ...state, goal: cloneGoal(state.goal) } : undefined;
+	return state ? cloneGoalModeState(state) : undefined;
 }
 
 function cloneEvent(event: GoalRuntimeEvent): GoalRuntimeEvent {
@@ -68,8 +108,8 @@ function cloneEvent(event: GoalRuntimeEvent): GoalRuntimeEvent {
 	return { ...event };
 }
 
-function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage; now?: number } = {}) {
-	let state = cloneState(initial.state);
+function createHarness(initial: { state?: TestGoalModeStateInput; usage?: GoalTokenUsage; now?: number } = {}) {
+	let state = initial.state ? cloneState(createGoalModeState(initial.state)) : undefined;
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
 	const events: GoalRuntimeEvent[] = [];
@@ -386,7 +426,7 @@ describe("goal runtime", () => {
 		expect(goal.failedCompletionAttempts).toBe(1);
 		expect(activePrompt).toContain("4 = excellent &lt;evidence&gt; &amp; coherent");
 		expect(activePrompt).toContain("Missing &lt;integration&gt; &amp; proof");
-		expect(continuationPrompt).toContain("Previous completion verification rejected attempt 1");
+		expect(continuationPrompt).toContain("Missing &lt;integration&gt; &amp; proof");
 	});
 
 	it("records side-agent usage against the active goal budget", async () => {
@@ -425,7 +465,7 @@ describe("goal runtime", () => {
 		expect(goal?.verificationAttempts?.map(attempt => attempt.sequence)).toEqual([1, 2]);
 		expect(goal?.lastVerificationFeedback).toBe("Second rejection");
 	});
-	it("resets blind-retry attempts after substantive non-yield work but preserves audit feedback", async () => {
+	it("preserves verifier-repair attempts across ordinary non-yield work", async () => {
 		const harness = createHarness();
 		const state = await harness.runtime.createGoal({ objective: "Ship after feedback" });
 		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Need evidence", {
@@ -438,9 +478,515 @@ describe("goal runtime", () => {
 		expect(harness.getState()?.goal.lastVerificationFeedback).toBe("Need evidence");
 
 		await harness.runtime.onToolCompleted("read");
-		expect(harness.getState()?.goal.failedCompletionAttempts).toBeUndefined();
+		expect(harness.getState()?.goal.failedCompletionAttempts).toBe(1);
+		expect(harness.getState()?.goal.verificationRepair?.feedback).toBe("Need evidence");
 		expect(harness.getState()?.goal.lastVerificationFeedback).toBe("Need evidence");
 		expect(harness.getState()?.goal.totalVerificationAttempts).toBe(1);
-		expect(harness.getState()?.goal.workEpoch).toBe(1);
+		expect(harness.getState()?.goal.workEpoch).toBe(0);
+	});
+
+	it("normalizes, serializes, and restores the parent frame and run state", async () => {
+		const harness = createHarness();
+
+		const created = await harness.runtime.createGoal({
+			objective: "Improve release reliability",
+			parentFrame: createParentFrame({
+				kind: "claim-gated",
+				desiredFuture: "Release truth is explicit",
+				currentTruth: "Local smoke exists; release readiness is unproven.",
+				gates: [
+					{
+						id: "install-smoke",
+						name: "Install smoke",
+						status: "unknown",
+						requiredEvidence: ["smoke output"],
+					},
+				],
+				boundaries: [
+					{
+						id: "local-smoke-not-release",
+						kind: "forbidden-inference",
+						statement: "Local smoke does not imply release readiness.",
+					},
+				],
+				residuals: [
+					{
+						id: "tarball-smoke",
+						statement: "Tarball path needs evidence.",
+						classification: "current-parent-blocker",
+					},
+				],
+				externalRefs: [{ id: "release-record", kind: "external-record", uri: "release://current" }],
+			}),
+		});
+
+		const restored = parseGoalModeState(serializeGoalModeState(created), true);
+
+		expect(restored?.runMode).toBe("working-target");
+		expect(restored?.stateVersion).toBe(1);
+		expect(restored?.parentFrameVersion).toBe(1);
+		expect(restored?.goal.parentFrame?.gates[0]?.id).toBe("install-smoke");
+		expect(restored?.goal.parentFrame?.boundaries[0]?.statement).toContain("Local smoke");
+	});
+
+	it("migrates legacy goal mode data without run-mode version fields", () => {
+		const restored = parseGoalModeState(
+			{
+				goal: createGoal({
+					objective: "Legacy goal",
+					parentFrame: createParentFrame({
+						desiredFuture: "Legacy objective stays active.",
+					}),
+				}),
+			},
+			true,
+		);
+
+		expect(restored?.enabled).toBe(true);
+		expect(restored?.runMode).toBe("working-target");
+		expect(restored?.stateVersion).toBe(0);
+		expect(restored?.parentFrameVersion).toBe(1);
+		expect(restored?.goal.parentFrame?.desiredFuture).toBe("Legacy objective stays active.");
+	});
+
+	it("does not increment semantic state version for accounting-only side-agent usage", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Track accounting" });
+		const before = harness.getState()?.stateVersion;
+
+		await harness.runtime.recordExternalUsage(createUsage({ input: 2, output: 1, cacheWrite: 1 }), 1_000);
+
+		expect(harness.getState()?.stateVersion).toBe(before);
+		expect(harness.getState()?.goal.tokensUsed).toBe(4);
+		expect(harness.getState()?.goal.timeUsedSeconds).toBe(1);
+	});
+
+	it("starts a target and commits an accepted checkpoint without completing the parent goal", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const targeted = await harness.runtime.startTarget({
+			title: "Prove installer smoke fails on worker startup breakage",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+			nonGoals: ["full release readiness"],
+			forbiddenClaims: ["CI is green"],
+			staleIf: ["installer script changes"],
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Smoke evidence recorded.",
+			localClaims: ["Smoke exercises worker startup"],
+			evidence: [
+				{
+					claim: "Smoke exercises worker startup",
+					evidence: "Observed focused smoke output",
+					current: true,
+				},
+			],
+			notClaimed: ["Release is ready"],
+			remainingQuestions: ["Which installer surface is next?"],
+		});
+
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Target closure evidence is bounded and current.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 10,
+		});
+
+		expect(targeted.runMode).toBe("working-target");
+		expect(candidate.notClaimed).toContain("Parent goal complete");
+		expect(committed.goal.status).toBe("active");
+		expect(committed.runMode).toBe("awaiting-checkpoint-resolution");
+		expect(committed.goal.pendingCheckpointId).toBe(candidate.id);
+		expect(committed.goal.currentTarget?.status).toBe("closed");
+		expect(committed.goal.checkpoints?.[0]?.targetSnapshot.status).toBe("closed");
+	});
+
+	it("rejects checkpoint candidates without positive current evidence", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+
+		expect(() =>
+			harness.runtime.buildCheckpointCandidate({
+				status: "closed_with_evidence",
+				summary: "No current evidence.",
+				localClaims: ["Smoke exercises worker startup"],
+				evidence: [{ claim: "Smoke exercises worker startup", evidence: "Old transcript", current: false }],
+				notClaimed: ["Release is ready"],
+				remainingQuestions: ["What next?"],
+			}),
+		).toThrow("checkpoint requires positive current evidence");
+	});
+
+	it("rejected checkpoints keep the current target active and focus repair", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Evidence is weak.",
+			localClaims: ["Smoke exercises worker startup"],
+			evidence: [{ claim: "Smoke exercises worker startup", evidence: "A file changed", current: true }],
+			notClaimed: ["Release is ready"],
+			remainingQuestions: ["What next?"],
+		});
+
+		const rejected = await harness.runtime.rejectCheckpoint(candidate, {
+			status: "rejected",
+			feedback: "Evidence does not satisfy the closure standard.",
+			evidenceChecked: candidate.evidence,
+			blockers: [
+				{
+					id: "smoke-output",
+					severity: "blocking",
+					problem: "No smoke command output.",
+					requiredEvidenceOrFix: "Run the focused smoke command.",
+				},
+			],
+			reviewedAt: 10,
+		});
+
+		expect(rejected.runMode).toBe("working-target");
+		expect(rejected.goal.currentTarget?.status).toBe("active");
+		expect(rejected.goal.lastCheckpointRejection?.review.blockers[0]?.id).toBe("smoke-output");
+	});
+
+	it("resolves checkpoints with explicit parent delta and next target atomically", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({
+			objective: "Improve release reliability",
+			parentFrame: createParentFrame({
+				kind: "claim-gated",
+				desiredFuture: "Release truth is explicit",
+				gates: [
+					{
+						id: "install-smoke",
+						name: "Install smoke",
+						status: "unknown",
+						requiredEvidence: ["smoke output"],
+					},
+				],
+			}),
+		});
+		await harness.runtime.startTarget({
+			title: "Prove source-link smoke",
+			desiredFutureClaim: "Source-link install exercises smoke path.",
+			closureStandard: "Smoke output is observed.",
+			gateRefs: ["install-smoke"],
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			localClaims: ["Source-link install exercises smoke path"],
+			evidence: [
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "Observed smoke output",
+					current: true,
+				},
+			],
+			notClaimed: ["Tarball path is verified"],
+			remainingQuestions: ["Check tarball path next?"],
+		});
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Closed locally.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+
+		const resolved = await harness.runtime.recordCheckpointResolution({
+			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			decision: "next_target",
+			parentReading: "Local smoke claim accepted; tarball path remains open.",
+			parentDelta: {
+				admittedClaims: [
+					{
+						id: "source-link-smoke",
+						claim: "Source-link install exercises smoke path.",
+						status: "accepted",
+						evidenceRefs: [{ id: `checkpoint:${candidate.id}`, kind: "artifact" }],
+						nonImplications: ["Tarball path is verified"],
+					},
+				],
+				candidateClaimsAdded: [],
+				rejectedClaims: [],
+				boundariesAdded: [
+					{
+						id: "source-link-not-tarball",
+						kind: "forbidden-inference",
+						statement: "Source-link smoke does not prove tarball install.",
+					},
+				],
+				residualsAddedOrUpdated: [
+					{
+						id: "tarball-smoke",
+						statement: "Tarball smoke needs equivalent evidence.",
+						classification: "current-parent-blocker",
+					},
+				],
+				gateDeltas: [{ gateId: "install-smoke", status: "passed" }],
+				frontierDeltas: [{ id: "tarball-frontier", statement: "Tarball smoke is next." }],
+				staleRefs: [],
+				externalRecordRefs: [{ id: "release-record", kind: "external-record", uri: "release://current" }],
+			},
+			notPropagated: ["Tarball path is verified"],
+			remainingParentWork: ["Tarball install evidence"],
+			nextTarget: {
+				title: "Prove tarball smoke",
+				desiredFutureClaim: "Tarball installs exercise smoke path.",
+				closureStandard: "Tarball smoke output is observed.",
+				forbiddenClaims: ["Release is ready"],
+			},
+		});
+
+		expect(resolved.runMode).toBe("working-target");
+		expect(resolved.goal.pendingCheckpointId).toBeUndefined();
+		expect(resolved.parentFrameVersion).toBe(committed.parentFrameVersion + 1);
+		expect(resolved.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
+		expect(resolved.goal.parentFrame?.gates[0]?.status).toBe("passed");
+		expect(resolved.goal.currentTarget?.title).toBe("Prove tarball smoke");
+		expect(resolved.goal.currentTarget?.parentFrameVersion).toBe(resolved.parentFrameVersion);
+	});
+
+	it("resolving a checkpoint to user input keeps continuation suppressed", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove source-link smoke",
+			desiredFutureClaim: "Source-link install exercises smoke path.",
+			closureStandard: "Smoke output is observed.",
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			localClaims: ["Source-link install exercises smoke path"],
+			evidence: [
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "Observed smoke output",
+					current: true,
+				},
+			],
+			notClaimed: ["Release is ready"],
+			remainingQuestions: ["Need operator decision."],
+		});
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Closed locally.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+
+		const resolved = await harness.runtime.recordCheckpointResolution({
+			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			decision: "needs_user_input",
+			parentReading: "Operator must choose next gate.",
+			notPropagated: ["Next target selected"],
+			remainingParentWork: ["Choose next gate"],
+			broaderChecksOrInputs: ["Ask operator which install surface to verify next."],
+		});
+
+		expect(resolved.runMode).toBe("awaiting-user-input");
+		expect(resolved.goal.pendingCheckpointId).toBe(committed.goal.pendingCheckpointId);
+	});
+
+	it("blocks parent completion across pending checkpoints and verifier repair", async () => {
+		const harness = createHarness();
+		const created = await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove source-link smoke",
+			desiredFutureClaim: "Source-link install exercises smoke path.",
+			closureStandard: "Smoke output is observed.",
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			localClaims: ["Source-link install exercises smoke path"],
+			evidence: [
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "Observed smoke output",
+					current: true,
+				},
+			],
+			notClaimed: ["Release is ready"],
+			remainingQuestions: ["Need parent resolution."],
+		});
+		await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Closed locally.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow("checkpoint is pending resolution");
+		await harness.runtime.recordCheckpointResolution({
+			checkpointId: candidate.id,
+			decision: "parent_completion_candidate",
+			parentReading: "Parent might be complete; verifier must decide.",
+			notPropagated: ["Parent goal complete"],
+			remainingParentWork: ["Independent verifier acceptance"],
+		});
+		await harness.runtime.recordFailedCompletionVerification(created.goal.id, "Missing tarball evidence", {
+			structuredFeedback: {
+				summary: "Missing evidence",
+				score: 2,
+				deliverableResults: [],
+				evidenceChecked: [],
+				completionBlockers: [
+					{
+						id: "tarball-evidence",
+						severity: "blocking",
+						problem: "Tarball install evidence missing.",
+						requiredEvidenceOrFix: "Run tarball install smoke.",
+					},
+				],
+				continuationFocus: {
+					openGaps: ["tarball-evidence"],
+					nextActions: ["Run tarball install smoke."],
+					evidenceToCollect: ["tarball install smoke output"],
+					avoidRepeating: ["Do not cite source-link smoke as tarball evidence."],
+				},
+			},
+		});
+		expect(harness.getState()?.runMode).toBe("awaiting-verification-repair");
+		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow("verifier blockers");
+		await harness.runtime.onToolCompleted("read");
+		expect(harness.getState()?.goal.verificationRepair?.feedback).toBe("Missing tarball evidence");
+		expect(harness.getState()?.runMode).toBe("awaiting-verification-repair");
+
+		await harness.runtime.startTarget({
+			title: "Repair tarball evidence",
+			desiredFutureClaim: "Tarball install evidence is current.",
+			closureStandard: "A current tarball install smoke result is recorded.",
+			linkedVerifierBlockerIds: ["tarball-evidence"],
+		});
+		const repairCandidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Tarball smoke evidence was collected.",
+			localClaims: ["Tarball install evidence is current"],
+			evidence: [
+				{ claim: "Tarball install evidence is current", evidence: "Observed tarball smoke output", current: true },
+			],
+			notClaimed: ["Parent goal is complete"],
+			remainingQuestions: ["Can parent completion be retried?"],
+		});
+		const repaired = await harness.runtime.commitCheckpoint(repairCandidate, {
+			status: "accepted",
+			feedback: "Repair target closed with evidence.",
+			evidenceChecked: repairCandidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+		expect(repaired.goal.verificationRepair).toBeUndefined();
+		expect(repaired.goal.failedCompletionAttempts).toBeUndefined();
+		expect(repaired.runMode).toBe("awaiting-checkpoint-resolution");
+	});
+
+	it("rejects stale side-agent output when state, target, checkpoint, or parent frame changes", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({
+			objective: "Improve release reliability",
+			parentFrame: createParentFrame({ kind: "claim-gated", desiredFuture: "Release truth is explicit" }),
+		});
+		const initialExpectation = harness.runtime.captureSideAgentExpectation({ includeParentFrame: true });
+		await harness.runtime.recordExternalUsage(createUsage({ input: 1 }), 1_000);
+		expect(harness.runtime.canCommitSideAgentResult(initialExpectation)).toBe(true);
+
+		await harness.runtime.startTarget({
+			title: "Prove source-link smoke",
+			desiredFutureClaim: "Source-link install exercises smoke path.",
+			closureStandard: "Smoke output is observed.",
+		});
+		expect(harness.runtime.canCommitSideAgentResult(initialExpectation)).toBe(false);
+		const targetExpectation = harness.runtime.captureSideAgentExpectation({ includeParentFrame: true });
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			localClaims: ["Source-link install exercises smoke path"],
+			evidence: [
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "Observed smoke output",
+					current: true,
+				},
+			],
+			notClaimed: ["Release is ready"],
+			remainingQuestions: ["Need parent resolution."],
+		});
+		await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Closed locally.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+		expect(harness.runtime.canCommitSideAgentResult(targetExpectation)).toBe(false);
+		const checkpointExpectation = harness.runtime.captureSideAgentExpectation({ includeParentFrame: true });
+		await harness.runtime.recordCheckpointResolution({
+			checkpointId: candidate.id,
+			decision: "parent_completion_candidate",
+			parentReading: "Accept one parent delta.",
+			parentDelta: {
+				admittedClaims: [{ id: "source-link-smoke", claim: "Source-link smoke passed.", status: "accepted" }],
+				candidateClaimsAdded: [],
+				rejectedClaims: [],
+				boundariesAdded: [],
+				residualsAddedOrUpdated: [],
+				gateDeltas: [],
+				frontierDeltas: [],
+				staleRefs: [],
+				externalRecordRefs: [],
+			},
+			notPropagated: ["Release ready"],
+			remainingParentWork: ["Verifier acceptance"],
+		});
+		expect(harness.runtime.canCommitSideAgentResult(checkpointExpectation)).toBe(false);
+	});
+
+	it("renders prompt guardrails for checkpoint and verifier-repair run modes", () => {
+		const goal = createGoal({ objective: "Improve release reliability", rubric: "Do the whole goal." });
+		const checkpointState = createGoalModeState({
+			goal: createGoal({
+				...goal,
+				pendingCheckpointId: "checkpoint-1",
+			}),
+			runMode: "awaiting-checkpoint-resolution",
+		});
+		const repairState = createGoalModeState({
+			goal: createGoal({
+				...goal,
+				verificationRepair: {
+					verificationAttemptId: "attempt-1",
+					feedback: "Missing current evidence.",
+					blockers: [],
+					evidenceToCollect: ["current evidence"],
+					avoidRepeating: ["old evidence"],
+					createdAt: 0,
+					workEpoch: 0,
+				},
+			}),
+			runMode: "awaiting-verification-repair",
+		});
+
+		expect(renderGoalPrompt("active", goal, createGoalModeState({ goal }))).toContain("start_target");
+		expect(renderGoalPrompt("continuation", checkpointState.goal, checkpointState)).toContain("resolve_checkpoint");
+		expect(renderGoalPrompt("continuation", repairState.goal, repairState)).toContain("Do not retry");
+		expect(systemPromptTemplate).toContain("Goal mode exception");
+		expect(systemPromptTemplate).toContain("It is not parent completion");
 	});
 });

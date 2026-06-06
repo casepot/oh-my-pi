@@ -27,6 +27,9 @@ function createActiveGoalState() {
 	return {
 		enabled: true,
 		mode: "active" as const,
+		runMode: "working-target" as const,
+		stateVersion: 1,
+		parentFrameVersion: 0,
 		goal: {
 			id: "goal-1",
 			objective: "Ship the release",

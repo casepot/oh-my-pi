@@ -1,5 +1,11 @@
 import type { InMemorySnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTelemetryConfig,
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+} from "@oh-my-pi/pi-agent-core";
 import type { ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -8,8 +14,14 @@ import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { Skill } from "../extensibility/skills";
-import type { GoalCompletionVerificationDetails, GoalModeState, GoalRuntime } from "../goals";
-import { GoalTool } from "../goals/tools/goal-tool";
+import type {
+	GoalCheckpointInput,
+	GoalCheckpointResolutionInput,
+	GoalModeState,
+	GoalParentFrame,
+	GoalRuntime,
+} from "../goals";
+import { GoalTool, type GoalToolResponse } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { LspTool } from "../lsp";
@@ -206,21 +218,23 @@ export interface ToolSession {
 	getGoalRuntime?: () => GoalRuntime | undefined;
 	/** Create a goal after generating and attaching a completion rubric. */
 	createGoalWithRubric?: (
-		input: { objective: string; tokenBudget?: number },
+		input: { objective: string; tokenBudget?: number; parentFrame?: GoalParentFrame },
 		signal?: AbortSignal,
 	) => Promise<GoalModeState>;
 	/** Replace the active goal after generating and attaching a completion rubric. */
 	replaceGoalWithRubric?: (
-		input: { objective: string; tokenBudget?: number },
+		input: { objective: string; tokenBudget?: number; parentFrame?: GoalParentFrame },
 		signal?: AbortSignal,
 	) => Promise<GoalModeState>;
+	/** Request checkpoint review/commit for the current target. */
+	requestGoalCheckpoint?: (input: GoalCheckpointInput, signal?: AbortSignal) => Promise<GoalToolResponse>;
+	/** Resolve a pending checkpoint and publish the controller decision. */
+	requestGoalCheckpointResolution?: (
+		input: GoalCheckpointResolutionInput,
+		signal?: AbortSignal,
+	) => Promise<GoalToolResponse>;
 	/** Request completion of the active goal after external verification. */
-	requestGoalCompletion?: (signal?: AbortSignal) => Promise<{
-		goal: GoalModeState["goal"] | null;
-		remainingTokens: number | null;
-		completionBudgetReport: string | null;
-		completionVerification?: GoalCompletionVerificationDetails;
-	}>;
+	requestGoalCompletion?: (signal?: AbortSignal) => Promise<GoalToolResponse>;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */
@@ -361,6 +375,55 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 
 export type ToolName = keyof typeof BUILTIN_TOOLS;
 
+const GOAL_CHECKPOINT_ALLOWED_TOOLS = new Set(["goal", "yield"]);
+const kGoalRunModeGuard: unique symbol = Symbol("GoalRunModeGuard");
+
+type GoalRunModeGuardedTool = AgentTool & { [kGoalRunModeGuard]?: true };
+
+function isBlockedByPendingGoalCheckpoint(session: ToolSession, toolName: string): boolean {
+	if (GOAL_CHECKPOINT_ALLOWED_TOOLS.has(toolName)) return false;
+	const state = session.getGoalModeState?.();
+	return (
+		state?.enabled === true &&
+		state.goal.status === "active" &&
+		state.runMode === "awaiting-checkpoint-resolution" &&
+		state.goal.pendingCheckpointId !== undefined
+	);
+}
+
+function wrapToolWithGoalRunModeGuard<T extends Tool>(tool: T, session: ToolSession): T {
+	const guarded = tool as T & GoalRunModeGuardedTool;
+	if (guarded[kGoalRunModeGuard]) return tool;
+	const originalExecute = tool.execute;
+	return Object.defineProperties(tool, {
+		[kGoalRunModeGuard]: {
+			value: true,
+			enumerable: false,
+			configurable: true,
+		},
+		execute: {
+			value: async function (
+				this: AgentTool,
+				toolCallId: string,
+				params: unknown,
+				signal?: AbortSignal,
+				onUpdate?: AgentToolUpdateCallback,
+				context?: AgentToolContext,
+			): Promise<AgentToolResult> {
+				if (isBlockedByPendingGoalCheckpoint(session, this.name)) {
+					throw new Error(
+						'Goal checkpoint is pending resolution; ordinary tool work is blocked until goal({ op: "resolve_checkpoint", ... }) records the controller decision.',
+					);
+				}
+				return await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+			},
+			enumerable: false,
+			configurable: true,
+			writable: true,
+		},
+	});
+}
+
 /**
  * Create tools from BUILTIN_TOOLS registry.
  */
@@ -492,14 +555,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const baseResults = await Promise.all(
 		baseEntries.map(async ([name, factory]) => {
 			const tool = await logger.time(`createTools:${name}`, factory as ToolFactory, session);
-			return tool ? wrapToolWithMetaNotice(tool) : null;
+			return tool ? wrapToolWithMetaNotice(wrapToolWithGoalRunModeGuard(tool, session)) : null;
 		}),
 	);
 	const tools = baseResults.filter((r): r is Tool => r !== null);
 	if (!tools.some(tool => tool.name === "resolve")) {
 		const resolveTool = await logger.time("createTools:resolve", HIDDEN_TOOLS.resolve, session);
 		if (resolveTool) {
-			tools.push(wrapToolWithMetaNotice(resolveTool));
+			tools.push(wrapToolWithMetaNotice(wrapToolWithGoalRunModeGuard(resolveTool, session)));
 		}
 	}
 
@@ -516,7 +579,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			.filter(name => (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS) && name !== "report_tool_issue");
 		const qaTool = createReportToolIssueTool(session, activeBuiltinNames);
 		if (qaTool) {
-			tools.push(wrapToolWithMetaNotice(qaTool));
+			tools.push(wrapToolWithMetaNotice(wrapToolWithGoalRunModeGuard(qaTool, session)));
 		}
 	}
 
