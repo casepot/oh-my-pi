@@ -49,6 +49,14 @@ class HostTool(Generic[TParams, TDetails]):
     label: str | None = None
     hidden: bool = False
     decode: Callable[[JsonObject], TParams] | None = None
+    side_effect_class: str | None = None
+    trust_class: str | None = None
+    display: JsonObject | None = None
+    input_size_hint_bytes: int | None = None
+    output_size_hint_bytes: int | None = None
+    default_timeout_ms: int | None = None
+    max_result_bytes: int | None = None
+    max_update_bytes: int | None = None
 
     def parse_params(self, payload: JsonObject) -> TParams:
         if self.decode is not None:
@@ -68,6 +76,14 @@ def host_tool(
     label: str | None = None,
     hidden: bool = False,
     decode: Callable[[JsonObject], TParams] | None = None,
+    side_effect_class: str | None = None,
+    trust_class: str | None = None,
+    display: JsonObject | None = None,
+    input_size_hint_bytes: int | None = None,
+    output_size_hint_bytes: int | None = None,
+    default_timeout_ms: int | None = None,
+    max_result_bytes: int | None = None,
+    max_update_bytes: int | None = None,
 ) -> HostTool[TParams, TDetails]:
     return HostTool(
         name=name,
@@ -77,4 +93,12 @@ def host_tool(
         label=label,
         hidden=hidden,
         decode=decode,
+        side_effect_class=side_effect_class,
+        trust_class=trust_class,
+        display=display,
+        input_size_hint_bytes=input_size_hint_bytes,
+        output_size_hint_bytes=output_size_hint_bytes,
+        default_timeout_ms=default_timeout_ms,
+        max_result_bytes=max_result_bytes,
+        max_update_bytes=max_update_bytes,
     )

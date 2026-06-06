@@ -37,23 +37,32 @@ URI_SERVER = textwrap.dedent(
 
         if command_type == "set_host_uri_schemes":
             schemes = command.get("schemes", [])
+            print(json.dumps({"type": "uri_echo", "frame": {"type": "registered", "schemes": schemes}}), flush=True)
             respond(
                 request_id,
                 "set_host_uri_schemes",
                 {"schemes": [entry.get("scheme", "") for entry in schemes]},
             )
-        elif command_type == "trigger_read":
-            print(
-                json.dumps(
-                    {
-                        "type": "host_uri_request",
-                        "id": f"uri-req-{pending_uri_id}",
-                        "operation": "read",
-                        "url": command["url"],
-                    }
-                ),
-                flush=True,
+        elif command_type == "add_host_uri_schemes":
+            schemes = command.get("schemes", [])
+            print(json.dumps({"type": "uri_echo", "frame": {"type": "registered", "schemes": schemes}}), flush=True)
+            respond(
+                request_id,
+                "add_host_uri_schemes",
+                {"schemes": [entry.get("scheme", "") for entry in schemes]},
             )
+        elif command_type == "remove_host_uri_schemes":
+            respond(request_id, "remove_host_uri_schemes", {"schemes": []})
+        elif command_type == "trigger_read":
+            frame = {
+                "type": "host_uri_request",
+                "id": f"uri-req-{pending_uri_id}",
+                "operation": "read",
+                "url": command["url"],
+            }
+            if "range" in command:
+                frame["range"] = command["range"]
+            print(json.dumps(frame), flush=True)
             pending_uri_id += 1
             respond(request_id, "trigger_read", {})
         elif command_type == "trigger_write":
@@ -131,6 +140,24 @@ class HostUriHelperTests(unittest.TestCase):
         )
         self.assertTrue(uri.writable)
 
+    def test_host_uri_helper_preserves_v1_metadata(self) -> None:
+        uri = host_uri(
+            scheme="db",
+            read=lambda url, ctx: "x",
+            trust_class="workspace",
+            default_timeout_ms=250,
+            max_content_bytes=4096,
+            content_types=("text/plain", "application/json"),
+            binary=True,
+            range=True,
+        )
+        self.assertEqual(uri.trust_class, "workspace")
+        self.assertEqual(uri.default_timeout_ms, 250)
+        self.assertEqual(uri.max_content_bytes, 4096)
+        self.assertEqual(uri.content_types, ("text/plain", "application/json"))
+        self.assertTrue(uri.binary)
+        self.assertTrue(uri.range)
+
 
 class RpcHostUriBridgeTests(unittest.TestCase):
     def _make_client(self, **kwargs: object) -> RpcClient:
@@ -161,6 +188,66 @@ class RpcHostUriBridgeTests(unittest.TestCase):
             self.assertEqual(frame["type"], "host_uri_result")
             self.assertEqual(frame["content"], "id=42")
             self.assertEqual(captured, [("read", "db://users/42")])
+
+
+    def test_read_handler_receives_range_context(self) -> None:
+        seen: list[dict[str, object]] = []
+
+        def read_db(_url: str, ctx) -> str:
+            if ctx.range is not None:
+                seen.append(ctx.range)
+            return "partial"
+
+        with self._make_client(
+            host_uris=(host_uri(scheme="db", read=read_db, range=True),),
+        ) as client:
+            client._request("trigger_read", url="db://users/42", range={"start": 1, "end": 3, "unit": "line"})  # type: ignore[attr-defined]
+            frame = self._await_echo(client)
+            self.assertEqual(frame["content"], "partial")
+
+        self.assertEqual(seen, [{"start": 1, "end": 3, "unit": "line"}])
+    def test_set_host_uris_serializes_v1_metadata(self) -> None:
+        with self._make_client(
+            host_uris=(
+                host_uri(
+                    scheme="db",
+                    read=lambda url, ctx: "x",
+                    trust_class="workspace",
+                    default_timeout_ms=250,
+                    max_content_bytes=4096,
+                    content_types=("text/plain",),
+                    binary=True,
+                    range=True,
+                ),
+            ),
+        ) as client:
+            registered = self._await_echo(client, "registered")
+            scheme = registered["schemes"][0]
+            self.assertEqual(scheme["trustClass"], "workspace")
+            self.assertEqual(scheme["defaultTimeoutMs"], 250)
+            self.assertEqual(scheme["maxContentBytes"], 4096)
+            self.assertEqual(scheme["contentTypes"], ["text/plain"])
+            self.assertTrue(scheme["binary"])
+            self.assertTrue(scheme["range"])
+
+    def test_incremental_host_uri_registration_methods(self) -> None:
+        with self._make_client() as client:
+            schemes = client.add_host_uris(
+                (
+                    host_uri(
+                        scheme="db",
+                        read=lambda url, ctx: "x",
+                        trust_class="workspace",
+                        max_content_bytes=1024,
+                    ),
+                )
+            )
+            self.assertEqual(schemes, ("db",))
+            registered = self._await_echo(client, "registered")
+            self.assertEqual(registered["schemes"][0]["scheme"], "db")
+            self.assertEqual(registered["schemes"][0]["trustClass"], "workspace")
+            self.assertEqual(registered["schemes"][0]["maxContentBytes"], 1024)
+            self.assertEqual(client.remove_host_uris(("db",)), ())
 
     def test_read_handler_can_return_structured_result(self) -> None:
         def read_db(_url: str, _ctx):
@@ -225,16 +312,18 @@ class RpcHostUriBridgeTests(unittest.TestCase):
             self.assertTrue(frame.get("isError"))
             self.assertEqual(frame["error"], "boom")
 
-    def _await_echo(self, client: RpcClient) -> dict:
+    def _await_echo(self, client: RpcClient, frame_type: str | None = "host_uri_result") -> dict:
         captured = getattr(client, "_test_uri_echos", None)
         if captured is None:
             self.fail("_capture was not called for this client")
         deadline = time.time() + 2.0
         while time.time() < deadline:
             if captured:
-                return captured.pop(0)
+                frame = captured.pop(0)
+                if frame_type is None or frame.get("type") == frame_type:
+                    return frame
             time.sleep(0.02)
-        self.fail("Timed out waiting for host_uri_result echo")
+        self.fail("Timed out waiting for host URI echo")
 
     def _attach_capture(self, client: RpcClient) -> None:
         captured: list[dict] = []

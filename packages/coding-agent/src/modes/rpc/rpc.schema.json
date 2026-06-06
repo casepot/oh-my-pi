@@ -1,0 +1,2267 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omp.sh/schemas/omp-rpc-1.1.schema.json",
+  "title": "OMP RPC protocol 1.1",
+  "$ref": "#/$defs/stdoutFrame",
+  "$defs": {
+    "json": true,
+    "metadata": {
+      "type": "object",
+      "required": [
+        "seq",
+        "timestamp",
+        "sessionId"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sessionId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "protocolIdentity": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "schemaVersion"
+      ],
+      "properties": {
+        "name": {
+          "const": "omp-rpc"
+        },
+        "version": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "serverIdentity": {
+      "type": "object",
+      "required": [
+        "packageName",
+        "packageVersion",
+        "pid"
+      ],
+      "properties": {
+        "packageName": {
+          "type": "string"
+        },
+        "packageVersion": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    },
+    "capabilities": {
+      "type": "object",
+      "required": [
+        "commands",
+        "events",
+        "frameMetadata",
+        "operationEvents",
+        "typedErrors",
+        "stateChanges",
+        "sessionGraph",
+        "taskEvents",
+        "observableSessions",
+        "extensionUi",
+        "hostTools",
+        "hostUris",
+        "oneShot",
+        "heartbeat"
+      ],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "frameMetadata": {
+          "type": "boolean"
+        },
+        "operationEvents": {
+          "type": "boolean"
+        },
+        "typedErrors": {
+          "type": "boolean"
+        },
+        "stateChanges": {
+          "type": "boolean"
+        },
+        "sessionGraph": {
+          "type": "boolean"
+        },
+        "taskEvents": {
+          "type": "boolean"
+        },
+        "observableSessions": {
+          "type": "boolean"
+        },
+        "extensionUi": {
+          "type": "boolean"
+        },
+        "hostTools": {
+          "type": "boolean"
+        },
+        "hostUris": {
+          "type": "boolean"
+        },
+        "chunkedPayloads": {
+          "type": "boolean"
+        },
+        "oneShot": {
+          "type": "boolean"
+        },
+        "heartbeat": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "maxFrameBytes",
+        "maxPartialLineBytes",
+        "maxOutboundFrameBytes",
+        "maxHostToolResultBytes",
+        "maxHostToolUpdateBytes",
+        "maxHostUriContentBytes",
+        "maxSessionEntryContentBytes",
+        "maxUiPayloadBytes",
+        "defaultExtensionUiTimeoutMs"
+      ],
+      "properties": {
+        "maxFrameBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxPartialLineBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxOutboundFrameBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxHostToolResultBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxHostToolUpdateBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxHostUriContentBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxSessionEntryContentBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxUiPayloadBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "defaultExtensionUiTimeoutMs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "resetProfile": {
+      "type": "object",
+      "required": [
+        "name",
+        "ambientUserConfigApplied",
+        "settingOverrides"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "ambientUserConfigApplied": {
+          "type": "boolean"
+        },
+        "settingOverrides": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "security": {
+      "type": "object",
+      "required": [
+        "enabledCommandCategories",
+        "disabledTools",
+        "hostToolPermissionMode",
+        "hostUriAllowedSchemes",
+        "hostUriReservedSchemes",
+        "bash",
+        "sessionMutation",
+        "loginProviders",
+        "extensionsEnabled",
+        "redactionPolicy"
+      ],
+      "properties": {
+        "enabledCommandCategories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "disabledTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hostToolPermissionMode": {
+          "enum": [
+            "host-owned",
+            "disabled"
+          ]
+        },
+        "hostUriAllowedSchemes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hostUriReservedSchemes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "bash": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "cwd",
+            "rootPolicy"
+          ],
+          "additionalProperties": true
+        },
+        "sessionMutation": {
+          "type": "boolean"
+        },
+        "loginProviders": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensionsEnabled": {
+          "type": "boolean"
+        },
+        "redactionPolicy": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "sessionState": {
+      "type": "object",
+      "required": [
+        "stateSeq",
+        "protocol",
+        "capabilities",
+        "limits",
+        "resetProfile",
+        "security",
+        "activeOperations",
+        "isStreaming",
+        "isCompacting",
+        "steeringMode",
+        "followUpMode",
+        "interruptMode",
+        "sessionId",
+        "autoCompactionEnabled",
+        "autoRetryEnabled",
+        "messageCount",
+        "queuedMessageCount",
+        "todoPhases",
+        "hostTools",
+        "hostUriSchemes"
+      ],
+      "properties": {
+        "stateSeq": { "type": "integer", "minimum": 0 },
+        "protocol": { "$ref": "#/$defs/protocolIdentity" },
+        "capabilities": { "$ref": "#/$defs/capabilities" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "resetProfile": { "$ref": "#/$defs/resetProfile" },
+        "security": { "$ref": "#/$defs/security" },
+        "activeOperations": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "isStreaming": { "type": "boolean" },
+        "isCompacting": { "type": "boolean" },
+        "steeringMode": { "enum": ["all", "one-at-a-time"] },
+        "followUpMode": { "enum": ["all", "one-at-a-time"] },
+        "interruptMode": { "enum": ["immediate", "wait"] },
+        "sessionFile": { "type": ["string", "null"] },
+        "sessionId": { "type": "string" },
+        "sessionName": { "type": "string" },
+        "autoCompactionEnabled": { "type": "boolean" },
+        "autoRetryEnabled": { "type": "boolean" },
+        "messageCount": { "type": "integer", "minimum": 0 },
+        "queuedMessageCount": { "type": "integer", "minimum": 0 },
+        "todoPhases": { "type": "array" },
+        "hostTools": { "type": "array" },
+        "hostUriSchemes": { "type": "array" }
+      },
+      "additionalProperties": true
+    },
+    "protocolInfo": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "server",
+        "mode",
+        "capabilities",
+        "limits",
+        "resetProfile",
+        "security"
+      ],
+      "properties": {
+        "protocol": {
+          "$ref": "#/$defs/protocolIdentity"
+        },
+        "server": {
+          "$ref": "#/$defs/serverIdentity"
+        },
+        "mode": {
+          "enum": [
+            "rpc",
+            "rpc-ui"
+          ]
+        },
+        "capabilities": {
+          "$ref": "#/$defs/capabilities"
+        },
+        "limits": {
+          "$ref": "#/$defs/limits"
+        },
+        "resetProfile": {
+          "$ref": "#/$defs/resetProfile"
+        },
+        "security": {
+          "$ref": "#/$defs/security"
+        }
+      },
+      "additionalProperties": true
+    },
+    "errorInfo": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "invalid_json",
+            "invalid_frame",
+            "invalid_command",
+            "unknown_command",
+            "invalid_arguments",
+            "unsupported_capability",
+            "operation_not_found",
+            "operation_cancelled",
+            "operation_timeout",
+            "peer_closed",
+            "host_tool_not_found",
+            "host_tool_timeout",
+            "host_tool_failed",
+            "host_tool_too_large",
+            "host_uri_scheme_not_found",
+            "host_uri_denied",
+            "host_uri_too_large",
+            "extension_ui_timeout",
+            "model_not_found",
+            "session_not_found",
+            "internal_error"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "$ref": "#/$defs/json"
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "correlation": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "operationId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        },
+        "messageId": {
+          "type": "string"
+        },
+        "toolCallId": {
+          "type": "string"
+        },
+        "taskRunId": {
+          "type": "string"
+        },
+        "subagentId": {
+          "type": "string"
+        },
+        "hostRequestId": {
+          "type": "string"
+        },
+        "uiRequestId": {
+          "type": "string"
+        },
+        "stateSeq": {
+          "type": "integer"
+        }
+      }
+    },
+    "readyFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "$ref": "#/$defs/protocolInfo"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "ready"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "responseFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "command",
+            "success"
+          ],
+          "properties": {
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "response"
+            },
+            "command": {
+              "type": "string"
+            },
+            "success": {
+              "type": "boolean"
+            },
+            "data": {
+              "$ref": "#/$defs/json"
+            },
+            "error": {
+              "type": "string"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "protocolErrorFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "error",
+            "errorInfo"
+          ],
+          "properties": {
+            "type": {
+              "const": "protocol_error"
+            },
+            "error": {
+              "type": "string"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "transportWarningFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "warning"
+          ],
+          "properties": {
+            "type": {
+              "const": "transport_warning"
+            },
+            "warning": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "operationStartFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "$ref": "#/$defs/correlation"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "operationId",
+            "command",
+            "startedAt"
+          ],
+          "properties": {
+            "type": {
+              "const": "operation_start"
+            },
+            "operationId": {
+              "type": "string"
+            },
+            "command": {
+              "type": "string"
+            },
+            "startedAt": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "operationTerminalFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "$ref": "#/$defs/correlation"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "operationId",
+            "command",
+            "status",
+            "startedAt",
+            "endedAt"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "operation_end",
+                "operation_error"
+              ]
+            },
+            "operationId": {
+              "type": "string"
+            },
+            "command": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "completed",
+                "failed",
+                "cancelled",
+                "rejected",
+                "peer_closed"
+              ]
+            },
+            "startedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "endedAt": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "data": {
+              "$ref": "#/$defs/json"
+            },
+            "error": {
+              "type": "string"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "stateChangedFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "stateSeq",
+            "changed",
+            "state"
+          ],
+          "properties": {
+            "type": {
+              "const": "state_changed"
+            },
+            "stateSeq": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "changed": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "state": {
+              "$ref": "#/$defs/sessionState"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "hostToolCallFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "toolCallId",
+            "toolName",
+            "arguments",
+            "metadata",
+            "maxResultBytes",
+            "maxUpdateBytes"
+          ],
+          "properties": {
+            "type": {
+              "const": "host_tool_call"
+            },
+            "id": {
+              "type": "string"
+            },
+            "toolCallId": {
+              "type": "string"
+            },
+            "toolName": {
+              "type": "string"
+            },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "metadata": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "deadlineMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxResultBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxUpdateBytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "hostToolCancelFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "targetId",
+            "expectsAck",
+            "errorInfo"
+          ],
+          "properties": {
+            "type": {
+              "const": "host_tool_cancel"
+            },
+            "id": {
+              "type": "string"
+            },
+            "targetId": {
+              "type": "string"
+            },
+            "expectsAck": {
+              "type": "boolean"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "hostUriRequestFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "operation",
+            "url",
+            "maxContentBytes"
+          ],
+          "properties": {
+            "type": {
+              "const": "host_uri_request"
+            },
+            "id": {
+              "type": "string"
+            },
+            "operation": {
+              "enum": [
+                "read",
+                "write"
+              ]
+            },
+            "url": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "contentLength": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "acceptsBase64": {
+              "type": "boolean"
+            },
+            "deadlineMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxContentBytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "range": {
+              "type": "object",
+              "required": [
+                "start"
+              ],
+              "properties": {
+                "start": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "end": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "unit": {
+                  "enum": [
+                    "line",
+                    "byte"
+                  ]
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "hostUriCancelFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "targetId",
+            "expectsAck",
+            "errorInfo"
+          ],
+          "properties": {
+            "type": {
+              "const": "host_uri_cancel"
+            },
+            "id": {
+              "type": "string"
+            },
+            "targetId": {
+              "type": "string"
+            },
+            "expectsAck": {
+              "type": "boolean"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "extensionUiRequestFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "method",
+            "expectsResponse"
+          ],
+          "properties": {
+            "type": {
+              "const": "extension_ui_request"
+            },
+            "id": {
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "expectsResponse": {
+              "type": "boolean"
+            },
+            "timeout": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "responseSchema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "extensionErrorFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "extensionPath",
+            "event",
+            "error"
+          ],
+          "properties": {
+            "type": {
+              "const": "extension_error"
+            },
+            "extensionPath": {
+              "type": "string"
+            },
+            "event": {
+              "type": "string"
+            },
+            "error": {
+              "type": "string"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "pongFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "pong"
+            },
+            "payload": {
+              "$ref": "#/$defs/json"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "taskFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "anyOf": [
+            {
+              "type": "object",
+              "required": ["type", "schemaVersion", "taskRunId", "agents"],
+              "properties": {
+                "type": { "const": "task_progress" },
+                "schemaVersion": { "type": "integer", "minimum": 1 },
+                "toolCallId": { "type": "string" },
+                "taskRunId": { "type": "string" },
+                "parentTaskRunId": { "type": "string" },
+                "subagentId": { "type": "string" },
+                "agents": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+              },
+              "additionalProperties": true
+            },
+            {
+              "type": "object",
+              "required": ["type", "schemaVersion", "taskRunId", "results"],
+              "properties": {
+                "type": { "const": "task_result" },
+                "schemaVersion": { "type": "integer", "minimum": 1 },
+                "toolCallId": { "type": "string" },
+                "taskRunId": { "type": "string" },
+                "parentTaskRunId": { "type": "string" },
+                "subagentId": { "type": "string" },
+                "results": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+              },
+              "additionalProperties": true
+            },
+            {
+              "type": "object",
+              "required": ["type", "schemaVersion", "subagentId", "parentSubagentId", "status", "agentType", "index"],
+              "properties": {
+                "type": { "const": "subagent_lifecycle" },
+                "schemaVersion": { "type": "integer", "minimum": 1 },
+                "toolCallId": { "type": "string" },
+                "taskRunId": { "type": "string" },
+                "parentTaskRunId": { "type": "string" },
+                "subagentId": { "type": "string" },
+                "parentSubagentId": { "type": ["string", "null"] },
+                "status": { "enum": ["started", "completed", "failed", "aborted"] },
+                "agentType": { "type": "string" },
+                "index": { "type": "integer", "minimum": 0 }
+              },
+              "additionalProperties": true
+            },
+            {
+              "type": "object",
+              "required": ["type", "schemaVersion", "sessions"],
+              "properties": {
+                "type": { "const": "observable_session_update" },
+                "schemaVersion": { "type": "integer", "minimum": 1 },
+                "sessions": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+              },
+              "additionalProperties": true
+            }
+          ]
+        }
+      ]
+    },
+    "shutdownFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "reason",
+            "status"
+          ],
+          "properties": {
+            "type": {
+              "const": "shutdown"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "graceful",
+                "peer_closed",
+                "one_shot_complete"
+              ]
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "otherStdoutFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/metadata"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string"
+            }
+          },
+          "not": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "enum": [
+                  "ready",
+                  "response",
+                  "protocol_error",
+                  "transport_warning",
+                  "operation_start",
+                  "operation_end",
+                  "operation_error",
+                  "state_changed",
+                  "host_tool_call",
+                  "host_tool_cancel",
+                  "host_uri_request",
+                  "host_uri_cancel",
+                  "extension_ui_request",
+                  "extension_error",
+                  "pong",
+                  "task_progress",
+                  "task_result",
+                  "subagent_lifecycle",
+                  "observable_session_update",
+                  "shutdown"
+                ]
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "stdoutFrame": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/readyFrame"
+        },
+        {
+          "$ref": "#/$defs/responseFrame"
+        },
+        {
+          "$ref": "#/$defs/protocolErrorFrame"
+        },
+        {
+          "$ref": "#/$defs/transportWarningFrame"
+        },
+        {
+          "$ref": "#/$defs/operationStartFrame"
+        },
+        {
+          "$ref": "#/$defs/operationTerminalFrame"
+        },
+        {
+          "$ref": "#/$defs/stateChangedFrame"
+        },
+        {
+          "$ref": "#/$defs/hostToolCallFrame"
+        },
+        {
+          "$ref": "#/$defs/hostToolCancelFrame"
+        },
+        {
+          "$ref": "#/$defs/hostUriRequestFrame"
+        },
+        {
+          "$ref": "#/$defs/hostUriCancelFrame"
+        },
+        {
+          "$ref": "#/$defs/extensionUiRequestFrame"
+        },
+        {
+          "$ref": "#/$defs/extensionErrorFrame"
+        },
+        {
+          "$ref": "#/$defs/pongFrame"
+        },
+        {
+          "$ref": "#/$defs/taskFrame"
+        },
+        {
+          "$ref": "#/$defs/shutdownFrame"
+        },
+        {
+          "$ref": "#/$defs/otherStdoutFrame"
+        }
+      ]
+    },
+    "inboundCommand": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_protocol_info"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_state"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "cycle_model"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_available_models"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "cycle_thinking_level"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "abort"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "new_session"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "abort_retry"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "abort_bash"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_session_stats"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_branch_messages"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_last_assistant_text"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_messages"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_session_tree"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_observable_sessions"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_login_providers"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "shutdown"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "message"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "prompt"
+            },
+            "message": {
+              "type": "string"
+            },
+            "images": {
+              "type": "array"
+            },
+            "streamingBehavior": {
+              "enum": [
+                "steer",
+                "followUp"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "message"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "steer"
+            },
+            "message": {
+              "type": "string"
+            },
+            "images": {
+              "type": "array"
+            },
+            "streamingBehavior": {
+              "enum": [
+                "steer",
+                "followUp"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "message"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "follow_up"
+            },
+            "message": {
+              "type": "string"
+            },
+            "images": {
+              "type": "array"
+            },
+            "streamingBehavior": {
+              "enum": [
+                "steer",
+                "followUp"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "message"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "abort_and_prompt"
+            },
+            "message": {
+              "type": "string"
+            },
+            "images": {
+              "type": "array"
+            },
+            "streamingBehavior": {
+              "enum": [
+                "steer",
+                "followUp"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "operationId"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "cancel_operation"
+            },
+            "operationId": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "command"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "shutdown_after"
+            },
+            "command": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "phases"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_todos"
+            },
+            "phases": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "tools"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_host_tools"
+            },
+            "tools": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "tools"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "add_host_tools"
+            },
+            "tools": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "toolNames"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "remove_host_tools"
+            },
+            "toolNames": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "schemes"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_host_uri_schemes"
+            },
+            "schemes": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "schemes"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "add_host_uri_schemes"
+            },
+            "schemes": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "schemes"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "remove_host_uri_schemes"
+            },
+            "schemes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "provider",
+            "modelId"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_model"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "modelId": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "level"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_thinking_level"
+            },
+            "level": {
+              "enum": [
+                "inherit",
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "mode"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_steering_mode"
+            },
+            "mode": {
+              "enum": [
+                "all",
+                "one-at-a-time"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "mode"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_follow_up_mode"
+            },
+            "mode": {
+              "enum": [
+                "all",
+                "one-at-a-time"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "mode"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_interrupt_mode"
+            },
+            "mode": {
+              "enum": [
+                "immediate",
+                "wait"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "enabled"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_auto_compaction"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "enabled"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_auto_retry"
+            },
+            "enabled": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "command"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "bash"
+            },
+            "command": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "export_html"
+            },
+            "outputPath": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "sessionPath"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "switch_session"
+            },
+            "sessionPath": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "entryId"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "branch"
+            },
+            "entryId": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "name"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_session_name"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "compact"
+            },
+            "customInstructions": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "handoff"
+            },
+            "customInstructions": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_session_entries"
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "includeContent": {
+              "type": "boolean"
+            },
+            "entryTypes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "providerId"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "login"
+            },
+            "providerId": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "ping"
+            },
+            "payload": {
+              "$ref": "#/$defs/json"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "hostOrUiResponse": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "result"
+          ],
+          "properties": {
+            "type": {
+              "const": "host_tool_result"
+            },
+            "id": {
+              "type": "string"
+            },
+            "result": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "isError": {
+              "type": "boolean"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "partialResult"
+          ],
+          "properties": {
+            "type": {
+              "const": "host_tool_update"
+            },
+            "id": {
+              "type": "string"
+            },
+            "partialResult": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id",
+            "targetId",
+            "accepted"
+          ],
+          "properties": {
+            "type": {
+              "enum": [
+                "host_tool_cancel_ack",
+                "host_uri_cancel_ack"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "targetId": {
+              "type": "string"
+            },
+            "accepted": {
+              "type": "boolean"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "host_uri_result"
+            },
+            "id": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "bytesBase64": {
+              "type": "string"
+            },
+            "contentLength": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "isError": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": "string"
+            },
+            "errorInfo": {
+              "$ref": "#/$defs/errorInfo"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "extension_ui_response"
+            },
+            "id": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            },
+            "cancelled": {
+              "type": "boolean"
+            },
+            "timedOut": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "inboundFrame": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/inboundCommand"
+        },
+        {
+          "$ref": "#/$defs/hostOrUiResponse"
+        }
+      ]
+    }
+  }
+}

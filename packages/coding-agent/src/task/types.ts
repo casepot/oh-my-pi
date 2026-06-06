@@ -37,6 +37,9 @@ export const TASK_SUBAGENT_LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 
 /** Payload emitted on TASK_SUBAGENT_PROGRESS_CHANNEL */
 export interface SubagentProgressPayload {
+	toolCallId?: string;
+	taskRunId?: string;
+	parentTaskRunId?: string;
 	index: number;
 	agent: string;
 	agentSource: AgentSource;
@@ -48,6 +51,9 @@ export interface SubagentProgressPayload {
 
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
 export interface SubagentLifecyclePayload {
+	toolCallId?: string;
+	taskRunId?: string;
+	parentTaskRunId?: string;
 	id: string;
 	agent: string;
 	agentSource: AgentSource;

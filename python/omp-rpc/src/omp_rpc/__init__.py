@@ -26,6 +26,7 @@ from .host_tools import (
 from .host_uris import (
     HostUri,
     HostUriContentType,
+    HostUriTrustClass,
     HostUriContext,
     HostUriReadHandler,
     HostUriReadResult,
@@ -120,6 +121,7 @@ __all__ = [
     "FileMentionMessage",
     "HostTool",
     "HostToolContext",
+    "HostUriTrustClass",
     "HostToolResultPayload",
     "HostToolResultValue",
     "HostUri",

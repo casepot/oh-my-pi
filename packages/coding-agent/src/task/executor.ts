@@ -151,6 +151,8 @@ export interface ExecutorOptions {
 	description?: string;
 	index: number;
 	id: string;
+	toolCallId?: string;
+	parentTaskRunId?: string;
 	modelOverride?: string | string[];
 	/**
 	 * Active model selector of the parent session, used as an auth-aware fallback
@@ -767,6 +769,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		onProgress?.({ ...progress });
 		if (options.eventBus) {
 			options.eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+				toolCallId: options.toolCallId,
+				taskRunId: id,
+				parentTaskRunId: options.parentTaskRunId,
 				index,
 				agent: agent.name,
 				agentSource: agent.source,
@@ -1322,6 +1327,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Emit lifecycle start event
 			if (options.eventBus) {
 				options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+					toolCallId: options.toolCallId,
+					taskRunId: id,
+					parentTaskRunId: options.parentTaskRunId,
 					id,
 					agent: agent.name,
 					agentSource: agent.source,
@@ -1682,6 +1690,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Emit lifecycle end event after finalization so yield status is reflected
 	if (options.eventBus) {
 		options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			toolCallId: options.toolCallId,
+			taskRunId: id,
+			parentTaskRunId: options.parentTaskRunId,
 			id,
 			agent: agent.name,
 			agentSource: agent.source,

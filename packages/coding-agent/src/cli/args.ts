@@ -27,6 +27,7 @@ export interface Args {
 	help?: boolean;
 	version?: boolean;
 	mode?: Mode;
+	rpcOneShot?: string;
 	noSession?: boolean;
 	sessionDir?: string;
 	providerSessionId?: string;
@@ -114,6 +115,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			if (mode === "text" || mode === "json" || mode === "rpc" || mode === "acp" || mode === "rpc-ui") {
 				result.mode = mode;
 			}
+		} else if (arg === "--rpc-one-shot" && i + 1 < args.length) {
+			result.rpcOneShot = args[++i];
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;
 		} else if (arg === "--resume" || arg === "-r" || arg === "--session") {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
@@ -79,7 +80,10 @@ from .protocol import (
 AgentEventListener = Callable[[RpcAgentEvent], None]
 NotificationListener = Callable[[RpcNotification], None]
 UiRequestListener = Callable[[ExtensionUiRequest], None]
+RawFrameListener = Callable[[JsonObject], None]
 ExtensionErrorListener = Callable[[ExtensionError], None]
+
+MAX_RPC_FRAME_BYTES = 1_048_576
 ReadyListener = Callable[[ReadyEvent], None]
 UnknownNotificationListener = Callable[[UnknownNotification], None]
 AgentStartListener = Callable[[AgentStartEvent], None]
@@ -152,10 +156,19 @@ class RpcConcurrencyError(RpcError):
 class RpcCommandError(RpcError):
     """Raised when the RPC server returns `success: false`."""
 
-    def __init__(self, command: str, error: str):
+    def __init__(
+        self,
+        command: str,
+        error: str,
+        error_info: Mapping[str, object] | None = None,
+    ):
         super().__init__(f"{command}: {error}")
         self.command = command
         self.error = error
+        self.error_info = dict(error_info) if error_info is not None else None
+        self.code = str(self.error_info.get("code")) if self.error_info and "code" in self.error_info else None
+        self.details = self.error_info.get("details") if self.error_info else None
+        self.retryable = bool(self.error_info.get("retryable")) if self.error_info else None
 
 
 class RpcProtocolError(RpcError):
@@ -169,6 +182,11 @@ class RpcProtocolError(RpcError):
         self.command = str(command) if isinstance(command, str) else None
         self.request_id = str(request_id) if isinstance(request_id, str) else None
         self.remote_error = str(error) if isinstance(error, str) else None
+        error_info = payload.get("errorInfo")
+        self.error_info = dict(error_info) if isinstance(error_info, Mapping) else None
+        self.code = str(self.error_info.get("code")) if self.error_info and "code" in self.error_info else None
+        self.details = self.error_info.get("details") if self.error_info else None
+        self.retryable = bool(self.error_info.get("retryable")) if self.error_info else None
 
         fragments = ["Received unmatched RPC error response"]
         if self.command:
@@ -214,11 +232,13 @@ class _PendingRequest:
 @dataclass(slots=True)
 class _PendingHostToolCall:
     cancel_event: threading.Event
+    timer: threading.Timer | None = None
 
 
 @dataclass(slots=True)
 class _PendingHostUriRequest:
     cancel_event: threading.Event
+    timer: threading.Timer | None = None
 
 
 @dataclass(slots=True)
@@ -336,6 +356,8 @@ class RpcClient:
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._event_condition = threading.Condition()
+        self._operation_condition = threading.Condition(self._state_lock)
+        self._operation_terminals: dict[str, JsonObject] = {}
         self._pending: dict[str, _PendingRequest] = {}
         self._pending_host_tool_calls: dict[str, _PendingHostToolCall] = {}
         self._pending_host_uri_requests: dict[str, _PendingHostUriRequest] = {}
@@ -360,6 +382,7 @@ class RpcClient:
         )
         self._prompt_lifecycle = _PromptLifecycleCoordinator()
 
+        self._raw_frame_listeners: list[RawFrameListener] = []
         self._notification_listeners: list[NotificationListener] = []
         self._event_listeners: list[AgentEventListener] = []
         self._typed_event_listeners: dict[str, list[AgentEventListener]] = {}
@@ -414,6 +437,7 @@ class RpcClient:
         with self._state_lock:
             self._protocol_errors.clear()
             self._listener_errors.clear()
+            self._operation_terminals.clear()
 
         process = subprocess.Popen(
             list(self._build_command()),
@@ -522,6 +546,10 @@ class RpcClient:
                 self._stderr_thread.join(timeout=1.0)
             self._stdout_thread = None
             self._stderr_thread = None
+
+    def on_frame(self, listener: RawFrameListener) -> Callable[[], None]:
+        self._raw_frame_listeners.append(listener)
+        return lambda: self._remove_listener(self._raw_frame_listeners, listener)
 
     def on_event(self, listener: AgentEventListener) -> Callable[[], None]:
         self._event_listeners.append(listener)
@@ -717,6 +745,9 @@ class RpcClient:
             payload["timedOut"] = True
         self._send_notification(payload)
 
+    def get_protocol_info(self) -> JsonObject:
+        return self._request("get_protocol_info")
+
     def get_state(self) -> SessionState:
         payload = self._request("get_state")
         return parse_session_state(payload)
@@ -750,9 +781,14 @@ class RpcClient:
 
     def set_interrupt_mode(self, mode: InterruptMode) -> None:
         self._request("set_interrupt_mode", mode=mode)
+    def cancel_operation(self, operation_id: str) -> JsonObject:
+        return self._request("cancel_operation", operationId=operation_id)
+
 
     def compact(self, custom_instructions: str | None = None) -> CompactionResult:
-        payload = self._request("compact", customInstructions=custom_instructions)
+        payload = self._request_operation(
+            "compact", customInstructions=custom_instructions, timeout=600.0
+        )
         return parse_compaction_result(payload)
 
     def set_auto_compaction(self, enabled: bool) -> None:
@@ -765,7 +801,7 @@ class RpcClient:
         self._request("abort_retry")
 
     def bash(self, command: str) -> BashResult:
-        payload = self._request("bash", command=command)
+        payload = self._request_operation("bash", command=command)
         return parse_bash_result(payload)
 
     def abort_bash(self) -> None:
@@ -803,6 +839,16 @@ class RpcClient:
         value = payload.get("text")
         return str(value) if isinstance(value, str) else None
 
+    def get_login_providers(self) -> tuple[JsonObject, ...]:
+        payload = self._request("get_login_providers")
+        providers = payload.get("providers") or []
+        if not isinstance(providers, list):
+            raise RpcError("get_login_providers response did not include providers")
+        return tuple(_clone_json_object(provider) for provider in providers)
+
+    def login(self, provider_id: str) -> JsonObject:
+        return self._request_operation("login", providerId=provider_id, timeout=600.0)
+
     def set_session_name(self, name: str) -> None:
         self._request("set_session_name", name=name)
 
@@ -819,9 +865,69 @@ class RpcClient:
     def clear_todos(self) -> tuple[TodoPhase, ...]:
         return self.set_todos(())
 
+    def get_messages_response(self) -> JsonObject:
+        return self._request("get_messages")
+
     def get_messages(self) -> tuple[AgentMessage, ...]:
-        payload = self._request("get_messages")
+        payload = self.get_messages_response()
         return parse_agent_messages(cast(JsonValue | None, payload.get("messages")))
+    def get_session_entries(
+        self,
+        *,
+        offset: int | None = None,
+        limit: int | None = None,
+        entry_types: Sequence[str] | None = None,
+        include_content: bool | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "get_session_entries",
+            offset=offset,
+            limit=limit,
+            entryTypes=list(entry_types) if entry_types is not None else None,
+            includeContent=include_content,
+        )
+
+    def get_session_tree(self, *, include_entries: bool = False) -> JsonObject:
+        return self._request("get_session_tree", includeEntries=include_entries)
+
+    def get_observable_sessions(self) -> tuple[JsonObject, ...]:
+        payload = self._request("get_observable_sessions")
+        sessions = payload.get("sessions") or []
+        if not isinstance(sessions, list):
+            raise RpcError("get_observable_sessions response did not include sessions")
+        return tuple(_clone_json_object(session) for session in sessions)
+
+
+    def _host_tool_definitions(
+        self, tools: Sequence[HostTool[Any, Any]]
+    ) -> list[JsonObject]:
+        definitions: list[JsonObject] = []
+        for tool in tools:
+            entry: JsonObject = {
+                "name": tool.name,
+                "label": tool.label,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "hidden": tool.hidden,
+            }
+            if tool.side_effect_class is not None:
+                entry["sideEffectClass"] = tool.side_effect_class
+            if tool.trust_class is not None:
+                entry["trustClass"] = tool.trust_class
+            if tool.display is not None:
+                entry["display"] = tool.display
+            if tool.input_size_hint_bytes is not None:
+                entry["inputSizeHintBytes"] = tool.input_size_hint_bytes
+            if tool.output_size_hint_bytes is not None:
+                entry["outputSizeHintBytes"] = tool.output_size_hint_bytes
+            if tool.default_timeout_ms is not None:
+                entry["defaultTimeoutMs"] = tool.default_timeout_ms
+            if tool.max_result_bytes is not None:
+                entry["maxResultBytes"] = tool.max_result_bytes
+            if tool.max_update_bytes is not None:
+                entry["maxUpdateBytes"] = tool.max_update_bytes
+            definitions.append(entry)
+        return definitions
 
     def set_custom_tools(self, tools: Sequence[HostTool[Any, Any]]) -> tuple[str, ...]:
         self._custom_tools = tuple(tools)
@@ -830,49 +936,96 @@ class RpcClient:
 
         payload = self._request(
             "set_host_tools",
-            tools=cast(
-                JsonValue,
-                [
-                    {
-                        "name": tool.name,
-                        "label": tool.label,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                        "hidden": tool.hidden,
-                    }
-                    for tool in self._custom_tools
-                ],
-            ),
+            tools=cast(JsonValue, self._host_tool_definitions(self._custom_tools)),
         )
         tool_names = payload.get("toolNames") or []
         if not isinstance(tool_names, list):
             raise RpcError("set_host_tools response did not include toolNames")
         return tuple(str(name) for name in tool_names)
 
+    def add_custom_tools(self, tools: Sequence[HostTool[Any, Any]]) -> tuple[str, ...]:
+        by_name = {tool.name: tool for tool in self._custom_tools}
+        for tool in tools:
+            by_name[tool.name] = tool
+        self._custom_tools = tuple(by_name.values())
+        payload = self._request(
+            "add_host_tools",
+            tools=cast(JsonValue, self._host_tool_definitions(tuple(tools))),
+        )
+        tool_names = payload.get("toolNames") or []
+        if not isinstance(tool_names, list):
+            raise RpcError("add_host_tools response did not include toolNames")
+        return tuple(str(name) for name in tool_names)
+
+    def remove_custom_tools(self, tool_names: Sequence[str]) -> tuple[str, ...]:
+        remove = set(tool_names)
+        self._custom_tools = tuple(tool for tool in self._custom_tools if tool.name not in remove)
+        payload = self._request("remove_host_tools", toolNames=list(tool_names))
+        names = payload.get("toolNames") or []
+        if not isinstance(names, list):
+            raise RpcError("remove_host_tools response did not include toolNames")
+        return tuple(str(name) for name in names)
+
+    def _host_uri_definitions(self, host_uris: Sequence[HostUri[Any]]) -> list[JsonObject]:
+        schemes_payload: list[JsonObject] = []
+        for uri in host_uris:
+            entry: JsonObject = {
+                "scheme": uri.scheme,
+                "writable": uri.writable,
+                "immutable": uri.immutable,
+                "trustClass": uri.trust_class,
+            }
+            if uri.description is not None:
+                entry["description"] = uri.description
+            if uri.default_timeout_ms is not None:
+                entry["defaultTimeoutMs"] = uri.default_timeout_ms
+            if uri.max_content_bytes is not None:
+                entry["maxContentBytes"] = uri.max_content_bytes
+            if uri.content_types:
+                entry["contentTypes"] = list(uri.content_types)
+            if uri.binary:
+                entry["binary"] = True
+            if uri.range:
+                entry["range"] = True
+            schemes_payload.append(entry)
+        return schemes_payload
+
     def set_host_uris(self, host_uris: Sequence[HostUri[Any]]) -> tuple[str, ...]:
         self._host_uris = tuple(host_uris)
         if self._process is None:
             return tuple(uri.scheme for uri in self._host_uris)
 
-        schemes_payload: list[JsonObject] = []
-        for uri in self._host_uris:
-            entry: JsonObject = {
-                "scheme": uri.scheme,
-                "writable": uri.writable,
-                "immutable": uri.immutable,
-            }
-            if uri.description is not None:
-                entry["description"] = uri.description
-            schemes_payload.append(entry)
-
         payload = self._request(
             "set_host_uri_schemes",
-            schemes=cast(JsonValue, schemes_payload),
+            schemes=cast(JsonValue, self._host_uri_definitions(self._host_uris)),
         )
         schemes = payload.get("schemes") or []
         if not isinstance(schemes, list):
             raise RpcError("set_host_uri_schemes response did not include schemes")
         return tuple(str(entry) for entry in schemes)
+
+    def add_host_uris(self, host_uris: Sequence[HostUri[Any]]) -> tuple[str, ...]:
+        by_scheme = {uri.scheme.lower(): uri for uri in self._host_uris}
+        for uri in host_uris:
+            by_scheme[uri.scheme.lower()] = uri
+        self._host_uris = tuple(by_scheme.values())
+        payload = self._request(
+            "add_host_uri_schemes",
+            schemes=cast(JsonValue, self._host_uri_definitions(host_uris)),
+        )
+        schemes = payload.get("schemes") or []
+        if not isinstance(schemes, list):
+            raise RpcError("add_host_uri_schemes response did not include schemes")
+        return tuple(str(entry) for entry in schemes)
+
+    def remove_host_uris(self, schemes: Sequence[str]) -> tuple[str, ...]:
+        remove = {scheme.lower() for scheme in schemes}
+        self._host_uris = tuple(uri for uri in self._host_uris if uri.scheme.lower() not in remove)
+        payload = self._request("remove_host_uri_schemes", schemes=list(schemes))
+        remaining = payload.get("schemes") or []
+        if not isinstance(remaining, list):
+            raise RpcError("remove_host_uri_schemes response did not include schemes")
+        return tuple(str(entry) for entry in remaining)
 
     def prompt(
         self,
@@ -880,15 +1033,15 @@ class RpcClient:
         *,
         images: Sequence[ImageContent] | None = None,
         streaming_behavior: StreamingBehavior | None = None,
-    ) -> None:
-        self._request(
+    ) -> JsonObject:
+        ack = self._request(
             "prompt",
             message=message,
             images=list(images) if images is not None else None,
             streamingBehavior=streaming_behavior,
         )
         self._mark_agent_run_scheduled()
-
+        return ack
     def steer(
         self, message: str, *, images: Sequence[ImageContent] | None = None
     ) -> None:
@@ -900,25 +1053,28 @@ class RpcClient:
 
     def follow_up(
         self, message: str, *, images: Sequence[ImageContent] | None = None
-    ) -> None:
-        self._request(
+    ) -> JsonObject:
+        ack = self._request(
             "follow_up",
             message=message,
             images=list(images) if images is not None else None,
         )
-
+        if isinstance(ack.get("operationId"), str):
+            self._mark_agent_run_scheduled()
+        return ack
     def abort(self) -> None:
         self._request("abort")
 
     def abort_and_prompt(
         self, message: str, *, images: Sequence[ImageContent] | None = None
-    ) -> None:
-        self._request(
+    ) -> JsonObject:
+        ack = self._request(
             "abort_and_prompt",
             message=message,
             images=list(images) if images is not None else None,
         )
         self._mark_agent_run_scheduled()
+        return ack
 
     def prompt_and_wait(
         self,
@@ -948,11 +1104,8 @@ class RpcClient:
             if self._is_agent_idle():
                 self._check_async_errors()
                 return
-            start_index = self._current_event_index()
             start_async_error_index = self._current_async_error_index()
-            self._wait_for_agent_end(
-                start_index, start_async_error_index, timeout=timeout
-            )
+            self._wait_until_agent_idle(start_async_error_index, timeout=timeout)
         finally:
             self._prompt_lifecycle.release(operation)
 
@@ -1030,6 +1183,34 @@ class RpcClient:
             if assistant_message is not None
             else None,
         )
+
+    def _wait_until_agent_idle(
+        self, start_async_error_index: int, timeout: float | None = None
+    ) -> None:
+        deadline = time.monotonic() + (timeout if timeout is not None else 60.0)
+        with self._event_condition:
+            while self._scheduled_agent_runs != self._completed_agent_runs:
+                if self._closed_error is not None:
+                    raise RpcProcessExitError(str(self._closed_error))
+
+                if start_async_error_index < self._async_errors.offset:
+                    raise RpcError(
+                        "Async error history limit was exceeded while waiting for idle. "
+                        "Increase max_event_history if your host needs to retain more background failures."
+                    )
+
+                async_errors = self._async_errors.snapshot_from(start_async_error_index)
+                if len(async_errors) > 0:
+                    raise async_errors[0]
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RpcTimeoutError(
+                        f"Timed out waiting for agent idle. Stderr: {self.stderr}"
+                    )
+                self._event_condition.wait(remaining)
+
+        self._check_async_errors()
 
     def _wait_for_agent_end(
         self,
@@ -1110,15 +1291,59 @@ class RpcClient:
             raise response
 
         if not bool(response.get("success", False)):
+            error_info = response.get("errorInfo")
             raise RpcCommandError(
                 command=str(response.get("command", command_type)),
                 error=str(response.get("error", "")),
+                error_info=error_info if isinstance(error_info, Mapping) else None,
             )
 
         data = response.get("data")
         if data is None:
             return {}
         return _clone_json_object(data)
+
+    def _request_operation(
+        self, command_type: str, timeout: float | None = None, **payload: JsonValue
+    ) -> JsonObject:
+        ack = self._request(command_type, **payload)
+        operation_id = ack.get("operationId")
+        if not isinstance(operation_id, str):
+            return ack
+        return self._wait_operation(operation_id, timeout or self._request_timeout)
+
+    def _wait_operation(self, operation_id: str, timeout: float) -> JsonObject:
+        deadline = time.monotonic() + timeout
+        with self._operation_condition:
+            while True:
+                if self._closed_error is not None:
+                    raise RpcProcessExitError(str(self._closed_error))
+
+                terminal = self._operation_terminals.pop(operation_id, None)
+                if terminal is not None:
+                    if terminal.get("type") == "operation_error":
+                        error_info = terminal.get("errorInfo")
+                        message = (
+                            str(error_info.get("message"))
+                            if isinstance(error_info, Mapping)
+                            else str(terminal.get("error", "operation failed"))
+                        )
+                        raise RpcCommandError(
+                            str(terminal.get("command", "operation")),
+                            message,
+                            error_info if isinstance(error_info, Mapping) else None,
+                        )
+
+                    data = terminal.get("data")
+                    return _clone_json_object(data) if isinstance(data, dict) else {}
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stderr = "".join(self._stderr_chunks.snapshot())
+                    raise RpcTimeoutError(
+                        f"Timed out waiting for operation {operation_id}. Stderr: {stderr}"
+                    )
+                self._operation_condition.wait(remaining)
 
     def _send_notification(self, payload: JsonObject) -> None:
         process = self._require_process()
@@ -1131,33 +1356,121 @@ class RpcClient:
             return cast(JsonObject, dict(result))
         raise RpcError("Host tool handlers must return a string or a result mapping")
 
+    def _frame_size(self, payload: JsonObject) -> int:
+        return len(json.dumps(payload).encode("utf-8"))
+
+    def _send_bounded_host_tool_result(
+        self,
+        request_id: str,
+        tool_name: str,
+        result: JsonObject,
+        max_bytes: int,
+        *,
+        is_error: bool = False,
+        error_info: JsonObject | None = None,
+    ) -> None:
+        frame: JsonObject = {"type": "host_tool_result", "id": request_id, "result": result}
+        if is_error:
+            frame["isError"] = True
+        if error_info is not None:
+            frame["errorInfo"] = error_info
+        if self._frame_size(result) <= max_bytes:
+            self._send_notification(frame)
+            return
+        message = f"Host tool response exceeded size limit for {tool_name}"
+        self._send_notification(
+            {
+                "type": "host_tool_result",
+                "id": request_id,
+                "result": {"content": [{"type": "text", "text": message}], "details": {}},
+                "isError": True,
+                "errorInfo": {
+                    "code": "host_tool_too_large",
+                    "message": message,
+                    "details": {"toolName": tool_name, "limitBytes": max_bytes},
+                    "retryable": False,
+                },
+            }
+        )
+
+    def _send_bounded_host_tool_update(
+        self, request_id: str, tool_name: str, partial_result: JsonObject, max_bytes: int
+    ) -> bool:
+        frame: JsonObject = {
+            "type": "host_tool_update",
+            "id": request_id,
+            "partialResult": partial_result,
+        }
+        if self._frame_size(partial_result) <= max_bytes:
+            self._send_notification(frame)
+            return True
+        message = f"Host tool update exceeded size limit for {tool_name}"
+        self._send_bounded_host_tool_result(
+            request_id,
+            tool_name,
+            {"content": [{"type": "text", "text": message}], "details": {}},
+            max_bytes,
+            is_error=True,
+            error_info={
+                "code": "host_tool_too_large",
+                "message": message,
+                "details": {"toolName": tool_name, "limitBytes": max_bytes},
+                "retryable": False,
+            },
+        )
+        return False
+
+    def _send_bounded_host_uri_result(
+        self, request_id: str, frame: JsonObject, max_bytes: int
+    ) -> None:
+        if self._host_uri_payload_size(frame) <= max_bytes:
+            self._send_notification(frame)
+            return
+        message = "Host URI result exceeded size limit"
+        self._send_notification(
+            {
+                "type": "host_uri_result",
+                "id": request_id,
+                "isError": True,
+                "error": message,
+                "errorInfo": {
+                    "code": "host_uri_too_large",
+                    "message": message,
+                    "details": {"limitBytes": max_bytes},
+                    "retryable": False,
+                },
+            }
+        )
+
+    def _host_uri_payload_size(self, frame: JsonObject) -> int:
+        total = 0
+        content = frame.get("content")
+        if isinstance(content, str):
+            total += len(content.encode("utf-8"))
+        bytes_base64 = frame.get("bytesBase64")
+        if isinstance(bytes_base64, str):
+            total += len(base64.b64decode(bytes_base64))
+        return total
+
     def _handle_host_tool_call(self, payload: JsonObject) -> None:
         request_id = payload.get("id")
         tool_name = payload.get("toolName")
+        raw_arguments = payload.get("arguments") or {}
         tool_call_id = payload.get("toolCallId")
-        raw_arguments = payload.get("arguments")
-        if (
-            not isinstance(request_id, str)
-            or not isinstance(tool_name, str)
-            or not isinstance(tool_call_id, str)
-        ):
+        max_result_bytes = int(payload.get("maxResultBytes") or 1_048_576)
+        max_update_bytes = int(payload.get("maxUpdateBytes") or 1_048_576)
+        if not isinstance(request_id, str) or not isinstance(tool_name, str) or not isinstance(tool_call_id, str):
             return
         if not isinstance(raw_arguments, Mapping):
-            self._send_notification(
+            self._send_bounded_host_tool_result(
+                request_id,
+                tool_name,
                 {
-                    "type": "host_tool_result",
-                    "id": request_id,
-                    "result": {
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Host tool arguments must be an object",
-                            }
-                        ],
-                        "details": {},
-                    },
-                    "isError": True,
-                }
+                    "content": [{"type": "text", "text": "Host tool arguments must be an object"}],
+                    "details": {},
+                },
+                max_result_bytes,
+                is_error=True,
             )
             return
 
@@ -1189,6 +1502,13 @@ class RpcClient:
             return
 
         pending_call = _PendingHostToolCall(cancel_event=threading.Event())
+        deadline_ms = payload.get("deadlineMs")
+        if isinstance(deadline_ms, (int, float)) and deadline_ms > 0:
+            pending_call.timer = threading.Timer(
+                deadline_ms / 1000, pending_call.cancel_event.set
+            )
+            pending_call.timer.daemon = True
+            pending_call.timer.start()
         self._pending_host_tool_calls[request_id] = pending_call
 
         def run_tool() -> None:
@@ -1197,39 +1517,39 @@ class RpcClient:
                 context = HostToolContext(
                     tool_call_id=tool_call_id,
                     _cancel_event=pending_call.cancel_event,
-                    _send_update=lambda result: self._send_notification(
-                        {
-                            "type": "host_tool_update",
-                            "id": request_id,
-                            "partialResult": result,
-                        }
+                    _send_update=lambda result: (
+                        None
+                        if self._send_bounded_host_tool_update(
+                            request_id, tool_name, result, max_update_bytes
+                        )
+                        else pending_call.cancel_event.set()
                     ),
                 )
                 result = tool.execute(params, context)
                 if pending_call.cancel_event.is_set():
                     return
-                self._send_notification(
-                    {
-                        "type": "host_tool_result",
-                        "id": request_id,
-                        "result": self._normalize_host_tool_result(result),
-                    }
+                self._send_bounded_host_tool_result(
+                    request_id,
+                    tool_name,
+                    self._normalize_host_tool_result(result),
+                    max_result_bytes,
                 )
             except Exception as exc:
                 if pending_call.cancel_event.is_set():
                     return
-                self._send_notification(
+                self._send_bounded_host_tool_result(
+                    request_id,
+                    tool_name,
                     {
-                        "type": "host_tool_result",
-                        "id": request_id,
-                        "result": {
-                            "content": [{"type": "text", "text": str(exc)}],
-                            "details": {},
-                        },
-                        "isError": True,
-                    }
+                        "content": [{"type": "text", "text": str(exc)}],
+                        "details": {},
+                    },
+                    max_result_bytes,
+                    is_error=True,
                 )
             finally:
+                if pending_call.timer is not None:
+                    pending_call.timer.cancel()
                 self._pending_host_tool_calls.pop(request_id, None)
 
         threading.Thread(
@@ -1237,12 +1557,27 @@ class RpcClient:
         ).start()
 
     def _handle_host_tool_cancel(self, payload: JsonObject) -> None:
+        cancel_id = payload.get("id")
         target_id = payload.get("targetId")
         if not isinstance(target_id, str):
             return
         pending_call = self._pending_host_tool_calls.get(target_id)
         if pending_call is not None:
             pending_call.cancel_event.set()
+        if isinstance(cancel_id, str):
+            ack: JsonObject = {
+                "type": "host_tool_cancel_ack",
+                "id": cancel_id,
+                "targetId": target_id,
+                "accepted": pending_call is not None,
+            }
+            if pending_call is None:
+                ack["errorInfo"] = {
+                    "code": "operation_not_found",
+                    "message": f"Host tool request not found: {target_id}",
+                    "retryable": False,
+                }
+            self._send_notification(ack)
 
     def _send_host_uri_error(self, request_id: str, message: str) -> None:
         self._send_notification(
@@ -1264,6 +1599,7 @@ class RpcClient:
             or not isinstance(url, str)
         ):
             return
+        max_content_bytes = int(payload.get("maxContentBytes") or 1_048_576)
         if operation not in ("read", "write"):
             self._send_host_uri_error(
                 request_id, f"Unsupported host URI operation: {operation}"
@@ -1295,7 +1631,14 @@ class RpcClient:
             )
             return
 
+        range_payload = payload.get("range")
+        request_range = dict(range_payload) if isinstance(range_payload, Mapping) else None
         pending = _PendingHostUriRequest(cancel_event=threading.Event())
+        deadline_ms = payload.get("deadlineMs")
+        if isinstance(deadline_ms, (int, float)) and deadline_ms > 0:
+            pending.timer = threading.Timer(deadline_ms / 1000, pending.cancel_event.set)
+            pending.timer.daemon = True
+            pending.timer.start()
         self._pending_host_uri_requests[request_id] = pending
 
         def run() -> None:
@@ -1303,6 +1646,7 @@ class RpcClient:
                 context = HostUriContext(
                     url=url,
                     operation=cast(Any, operation),
+                    range=request_range,
                     _cancel_event=pending.cancel_event,
                 )
                 if operation == "read":
@@ -1310,12 +1654,14 @@ class RpcClient:
                     if pending.cancel_event.is_set():
                         return
                     result_fields = normalize_read_result(value)
-                    self._send_notification(
+                    self._send_bounded_host_uri_result(
+                        request_id,
                         {
                             "type": "host_uri_result",
                             "id": request_id,
                             **result_fields,
-                        }
+                        },
+                        max_content_bytes,
                     )
                 else:
                     raw_content = payload.get("content")
@@ -1324,14 +1670,18 @@ class RpcClient:
                     uri.write(url, content, context)
                     if pending.cancel_event.is_set():
                         return
-                    self._send_notification(
-                        {"type": "host_uri_result", "id": request_id}
+                    self._send_bounded_host_uri_result(
+                        request_id,
+                        {"type": "host_uri_result", "id": request_id},
+                        max_content_bytes,
                     )
             except Exception as exc:
                 if pending.cancel_event.is_set():
                     return
                 self._send_host_uri_error(request_id, str(exc))
             finally:
+                if pending.timer is not None:
+                    pending.timer.cancel()
                 self._pending_host_uri_requests.pop(request_id, None)
 
         threading.Thread(
@@ -1339,12 +1689,27 @@ class RpcClient:
         ).start()
 
     def _handle_host_uri_cancel(self, payload: JsonObject) -> None:
+        cancel_id = payload.get("id")
         target_id = payload.get("targetId")
         if not isinstance(target_id, str):
             return
         pending = self._pending_host_uri_requests.get(target_id)
         if pending is not None:
             pending.cancel_event.set()
+        if isinstance(cancel_id, str):
+            ack: JsonObject = {
+                "type": "host_uri_cancel_ack",
+                "id": cancel_id,
+                "targetId": target_id,
+                "accepted": pending is not None,
+            }
+            if pending is None:
+                ack["errorInfo"] = {
+                    "code": "operation_not_found",
+                    "message": f"Host URI request not found: {target_id}",
+                    "retryable": False,
+                }
+            self._send_notification(ack)
 
     def _add_typed_event_listener(
         self, event_type: str, listener: TEventListener
@@ -1513,6 +1878,8 @@ class RpcClient:
     def _write_json(self, process: subprocess.Popen[str], payload: JsonObject) -> None:
         if process.stdin is None:
             raise RpcProcessExitError("RPC process stdin is unavailable")
+        if self._frame_size(payload) > MAX_RPC_FRAME_BYTES:
+            raise RpcError("RPC outbound frame exceeded size limit")
         with self._write_lock:
             try:
                 process.stdin.write(json.dumps(payload))
@@ -1545,8 +1912,25 @@ class RpcClient:
                     raise RpcError(
                         f"Failed to decode RPC output on line {line_number}: {exc}. Frame: {snippet!r}"
                     ) from exc
+                self._dispatch_listeners(
+                    "raw_frame",
+                    str(payload.get("type", "unknown")),
+                    self._raw_frame_listeners,
+                    payload,
+                )
                 if payload.get("type") == "response":
                     self._handle_response(payload)
+                    continue
+                if payload.get("type") == "protocol_error":
+                    self._record_protocol_error(RpcProtocolError(payload))
+                    continue
+                frame_type = payload.get("type")
+                if frame_type == "operation_end" or frame_type == "operation_error":
+                    operation_id = payload.get("operationId")
+                    if isinstance(operation_id, str):
+                        with self._operation_condition:
+                            self._operation_terminals[operation_id] = payload
+                            self._operation_condition.notify_all()
                     continue
                 if payload.get("type") == "host_tool_call":
                     self._handle_host_tool_call(payload)
@@ -1663,6 +2047,8 @@ class RpcClient:
         self._fail_pending(error)
         with self._event_condition:
             self._event_condition.notify_all()
+        with self._operation_condition:
+            self._operation_condition.notify_all()
 
     def _fail_pending(self, error: BaseException) -> None:
         with self._state_lock:
@@ -1692,7 +2078,11 @@ class RpcClient:
             and protocol_error.remote_error is not None
         ):
             self._append_async_error(
-                RpcCommandError(protocol_error.command, protocol_error.remote_error)
+                RpcCommandError(
+                    protocol_error.command,
+                    protocol_error.remote_error,
+                    protocol_error.error_info,
+                )
             )
             self._mark_agent_run_completed()
 

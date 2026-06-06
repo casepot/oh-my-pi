@@ -17,6 +17,25 @@ import { RuleProtocolHandler } from "./rule-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 import { VaultProtocolHandler } from "./vault-protocol";
+export const INTERNAL_URL_RESERVED_SCHEMES = Object.freeze([
+	"omp",
+	"agent",
+	"artifact",
+	"memory",
+	"local",
+	"vault",
+	"skill",
+	"rule",
+	"mcp",
+	"issue",
+	"pr",
+] as const);
+
+export function isReservedInternalUrlScheme(scheme: string): boolean {
+	return INTERNAL_URL_RESERVED_SCHEMES.includes(
+		scheme.toLowerCase() as (typeof INTERNAL_URL_RESERVED_SCHEMES)[number],
+	);
+}
 
 export class InternalUrlRouter {
 	static #instance: InternalUrlRouter | undefined;

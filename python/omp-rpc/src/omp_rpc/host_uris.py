@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Generic, Literal, TypeAlias, TypeVar, TypedDict
+from typing import Callable, Generic, Literal, Sequence, TypeAlias, TypeVar, TypedDict
 
 from .protocol import JsonObject
 
@@ -12,6 +12,8 @@ TPayload = TypeVar("TPayload")
 HostUriContentType: TypeAlias = Literal[
     "text/markdown", "application/json", "text/plain"
 ]
+
+HostUriTrustClass: TypeAlias = Literal["host", "workspace", "user-approved", "untrusted"]
 
 
 class HostUriReadResult(TypedDict, total=False):
@@ -39,6 +41,7 @@ class HostUriContext:
 
     url: str
     operation: Literal["read", "write"]
+    range: dict[str, int | str] | None = None
     _cancel_event: threading.Event = field(default_factory=threading.Event)
 
     @property
@@ -66,7 +69,12 @@ class HostUri(Generic[TPayload]):
     write: HostUriWriteHandler | None = None
     description: str | None = None
     immutable: bool = False
-
+    trust_class: HostUriTrustClass = "host"
+    default_timeout_ms: int | None = None
+    max_content_bytes: int | None = None
+    content_types: tuple[str, ...] = ()
+    binary: bool = False
+    range: bool = False
     @property
     def writable(self) -> bool:
         return self.write is not None
@@ -79,6 +87,12 @@ def host_uri(
     write: HostUriWriteHandler | None = None,
     description: str | None = None,
     immutable: bool = False,
+    trust_class: HostUriTrustClass = "host",
+    default_timeout_ms: int | None = None,
+    max_content_bytes: int | None = None,
+    content_types: Sequence[str] = (),
+    binary: bool = False,
+    range: bool = False,
 ) -> HostUri[None]:
     cleaned = (scheme or "").strip().lower()
     if not cleaned:
@@ -89,6 +103,12 @@ def host_uri(
         write=write,
         description=description,
         immutable=immutable,
+        trust_class=trust_class,
+        default_timeout_ms=default_timeout_ms,
+        max_content_bytes=max_content_bytes,
+        content_types=tuple(content_types),
+        binary=binary,
+        range=range,
     )
 
 

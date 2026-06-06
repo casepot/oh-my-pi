@@ -23,6 +23,18 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 - [`src/session/history-storage.ts`](../packages/coding-agent/src/session/history-storage.ts)
 - [`src/session/blob-store.ts`](../packages/coding-agent/src/session/blob-store.ts)
 
+## RPC hydration surface
+
+RPC mode exposes sessions through both legacy linear and graph APIs:
+
+- `get_messages` returns the current branch's linear LLM-visible messages for compatibility.
+- `get_session_entries` returns paginated `SessionEntry` views with `id`, `parentId`, `type`, `timestamp`, optional label, bounded text preview, `currentLeafId`, and `contentRef` for large serialized entries.
+- `get_session_tree` returns the entry tree, `currentLeafId`, and optional inline entries.
+- `get_state` includes `stateSeq`, active operations, reset/security posture, capabilities/limits, message counts, todo state, context usage, host surfaces, and the current session identity.
+- `state_changed` frames announce material session/state mutations with monotonic `stateSeq`.
+
+Dashboards should reconstruct branching/compaction from `get_session_entries` or `get_session_tree`; they should use `get_messages` only for current-branch compatibility.
+
 ## On-Disk Layout
 
 Default session file location:

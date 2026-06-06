@@ -864,6 +864,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 			const promptTemplates = this.session.promptTemplates;
 			const parentEvalSessionId = this.session.getEvalSessionId?.() ?? undefined;
+			const parentTaskRunId = this.session.getAgentId?.() ?? undefined;
 			const mcpManager = this.session.mcpManager ?? MCPManager.instance();
 
 			// Initialize progress for all tasks
@@ -900,6 +901,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						context: sharedContext,
 						description: task.description,
 						index,
+						toolCallId: _toolCallId,
+						parentTaskRunId,
 						id: task.id,
 						taskDepth,
 						modelOverride,
@@ -958,6 +961,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						description: task.description,
 						index,
 						id: task.id,
+						toolCallId: _toolCallId,
+						parentTaskRunId,
 						taskDepth,
 						modelOverride,
 						parentActiveModelPattern,

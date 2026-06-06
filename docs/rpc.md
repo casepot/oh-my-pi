@@ -1,219 +1,241 @@
 # RPC Protocol Reference
 
-OMP RPC mode runs the coding agent as a newline-delimited JSON protocol over stdio.
-
-This is **not JSON-RPC**: frames do not contain `jsonrpc`, `method`, or `params`. Each line is one JSON object whose own `type` field defines the frame.
-
-- **stdin**: commands (`RpcCommand`), extension UI responses, host-tool updates/results, and host URI results
-- **stdout**: the ready frame, command responses (`RpcResponse`), session/agent events, extension UI requests, host-tool requests/cancellations, host URI requests/cancellations, and extension errors
-- **stderr**: human diagnostics, startup errors, and logging; do not parse it as protocol
+OMP RPC is a local stdio NDJSON control plane for embedding the coding agent in dashboards, IDEs, gateway runtimes, supervisors, and other host processes. It is **not JSON-RPC**: every line is one JSON object whose top-level `type` names the frame.
 
 Primary implementation:
 
-- `packages/coding-agent/src/modes/rpc/rpc-mode.ts`
-- `packages/coding-agent/src/modes/rpc/rpc-types.ts`
-- `packages/coding-agent/src/modes/rpc/rpc-client.ts`
-- `packages/coding-agent/src/modes/rpc/host-tools.ts`
-- `packages/coding-agent/src/modes/rpc/host-uris.ts`
-- `packages/coding-agent/src/session/agent-session.ts`
-- `packages/coding-agent/src/cli/args.ts`
-- `packages/coding-agent/src/main.ts`
+- `packages/coding-agent/src/modes/rpc/rpc-mode.ts` — server dispatcher
+- `packages/coding-agent/src/modes/rpc/rpc-protocol.ts` — protocol facts, typed errors, frame writer, limits
+- `packages/coding-agent/src/modes/rpc/operation-manager.ts` — operation registry/cancellation/terminal frames
+- `packages/coding-agent/src/modes/rpc/rpc-input.ts` — bounded stdin parser and validation
+- `packages/coding-agent/src/modes/rpc/rpc-types.ts` — TypeScript protocol types
+- `packages/coding-agent/src/modes/rpc/rpc.schema.json` — shipped JSON schema artifact
+- `packages/coding-agent/src/modes/rpc/rpc-client.ts` — TypeScript helper client
+- `python/omp-rpc/src/omp_rpc/` — Python helper client
 
-## Launching RPC mode
+## Launching
 
 ```bash
 omp --mode rpc [session/model/tool/config options]
+omp --mode rpc-ui [session/model/tool/config options]
 ```
 
-Common embedder launches:
+`rpc` is a protocol-only embedding mode. `rpc-ui` also installs an RPC-backed extension/tool UI context. Both modes are keyless for protocol introspection commands such as `get_protocol_info`, `get_state`, `ping`, and `shutdown`.
+
+Deterministic one-shot probing:
 
 ```bash
-# Isolated, no persisted session file
-omp --mode rpc --no-session --model anthropic/claude-sonnet-4-5
-
-# Persist sessions under a host-controlled directory
-omp --mode rpc --session-dir /var/lib/my-host/omp-sessions --model openrouter/anthropic/claude-sonnet-4.6
-
-# Narrow ambient surfaces for a deterministic worker
-omp --mode rpc --no-session --no-skills --no-rules --no-extensions --tools read,search,find
+omp --mode rpc --no-session --no-skills --no-rules --no-title --rpc-one-shot get_protocol_info
+omp --mode rpc-ui --no-session --no-skills --no-rules --no-title --rpc-one-shot '{"id":"probe","type":"get_state"}'
 ```
 
-Accepted mode values include `rpc` and `rpc-ui`. Plain `rpc` does not install a tool UI context; `rpc-ui` passes the RPC UI context to tools and also sets `PI_NO_PTY=1`.
+A one-shot launch emits `ready`, executes one command, emits its response and a `shutdown` frame, then exits.
 
 Startup behavior:
 
-- `@file` CLI arguments are rejected in `rpc` and `rpc-ui` before the ready frame.
-- `PI_NO_TITLE=1` is set in RPC modes.
-- RPC mode applies built-in defaults for host-sensitive settings: `todo.*`, `task.*`, memory settings, `async.*`, and `bash.autoBackground.*` instead of inheriting user overrides.
-- Startup/session/model failures can write human-readable errors to stderr and exit before any JSON frame is emitted. One-shot CLI flags that bypass agent startup, such as `--version`, `--list-models`, and `--export`, are not protocol launches and may write ordinary CLI output to stdout instead of a ready frame.
-- Once `runRpcMode(...)` starts, stdout is protocol-only. Terminal notifications are disabled because BEL/OSC bytes on stdout would corrupt JSONL.
-- The first successful protocol frame is exactly `{"type":"ready"}` followed by `\n`.
-- When stdin closes, pending host-tool calls are rejected, host URI schemes are unregistered, pending host URI requests are rejected, and the process exits with code `0`.
+- stdout is protocol-only after `runRpcMode(...)` starts.
+- The first successful stdout protocol frame is `ready`.
+- `@file` CLI arguments are rejected in `rpc` and `rpc-ui` before ready.
+- Startup failures before ready may write human diagnostics to stderr and exit.
+- `PI_NOTIFICATIONS=off` is applied to prevent terminal control bytes on stdout.
+- stdin close is treated as `peer_closed`: pending operations, host calls, URI requests, and UI requests receive typed terminal/rejection handling before shutdown.
 
-## Transport and framing
+## Transport
 
-Each frame is one JSON object followed by a newline:
+- **stdin**: commands, extension UI responses, host-tool updates/results/cancel ACKs, host URI results/cancel ACKs.
+- **stdout**: `ready`, command `response`, protocol/session/operation/task/subagent/state frames, host-tool requests/cancels, host URI requests/cancels, extension UI requests, extension errors, `pong` health responses, and `shutdown`.
+- **stderr**: diagnostics only; never parse it as protocol.
 
-```text
-{"type":"ready"}\n
-{"id":"req_1","type":"get_state"}\n
-```
-
-There is no batching and no outer envelope.
-
-### Stdout frame categories
-
-1. Ready frame: `{ "type": "ready" }`
-2. Command response: `{ "type": "response", ... }`
-3. `AgentSessionEvent`: `agent_start`, `message_update`, `tool_execution_end`, etc.
-4. Extension UI request: `{ "type": "extension_ui_request", ... }`
-5. Host tool request/cancel: `host_tool_call`, `host_tool_cancel`
-6. Host URI request/cancel: `host_uri_request`, `host_uri_cancel`
-7. Extension error: `{ "type": "extension_error", "extensionPath": "...", "event": "...", "error": "..." }`
-
-### Stdin frame categories
-
-1. `RpcCommand`
-2. Extension UI response: `{ "type": "extension_ui_response", ... }`
-3. Host tool update/result: `host_tool_update`, `host_tool_result`
-4. Host URI result: `host_uri_result`
-
-### Minimal raw client example
-
-```ts
-import { spawn } from "bun";
-
-const child = spawn(["omp", "--mode", "rpc", "--no-session"], {
-  stdin: "pipe",
-  stdout: "pipe",
-  stderr: "pipe",
-});
-
-const stdin = child.stdin as Bun.FileSink;
-
-async function* frames(stream: ReadableStream<Uint8Array>) {
-  const decoder = new TextDecoder();
-  let buffer = "";
-  for await (const chunk of stream) {
-    buffer += decoder.decode(chunk, { stream: true });
-    for (;;) {
-      const newline = buffer.indexOf("\n");
-      if (newline === -1) break;
-      const line = buffer.slice(0, newline);
-      buffer = buffer.slice(newline + 1);
-      if (line.trim()) yield JSON.parse(line);
-    }
-  }
-}
-
-for await (const frame of frames(child.stdout)) {
-  if (frame.type === "ready") {
-    stdin.write(`${JSON.stringify({ id: "state_1", type: "get_state" })}\n`);
-    await stdin.flush();
-    continue;
-  }
-
-  if (frame.type === "response" && frame.id === "state_1") {
-    process.stdout.write(`${JSON.stringify(frame.data, null, 2)}\n`);
-    break;
-  }
-}
-
-child.kill();
-```
-
-## Request/response correlation
-
-All commands accept optional `id?: string`.
-
-Normal command responses echo the same `id`:
-
-```json
-{ "id": "req_1", "type": "response", "command": "get_state", "success": true, "data": {} }
-```
-
-Failures use the same response shape:
-
-```json
-{ "id": "req_2", "type": "response", "command": "set_model", "success": false, "error": "Model not found: provider/model" }
-```
-
-Runtime edge behavior:
-
-- Unknown-command responses are emitted with `id: undefined`, even when the request included an id.
-- Parse/input-loop exceptions emit `{ type: "response", command: "parse", success: false, error }` with `id: undefined`.
-- Extension UI responses with unknown ids are ignored.
-- Host tool/URI results with unknown ids are ignored by the bridge.
-- `prompt` and `abort_and_prompt` return an immediate success ACK, then may emit a later failure response with the same id if asynchronous prompt scheduling fails. A helper that resolves pending requests on the first ACK may surface that later error through a separate protocol-error path, not through the original request promise.
-
-## Command schema
-
-`RpcCommand` is defined in `packages/coding-agent/src/modes/rpc/rpc-types.ts`.
-
-### Prompting
-
-- `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
-- `{ id?, type: "steer", message: string, images?: ImageContent[] }`
-- `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
-- `{ id?, type: "abort" }`
-- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
-- `{ id?, type: "new_session", parentSession?: string }`
-
-### State and host registration
-
-- `{ id?, type: "get_state" }`
-- `{ id?, type: "set_todos", phases: TodoPhase[] }`
-- `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
-- `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
-
-### Model and thinking
-
-- `{ id?, type: "set_model", provider: string, modelId: string }`
-- `{ id?, type: "cycle_model" }`
-- `{ id?, type: "get_available_models" }`
-- `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
-- `{ id?, type: "cycle_thinking_level" }`
-
-### Queue modes
-
-- `{ id?, type: "set_steering_mode", mode: "all" | "one-at-a-time" }`
-- `{ id?, type: "set_follow_up_mode", mode: "all" | "one-at-a-time" }`
-- `{ id?, type: "set_interrupt_mode", mode: "immediate" | "wait" }`
-
-### Compaction, retry, bash
-
-- `{ id?, type: "compact", customInstructions?: string }`
-- `{ id?, type: "set_auto_compaction", enabled: boolean }`
-- `{ id?, type: "set_auto_retry", enabled: boolean }`
-- `{ id?, type: "abort_retry" }`
-- `{ id?, type: "bash", command: string }`
-- `{ id?, type: "abort_bash" }`
-
-### Session, messages, login
-
-- `{ id?, type: "get_session_stats" }`
-- `{ id?, type: "export_html", outputPath?: string }`
-- `{ id?, type: "switch_session", sessionPath: string }`
-- `{ id?, type: "branch", entryId: string }`
-- `{ id?, type: "get_branch_messages" }`
-- `{ id?, type: "get_last_assistant_text" }`
-- `{ id?, type: "set_session_name", name: string }`
-- `{ id?, type: "handoff", customInstructions?: string }`
-- `{ id?, type: "get_messages" }`
-- `{ id?, type: "get_login_providers" }`
-- `{ id?, type: "login", providerId: string }`
-
-## Response schema
-
-All command results use `RpcResponse`:
-
-- Success: `{ id?, type: "response", command: <command>, success: true, data?: ... }`
-- Failure: `{ id?, type: "response", command: string, success: false, error: string }`
-
-### `get_state` response data
+Every stdout frame is written by `RpcFrameWriter` and includes:
 
 ```json
 {
+  "seq": 1,
+  "timestamp": "2026-06-05T12:00:00.000Z",
+  "sessionId": "019e..."
+}
+```
+
+`seq` is monotonic per process. `timestamp` is ISO-8601. `sessionId` is stable for the current session identity and may be `null` before a session exists.
+
+Inbound limits are enforced before dispatch:
+
+- `maxFrameBytes`
+- `maxPartialLineBytes`
+- `maxOutboundFrameBytes`
+- `maxHostToolResultBytes`
+- `maxHostToolUpdateBytes`
+- `maxHostUriContentBytes`
+- default host-tool/URI/UI deadlines
+
+Oversized inbound or outbound payloads produce typed protocol errors instead of unbounded buffering.
+
+## Ready and protocol info
+
+`ready` is authoritative. `get_protocol_info` returns matching durable facts.
+
+```json
+{
+  "type": "ready",
+  "seq": 1,
+  "timestamp": "2026-06-05T12:00:00.000Z",
+  "sessionId": "session_abc",
+  "protocol": { "name": "omp-rpc", "version": "1.1.0", "schemaVersion": 1 },
+  "server": { "packageName": "@oh-my-pi/pi-coding-agent", "packageVersion": "15.8.1", "pid": 12345 },
+  "mode": "rpc-ui",
+  "capabilities": {
+    "commands": ["get_protocol_info", "get_state", "prompt", "bash", "cancel_operation"],
+    "events": ["operation_start", "operation_end", "state_changed", "task_progress"],
+    "frameMetadata": true,
+    "operationEvents": true,
+    "typedErrors": true,
+    "stateChanges": true,
+    "sessionGraph": true,
+    "taskEvents": true,
+    "extensionUi": true,
+    "observableSessions": true,
+    "hostTools": true,
+    "hostUris": true,
+    "chunkedPayloads": false,
+    "oneShot": true,
+    "heartbeat": true
+  },
+  "limits": {
+    "maxFrameBytes": 1048576,
+    "maxPartialLineBytes": 1048576,
+    "maxOutboundFrameBytes": 1048576,
+    "maxHostToolResultBytes": 1032192,
+    "maxHostToolUpdateBytes": 262144,
+    "maxHostUriContentBytes": 1032192,
+    "maxSessionEntryContentBytes": 262144,
+    "maxUiPayloadBytes": 262144,
+    "defaultHostToolTimeoutMs": null,
+    "defaultHostUriTimeoutMs": null,
+    "defaultOperationTimeoutMs": null,
+    "defaultExtensionUiTimeoutMs": 30000
+  },
+  "resetProfile": {
+    "name": "rpc-defaults",
+    "ambientUserConfigApplied": true,
+    "settingOverrides": []
+  },
+  "security": {
+    "enabledCommandCategories": ["protocol", "prompting", "state", "model", "thinking", "queue", "compaction", "retry", "bash", "session", "messages", "login"],
+    "disabledTools": [],
+    "hostToolPermissionMode": "host-owned",
+    "hostUriAllowedSchemes": [],
+    "hostUriReservedSchemes": ["omp", "agent", "artifact", "memory", "local", "vault", "skill", "rule", "mcp", "issue", "pr"],
+    "bash": { "enabled": true, "cwd": "/work/repo", "rootPolicy": "session-cwd" },
+    "sessionMutation": true,
+    "loginProviders": [],
+    "extensionsEnabled": true,
+    "redactionPolicy": "host-owned local stdio; paths are not redacted in protocol frames"
+  }
+}
+```
+
+Hosts must make feature decisions from `ready.capabilities` or `get_protocol_info`, not source inference.
+
+## Commands and responses
+
+All commands accept `id?: string`; parseable ids are echoed on validation and unknown-command failures.
+
+```json
+{ "id": "req_1", "type": "get_state" }
+```
+
+Responses preserve legacy fields and add typed errors:
+
+```json
+{
+  "id": "req_1",
+  "type": "response",
+  "command": "set_model",
+  "success": false,
+  "error": "Model not found: provider/model",
+  "errorInfo": {
+    "code": "model_not_found",
+    "message": "Model not found: provider/model",
+    "details": { "provider": "provider", "modelId": "model" },
+    "retryable": false
+  }
+}
+```
+
+Malformed JSON that cannot expose an id emits uncorrelated `protocol_error`:
+
+```json
+{
+  "type": "protocol_error",
+  "error": "Unexpected token ...",
+  "errorInfo": { "code": "invalid_json", "message": "Unexpected token ...", "retryable": false }
+}
+```
+
+Stable error-code family:
+
+- `invalid_json`, `invalid_frame`, `invalid_command`, `unknown_command`, `invalid_arguments`
+- `unsupported_capability`, `model_not_found`, `session_not_found`, `internal_error`
+- `operation_not_found`, `operation_cancelled`, `operation_timeout`, `peer_closed`
+- `host_tool_not_found`, `host_tool_timeout`, `host_tool_failed`, `host_tool_too_large`
+- `host_uri_scheme_not_found`, `host_uri_denied`, `host_uri_too_large`
+- `extension_ui_timeout`
+
+## Operation lifecycle
+
+Long-running commands return an ACK with `operationId`; completion is observed only through terminal operation frames.
+
+Long-running commands include `prompt`, `follow_up`, `abort_and_prompt`, `compact`, `bash`, `handoff`, and `login`.
+
+```json
+{ "id": "bash_1", "type": "bash", "command": "sleep 10" }
+```
+
+```json
+{
+  "id": "bash_1",
+  "type": "response",
+  "command": "bash",
+  "success": true,
+  "data": { "ack": "accepted", "operationId": "op_123", "queued": false }
+}
+```
+
+Operation frames:
+
+```json
+{ "type": "operation_start", "operationId": "op_123", "command": "bash", "requestId": "bash_1", "startedAt": "..." }
+```
+
+```json
+{ "type": "operation_end", "operationId": "op_123", "command": "bash", "status": "completed", "data": { "exitCode": 0, "output": "" }, "startedAt": "...", "endedAt": "..." }
+```
+
+```json
+{ "type": "operation_error", "operationId": "op_123", "command": "bash", "status": "cancelled", "error": "Operation cancelled: op_123", "errorInfo": { "code": "operation_cancelled", "message": "Operation cancelled: op_123", "retryable": false } }
+```
+
+Cancel an accepted operation:
+
+```json
+{ "id": "cancel_1", "type": "cancel_operation", "operationId": "op_123" }
+```
+
+Every accepted operation emits exactly one terminal `operation_end` or `operation_error` frame. Late async failures are terminal operation frames, not duplicate command responses.
+
+## State and session graph
+
+`get_state` returns a complete RPC-visible snapshot:
+
+```json
+{
+  "stateSeq": 2,
+  "protocol": { "name": "omp-rpc", "version": "1.1.0", "schemaVersion": 1 },
+  "capabilities": {},
+  "limits": {},
+  "resetProfile": {},
+  "security": {},
+  "activeOperations": [],
   "model": { "provider": "anthropic", "id": "claude-sonnet-4-5" },
   "thinkingLevel": "medium",
   "isStreaming": false,
@@ -225,463 +247,173 @@ All command results use `RpcResponse`:
   "sessionId": "01J...",
   "sessionName": "optional name",
   "autoCompactionEnabled": true,
+  "autoRetryEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
   "todoPhases": [],
   "systemPrompt": ["..."],
-  "dumpTools": [
-    {
-      "name": "read",
-      "description": "Read files and URLs",
-      "parameters": {}
-    }
-  ],
-  "contextUsage": {
-    "tokens": 1100,
-    "contextWindow": 200000,
-    "percent": 0.55
-  }
+  "dumpTools": [],
+  "contextUsage": {},
+  "hostTools": [],
+  "hostUriSchemes": []
 }
 ```
 
-`contextUsage` is part of the raw TypeScript RPC state. The Python `omp-rpc` helper currently parses a narrower `SessionState` and does not expose that field.
+Material mutations emit `state_changed` with monotonic `stateSeq` and an embedded snapshot matching `get_state`.
 
-### `set_todos`
+Session hydration commands:
 
-`set_todos` replaces the in-memory todo state for the current session and returns `{ "todoPhases": TodoPhase[] }`.
+- `{ id?, type: "get_messages" }` — legacy/current-branch linear messages.
+- `{ id?, type: "get_session_entries", offset?: number, limit?: number, entryTypes?: string[], includeContent?: boolean }` — paginated tree entries with ids, parent ids, labels, timestamps, previews, `currentLeafId`, and artifact refs for large serialized entries.
+- `{ id?, type: "get_session_tree", includeEntries?: boolean }` — tree rooted at session entries plus `currentLeafId` for the current branch.
+- `{ id?, type: "get_observable_sessions" }` — observable main/subagent session summaries.
+
+Large entry content uses `contentRef` instead of unbounded inline payloads.
+
+## Task, subagent, and observable-session frames
+
+Task/subagent orchestration is first-class:
+
+- `task_progress` — stable task/subagent ids, parent ids, status, current tool, token counters, bounded preview.
+- `task_result` — final subagent results, bounded summary, output refs.
+- `subagent_lifecycle` — started/completed/failed lifecycle for child sessions.
+- `observable_session_update` — dashboard-friendly session list with labels, status, summary, and timestamps.
+
+These frames are additive and do not replace existing `tool_execution_*` events or task tool details.
+
+## Host tools
+
+Registration commands:
+
+- `set_host_tools` — explicit replace-all for host-owned tools.
+- `add_host_tools` — incremental add/update.
+- `remove_host_tools` — incremental removal.
+
+Definitions may include side-effect/trust/display/deadline/size metadata:
 
 ```json
 {
-  "id": "todo_1",
-  "type": "set_todos",
-  "phases": [
-    {
-      "id": "phase-1",
-      "name": "Evaluation",
-      "tasks": [
-        { "id": "task-1", "content": "Map the read tool surface", "status": "in_progress" },
-        { "id": "task-2", "content": "Exercise edit operations", "status": "pending" }
-      ]
-    }
-  ]
+  "name": "lookup",
+  "description": "Lookup data in the host",
+  "parameters": { "type": "object", "properties": {}, "additionalProperties": false },
+  "sideEffectClass": "none",
+  "trustClass": "untrusted",
+  "display": { "kind": "inline" },
+  "defaultTimeoutMs": 30000,
+  "maxResultBytes": 1048576,
+  "maxUpdateBytes": 65536
 }
 ```
 
-## Event stream
-
-RPC mode forwards `AgentSessionEvent` objects from `AgentSession.subscribe(...)`.
-
-Core event types include:
-
-- `agent_start`, `agent_end`
-- `turn_start`, `turn_end`
-- `message_start`, `message_update`, `message_end`
-- `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
-
-Session-level events include:
-
-- `auto_compaction_start`, `auto_compaction_end`
-- `auto_retry_start`, `auto_retry_end`
-- `retry_fallback_applied`, `retry_fallback_succeeded`
-- `ttsr_triggered`
-- `todo_reminder`, `todo_auto_clear`
-- `irc_message`
-- `notice`
-- `thinking_level_changed`
-- `goal_updated`
-
-`message_update` carries streaming deltas in `assistantMessageEvent`.
-
-Extension runner errors are emitted separately:
-
-```json
-{
-  "type": "extension_error",
-  "extensionPath": "...",
-  "event": "...",
-  "error": "..."
-}
-```
-
-## Prompt, queueing, and completion
-
-### Immediate ACK vs completion
-
-`prompt` and `abort_and_prompt` are accepted asynchronously:
-
-stdin:
-
-```json
-{ "id": "req_1", "type": "prompt", "message": "Summarize this repo" }
-```
-
-stdout ACK:
-
-```json
-{ "id": "req_1", "type": "response", "command": "prompt", "success": true }
-```
-
-That ACK means the command was accepted/scheduled. It does **not** mean the model turn is complete.
-
-Completion is observed through later events, normally ending with `agent_end`:
-
-```json
-{ "type": "agent_start" }
-{ "type": "message_update", "assistantMessageEvent": { "type": "text_delta", "delta": "..." }, "message": { "role": "assistant", "content": [] } }
-{ "type": "agent_end", "messages": [] }
-```
-
-### Prompt while streaming
-
-During active streaming, `AgentSession.prompt()` requires `streamingBehavior`:
-
-```json
-{
-  "id": "req_2",
-  "type": "prompt",
-  "message": "Also include risks",
-  "streamingBehavior": "followUp"
-}
-```
-
-- `"steer"` queues an interrupting steering message.
-- `"followUp"` queues a post-turn follow-up.
-
-If `streamingBehavior` is omitted during active streaming, prompt scheduling fails. For `prompt` and `abort_and_prompt`, that failure can appear after the immediate ACK as a later error response.
-
-### Queue mode commands
-
-- `set_steering_mode`
-  - `"one-at-a-time"`: dequeue one steering message per turn.
-  - `"all"`: dequeue all queued steering messages.
-- `set_follow_up_mode`
-  - `"one-at-a-time"`: dequeue one follow-up per continuation.
-  - `"all"`: dequeue all queued follow-ups.
-- `set_interrupt_mode`
-  - `"immediate"`: steering can interrupt between tool calls.
-  - `"wait"`: steering waits for turn completion.
-
-## Extension UI sub-protocol
-
-Extensions in RPC mode use request/response UI frames.
-
-Outbound `extension_ui_request` methods from TypeScript source:
-
-- `select`, `confirm`, `input`, `editor`, `cancel`
-- `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
-- `open_url` from RPC login/OAuth flows
-
-Most methods are fire-and-forget except interactive dialogs, which expect an `extension_ui_response`.
-
-Request example:
-
-```json
-{
-  "type": "extension_ui_request",
-  "id": "ui_7",
-  "method": "confirm",
-  "title": "Confirm",
-  "message": "Continue?",
-  "timeout": 30000
-}
-```
-
-Response shapes:
-
-```json
-{ "type": "extension_ui_response", "id": "ui_7", "confirmed": true }
-```
-
-```json
-{ "type": "extension_ui_response", "id": "ui_8", "value": "feature/rpc-host" }
-```
-
-```json
-{ "type": "extension_ui_response", "id": "ui_9", "cancelled": true, "timedOut": true }
-```
-
-Timeouts and aborts resolve to default values in the runtime. `setTitle` UI events are suppressed unless `PI_RPC_EMIT_TITLE=1` is set.
-
-RPC UI limitations in source:
-
-- raw terminal input is unsupported
-- working-message, footer, header, custom UI, custom editor components, tool expansion, and theme switching are unsupported/no-op or return a failure
-- `getEditorText()` returns an empty string
-- `pasteToEditor(text)` falls back to `set_editor_text`
-
-## Host tool sub-protocol
-
-RPC hosts can expose custom tools by sending `set_host_tools`, then serving execution requests over the same stdio channel.
-
-### Register tools
-
-stdin:
-
-```json
-{
-  "id": "tools_1",
-  "type": "set_host_tools",
-  "tools": [
-    {
-      "name": "echo_host",
-      "label": "Echo Host",
-      "description": "Echo a value from the embedding host",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "message": { "type": "string" }
-        },
-        "required": ["message"],
-        "additionalProperties": false
-      },
-      "hidden": false
-    }
-  ]
-}
-```
-
-stdout:
-
-```json
-{
-  "id": "tools_1",
-  "type": "response",
-  "command": "set_host_tools",
-  "success": true,
-  "data": { "toolNames": ["echo_host"] }
-}
-```
-
-Definition normalization/validation:
-
-- `name` and `description` are trimmed and must be non-empty.
-- `parameters` must be a JSON Schema object, not an array.
-- `label` defaults to the normalized name.
-- `hidden` is true only when the input is exactly `true`.
-- Re-sending `set_host_tools` replaces the whole host-owned tool set.
-
-### Execute a host tool
-
-When the model calls the tool, stdout emits:
+Execution request:
 
 ```json
 {
   "type": "host_tool_call",
   "id": "host_1",
-  "toolCallId": "toolu_123",
-  "toolName": "echo_host",
-  "arguments": { "message": "hello" }
+  "toolCallId": "tool_1",
+  "toolName": "lookup",
+  "arguments": {},
+  "metadata": { "sideEffectClass": "none", "trustClass": "untrusted" },
+  "deadlineMs": 30000,
+  "maxResultBytes": 1048576,
+  "maxUpdateBytes": 65536
 }
 ```
 
-The host may stream zero or more updates on stdin:
+Host responses:
 
-```json
-{
-  "type": "host_tool_update",
-  "id": "host_1",
-  "partialResult": {
-    "content": [{ "type": "text", "text": "working" }]
-  }
-}
-```
+- `host_tool_update` for bounded streaming updates.
+- `host_tool_result` for terminal success/error.
+- `host_tool_cancel_ack` for requested cancellation acknowledgement or NAK.
 
-The host completes with:
+Oversized updates/results and deadlines produce typed terminal failures.
 
-```json
-{
-  "type": "host_tool_result",
-  "id": "host_1",
-  "result": {
-    "content": [{ "type": "text", "text": "done" }]
-  }
-}
-```
+## Host URIs
 
-To reject the call, set top-level `isError: true`. The bridge joins returned text content and surfaces it as the tool error:
+Registration commands:
 
-```json
-{
-  "type": "host_tool_result",
-  "id": "host_1",
-  "isError": true,
-  "result": {
-    "content": [{ "type": "text", "text": "host-side failure" }]
-  }
-}
-```
+- `set_host_uri_schemes` — explicit replace-all for host-owned schemes.
+- `add_host_uri_schemes` — incremental add/update.
+- `remove_host_uri_schemes` — incremental removal.
 
-### Host tool cancellation
+Reserved OMP schemes cannot be shadowed or cleared by normal host registration: `omp`, `agent`, `artifact`, `memory`, `local`, `vault`, `skill`, `rule`, `mcp`, `issue`, and `pr`.
 
-If the agent-side tool execution aborts, stdout emits:
+Scheme definition fields include `writable`, `immutable`, `trustClass`, `defaultTimeoutMs`, `maxContentBytes`, `contentTypes`, `binary`, and `range`.
 
-```json
-{
-  "type": "host_tool_cancel",
-  "id": "host_cancel_1",
-  "targetId": "host_1"
-}
-```
-
-`targetId` is the original `host_tool_call.id`. The host should stop work and avoid sending late updates/results. Late frames for unknown ids are ignored.
-
-## Host URI sub-protocol
-
-RPC hosts can own virtual URL schemes. After registration, the agent's `read` tool resolves `<scheme>://...` through the host, and the `write` tool dispatches full replacement content when the scheme is registered as writable.
-
-The `edit` tool does not target host URIs.
-
-### Register schemes
-
-stdin:
-
-```json
-{
-  "id": "uris_1",
-  "type": "set_host_uri_schemes",
-  "schemes": [
-    {
-      "scheme": "db",
-      "description": "Virtual db row files",
-      "writable": true,
-      "immutable": false
-    }
-  ]
-}
-```
-
-stdout:
-
-```json
-{
-  "id": "uris_1",
-  "type": "response",
-  "command": "set_host_uri_schemes",
-  "success": true,
-  "data": { "schemes": ["db"] }
-}
-```
-
-Registration behavior:
-
-- scheme names are trimmed, lowercased, and must match `^[a-z][a-z0-9+.-]*$`
-- schemes are registered in the process-global internal URL router
-- re-sending `set_host_uri_schemes` replaces the whole host-owned scheme set and unregisters dropped schemes
-- stdin close clears registered host URI schemes
-
-### Host URI read
-
-When the agent reads `db://users/42`, stdout emits:
+Read request:
 
 ```json
 {
   "type": "host_uri_request",
   "id": "uri_1",
   "operation": "read",
-  "url": "db://users/42"
+  "url": "docs://guide?range=0-99",
+  "range": { "start": 0, "end": 99, "unit": "byte" },
+  "deadlineMs": 30000,
+  "maxContentBytes": 1032192,
+  "acceptsBase64": false
 }
 ```
 
-The host returns:
+Write request includes `content` and `contentLength`. Host results may return `content`, `bytesBase64`, `contentType`, `contentLength`, `notes`, and `immutable`. Reads and writes enforce deadline and content limits before resolving.
+
+For read-tool line selectors on range-capable schemes, OMP sends `range.unit: "line"` and marks the resolved resource as range-applied so local post-processing does not fetch or slice the full resource a second time. Schemes that do not declare `range: true` reject ranged reads with `host_uri_denied`.
+
+## Extension UI
+
+Every UI frame declares whether it expects a response:
+
+- Event-only: `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `open_url`, `cancel` with `expectsResponse: false`.
+- Request/response: `select`, `confirm`, `input`, `editor` with `expectsResponse: true`, `timeout` (default 30000 ms), and `responseSchema`; aborts and timeouts emit a paired `cancel` event before clearing pending state.
+
+Responses:
 
 ```json
-{
-  "type": "host_uri_result",
-  "id": "uri_1",
-  "content": "id=42\nname=Alice\n",
-  "contentType": "text/plain",
-  "notes": ["fresh from cache"],
-  "immutable": false
-}
+{ "type": "extension_ui_response", "id": "ui_1", "confirmed": true }
+{ "type": "extension_ui_response", "id": "ui_2", "value": "text" }
+{ "type": "extension_ui_response", "id": "ui_3", "cancelled": true, "timedOut": true }
 ```
 
-Read defaults:
+Event-only frames do not create pending UI state. Timeout, abort, close, and explicit cancel clean pending state.
 
-- missing `content` becomes `""`
-- missing `contentType` becomes `"text/plain"`
-- `notes` are propagated only when non-empty
-- result-level `immutable` overrides scheme-level `immutable`
+## Clients
 
-### Host URI write
+TypeScript `RpcClient` exposes:
 
-When the agent writes replacement content to a writable scheme, stdout emits:
+- raw-frame, unknown-frame, protocol-error, session-event, extension-error, and extension UI hooks
+- protocol info/state helpers
+- operation tracking: `waitForOperation`, `waitForIdle`, `cancelOperation`
+- host tool serving: set/add/remove custom tools
+- host URI serving: set/add/remove schemes and serve read/write requests
+- close-time rejection for pending requests and waiters
 
-```json
-{
-  "type": "host_uri_request",
-  "id": "uri_2",
-  "operation": "write",
-  "url": "db://users/42",
-  "content": "id=42\nname=Bob\n"
-}
-```
+Python `omp_rpc.RpcClient` preserves enriched/future metadata through raw frame listeners and parsed `raw` fields, supports host tools/URIs/UI, and remains backward-compatible with older direct-result servers while understanding operation terminal frames.
 
-Successful writes return no content:
+Unknown future frames are surfaced through raw/unknown hooks rather than silently dropped.
 
-```json
-{ "type": "host_uri_result", "id": "uri_2" }
-```
+## Schema, fixtures, and compatibility
 
-To reject a read or write, set `isError: true` and provide `error` or fallback text in `content`:
+Schema artifact: `packages/coding-agent/src/modes/rpc/rpc.schema.json` and package export `@oh-my-pi/pi-coding-agent/modes/rpc/rpc.schema.json`. The schema root validates stdout protocol frames; inbound command and host/UI response shapes are available under `$defs` for embedders that validate stdin before sending.
 
-```json
-{
-  "type": "host_uri_result",
-  "id": "uri_2",
-  "isError": true,
-  "error": "row 42 not found"
-}
-```
+Golden fixture: `packages/coding-agent/test/fixtures/rpc-golden-frames.jsonl`.
 
-### Host URI cancellation
+Compatibility policy:
 
-If a pending read/write aborts, stdout emits:
+- Existing frame names and legacy string `error` fields remain.
+- Additive fields are allowed on all protocol objects.
+- New capabilities should be advertised in `ready.capabilities` and `get_protocol_info`.
+- Breaking removals require a protocol version bump and migration notes.
 
-```json
-{
-  "type": "host_uri_cancel",
-  "id": "uri_cancel_1",
-  "targetId": "uri_2"
-}
-```
+## Gateway and dashboard integration
 
-`targetId` is the original `host_uri_request.id`. Late results for unknown ids are ignored.
+Gateway runtimes should:
 
-## Error model and process lifetime
+1. Launch OMP with deterministic arguments, usually `--mode rpc --no-title` and host-chosen session/model flags.
+2. Read `ready.protocol`, `ready.capabilities`, and `get_protocol_info` for descriptors.
+3. Treat prompt/follow-up/bash/compact/login terminal evidence as observed only after correlated terminal operation frames.
+4. Classify failures using `errorInfo.code`, not string parsing.
+5. Fail closed on malformed JSON, contradictory metadata, decreasing `seq`, or missing terminal frames.
+6. Tolerate additive fields under the protocol compatibility policy.
 
-- Command failures are `success: false` with string `error`.
-- Most command failures are recoverable; the process keeps reading stdin.
-- Malformed JSONL is a transport failure from the JSONL reader; do not rely on a recoverable `parse` response for invalid JSON. Exceptions while handling an already parsed frame emit a `parse` error response and keep reading subsequent frames.
-- Empty `set_session_name` is rejected with `Session name cannot be empty`.
-- Process termination conditions are stdin close or extension-triggered shutdown after the current command.
-- Pre-ready startup failure is not recoverable through protocol frames; inspect stderr and process exit.
-
-## `RpcClient` helper notes
-
-`packages/coding-agent/src/modes/rpc/rpc-client.ts` is a TypeScript convenience wrapper, not the protocol definition.
-
-Current helper behavior:
-
-- spawns `bun <cliPath> --mode rpc`
-- waits for the ready frame and rejects startup failures with captured stderr
-- generates request ids as `req_<n>`
-- correlates matching `response` frames by id
-- dispatches only recognized core `AgentEvent` types to `onEvent` listeners: `agent_start`, `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
-- supports host-owned custom tools through `setCustomTools()` and automatic `host_tool_call` / `host_tool_cancel` handling
-- wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)`
-
-Helper limitations:
-
-- It is not a complete raw-frame API.
-- It drops unrecognized session-level events such as auto-compaction, auto-retry, TTSR, todo, notice, thinking-level, goal, and extension-error frames unless another helper path handles them.
-- It has no typed host URI registration/serving helper; use raw frames for `set_host_uri_schemes` and `host_uri_request`.
-- `prompt()`, `abortAndPrompt()`, and `waitForIdle()` inherit the protocol's async ACK semantics; completion is still `agent_end`.
-
-## Known non-claims and limitations
-
-- OMP RPC is stdio NDJSON, not JSON-RPC, MCP, or HTTP.
-- The protocol does not guarantee ordered pairing between command responses and agent events beyond the line order emitted on stdout.
-- A `prompt` ACK is not completion.
-- Host URI writes are full replacement writes, not patches.
-- Host tools and host URI schemes are process/session transport registrations; re-registration replaces host-owned definitions.
-- OAuth login in raw TypeScript RPC can emit `open_url` UI requests. Language clients may expose a narrower typed UI surface; check the client package docs.
+Dashboard browser/React code should not own OMP stdio. A local backend owns the child process, raw frame log, ready negotiation, request/operation table, normalized state/message/session/task/host/UI models, restart policy, redaction, and authorization. See `docs/rpc-dashboard-backend.md`.

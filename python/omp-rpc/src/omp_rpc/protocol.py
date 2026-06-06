@@ -17,30 +17,19 @@ SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
 NotifyType: TypeAlias = Literal["info", "warning", "error"]
-WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor"]
+WidgetPlacement: TypeAlias = Literal["aboveEditor", "belowEditor", "header", "footer"]
 TodoStatus: TypeAlias = Literal["pending", "in_progress", "completed", "abandoned"]
-ExtensionUiMethod: TypeAlias = Literal[
-    "select",
-    "confirm",
-    "input",
-    "editor",
-    "cancel",
-    "notify",
-    "setStatus",
-    "setWidget",
-    "setTitle",
-    "set_editor_text",
-]
+ExtensionUiMethod: TypeAlias = str
 InteractiveExtensionUiMethod: TypeAlias = Literal[
     "select", "confirm", "input", "editor"
 ]
 PassiveExtensionUiMethod: TypeAlias = Literal[
-    "notify", "setStatus", "setWidget", "setTitle", "set_editor_text"
+    "notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "open_url", "cancel"
 ]
 ValueExtensionUiMethod: TypeAlias = Literal["select", "input", "editor"]
 
-PASSIVE_EXTENSION_UI_METHODS: Final[frozenset[PassiveExtensionUiMethod]] = frozenset(
-    {"notify", "setStatus", "setWidget", "setTitle", "set_editor_text"}
+PASSIVE_EXTENSION_UI_METHODS: Final[frozenset[str]] = frozenset(
+    {"notify", "setStatus", "setWidget", "setTitle", "set_editor_text", "open_url", "cancel"}
 )
 INTERACTIVE_EXTENSION_UI_METHODS: Final[frozenset[InteractiveExtensionUiMethod]] = (
     frozenset({"select", "confirm", "input", "editor"})
@@ -58,7 +47,7 @@ _STOP_REASON_VALUES: Final[frozenset[str]] = frozenset(
 )
 _NOTIFY_TYPE_VALUES: Final[frozenset[str]] = frozenset({"info", "warning", "error"})
 _WIDGET_PLACEMENT_VALUES: Final[frozenset[str]] = frozenset(
-    {"aboveEditor", "belowEditor"}
+    {"aboveEditor", "belowEditor", "header", "footer"}
 )
 _TODO_STATUS_VALUES: Final[frozenset[str]] = frozenset(
     {"pending", "in_progress", "completed", "abandoned"}
@@ -75,6 +64,7 @@ _EXTENSION_UI_METHOD_VALUES: Final[frozenset[str]] = frozenset(
         "setWidget",
         "setTitle",
         "set_editor_text",
+        "open_url",
     }
 )
 _AGENT_MESSAGE_ROLE_VALUES: Final[frozenset[str]] = frozenset(
@@ -757,11 +747,23 @@ class SessionState:
     session_id: str
     session_name: str | None
     auto_compaction_enabled: bool
+    auto_retry_enabled: bool
     message_count: int
     queued_message_count: int
     todo_phases: tuple[TodoPhase, ...] = ()
     system_prompt: tuple[str, ...] = ()
     dump_tools: tuple[ToolDescriptor, ...] = ()
+    state_seq: int = 0
+    protocol: JsonObject | None = None
+    capabilities: JsonObject | None = None
+    limits: JsonObject | None = None
+    reset_profile: JsonObject | None = None
+    security: JsonObject | None = None
+    active_operations: tuple[JsonObject, ...] = ()
+    host_tools: tuple[JsonObject, ...] = ()
+    host_uri_schemes: tuple[JsonObject, ...] = ()
+    context_usage: JsonValue | None = None
+    raw: JsonObject | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -841,6 +843,17 @@ class SessionStats:
 
 @dataclass(slots=True, frozen=True)
 class ReadyEvent:
+    protocol: JsonObject | None = None
+    server: JsonObject | None = None
+    mode: str | None = None
+    capabilities: JsonObject | None = None
+    limits: JsonObject | None = None
+    reset_profile: JsonObject | None = None
+    security: JsonObject | None = None
+    seq: int | None = None
+    timestamp: str | None = None
+    session_id: str | None = None
+    raw: JsonObject | None = None
     type: Literal["ready"] = "ready"
 
 
@@ -863,6 +876,11 @@ class ExtensionUiRequest:
     widget_lines: tuple[str, ...] | None = None
     widget_placement: WidgetPlacement | None = None
     text: str | None = None
+    expects_response: bool | None = None
+    response_schema: JsonObject | None = None
+    url: str | None = None
+    instructions: str | None = None
+    raw: JsonObject | None = None
     type: Literal["extension_ui_request"] = "extension_ui_request"
 
     def is_passive(self) -> bool:
@@ -875,7 +893,7 @@ class ExtensionUiRequest:
         return self.method in VALUE_EXTENSION_UI_METHODS
 
     def requires_response(self) -> bool:
-        return self.is_interactive()
+        return self.expects_response if self.expects_response is not None else self.is_interactive()
 
 
 @dataclass(slots=True, frozen=True)
@@ -1285,13 +1303,27 @@ def parse_session_state(payload: JsonObject) -> SessionState:
         session_id=_require_str(payload, "sessionId"),
         session_name=_optional_str(payload, "sessionName"),
         auto_compaction_enabled=bool(payload.get("autoCompactionEnabled", False)),
+        auto_retry_enabled=bool(payload.get("autoRetryEnabled", False)),
         message_count=int(payload.get("messageCount", 0)),
         queued_message_count=int(payload.get("queuedMessageCount", 0)),
-        todo_phases=parse_todo_phases(
-            cast(JsonValue | None, payload.get("todoPhases"))
-        ),
+        todo_phases=parse_todo_phases(cast(JsonValue | None, payload.get("todoPhases"))),
         system_prompt=_optional_str_list(payload, "systemPrompt"),
         dump_tools=dump_tools,
+        state_seq=int(payload.get("stateSeq", 0)),
+        protocol=_optional_json_object(payload.get("protocol"), field="protocol"),
+        capabilities=_optional_json_object(payload.get("capabilities"), field="capabilities"),
+        limits=_optional_json_object(payload.get("limits"), field="limits"),
+        reset_profile=_optional_json_object(payload.get("resetProfile"), field="resetProfile"),
+        security=_optional_json_object(payload.get("security"), field="security"),
+        active_operations=_clone_json_objects(payload.get("activeOperations"), field="activeOperations"),
+        host_tools=_clone_json_objects(payload.get("hostTools"), field="hostTools"),
+        host_uri_schemes=_clone_json_objects(payload.get("hostUriSchemes"), field="hostUriSchemes"),
+        context_usage=(
+            _clone_json_value(payload.get("contextUsage"), field="contextUsage")
+            if "contextUsage" in payload
+            else None
+        ),
+        raw=_clone_json_object(payload, field="state"),
     )
 
 
@@ -1399,14 +1431,7 @@ def parse_session_stats(payload: JsonObject) -> SessionStats:
 def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
     return ExtensionUiRequest(
         id=_require_str(payload, "id"),
-        method=cast(
-            ExtensionUiMethod,
-            _require_literal(
-                payload.get("method"),
-                _EXTENSION_UI_METHOD_VALUES,
-                field="extension_ui_request.method",
-            ),
-        ),
+        method=str(payload.get("method", "")),
         title=_optional_str(payload, "title"),
         options=_tuple_of_strings(
             payload.get("options"), field="extension_ui_request.options"
@@ -1440,6 +1465,13 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
             ),
         ),
         text=_optional_str(payload, "text"),
+        expects_response=_optional_bool(payload, "expectsResponse"),
+        response_schema=_optional_json_object(
+            payload.get("responseSchema"), field="extension_ui_request.responseSchema"
+        ),
+        url=_optional_str(payload, "url"),
+        instructions=_optional_str(payload, "instructions"),
+        raw=_clone_json_object(payload, field="extension_ui_request"),
     )
 
 
@@ -1454,7 +1486,19 @@ def parse_extension_error(payload: JsonObject) -> ExtensionError:
 def parse_notification(payload: JsonObject) -> RpcNotification:
     event_type = payload.get("type")
     if event_type == "ready":
-        return ReadyEvent()
+        return ReadyEvent(
+            protocol=_optional_json_object(payload.get("protocol"), field="ready.protocol"),
+            server=_optional_json_object(payload.get("server"), field="ready.server"),
+            mode=_optional_str(payload, "mode"),
+            capabilities=_optional_json_object(payload.get("capabilities"), field="ready.capabilities"),
+            limits=_optional_json_object(payload.get("limits"), field="ready.limits"),
+            reset_profile=_optional_json_object(payload.get("resetProfile"), field="ready.resetProfile"),
+            security=_optional_json_object(payload.get("security"), field="ready.security"),
+            seq=_optional_int(payload, "seq"),
+            timestamp=_optional_str(payload, "timestamp"),
+            session_id=_optional_str(payload, "sessionId"),
+            raw=_clone_json_object(payload, field="ready"),
+        )
     if event_type == "extension_ui_request":
         return parse_extension_ui_request(payload)
     if event_type == "extension_error":

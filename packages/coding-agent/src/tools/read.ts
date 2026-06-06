@@ -15,7 +15,7 @@ import { isNotebookPath, readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
-import type { InternalUrl } from "../internal-urls/types";
+import type { InternalUrl, InternalUrlRange } from "../internal-urls/types";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -2183,6 +2183,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			throw new ToolError("Cannot combine query extraction with line selectors");
 		}
 
+		const requestedRange: InternalUrlRange | undefined =
+			parsedSel.kind === "lines" && parsedSel.ranges.length === 1
+				? {
+						start: parsedSel.ranges[0].startLine,
+						end: parsedSel.ranges[0].endLine,
+						unit: "line",
+					}
+				: undefined;
+
 		// Resolve the internal URL
 		const resource = await internalRouter.resolve(url, {
 			cwd: this.session.cwd,
@@ -2190,6 +2199,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			signal,
 			skills: this.session.skills,
 			localProtocolOptions: this.session.localProtocolOptions,
+			range: requestedRange,
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
 
@@ -2197,8 +2207,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (hasExtraction) {
 			return toolResult(details).text(resource.content).sourceInternal(url).done();
 		}
-
 		const raw = isRawSelector(parsedSel);
+		if (resource.rangeApplied) {
+			return this.#buildInMemoryTextResult(resource.content, undefined, undefined, {
+				details,
+				sourcePath: resource.sourcePath,
+				sourceInternal: url,
+				entityLabel: "resource",
+				immutable: resource.immutable,
+				raw,
+			});
+		}
+
 		if (isMultiRange(parsedSel) && parsedSel.kind === "lines") {
 			return this.#buildInMemoryMultiRangeResult(resource.content, parsedSel.ranges, {
 				details,

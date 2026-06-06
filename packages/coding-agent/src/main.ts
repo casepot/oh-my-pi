@@ -1049,7 +1049,7 @@ export async function runRootCommand(
 			notifs.push({ kind: "error", message: modelRegistryError.message });
 		}
 
-		if (!isInteractive && !session.model) {
+		if (!isInteractive && mode !== "rpc" && mode !== "rpc-ui" && !session.model) {
 			if (modelFallbackMessage) {
 				process.stderr.write(`${chalk.red(modelFallbackMessage)}\n`);
 			} else {
@@ -1062,7 +1062,11 @@ export async function runRootCommand(
 		}
 
 		if (mode === "rpc" || mode === "rpc-ui") {
-			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined);
+			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, {
+				mode,
+				oneShotCommand: parsedArgs.rpcOneShot,
+				eventBus,
+			});
 		} else if (isInteractive) {
 			const updateStatusPromise = checkForUpdateStatus(VERSION).catch(() => undefined);
 			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);

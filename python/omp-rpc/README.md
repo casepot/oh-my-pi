@@ -8,7 +8,7 @@ The underlying OMP protocol is newline-delimited JSON over stdin/stdout. It is n
 
 - typed command methods for the common RPC command surface
 - startup options for `omp --mode rpc` flags such as model selection, thinking level, tool selection, prompt appends, provider session IDs, and session isolation
-- typed protocol models for state, bash results, compaction, messages, todos, events, and session stats
+- typed protocol models for state, protocol/security posture, host surfaces, bash results, compaction, messages, todos, events, and session stats
 - a process-backed client that manages request correlation over stdio
 - per-event listeners plus catch-all notification and unknown-notification hooks
 - lifecycle helpers: `prompt_and_wait()`, `wait_for_idle()`, and `collect_events()`
@@ -234,10 +234,10 @@ Read-only schemes reject `write` calls with an error. The agent's `edit` tool do
 
 ## Extension UI requests
 
-Extensions can ask the host for input. Typed `ExtensionUiRequest` methods currently accepted by the Python parser are:
+Extensions can ask the host for input or report passive UI state. Typed `ExtensionUiRequest` methods currently accepted by the Python parser are:
 
-- `select`, `confirm`, `input`, `editor`, `cancel`
-- `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
+- Response-requiring: `select`, `confirm`, `input`, `editor`, `cancel`
+- Passive/event-style: `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `open_url`
 
 Manual handling:
 
@@ -259,9 +259,16 @@ with RpcClient(model="anthropic/claude-sonnet-4-5") as client:
     print(turn.assistant_text)
 ```
 
-`install_headless_ui()` ignores passive UI notifications (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`), answers `confirm` with `False` by default, and cancels `select`/`input`/`editor` unless explicit values are supplied.
+`install_headless_ui()` ignores passive UI notifications (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`, `open_url`), answers `confirm` with `False` by default, and cancels `select`/`input`/`editor` unless explicit values are supplied.
 
-Current limitation: the raw TypeScript RPC server can emit `open_url` for OAuth/login flows, but the Python `ExtensionUiMethod` parser does not currently include `open_url`, and this package does not expose typed `login` helpers. Do not rely on Python `omp-rpc` for OAuth login flows unless that support is added.
+OAuth/login flows are supported when the server exposes provider commands:
+
+```python
+with RpcClient() as client:
+    providers = client.get_login_providers()
+    if providers:
+        client.login(providers[0]["id"])
+```
 
 ## Error handling and retained history
 
@@ -301,8 +308,8 @@ full = assistant_text_with_thinking(message)
 - Prompt completion is event-driven; ACK frames are not completion.
 - Lifecycle collection is single-flight per client instance.
 - Host tool/URI cancellation is cooperative.
-- The parsed Python `SessionState` is narrower than the raw TypeScript `get_state` payload; for example, it does not expose raw `contextUsage`.
-- Typed extension UI support currently excludes `open_url`.
+- The parsed Python `SessionState` preserves the RPC-visible protocol, capabilities, limits, reset profile, security posture, active operations, host tool definitions, and host URI schemes; raw future fields remain available through callbacks/raw payloads rather than typed attributes.
+- Typed extension UI support includes `open_url` as a passive notification; login helpers are available through `get_login_providers()` and `login()` when the RPC server advertises those commands.
 
 ## Protocol reference
 

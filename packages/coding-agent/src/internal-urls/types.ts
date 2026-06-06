@@ -33,6 +33,8 @@ export interface InternalResource {
 	 * resources. Mutable resources (e.g. local://) behave like editable files.
 	 */
 	immutable?: boolean;
+	/** True when the protocol handler already applied the caller-supplied range. */
+	rangeApplied?: boolean;
 }
 
 /**
@@ -65,6 +67,11 @@ export interface InternalUrl extends URL {
 	rawPathname?: string;
 }
 
+export interface InternalUrlRange {
+	start: number;
+	end?: number;
+	unit: "line" | "byte";
+}
 /**
  * Caller-supplied context that the router threads into protocol handlers.
  *
@@ -93,6 +100,8 @@ export interface ResolveContext {
 	 * [#1608](https://github.com/can1357/oh-my-pi/issues/1608).
 	 */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Optional bounded range requested by the caller, before local post-processing. */
+	range?: InternalUrlRange;
 }
 
 /**
