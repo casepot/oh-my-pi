@@ -177,6 +177,7 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import {
 	buildGoalContinuationPacket,
 	completionBudgetReport,
+	escapeXmlText,
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
 	type GoalContinuationPacket,
@@ -235,6 +236,9 @@ import backgroundLaneIntakeTemplate from "../prompts/background-lanes/lane-intak
 import goalCompactionContextTemplate from "../prompts/goals/goal-compaction-context.md" with { type: "text" };
 import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
 import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
+import goalPostCompactionContinuationTemplate from "../prompts/goals/goal-post-compaction-continuation.md" with {
+	type: "text",
+};
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
@@ -297,8 +301,10 @@ import {
 	type CustomMessage,
 	convertToLlm,
 	type FileMentionMessage,
+	GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
+	GOAL_POST_COMPACTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
@@ -1167,6 +1173,13 @@ export class AgentSession {
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#planModeState: PlanModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
+	#goalPostCompactionContinuation:
+		| {
+				goalId: string;
+				stateVersion: number;
+				prompt: string;
+		  }
+		| undefined;
 	#goalRuntime: GoalRuntime;
 	#backgroundLaneManager: BackgroundLaneManager;
 	#goalSideAgentTail: Promise<void> = Promise.resolve();
@@ -4454,10 +4467,10 @@ export class AgentSession {
 			tokenBudget: input.tokenBudget,
 			parentFrame: input.parentFrame,
 		});
-		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
-		if (current) {
-			await this.#publishGoalRubricArtifact(current, rubric);
-			return { ...state, goal: current };
+		const rubricState = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
+		if (rubricState) {
+			await this.#publishGoalRubricArtifact(rubricState.goal, rubric);
+			return rubricState;
 		}
 		return state;
 	}
@@ -4484,10 +4497,10 @@ export class AgentSession {
 			tokenBudget: input.tokenBudget,
 			parentFrame: input.parentFrame,
 		});
-		const current = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
-		if (current) {
-			await this.#publishGoalRubricArtifact(current, rubric);
-			return { ...state, goal: current };
+		const rubricState = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
+		if (rubricState) {
+			await this.#publishGoalRubricArtifact(rubricState.goal, rubric);
+			return rubricState;
 		}
 		return state;
 	}
@@ -4817,12 +4830,18 @@ export class AgentSession {
 		if (!state?.enabled || state.goal.status !== "active") return undefined;
 		if (state.runMode === "awaiting-user-input") return undefined;
 		const goalId = state.goal.id;
+		const postCompaction = this.#consumeGoalPostCompactionContinuation(state);
+		if (postCompaction) return postCompaction;
 		const stateVersion = state.stateVersion;
 		if (state.runMode === "awaiting-checkpoint-resolution") {
 			const promptText = await this.#prepareGoalCheckpointGuidancePrompt(state, signal);
 			const latest = this.#goalModeState;
 			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
-			return { kind: "checkpoint-resolution", customType: "goal-checkpoint-resolution", prompt: promptText };
+			return {
+				kind: "checkpoint-resolution",
+				customType: GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE,
+				prompt: promptText,
+			};
 		}
 		if (state.runMode === "awaiting-parent-completion") {
 			const promptText = this.#prepareGoalParentCompletionPrompt(state);
@@ -7391,6 +7410,7 @@ export class AgentSession {
 		await this.sessionManager.rewriteEntries();
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
+		this.#armGoalPostCompactionContinuation();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
 		return {
@@ -7555,6 +7575,7 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#armGoalPostCompactionContinuation();
 			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 
@@ -7774,6 +7795,7 @@ export class AgentSession {
 					...serializeGoalModeState(carriedGoalState),
 				});
 				await this.setActiveToolsByName([...new Set([...activeToolsBeforeHandoff, "goal"])]);
+				this.#armGoalPostCompactionContinuation(carriedGoalState);
 			}
 			await this.sessionManager.ensureOnDisk();
 			let savedPath: string | undefined;
@@ -8664,15 +8686,7 @@ export class AgentSession {
 		throw this.#buildCompactionAuthError();
 	}
 
-	#buildGoalCompactionContext():
-		| {
-				context: string;
-				preserveData: Record<string, unknown>;
-		  }
-		| undefined {
-		const state = this.#goalModeState;
-		if (!state?.goal) return undefined;
-		if (state.goal.status === "complete" || state.goal.status === "dropped") return undefined;
+	#buildGoalContinuationPacketForCompaction(state: GoalModeState): GoalContinuationPacket {
 		let transition: GoalContinuationPacket["transition"] = "context-compaction";
 		let reason =
 			"Context compaction must preserve the active goal state without changing checkpoint or target authority.";
@@ -8697,14 +8711,70 @@ export class AgentSession {
 		} else if (state.runMode === "awaiting-user-input") {
 			guidance = "Preserve the blocked state and wait for user, check, or external-control input.";
 		}
-		const continuationPacket = buildGoalContinuationPacket(state, transition, reason, guidance);
+		return buildGoalContinuationPacket(state, transition, reason, guidance);
+	}
+
+	#renderGoalPostCompactionPrompt(state: GoalModeState, continuationPacket: GoalContinuationPacket): string {
+		const serializedState = serializeGoalModeState(state);
+		return prompt.render(goalPostCompactionContinuationTemplate, {
+			objective: escapeXmlText(state.goal.objective),
+			runMode: state.runMode,
+			stateVersion: String(state.stateVersion),
+			parentFrameVersion: String(state.parentFrameVersion),
+			goalStateSnapshot: renderGoalStateSnapshot(state, state.goal),
+			serializedState: escapeXmlText(JSON.stringify(serializedState, null, 2)),
+			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
+		});
+	}
+
+	#armGoalPostCompactionContinuation(state: GoalModeState | undefined = this.#goalModeState): void {
+		if (!state?.enabled || state.goal.status !== "active" || state.runMode === "awaiting-user-input") {
+			this.#goalPostCompactionContinuation = undefined;
+			return;
+		}
+		const continuationPacket = this.#buildGoalContinuationPacketForCompaction(state);
+		this.#goalPostCompactionContinuation = {
+			goalId: state.goal.id,
+			stateVersion: state.stateVersion,
+			prompt: this.#renderGoalPostCompactionPrompt(state, continuationPacket),
+		};
+	}
+
+	#consumeGoalPostCompactionContinuation(state: GoalModeState):
+		| {
+				kind: "post-compaction";
+				customType: string;
+				prompt: string;
+		  }
+		| undefined {
+		const continuation = this.#goalPostCompactionContinuation;
+		if (!continuation) return undefined;
+		this.#goalPostCompactionContinuation = undefined;
+		if (continuation.goalId !== state.goal.id || continuation.stateVersion !== state.stateVersion) return undefined;
+		return {
+			kind: "post-compaction",
+			customType: GOAL_POST_COMPACTION_MESSAGE_TYPE,
+			prompt: continuation.prompt,
+		};
+	}
+
+	#buildGoalCompactionContext():
+		| {
+				context: string;
+				preserveData: Record<string, unknown>;
+		  }
+		| undefined {
+		const state = this.#goalModeState;
+		if (!state?.goal) return undefined;
+		if (state.goal.status === "complete" || state.goal.status === "dropped") return undefined;
+		const continuationPacket = this.#buildGoalContinuationPacketForCompaction(state);
 		const serializedState = serializeGoalModeState(state);
 		const context = prompt.render(goalCompactionContextTemplate, {
-			transition,
-			reason,
+			transition: continuationPacket.transition,
+			reason: continuationPacket.reason,
 			stateSnapshot: renderGoalStateSnapshot(state, state.goal),
-			serializedState: JSON.stringify(serializedState, null, 2),
-			continuationPacket: JSON.stringify(continuationPacket, null, 2),
+			serializedState: escapeXmlText(JSON.stringify(serializedState, null, 2)),
+			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
 		});
 		return {
 			context,
@@ -9110,6 +9180,7 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#armGoalPostCompactionContinuation();
 			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 

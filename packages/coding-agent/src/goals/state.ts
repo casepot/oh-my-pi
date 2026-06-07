@@ -9,6 +9,7 @@ export type GoalVerificationGapSeverity = "blocking" | "important" | "polish";
 export type GoalModeLifecycle = "active" | "exiting";
 export type GoalRunMode =
 	| "working-target"
+	| "completed"
 	| "awaiting-checkpoint-resolution"
 	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
@@ -492,6 +493,7 @@ function normalizeGoalStatus(value: unknown): GoalStatus {
 function normalizeRunMode(value: unknown): GoalRunMode {
 	switch (value) {
 		case "working-target":
+		case "completed":
 		case "awaiting-checkpoint-resolution":
 		case "awaiting-parent-completion":
 		case "awaiting-verification-repair":
@@ -968,11 +970,19 @@ export function normalizeGoalModeState(value: unknown): GoalModeState | undefine
 	if (!isRecord(value)) return undefined;
 	const goal = normalizeGoal(value.goal);
 	if (!goal) return undefined;
+	let mode = normalizeLifecycle(value.mode);
+	let runMode = normalizeRunMode(value.runMode);
+	let reason: "completed" | undefined = value.reason === "completed" ? "completed" : undefined;
+	if (goal.status === "complete" || (mode === "exiting" && reason === "completed")) {
+		mode = "exiting";
+		reason = "completed";
+		runMode = "completed";
+	}
 	return {
 		enabled: value.enabled === true,
-		mode: normalizeLifecycle(value.mode),
-		runMode: normalizeRunMode(value.runMode),
-		reason: value.reason === "completed" ? "completed" : undefined,
+		mode,
+		runMode,
+		reason,
 		stateVersion: optionalNumber(value.stateVersion) ?? 0,
 		parentFrameVersion: optionalNumber(value.parentFrameVersion) ?? (goal.parentFrame ? 1 : 0),
 		goal,
@@ -1010,8 +1020,8 @@ export function parseGoalModeState(modeData: unknown, fallbackEnabled?: boolean)
 	if (!legacyGoal) return undefined;
 	return {
 		enabled: fallbackEnabled ?? true,
-		mode: "active",
-		runMode: "working-target",
+		mode: legacyGoal.status === "complete" ? "exiting" : "active",
+		runMode: legacyGoal.status === "complete" ? "completed" : "working-target",
 		stateVersion: 0,
 		parentFrameVersion: legacyGoal.parentFrame ? 1 : 0,
 		goal: legacyGoal,

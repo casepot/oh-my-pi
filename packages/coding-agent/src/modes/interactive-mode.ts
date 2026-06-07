@@ -85,8 +85,10 @@ import type { AgentSession, AgentSessionEvent, ResolvedRoleModel } from "../sess
 import { HistoryStorage } from "../session/history-storage";
 import {
 	type CustomMessage,
+	GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
+	GOAL_POST_COMPACTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
@@ -279,7 +281,9 @@ const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 function isGoalContinuationSubmissionType(customType: string | undefined): boolean {
 	return (
 		customType === "goal-continuation" ||
-		customType === "goal-checkpoint-resolution" ||
+		customType === GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE ||
+		customType === GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE ||
+		customType === GOAL_POST_COMPACTION_MESSAGE_TYPE ||
 		customType === "goal-parent-completion" ||
 		customType === "goal-verification-repair"
 	);
@@ -1380,7 +1384,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			state?.runMode === "awaiting-checkpoint-resolution"
 				? this.#goalContinuationTurnInFlight
 					? "Goal resolving checkpoint"
-					: "Goal checkpoint pending"
+					: `Goal checkpoint pending${state.goal.pendingCheckpointId ? `: resolve ${state.goal.pendingCheckpointId}` : ""}`
 				: state?.runMode === "awaiting-parent-completion"
 					? this.#goalContinuationTurnInFlight
 						? "Goal verifying parent completion"

@@ -311,10 +311,14 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
 		case "awaiting-checkpoint-resolution":
 			return ["Inspect checkpoint guidance", 'Call goal({ op: "resolve_checkpoint", ... })'];
+		case "completed":
+			return ["Report completed parent goal outcome"];
 		case "awaiting-parent-completion":
 			return ['Call goal({ op: "complete" }) for parent completion verification'];
 		case "awaiting-verification-repair":
 			return ["Repair verifier blockers", "Start a blocker-scoped target", "Gather fresh evidence"];
+		case "awaiting-background-lane-intake":
+			return ["Disposition blocked background lanes before ordinary implementation resumes"];
 		case "awaiting-user-input":
 			return ["Wait for user input, broader checks, or external authority"];
 		default:
@@ -330,10 +334,14 @@ function disallowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
 		case "awaiting-checkpoint-resolution":
 			return ["Continue local implementation", "Mutate parent frame in prose", "Call complete before resolution"];
+		case "completed":
+			return ["Resume local implementation under the completed goal"];
 		case "awaiting-parent-completion":
 			return ["Continue local implementation", "Start another target", "Checkpoint target work"];
 		case "awaiting-verification-repair":
 			return ["Retry complete without fresh repair/evidence", "Choose unrelated work"];
+		case "awaiting-background-lane-intake":
+			return ["Continue local implementation", "Start unrelated target work", "Retry complete before lane intake"];
 		case "awaiting-user-input":
 			return ["Auto-continue ordinary work"];
 		default:
@@ -861,7 +869,7 @@ export class GoalRuntime {
 		await this.#withAccounting(() => this.#flushUsageLocked(steering, currentUsage));
 	}
 
-	async setGoalRubric(goalId: string, rubric: string): Promise<Goal | undefined> {
+	async setGoalRubric(goalId: string, rubric: string): Promise<GoalModeState | undefined> {
 		const trimmedRubric = rubric.trim();
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
@@ -869,7 +877,7 @@ export class GoalRuntime {
 			state.goal.rubric = trimmedRubric || undefined;
 			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
-			return state.goal;
+			return state;
 		});
 	}
 
@@ -1183,7 +1191,7 @@ export class GoalRuntime {
 			state.goal.status = "complete";
 			state.mode = "exiting";
 			state.reason = "completed";
-			state.runMode = "working-target";
+			state.runMode = "completed";
 			this.#bumpState(state);
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;

@@ -25,11 +25,13 @@ Write guidance for the next main-agent turn. It MUST say:
 - parent-state changes require `resolve_checkpoint.parent_delta`; prose does not mutate the parent frame;
 - domain-specific records should be referenced as external refs, not copied into goal state;
 - next targets should be desired-future claims, not cleanup checklist items;
+- prefer `decision:"next_target"` while any parent deliverable, subsystem, or evidence class lacks accepted current evidence;
+- recommend `parent_completion_candidate` only when remaining work is genuinely verifier confirmation, not unresolved implementation or evidence collection;
 - parent completion requires `goal({op:"complete"})` and verifier-worthy parent-level evidence;
 - if recommending `parent_completion_candidate`, show an exact valid `resolve_checkpoint` JSON object that omits `next_target`, followed by `goal({op:"complete"})` as the next action;
-- if recommending `next_target`, show an exact valid `resolve_checkpoint` JSON object that includes `next_target`.
+- if recommending `next_target`, show an exact valid `resolve_checkpoint` JSON object that includes one bounded `next_target` whose closure standard does not mirror the whole parent rubric.
 
-Controller outcomes may include: start next target; update parent frame through `parent_delta`; request user input; request broader checks; preserve lessons; or select `parent_completion_candidate` only when the parent goal is genuinely verifier-ready.
+Controller outcomes may include: start next bounded target; update parent frame through `parent_delta`; request user input; request broader checks; preserve lessons; or select `parent_completion_candidate` only when the parent goal is genuinely verifier-ready.
 
 Return structured output:
 - `continuationMessage`: hidden prompt for the controller turn.

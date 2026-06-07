@@ -25,7 +25,7 @@ export interface PruneConfig {
 export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 	protectTokens: 40_000,
 	minimumSavings: 20_000,
-	protectedTools: ["skill", isSkillReadToolResult],
+	protectedTools: ["skill", "goal", isSkillReadToolResult],
 };
 
 export interface PruneResult {

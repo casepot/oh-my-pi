@@ -442,10 +442,15 @@ describe("GoalTool", () => {
 		expect(checkpoint.details?.checkpoint?.notClaimed).toContain("Parent goal complete");
 		const checkpointText = checkpoint.content[0]?.type === "text" ? checkpoint.content[0].text : "";
 		expect(checkpointText).toContain("Parent goal remains active");
+		expect(checkpointText).toContain("Ordinary tools are blocked");
+		expect(checkpointText).toContain("resolve_checkpoint");
 
 		const getCheckpoint = await tool.execute("get-checkpoint", { op: "get" });
 		expect(getCheckpoint.details?.state?.goal.pendingCheckpointId).toBe(checkpoint.details?.checkpoint?.id);
 		expect(getCheckpoint.details?.state?.goal.checkpoints?.[0]?.targetSnapshot.status).toBe("closed");
+		const getText = getCheckpoint.content[0]?.type === "text" ? getCheckpoint.content[0].text : "";
+		expect(getText).toContain(`Pending checkpoint: ${checkpoint.details?.checkpoint?.id}`);
+		expect(getText).toContain("Next action: inspect checkpoint guidance");
 
 		const resolved = await tool.execute("resolve", {
 			op: "resolve_checkpoint",
@@ -566,6 +571,7 @@ describe("GoalTool", () => {
 		expect(after?.mode).toBe("exiting");
 		expect(after?.reason).toBe("completed");
 		expect(after?.goal.status).toBe("complete");
+		expect(after?.runMode).toBe("completed");
 	});
 
 	it("completes a paused goal (enabled=false) — was broken before fix", async () => {

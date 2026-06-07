@@ -16,6 +16,9 @@ Read transcript/repo context only when it materially improves the rubric. The ru
 - Repo observations MAY inform required evidence; phrase them as evidence the verifier must re-check.
 - Assign short stable deliverable IDs (`D1`, `D2`, …). Verifier/continuation output will reference them.
 
+- Make deliverable boundaries decomposition-friendly: when the objective spans multiple subsystems, evidence classes, or user-visible outcomes, express those as separate deliverables rather than one umbrella item.
+- Include a short `Target aperture guidance` section describing how the first bounded target should be sliced. A target is too broad when its closure standard would satisfy nearly all parent completion criteria.
+
 Return one concise but stringent rubric. It MUST include:
 - Durable deliverables required by strongest good-faith objective interpretation.
 - Required current-state evidence for each deliverable.

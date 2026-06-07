@@ -426,7 +426,8 @@ function goalRunModeBlockMessage(session: ToolSession, toolName: string): string
 	const state = session.getGoalModeState?.();
 	if (state?.enabled !== true || state.goal.status !== "active") return undefined;
 	if (state.runMode === "awaiting-checkpoint-resolution" && state.goal.pendingCheckpointId !== undefined) {
-		return 'Goal checkpoint is pending resolution; ordinary tool work is blocked until goal({ op: "resolve_checkpoint", ... }) records the controller decision.';
+		const checkpointId = state.goal.pendingCheckpointId;
+		return `Goal checkpoint is pending resolution (${checkpointId}); ordinary tool work is blocked until goal({ op: "resolve_checkpoint", checkpoint_id: "${checkpointId}", ... }) records the controller decision.`;
 	}
 	if (state.runMode === "awaiting-parent-completion") {
 		return 'Goal parent completion verification is pending; ordinary tool work is blocked until goal({ op: "complete" }) runs the verifier.';

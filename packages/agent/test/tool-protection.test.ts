@@ -50,13 +50,27 @@ function readResult(toolCallId: string, text: string): SessionMessageEntry {
 	});
 }
 
+function genericResult(toolName: string, toolCallId: string, text: string): SessionMessageEntry {
+	const content: TextContent[] = [{ type: "text", text }];
+	return messageEntry(`result-${toolCallId}`, {
+		role: "toolResult",
+		toolCallId,
+		toolName,
+		content,
+		isError: false,
+		timestamp: 0,
+	});
+}
+
 describe("conditional tool-result protection", () => {
 	it("prunes regular read results but keeps skill:// reads", () => {
 		const skillResult = readResult("skill-read", "skill read output that must remain intact");
+		const goalResult = genericResult("goal", "goal-call", "goal output that must remain intact");
 		const fileResult = readResult("file-read", "file read output that can be pruned");
 		const entries = [
 			assistantReadCall("skill-read", "skill://session-memory"),
 			skillResult,
+			goalResult,
 			assistantReadCall("file-read", "packages/agent/src/index.ts"),
 			fileResult,
 		];
@@ -68,6 +82,10 @@ describe("conditional tool-result protection", () => {
 		expect((skillResult.message as ToolResultMessage).content).toEqual([
 			{ type: "text", text: "skill read output that must remain intact" },
 		]);
+		expect((goalResult.message as ToolResultMessage).prunedAt).toBeUndefined();
+		expect((goalResult.message as ToolResultMessage).content).toEqual([
+			{ type: "text", text: "goal output that must remain intact" },
+		]);
 		expect(typeof (fileResult.message as ToolResultMessage).prunedAt).toBe("number");
 		expect(((fileResult.message as ToolResultMessage).content[0] as TextContent).text).toStartWith(
 			"[Output truncated - ",
@@ -76,10 +94,12 @@ describe("conditional tool-result protection", () => {
 
 	it("shakes regular read results but excludes skill:// reads", () => {
 		const skillResult = readResult("skill-read", "skill read output that must not be shaken");
+		const goalResult = genericResult("goal", "goal-call", "goal output that must not be shaken");
 		const fileResult = readResult("file-read", "file read output that is eligible for shake");
 		const entries = [
 			assistantReadCall("skill-read", "skill://session-memory"),
 			skillResult,
+			goalResult,
 			assistantReadCall("file-read", "src/index.ts"),
 			fileResult,
 		];

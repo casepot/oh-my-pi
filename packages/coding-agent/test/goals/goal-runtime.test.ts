@@ -409,13 +409,15 @@ describe("goal runtime", () => {
 		expect(state?.enabled).toBe(false);
 		expect(state?.mode).toBe("exiting");
 		expect(state?.goal.status).toBe("complete");
+		expect(state?.runMode).toBe("completed");
 	});
 
 	it("stores verifier metadata in rendered goal prompts", async () => {
 		const harness = createHarness();
 
 		const state = await harness.runtime.createGoal({ objective: "Ship <safe> & audited" });
-		await harness.runtime.setGoalRubric(state.goal.id, "4 = excellent <evidence> & coherent");
+		const rubricState = await harness.runtime.setGoalRubric(state.goal.id, "4 = excellent <evidence> & coherent");
+		expect(rubricState?.stateVersion).toBe(state.stateVersion + 1);
 		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Missing <integration> & proof");
 
 		const goal = harness.getState()?.goal;
@@ -547,6 +549,25 @@ describe("goal runtime", () => {
 		expect(restored?.stateVersion).toBe(0);
 		expect(restored?.parentFrameVersion).toBe(1);
 		expect(restored?.goal.parentFrame?.desiredFuture).toBe("Legacy objective stays active.");
+	});
+
+	it("normalizes completed goals to terminal run mode", () => {
+		const restored = parseGoalModeState(
+			{
+				enabled: false,
+				mode: "active",
+				runMode: "working-target",
+				stateVersion: 4,
+				parentFrameVersion: 0,
+				goal: createGoal({ objective: "Completed legacy goal", status: "complete" }),
+			},
+			false,
+		);
+
+		expect(restored?.runMode).toBe("completed");
+		expect(restored?.mode).toBe("exiting");
+		expect(restored?.reason).toBe("completed");
+		expect(restored?.enabled).toBe(false);
 	});
 
 	it("does not increment semantic state version for accounting-only side-agent usage", async () => {

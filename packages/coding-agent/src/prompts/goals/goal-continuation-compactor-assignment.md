@@ -35,6 +35,7 @@ Use read/search/find only. NEVER modify files. NEVER run tests/checks/linters/fo
 Return one concise continuation message. It MUST:
 - Preserve parent goal, parent-state frame, current target, pending checkpoint, verification repair, non-claims, residuals, gates, stale conditions, and exact next local action when present.
 - For ordinary compaction, resume the same open target; do not choose a new target merely because context was compacted.
+- Preserve target aperture: if the parent rubric spans multiple deliverables/subsystems/evidence classes, the next target must remain one coherent cluster, not the whole parent rubric.
 - If a checkpoint is pending, route the next turn to checkpoint guidance and `resolve_checkpoint`, not local work.
 - If parent completion was rejected, route the next turn to verifier blockers and fresh evidence; do not allow a cosmetic `complete` retry.
 - Include things not to infer from the summary, especially checkpoint non-claims and parent-frame boundaries.

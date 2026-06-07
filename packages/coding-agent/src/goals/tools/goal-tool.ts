@@ -651,7 +651,12 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 	if (goal.parentFrame)
 		text += `\nParent frame: ${goal.parentFrame.kind} (version ${response.state?.parentFrameVersion ?? 0})`;
 	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
-	if (goal.pendingCheckpointId) text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
+	if (goal.pendingCheckpointId) {
+		text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
+		if (response.state?.runMode === "awaiting-checkpoint-resolution") {
+			text += `\nNext action: inspect checkpoint guidance, then call goal({op:"resolve_checkpoint", checkpoint_id:"${goal.pendingCheckpointId}"}) before ordinary tools.`;
+		}
+	}
 	if (goal.verificationRepair) text += `\nVerifier repair: ${goal.verificationRepair.verificationAttemptId}`;
 	if (goal.backgroundLanes?.length) {
 		const requiredOpen = goal.backgroundLanes.filter(
@@ -666,8 +671,8 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 		if (response.checkpointReview?.status === "rejected") {
 			text += `\n\nCheckpoint rejected. Target remains active; no checkpoint is pending resolution. Continue repairing the current target closure evidence.\n\nReviewer feedback:\n${response.checkpointReview.feedback}`;
 		} else {
-			text +=
-				"\n\nTarget checkpoint recorded. Parent goal remains active. Ordinary continuation is paused while checkpoint guidance is prepared.";
+			const checkpointId = response.checkpoint.id;
+			text += `\n\nTarget checkpoint recorded: ${checkpointId}. Parent goal remains active. Ordinary tools are blocked until checkpoint guidance is inspected and goal({op:"resolve_checkpoint", checkpoint_id:"${checkpointId}"}) records the controller decision.`;
 		}
 	}
 	if (op === "resolve_checkpoint" && response.checkpointResolution) {
@@ -816,12 +821,14 @@ export const goalToolRenderer = {
 			),
 		);
 
-		const objectiveText = truncateToWidth(goal.objective.trim(), TRUNCATE_LENGTHS.LONG);
+		const objectiveText = humanPreview(goal.objective);
 		lines.push(`  ${uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`))}`);
 		if (goal.currentTarget)
 			lines.push(`  ${uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`)}`);
-		if (goal.pendingCheckpointId)
-			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: ${goal.pendingCheckpointId}`)}`);
+		if (goal.pendingCheckpointId) {
+			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: resolve ${goal.pendingCheckpointId}`)}`);
+			lines.push(`  ${uiTheme.fg("muted", "ordinary tools blocked until resolve_checkpoint")}`);
+		}
 
 		const used = formatNumber(goal.tokensUsed);
 		const tokensLine =
@@ -832,8 +839,10 @@ export const goalToolRenderer = {
 
 		if (goal.timeUsedSeconds > 0)
 			lines.push(`  ${uiTheme.fg("dim", `${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`)}`);
-		if (details?.checkpoint && !checkpointRejected)
+		if (details?.checkpoint && !checkpointRejected) {
 			lines.push(`  ${uiTheme.fg("muted", "Target closed; parent goal still active")}`);
+			lines.push(`  ${uiTheme.fg("muted", "Next: resolve_checkpoint after checkpoint guidance")}`);
+		}
 		if (details?.checkpointResolution)
 			lines.push(`  ${uiTheme.fg("muted", `checkpoint resolution: ${details.checkpointResolution.decision}`)}`);
 		if (verificationRejected) {

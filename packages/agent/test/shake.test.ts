@@ -204,15 +204,17 @@ describe("applyShakeRegions — multi-region ordering", () => {
 });
 
 describe("shake config presets", () => {
-	test("aggressive preset protects skill and drops everything else", () => {
+	test("aggressive preset protects audit-critical tools and drops everything else", () => {
 		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBe(0);
 		expect(AGGRESSIVE_SHAKE_CONFIG.minSavings).toBe(0);
 		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toContain("skill");
+		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toContain("goal");
 	});
 
 	test("default preset keeps a protect window", () => {
 		expect(DEFAULT_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
 		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("skill");
+		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("goal");
 	});
 
 	test("empty branch yields no regions", () => {

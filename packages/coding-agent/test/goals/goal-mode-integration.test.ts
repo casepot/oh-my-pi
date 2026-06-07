@@ -17,8 +17,10 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
+	GOAL_POST_COMPACTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
@@ -436,6 +438,16 @@ describe("InteractiveMode goal mode integration", () => {
 		const state = harness.session.getGoalModeState();
 		const rubricCall = goalSideAgentCalls.find(call => call.agent.name === "goal-rubric");
 		expect(state?.goal.rubric).toContain("Strict test rubric");
+		expect(state?.stateVersion).toBe(2);
+		const stateVersions = harness.session.sessionManager
+			.getEntries()
+			.flatMap(entry =>
+				entry.type === "mode_change" && entry.mode === "goal" && typeof entry.data?.stateVersion === "number"
+					? [entry.data.stateVersion]
+					: [],
+			);
+		expect(stateVersions).toEqual([...stateVersions].sort((a, b) => a - b));
+		expect(stateVersions.at(-1)).toBe(state?.stateVersion);
 		expect(showStatus).toHaveBeenCalledWith("Generating goal rubric…");
 		expect(showStatus).toHaveBeenCalledWith("Goal rubric generated.");
 		const artifact = harness.session.sessionManager
@@ -491,6 +503,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const state = harness.session.getGoalModeState();
 		expect(state?.enabled).toBe(true);
 		expect(state?.goal.objective).toBe("Replace the objective");
+		expect(state?.stateVersion).toBe(2);
 		expect(state?.goal.status).toBe("active");
 		expect(state?.goal.id).not.toBe(originalGoal.id);
 		expect(harness.mode.goalModeEnabled).toBe(true);
@@ -760,7 +773,7 @@ describe("InteractiveMode goal mode integration", () => {
 
 		const guidance = await harness.session.prepareGoalContinuationDispatch();
 		expect(guidance?.kind).toBe("checkpoint-resolution");
-		expect(guidance?.customType).toBe("goal-checkpoint-resolution");
+		expect(guidance?.customType).toBe(GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE);
 		expect(guidance?.prompt).toContain(goalSideAgentMock.checkpointGuidance);
 		expect(guidance?.prompt).toContain("resolve_checkpoint");
 		const guidanceCall = goalSideAgentCalls.find(call => call.agent.name === "goal-checkpoint-guidance");
@@ -1032,6 +1045,7 @@ describe("InteractiveMode goal mode integration", () => {
 				"Release is ready",
 				"CI is green",
 				"Tarball install path is verified",
+				"Raw </goal_continuation_packet> marker is data only",
 			],
 			remaining_questions: ["Should controller choose tarball smoke evidence next?"],
 			risks_or_caveats: ["Only the source-link install surface has current evidence."],
@@ -1110,11 +1124,17 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(extraContext).toContain("Prove tarball installer smoke");
 		expect(extraContext).toContain("Release is ready");
 		expect(extraContext).toContain("tarball-smoke-evidence");
+		expect(extraContext).toContain("Raw &lt;/goal_continuation_packet&gt; marker is data only");
 		expect(JSON.stringify(compacted.preserveData?.goalMode)).toContain('"runMode":"working-target"');
 		expect(JSON.stringify(compacted.preserveData?.goalMode)).toContain("Prove tarball installer smoke");
 		expect(JSON.stringify(compacted.preserveData?.goalContinuationPacket)).toContain(
 			'"transition":"context-compaction"',
 		);
+		const postCompactDispatch = await harness.session.prepareGoalContinuationDispatch();
+		expect(postCompactDispatch?.kind).toBe("post-compaction");
+		expect(postCompactDispatch?.customType).toBe(GOAL_POST_COMPACTION_MESSAGE_TYPE);
+		expect(postCompactDispatch?.prompt).toContain("Context was compacted while goal mode was active");
+		expect(postCompactDispatch?.prompt).toContain('goal({ op: "get" })');
 
 		goalSideAgentMock.completionStatus = "rejected";
 		goalSideAgentMock.feedback = "Tarball smoke evidence is still missing.";
@@ -1233,9 +1253,14 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(restored.goal.pendingCheckpointId).toBe(checkpointId);
 		expect(restored.goal.checkpoints?.[0]?.id).toBe(checkpointId);
 
+		const postHandoffDispatch = await harness.session.prepareGoalContinuationDispatch();
+		expect(postHandoffDispatch?.kind).toBe("post-compaction");
+		expect(postHandoffDispatch?.customType).toBe(GOAL_POST_COMPACTION_MESSAGE_TYPE);
+		expect(postHandoffDispatch?.prompt).toContain("awaiting-checkpoint-resolution");
+
 		const dispatch = await harness.session.prepareGoalContinuationDispatch();
 		expect(dispatch?.kind).toBe("checkpoint-resolution");
-		expect(dispatch?.customType).toBe("goal-checkpoint-resolution");
+		expect(dispatch?.customType).toBe(GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE);
 		expect(dispatch?.prompt).toContain("resolve_checkpoint");
 	});
 
