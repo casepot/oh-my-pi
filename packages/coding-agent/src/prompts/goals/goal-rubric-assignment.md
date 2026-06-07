@@ -19,12 +19,24 @@ Read transcript/repo context only when it materially improves the rubric. The ru
 - Make deliverable boundaries decomposition-friendly: when the objective spans multiple subsystems, evidence classes, or user-visible outcomes, express those as separate deliverables rather than one umbrella item.
 - Include a short `Target aperture guidance` section describing how the first bounded target should be sliced. A target is too broad when its closure standard would satisfy nearly all parent completion criteria.
 
-Return one concise but stringent rubric. It MUST include:
+Return:
+- `rubric`: one concise but stringent verifier-only rubric.
+- `deliverableMap`: compact main-agent-facing deliverables.
+
+The rubric MUST include:
 - Durable deliverables required by strongest good-faith objective interpretation.
 - Required current-state evidence for each deliverable.
 - Integration points/user-visible behavior that must work.
 - Quality/taste/coherence criteria: maintainability, architecture fit, no gratuitous churn.
 - Non-completion conditions that MUST force rejection.
 - Labeled score levels: 0 = not attempted, 1 = partial/scaffold, 2 = functional but incomplete/fragile, 3 = complete/coherent, 4 = excellent/high-taste with strong verification.
+
+`deliverableMap` MUST contain one item per rubric deliverable:
+- `id`: same short stable ID used in the rubric.
+- `summary`: one sentence, no checklist prose.
+- `status`: `pending`.
+- `evidenceRefs`: empty unless current durable refs are already authoritative.
+- `blockedBy`: empty unless a known blocker exists.
+- `nextRelevantTarget`: optional first target hint.
 
 The rubric is a verification aid; NEVER narrow or rewrite the objective.

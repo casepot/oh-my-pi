@@ -110,6 +110,7 @@ function installGoalSideAgentMock(): void {
 		if (options.agent.name === "goal-rubric") {
 			return createSideAgentResult(options, {
 				rubric: "Strict test rubric with labeled score levels.",
+				deliverableMap: [{ id: "D1", summary: "Ship release behavior.", status: "pending" }],
 			});
 		}
 		if (options.agent.name === "goal-completion-verifier") {
@@ -437,6 +438,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const state = harness.session.getGoalModeState();
 		const rubricCall = goalSideAgentCalls.find(call => call.agent.name === "goal-rubric");
 		expect(state?.goal.rubric).toContain("Strict test rubric");
+		expect(state?.goal.deliverableMap).toEqual([{ id: "D1", summary: "Ship release behavior.", status: "pending" }]);
 		expect(state?.stateVersion).toBe(2);
 		const stateVersions = harness.session.sessionManager
 			.getEntries()
@@ -482,6 +484,7 @@ describe("InteractiveMode goal mode integration", () => {
 			.filter(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
 		expect(rubricEntries.length).toBe(beforeRubricCount);
 		expect(state?.goal.rubric).toContain("Strict test rubric");
+		expect(state?.goal.deliverableMap?.[0]?.id).toBe("D1");
 		const renderedChat = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
 		expect(renderedChat).toContain("[goal-rubric]");
 		expect(showStatus.mock.calls.map(call => String(call[0])).join("\n")).not.toContain("Strict test rubric");
@@ -717,6 +720,7 @@ describe("InteractiveMode goal mode integration", () => {
 
 	it("checkpoints a closed target, schedules controller guidance, and resolves to the next target", async () => {
 		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		await harness.mode.handleGoalModeCommand("rubric");
 		const toolsForTurn = await createTools(harness.toolSession, harness.session.getActiveToolNames());
 		const goalTool = toolsForTurn.find(tool => tool.name === "goal");
 		const readTool = toolsForTurn.find(tool => tool.name === "read");
@@ -728,6 +732,7 @@ describe("InteractiveMode goal mode integration", () => {
 			desired_future_claim: "Source-link install exercises smoke path.",
 			closure_standard: "Current smoke output exists.",
 			forbidden_claims: ["Release is ready"],
+			parent_deliverable_ids: ["D1"],
 		});
 		const checkpoint = await goalTool.execute("checkpoint", {
 			op: "checkpoint",
@@ -778,6 +783,18 @@ describe("InteractiveMode goal mode integration", () => {
 		const guidanceCall = goalSideAgentCalls.find(call => call.agent.name === "goal-checkpoint-guidance");
 		expect(guidanceCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
 		expect(guidanceCall?.task).toContain("<goal_state_snapshot>");
+		const goalStateFile = /<goal_state_file>\n([^<]+)\n<\/goal_state_file>/.exec(guidanceCall?.task ?? "")?.[1];
+		if (!goalStateFile) throw new Error("expected checkpoint guidance goal state file");
+		const guidanceState = await Bun.file(goalStateFile).text();
+		expect(guidanceState).not.toContain("Strict test rubric");
+		expect(guidanceState).toContain("Ship release behavior.");
+		const guidanceTranscriptFile = /<full_transcript_file>\n([^<]+)\n<\/full_transcript_file>/.exec(
+			guidanceCall?.task ?? "",
+		)?.[1];
+		if (!guidanceTranscriptFile) throw new Error("expected checkpoint guidance transcript file");
+		const guidanceTranscript = await Bun.file(guidanceTranscriptFile).text();
+		expect(guidanceTranscript).not.toContain("Strict test rubric");
+		expect(guidanceTranscript).toContain("Improve release reliability");
 
 		const resolved = await goalTool.execute("resolve", {
 			op: "resolve_checkpoint",
@@ -800,6 +817,7 @@ describe("InteractiveMode goal mode integration", () => {
 						classification: "current-parent-blocker",
 					},
 				],
+				deliverable_deltas: [{ id: "D1", status: "partial", next_relevant_target: "Prove tarball smoke" }],
 			},
 			not_propagated: ["Release is ready"],
 			remaining_parent_work: ["Tarball smoke evidence"],
@@ -808,6 +826,7 @@ describe("InteractiveMode goal mode integration", () => {
 				desired_future_claim: "Tarball install exercises smoke path.",
 				closure_standard: "Current tarball smoke output exists.",
 				forbidden_claims: ["Release is ready"],
+				parent_deliverable_ids: ["D1"],
 			},
 		});
 
@@ -815,6 +834,8 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
 		expect(resolved.details?.state?.goal.currentTarget?.title).toBe("Prove tarball smoke");
 		expect(resolved.details?.state?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
+		expect(resolved.details?.state?.goal.deliverableMap?.[0]?.status).toBe("partial");
+		expect(resolved.details?.state?.goal.currentTarget?.parentDeliverableIds).toEqual(["D1"]);
 		const resolutionEntry = harness.session.sessionManager
 			.getEntries()
 			.find(

@@ -26,6 +26,8 @@ import type {
 	GoalCheckpointReview,
 	GoalCheckpointStatus,
 	GoalCompletionVerifierStructuredOutput,
+	GoalDeliverableDelta,
+	GoalDeliverableMapItem,
 	GoalModeState,
 	GoalParentFrame,
 	GoalParentStateDelta,
@@ -106,6 +108,7 @@ export interface GoalStartTargetInput {
 	createdFromCheckpointId?: string;
 	createdFromVerificationAttemptId?: string;
 	linkedVerifierBlockerIds?: string[];
+	parentDeliverableIds?: string[];
 }
 
 export interface GoalCheckpointInput {
@@ -263,6 +266,27 @@ function compactVerificationGaps(blockers: GoalVerificationGap[]): Record<string
 	}));
 }
 
+function compactDeliverableMap(items: GoalDeliverableMapItem[] | undefined): Record<string, unknown>[] {
+	return (
+		items?.map(item => ({
+			id: item.id,
+			summary: item.summary,
+			status: item.status,
+			evidenceRefs: compactRefIds(item.evidenceRefs),
+			blockedBy: item.blockedBy,
+			nextRelevantTarget: item.nextRelevantTarget,
+		})) ?? []
+	);
+}
+
+function cloneDeliverableMapForState(items: GoalDeliverableMapItem[]): GoalDeliverableMapItem[] {
+	return items.map(item => ({
+		...item,
+		evidenceRefs: item.evidenceRefs ? cloneRefs(item.evidenceRefs) : undefined,
+		blockedBy: item.blockedBy ? [...item.blockedBy] : undefined,
+	}));
+}
+
 function compactTarget(target: GoalTarget | undefined): Record<string, unknown> | undefined {
 	if (!target) return undefined;
 	return {
@@ -283,6 +307,7 @@ function compactTarget(target: GoalTarget | undefined): Record<string, unknown> 
 		createdFromCheckpointId: target.createdFromCheckpointId,
 		createdFromVerificationAttemptId: target.createdFromVerificationAttemptId,
 		linkedVerifierBlockerIds: target.linkedVerifierBlockerIds,
+		parentDeliverableIds: target.parentDeliverableIds,
 	};
 }
 
@@ -386,6 +411,14 @@ function compactParentDelta(delta: GoalParentStateDelta | undefined): Record<str
 		externalRecordRefs: compactRefIds(delta.externalRecordRefs),
 		authorityDecisionRefs: compactRefIds(delta.authorityDecisionRefs),
 		backgroundLaneCount: delta.backgroundLanesToSpawn?.length ?? 0,
+		deliverableDeltas: delta.deliverableDeltas?.map(item => ({
+			id: item.id,
+			summary: item.summary,
+			status: item.status,
+			evidenceRefs: compactRefIds(item.evidenceRefs),
+			blockedBy: item.blockedBy,
+			nextRelevantTarget: item.nextRelevantTarget,
+		})),
 	};
 }
 
@@ -439,6 +472,7 @@ export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: 
 			status: goal.status,
 		},
 		parentFrame: compactParentFrame(goal.parentFrame, goal.objective),
+		deliverableMap: compactDeliverableMap(goal.deliverableMap),
 		currentTarget: compactTarget(goal.currentTarget),
 		pendingCheckpoint: compactCheckpoint(latestCheckpoint(goal)),
 		latestCheckpointResolution: compactResolution(latestResolution(goal)),
@@ -617,6 +651,10 @@ function parentDeltaHasFrameChanges(delta: GoalParentStateDelta): boolean {
 	);
 }
 
+function parentDeltaHasDeliverableChanges(delta: GoalParentStateDelta): boolean {
+	return (delta.deliverableDeltas?.length ?? 0) > 0;
+}
+
 function upsertStrings(values: string[], additions: string[]): string[] {
 	const output = [...values];
 	for (const addition of additions) {
@@ -664,6 +702,37 @@ function upsertById<T extends { id: string }>(values: T[], additions: T[]): T[] 
 		else output[index] = addition;
 	}
 	return output;
+}
+
+function applyDeliverableDeltas(
+	values: GoalDeliverableMapItem[] | undefined,
+	deltas: GoalDeliverableDelta[] | undefined,
+): GoalDeliverableMapItem[] | undefined {
+	if (!deltas?.length) return values ? cloneDeliverableMapForState(values) : undefined;
+	const current = new Map((values ?? []).map(item => [item.id, item]));
+	for (const delta of deltas) {
+		const existing = current.get(delta.id);
+		const next: GoalDeliverableMapItem = {
+			id: delta.id,
+			summary: delta.summary ?? existing?.summary ?? delta.id,
+			status: delta.status ?? existing?.status ?? "pending",
+			evidenceRefs:
+				delta.evidenceRefs !== undefined
+					? cloneRefs(delta.evidenceRefs)
+					: existing?.evidenceRefs
+						? cloneRefs(existing.evidenceRefs)
+						: undefined,
+			blockedBy:
+				delta.blockedBy !== undefined
+					? [...delta.blockedBy]
+					: existing?.blockedBy
+						? [...existing.blockedBy]
+						: undefined,
+			nextRelevantTarget: delta.nextRelevantTarget ?? existing?.nextRelevantTarget,
+		};
+		current.set(delta.id, next);
+	}
+	return [...current.values()];
 }
 
 function blockerIds(blockers: GoalVerificationGap[]): Set<string> {
@@ -748,6 +817,7 @@ function targetFromInput(
 		createdFromCheckpointId: input.createdFromCheckpointId,
 		createdFromVerificationAttemptId: input.createdFromVerificationAttemptId,
 		linkedVerifierBlockerIds: input.linkedVerifierBlockerIds ? [...input.linkedVerifierBlockerIds] : undefined,
+		parentDeliverableIds: input.parentDeliverableIds ? [...input.parentDeliverableIds] : undefined,
 	};
 }
 
@@ -1057,12 +1127,17 @@ export class GoalRuntime {
 		await this.#withAccounting(() => this.#flushUsageLocked(steering, currentUsage));
 	}
 
-	async setGoalRubric(goalId: string, rubric: string): Promise<GoalModeState | undefined> {
+	async setGoalRubric(
+		goalId: string,
+		rubric: string,
+		deliverableMap?: GoalDeliverableMapItem[],
+	): Promise<GoalModeState | undefined> {
 		const trimmedRubric = rubric.trim();
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
 			if (!state?.enabled || state.goal.id !== goalId || state.goal.status !== "active") return undefined;
 			state.goal.rubric = trimmedRubric || undefined;
+			state.goal.deliverableMap = deliverableMap?.length ? cloneDeliverableMapForState(deliverableMap) : undefined;
 			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
 			return state;
@@ -1578,9 +1653,17 @@ export class GoalRuntime {
 			const sequence = nextResolutionSequence(state.goal);
 			const resolutionId = `${state.goal.id}-checkpoint-resolution-${sequence}`;
 			let parentFrameChanged = false;
-			if (input.parentDelta && parentDeltaHasFrameChanges(input.parentDelta)) {
-				state.goal.parentFrame = this.#applyParentStateDeltaToFrame(state.goal, input.parentDelta, resolutionId);
-				parentFrameChanged = true;
+			if (input.parentDelta) {
+				parentFrameChanged = parentDeltaHasFrameChanges(input.parentDelta);
+				if (parentFrameChanged) {
+					state.goal.parentFrame = this.#applyParentStateDeltaToFrame(state.goal, input.parentDelta, resolutionId);
+				}
+				if (parentDeltaHasDeliverableChanges(input.parentDelta)) {
+					state.goal.deliverableMap = applyDeliverableDeltas(
+						state.goal.deliverableMap,
+						input.parentDelta.deliverableDeltas,
+					);
+				}
 			}
 			let nextTarget: GoalTarget | undefined;
 			let runMode: GoalRunMode = "awaiting-user-input";

@@ -25,14 +25,40 @@ import type {
 	GoalCheckpointEvidenceItem,
 	GoalCompletionVerifierStructuredOutput,
 	GoalContinuationFocus,
+	GoalDeliverableMapItem,
 	GoalVerificationGap,
 } from "./state";
 
 export const GOAL_SIDE_AGENT_TOOLS = ["read", "search", "find", "yield"] as const;
 
+const deliverableMapItemSchema = {
+	properties: {
+		id: { type: "string" },
+		summary: { type: "string" },
+		status: { enum: ["pending", "partial", "satisfied", "blocked", "stale"] },
+	},
+	optionalProperties: {
+		evidenceRefs: {
+			elements: {
+				properties: {
+					id: { type: "string" },
+					kind: { enum: ["doc", "issue", "artifact", "test", "commit", "external-record", "other"] },
+				},
+				optionalProperties: {
+					label: { type: "string" },
+					uri: { type: "string" },
+				},
+			},
+		},
+		blockedBy: { elements: { type: "string" } },
+		nextRelevantTarget: { type: "string" },
+	},
+} as const;
+
 const goalRubricOutputSchema = {
 	properties: {
 		rubric: { type: "string" },
+		deliverableMap: { elements: deliverableMapItemSchema },
 	},
 } as const;
 
@@ -175,6 +201,7 @@ export const goalCheckpointGuidanceAgent = {
 
 export interface GoalRubricOutput {
 	rubric: string;
+	deliverableMap: GoalDeliverableMapItem[];
 }
 
 export interface GoalCompletionVerifierOutput extends GoalCompletionVerifierStructuredOutput {

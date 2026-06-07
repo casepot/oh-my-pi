@@ -37,6 +37,8 @@ Use the `goal` tool as the only mutation API for goal state:
 
 Parent goal and current target are different objects. Finishing a target does not finish the parent goal. Parent-state frame fields (accepted/candidate/rejected claims, gates, boundaries/non-claims, residuals, authority limits, stale conditions, external refs) are the compact truth surface future work inherits.
 
+The compact deliverable map is the main-agent-facing parent deliverable surface. When a target advances mapped deliverables, include their IDs in `parent_deliverable_ids`; when checkpoint resolution changes their status/evidence/blockers/next hint, include `parent_delta.deliverable_deltas`.
+
 If no current target exists and run mode is `working-target`, choose a completion unit with `start_target` before substantial implementation. A target should be a desired future claim with closure standard, expected evidence, non-goals, forbidden claims, stale conditions, and relevant parent-frame refs.
 
 Project/domain target rules override generic splitting. If they define a minimum target unit, the target MUST be that unit. NEVER start targets for internal process phases such as planning, implementation contact, evidence review, record writing, closure, recomposition, or reviewer passes.

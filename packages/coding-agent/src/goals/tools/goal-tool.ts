@@ -36,6 +36,8 @@ import type {
 } from "../state";
 import { normalizeParentFrame } from "../state";
 
+const deliverableStatusSchema = z.enum(["pending", "partial", "satisfied", "blocked", "stale"]);
+
 const refKindSchema = z.enum(["doc", "issue", "artifact", "test", "commit", "external-record", "other"]);
 const refSchema = z
 	.object({
@@ -43,6 +45,16 @@ const refSchema = z
 		kind: refKindSchema,
 		label: z.string().optional(),
 		uri: z.string().optional(),
+	})
+	.strict();
+const deliverableDeltaSchema = z
+	.object({
+		id: z.string(),
+		summary: z.string().optional(),
+		status: deliverableStatusSchema.optional(),
+		evidence_refs: z.array(refSchema).optional(),
+		blocked_by: z.array(z.string()).optional(),
+		next_relevant_target: z.string().optional(),
 	})
 	.strict();
 
@@ -171,6 +183,7 @@ const targetFields = {
 	forbidden_claims: z.array(z.string()).optional(),
 	stale_if: z.array(z.string()).optional(),
 	linked_verifier_blocker_ids: z.array(z.string()).optional(),
+	parent_deliverable_ids: z.array(z.string()).optional(),
 };
 const targetSchema = z.object(targetFields).strict();
 const resolveTargetSchema = z.object(targetFields);
@@ -209,7 +222,8 @@ function isEffectivelyEmptyTarget(value: MaybeTargetParams): boolean {
 		!hasArrayEntries(value.non_goals) &&
 		!hasArrayEntries(value.forbidden_claims) &&
 		!hasArrayEntries(value.stale_if) &&
-		!hasArrayEntries(value.linked_verifier_blocker_ids)
+		!hasArrayEntries(value.linked_verifier_blocker_ids) &&
+		!hasArrayEntries(value.parent_deliverable_ids)
 	);
 }
 
@@ -255,6 +269,7 @@ const parentDeltaSchema = z
 		external_record_refs: z.array(refSchema).optional(),
 		authority_decision_refs: z.array(refSchema).optional(),
 		background_lanes_to_spawn: z.array(backgroundLaneSpawnRequestSchema).optional(),
+		deliverable_deltas: z.array(deliverableDeltaSchema).optional(),
 	})
 	.strict();
 
@@ -441,6 +456,7 @@ function mapTargetInput(params: z.infer<typeof targetSchema>): GoalStartTargetIn
 		forbiddenClaims: params.forbidden_claims,
 		staleIf: params.stale_if,
 		linkedVerifierBlockerIds: params.linked_verifier_blocker_ids,
+		parentDeliverableIds: params.parent_deliverable_ids,
 	};
 }
 
@@ -535,6 +551,14 @@ function mapParentDelta(input: z.infer<typeof parentDeltaSchema> | undefined): G
 			},
 			assignment: lane.assignment,
 			agent: lane.agent,
+		})),
+		deliverableDeltas: input.deliverable_deltas?.map(item => ({
+			id: item.id,
+			summary: item.summary,
+			status: item.status,
+			evidenceRefs: item.evidence_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+			blockedBy: item.blocked_by,
+			nextRelevantTarget: item.next_relevant_target,
 		})),
 	};
 }
@@ -650,6 +674,22 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 	if (response.remainingTokens !== null) text += `\nRemaining tokens: ${response.remainingTokens}`;
 	if (goal.parentFrame)
 		text += `\nParent frame: ${goal.parentFrame.kind} (version ${response.state?.parentFrameVersion ?? 0})`;
+	if (goal.deliverableMap?.length) {
+		const counts = goal.deliverableMap.reduce<Record<string, number>>((acc, item) => {
+			acc[item.status] = (acc[item.status] ?? 0) + 1;
+			return acc;
+		}, {});
+		text += `\nDeliverables: ${goal.deliverableMap.length}`;
+		const summary = ["satisfied", "partial", "blocked", "stale", "pending"]
+			.filter(status => counts[status])
+			.map(status => `${status}:${counts[status]}`)
+			.join(", ");
+		if (summary) text += ` (${summary})`;
+		const relevant = goal.currentTarget?.parentDeliverableIds?.length
+			? goal.currentTarget.parentDeliverableIds
+			: goal.deliverableMap.slice(0, 5).map(item => item.id);
+		if (relevant.length) text += `\nRelevant deliverables: ${relevant.join(", ")}`;
+	}
 	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
 	if (goal.pendingCheckpointId) {
 		text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;

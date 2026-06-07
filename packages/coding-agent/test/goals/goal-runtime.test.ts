@@ -417,7 +417,9 @@ describe("goal runtime", () => {
 		const harness = createHarness();
 
 		const state = await harness.runtime.createGoal({ objective: "Ship <safe> & audited" });
-		const rubricState = await harness.runtime.setGoalRubric(state.goal.id, "4 = excellent <evidence> & coherent");
+		const rubricState = await harness.runtime.setGoalRubric(state.goal.id, "4 = excellent <evidence> & coherent", [
+			{ id: "D1", summary: "Audited safe release.", status: "pending" },
+		]);
 		expect(rubricState?.stateVersion).toBe(state.stateVersion + 1);
 		await harness.runtime.recordFailedCompletionVerification(state.goal.id, "Missing <integration> & proof");
 
@@ -431,15 +433,20 @@ describe("goal runtime", () => {
 		expect(continuationPrompt).not.toContain("4 = excellent &lt;evidence&gt; &amp; coherent");
 		expect(activePrompt).toContain("Missing &lt;integration&gt; &amp; proof");
 		expect(continuationPrompt).toContain("Missing &lt;integration&gt; &amp; proof");
+		expect(activePrompt).toContain("Audited safe release.");
+		expect(continuationPrompt).toContain('"id": "D1"');
 	});
 
 	it("renders compact goal snapshots without duplicating objective or nested checkpoint bodies", async () => {
 		const harness = createHarness();
 		const objective = "Ship compact goal context";
-		await harness.runtime.createGoal({
+		const initialState = await harness.runtime.createGoal({
 			objective,
 			parentFrame: createParentFrame({ desiredFuture: objective }),
 		});
+		await harness.runtime.setGoalRubric(initialState.goal.id, "Verifier-only rubric", [
+			{ id: "D1", summary: "Compact deliverable.", status: "pending", nextRelevantTarget: "Close compact target" },
+		]);
 		await harness.runtime.startTarget({
 			title: "Close compact target",
 			desiredFutureClaim: "Target claim",
@@ -470,6 +477,8 @@ describe("goal runtime", () => {
 		});
 
 		const snapshot = renderGoalStateSnapshot(checkpointState, checkpointState.goal);
+		expect(snapshot).toContain("Compact deliverable.");
+		expect(snapshot).not.toContain("Verifier-only rubric");
 		expect(snapshot).toContain('"desiredFuture": "same_as_objective"');
 		expect(snapshot).not.toContain('"objective"');
 		expect(snapshot).not.toContain("targetSnapshot");
@@ -746,11 +755,18 @@ describe("goal runtime", () => {
 				],
 			}),
 		});
+		const activeState = harness.getState();
+		if (!activeState) throw new Error("expected goal state");
+		await harness.runtime.setGoalRubric(activeState.goal.id, "Verifier-only rubric", [
+			{ id: "D1", summary: "Source-link smoke.", status: "pending" },
+			{ id: "D2", summary: "Tarball smoke.", status: "pending" },
+		]);
 		await harness.runtime.startTarget({
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link install exercises smoke path.",
 			closureStandard: "Smoke output is observed.",
 			gateRefs: ["install-smoke"],
+			parentDeliverableIds: ["D1"],
 		});
 		const candidate = harness.runtime.buildCheckpointCandidate({
 			status: "closed_with_evidence",
@@ -808,6 +824,14 @@ describe("goal runtime", () => {
 				frontierDeltas: [{ id: "tarball-frontier", statement: "Tarball smoke is next." }],
 				staleRefs: [],
 				externalRecordRefs: [{ id: "release-record", kind: "external-record", uri: "release://current" }],
+				deliverableDeltas: [
+					{
+						id: "D1",
+						status: "satisfied",
+						evidenceRefs: [{ id: `checkpoint:${candidate.id}`, kind: "artifact" }],
+						nextRelevantTarget: "Prove tarball smoke",
+					},
+				],
 			},
 			notPropagated: ["Tarball path is verified"],
 			remainingParentWork: ["Tarball install evidence"],
@@ -816,6 +840,7 @@ describe("goal runtime", () => {
 				desiredFutureClaim: "Tarball installs exercise smoke path.",
 				closureStandard: "Tarball smoke output is observed.",
 				forbiddenClaims: ["Release is ready"],
+				parentDeliverableIds: ["D2"],
 			},
 		});
 
@@ -824,8 +849,85 @@ describe("goal runtime", () => {
 		expect(resolved.parentFrameVersion).toBe(committed.parentFrameVersion + 1);
 		expect(resolved.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
 		expect(resolved.goal.parentFrame?.gates[0]?.status).toBe("passed");
+		expect(resolved.goal.deliverableMap?.find(item => item.id === "D1")?.status).toBe("satisfied");
+		expect(resolved.goal.currentTarget?.parentDeliverableIds).toEqual(["D2"]);
 		expect(resolved.goal.currentTarget?.title).toBe("Prove tarball smoke");
 		expect(resolved.goal.currentTarget?.parentFrameVersion).toBe(resolved.parentFrameVersion);
+	});
+
+	it("updates deliverable map without bumping parent frame version when no frame fields change", async () => {
+		const harness = createHarness();
+		const created = await harness.runtime.createGoal({
+			objective: "Improve release reliability",
+			parentFrame: createParentFrame({ desiredFuture: "Release truth is explicit" }),
+		});
+		await harness.runtime.setGoalRubric(created.goal.id, "Verifier-only rubric", [
+			{ id: "D1", summary: "Source-link smoke.", status: "pending" },
+			{ id: "D2", summary: "Tarball smoke.", status: "pending" },
+		]);
+		await harness.runtime.startTarget({
+			title: "Prove source-link smoke",
+			desiredFutureClaim: "Source-link smoke evidence exists.",
+			closureStandard: "Current smoke output is observed.",
+			parentDeliverableIds: ["D1"],
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			localClaims: ["Source-link smoke evidence exists."],
+			evidence: [{ claim: "Source-link smoke evidence exists.", evidence: "Observed smoke output", current: true }],
+			notClaimed: ["Tarball smoke is proven."],
+			remainingQuestions: ["Check tarball path next?"],
+		});
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Closed locally.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+
+		const resolved = await harness.runtime.recordCheckpointResolution({
+			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			decision: "next_target",
+			parentReading: "Only the compact deliverable status changes; parent frame claims remain unchanged.",
+			parentDelta: {
+				admittedClaims: [],
+				candidateClaimsAdded: [],
+				rejectedClaims: [],
+				boundariesAdded: [],
+				residualsAddedOrUpdated: [],
+				gateDeltas: [],
+				frontierDeltas: [],
+				staleRefs: [],
+				externalRecordRefs: [],
+				deliverableDeltas: [
+					{
+						id: "D1",
+						status: "partial",
+						evidenceRefs: [{ id: `checkpoint:${candidate.id}`, kind: "artifact" }],
+						nextRelevantTarget: "Prove tarball smoke",
+					},
+				],
+			},
+			notPropagated: ["Tarball smoke is proven."],
+			remainingParentWork: ["Tarball install evidence"],
+			nextTarget: {
+				title: "Prove tarball smoke",
+				desiredFutureClaim: "Tarball smoke evidence exists.",
+				closureStandard: "Current tarball smoke output is observed.",
+				parentDeliverableIds: ["D2"],
+			},
+		});
+
+		expect(resolved.parentFrameVersion).toBe(committed.parentFrameVersion);
+		expect(resolved.goal.parentFrame?.lastParentDeltaId).toBeUndefined();
+		expect(resolved.goal.deliverableMap?.find(item => item.id === "D1")?.status).toBe("partial");
+		expect(resolved.goal.deliverableMap?.find(item => item.id === "D1")?.evidenceRefs?.[0]?.id).toBe(
+			`checkpoint:${candidate.id}`,
+		);
+		expect(resolved.goal.currentTarget?.parentDeliverableIds).toEqual(["D2"]);
+		expect(resolved.goal.currentTarget?.parentFrameVersion).toBe(committed.parentFrameVersion);
 	});
 
 	it("resolving a checkpoint to user input keeps continuation suppressed", async () => {

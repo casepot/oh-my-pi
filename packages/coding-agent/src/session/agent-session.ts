@@ -212,8 +212,11 @@ import type {
 	GoalCompletionVerificationDetails,
 	GoalCompletionVerifierStructuredOutput,
 	GoalContinuationFocus,
+	GoalDeliverableMapItem,
 	GoalModeState,
 	GoalParentFrame,
+	GoalRef,
+	GoalRefKind,
 	GoalTokenUsage,
 	GoalVerificationDeliverableResult,
 	GoalVerificationEvidenceItem,
@@ -306,6 +309,7 @@ import {
 	GOAL_CHECKPOINT_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_POST_COMPACTION_MESSAGE_TYPE,
+	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
 	type GoalCheckpointResolutionMessageDetails,
@@ -937,11 +941,97 @@ function parseStructuredSideAgentOutput(output: string): unknown {
 
 function parseGoalRubricOutput(value: unknown): GoalRubricOutput | undefined {
 	if (!isStringRecord(value) || typeof value.rubric !== "string") return undefined;
-	return { rubric: value.rubric };
+	return {
+		rubric: value.rubric,
+		deliverableMap: parseGoalDeliverableMap(value.deliverableMap ?? value.deliverable_map),
+	};
 }
 
 function stringArray(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function parseGoalRefKind(value: unknown): GoalRefKind {
+	switch (value) {
+		case "doc":
+		case "issue":
+		case "artifact":
+		case "test":
+		case "commit":
+		case "external-record":
+			return value;
+		default:
+			return "other";
+	}
+}
+
+function parseGoalRef(value: unknown): GoalRef | undefined {
+	if (!isStringRecord(value) || typeof value.id !== "string") return undefined;
+	const ref: GoalRef = {
+		id: value.id,
+		kind: parseGoalRefKind(value.kind),
+	};
+	if (typeof value.label === "string") ref.label = value.label;
+	if (typeof value.uri === "string") ref.uri = value.uri;
+	return ref;
+}
+
+function parseGoalRefs(value: unknown): GoalRef[] {
+	return Array.isArray(value) ? value.flatMap(ref => parseGoalRef(ref) ?? []) : [];
+}
+
+function parseGoalDeliverableStatus(value: unknown): GoalDeliverableMapItem["status"] {
+	switch (value) {
+		case "partial":
+		case "satisfied":
+		case "blocked":
+		case "stale":
+			return value;
+		default:
+			return "pending";
+	}
+}
+
+function parseGoalDeliverableMap(value: unknown): GoalDeliverableMapItem[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap(item => {
+		if (!isStringRecord(item) || typeof item.id !== "string" || typeof item.summary !== "string") return [];
+		const parsed: GoalDeliverableMapItem = {
+			id: item.id,
+			summary: item.summary,
+			status: parseGoalDeliverableStatus(item.status),
+		};
+		const evidenceRefs = parseGoalRefs(item.evidenceRefs ?? item.evidence_refs);
+		if (evidenceRefs.length) parsed.evidenceRefs = evidenceRefs;
+		const blockedBy = stringArray(item.blockedBy ?? item.blocked_by);
+		if (blockedBy.length) parsed.blockedBy = blockedBy;
+		const nextRelevantTarget =
+			typeof item.nextRelevantTarget === "string"
+				? item.nextRelevantTarget
+				: typeof item.next_relevant_target === "string"
+					? item.next_relevant_target
+					: undefined;
+		if (nextRelevantTarget !== undefined) parsed.nextRelevantTarget = nextRelevantTarget;
+		return [parsed];
+	});
+}
+
+function deriveGoalDeliverableMapFromRubric(rubric: string): GoalDeliverableMapItem[] {
+	const items: GoalDeliverableMapItem[] = [];
+	const seen = new Set<string>();
+	for (const rawLine of rubric.split("\n")) {
+		const line = rawLine.trim();
+		const match =
+			/^(?:#{1,6}\s*)?(D\d+)[\s:.)—-]+(.+)$/.exec(line) ?? /^(?:[-*]\s*)?(D\d+)[\s:.)—-]+(.+)$/.exec(line);
+		if (!match) continue;
+		const id = match[1];
+		if (seen.has(id)) continue;
+		const summary = match[2]?.replace(/\s+/g, " ").trim();
+		if (!summary) continue;
+		seen.add(id);
+		items.push({ id, summary, status: "pending" });
+	}
+	return items;
 }
 
 function parseGoalVerificationEvidenceItem(value: unknown): GoalVerificationEvidenceItem | undefined {
@@ -4456,7 +4546,7 @@ export class AgentSession {
 		}
 		const initialGoalId = this.#goalModeState?.goal.id;
 		const initialGoalStatus = this.#goalModeState?.goal.status;
-		const rubric = await this.#generateGoalRubric(objective, signal);
+		const rubricOutput = await this.#generateGoalRubric(objective, signal);
 		const latest = this.#goalModeState;
 		if (latest?.goal.id !== initialGoalId || latest?.goal.status !== initialGoalStatus) {
 			throw new Error("cannot create goal because the active goal changed while generating the rubric");
@@ -4466,7 +4556,11 @@ export class AgentSession {
 			tokenBudget: input.tokenBudget,
 			parentFrame: input.parentFrame,
 		});
-		const rubricState = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
+		const rubricState = await this.#goalRuntime.setGoalRubric(
+			state.goal.id,
+			rubricOutput.rubric,
+			rubricOutput.deliverableMap,
+		);
 		if (rubricState) return rubricState;
 		return state;
 	}
@@ -4483,7 +4577,7 @@ export class AgentSession {
 		}
 		const existingGoalId = existing.goal.id;
 		const existingGoalStatus = existing.goal.status;
-		const rubric = await this.#generateGoalRubric(objective, signal);
+		const rubricOutput = await this.#generateGoalRubric(objective, signal);
 		const latest = this.#goalModeState;
 		if (!latest?.enabled || latest.goal.status !== existingGoalStatus || latest.goal.id !== existingGoalId) {
 			throw new Error("cannot replace goal because the active goal changed while generating the rubric");
@@ -4493,7 +4587,11 @@ export class AgentSession {
 			tokenBudget: input.tokenBudget,
 			parentFrame: input.parentFrame,
 		});
-		const rubricState = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
+		const rubricState = await this.#goalRuntime.setGoalRubric(
+			state.goal.id,
+			rubricOutput.rubric,
+			rubricOutput.deliverableMap,
+		);
 		if (rubricState) return rubricState;
 		return state;
 	}
@@ -5183,7 +5281,7 @@ export class AgentSession {
 		return sections.join("\n\n");
 	}
 
-	async #generateGoalRubric(objective: string, signal?: AbortSignal): Promise<string> {
+	async #generateGoalRubric(objective: string, signal?: AbortSignal): Promise<GoalRubricOutput> {
 		return await this.#withSerializedGoalSideAgent(async () => {
 			const contextFile = await this.#writeGoalTranscriptFile("rubric", "pending");
 			const assignment = renderGoalRubricAssignment({ objective, contextFile });
@@ -5197,7 +5295,10 @@ export class AgentSession {
 			});
 			const rubric = output.rubric.trim();
 			if (!rubric) throw new Error("goal-rubric returned an empty rubric");
-			return rubric;
+			const deliverableMap = output.deliverableMap.length
+				? output.deliverableMap
+				: deriveGoalDeliverableMapFromRubric(rubric);
+			return { rubric, deliverableMap };
 		});
 	}
 
@@ -5367,8 +5468,10 @@ export class AgentSession {
 	): Promise<GoalCompletionVerifierOutput> {
 		return await this.#withSerializedGoalSideAgent(async () => {
 			const state = this.#goalModeState;
-			const contextFile = await this.#writeGoalTranscriptFile("verify", goal.id);
-			const goalStateFile = state ? await this.#writeGoalStateSnapshotFile("verify", state) : undefined;
+			const contextFile = await this.#writeGoalTranscriptFile("verify", goal.id, { includeRubric: true });
+			const goalStateFile = state
+				? await this.#writeGoalStateSnapshotFile("verify", state, { includeRubric: true })
+				: undefined;
 			const assignment = renderGoalCompletionVerifierAssignment({
 				objective: goal.objective,
 				rubric: goal.rubric ?? "",
@@ -5451,19 +5554,35 @@ export class AgentSession {
 		return await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-goal-side-agents-"));
 	}
 
-	async #writeGoalTranscriptFile(kind: string, goalId: string): Promise<string> {
+	async #writeGoalTranscriptFile(
+		kind: string,
+		goalId: string,
+		options: { includeRubric?: boolean } = {},
+	): Promise<string> {
 		const dir = await this.#createGoalSideAgentArtifactsDir();
 		const safeGoalId = goalId.replace(/[^A-Za-z0-9_-]/g, "_");
 		const filePath = path.join(dir, `${Date.now()}-${safeGoalId}-${kind}-transcript.txt`);
-		await Bun.write(filePath, this.formatSessionAsText());
+		await Bun.write(
+			filePath,
+			this.formatSessionAsText({
+				includeContextExcludedMessages: options.includeRubric === true,
+				omitCustomTypes: options.includeRubric ? undefined : [GOAL_RUBRIC_MESSAGE_TYPE],
+			}),
+		);
 		return filePath;
 	}
 
-	async #writeGoalStateSnapshotFile(kind: string, state: GoalModeState): Promise<string> {
+	async #writeGoalStateSnapshotFile(
+		kind: string,
+		state: GoalModeState,
+		options: { includeRubric?: boolean } = {},
+	): Promise<string> {
 		const dir = await this.#createGoalSideAgentArtifactsDir();
 		const safeGoalId = state.goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
 		const filePath = path.join(dir, `${Date.now()}-${safeGoalId}-${kind}-goal-state.json`);
-		await Bun.write(filePath, `${JSON.stringify(serializeGoalModeState(state), null, 2)}\n`);
+		const serialized = serializeGoalModeState(state);
+		if (!options.includeRubric) serialized.goal.rubric = undefined;
+		await Bun.write(filePath, `${JSON.stringify(serialized, null, 2)}\n`);
 		return filePath;
 	}
 
@@ -11300,13 +11419,17 @@ export class AgentSession {
 	 * Format the entire session as plain text for clipboard export.
 	 * Includes user messages, assistant text, thinking blocks, tool calls, and tool results.
 	 */
-	formatSessionAsText(): string {
+	formatSessionAsText(
+		options: { includeContextExcludedMessages?: boolean; omitCustomTypes?: readonly string[] } = {},
+	): string {
 		return formatSessionDumpText({
 			messages: this.messages,
 			systemPrompt: this.agent.state.systemPrompt,
 			model: this.agent.state.model,
 			thinkingLevel: this.#thinkingLevel,
 			tools: this.agent.state.tools,
+			includeContextExcludedMessages: options.includeContextExcludedMessages,
+			omitCustomTypes: options.omitCustomTypes,
 		});
 	}
 

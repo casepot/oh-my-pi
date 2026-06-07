@@ -29,6 +29,8 @@ export interface FormatSessionDumpTextOptions {
 	model?: Model | null;
 	thinkingLevel?: ThinkingLevel | string | null;
 	tools?: readonly SessionDumpToolInfo[];
+	includeContextExcludedMessages?: boolean;
+	omitCustomTypes?: readonly string[];
 }
 
 function stripTypeBoxFields(obj: unknown): unknown {
@@ -163,6 +165,13 @@ export function formatSessionDumpText(options: FormatSessionDumpTextOptions): st
 			}
 		} else if (msg.role === "custom" || msg.role === "hookMessage") {
 			const customMsg = msg as CustomMessage | HookMessage;
+			if (
+				msg.role === "custom" &&
+				((options.includeContextExcludedMessages === false && msg.includeInContext === false) ||
+					options.omitCustomTypes?.includes(msg.customType))
+			) {
+				continue;
+			}
 			lines.push(`## ${customMsg.customType}\n`);
 			if (typeof customMsg.content === "string") {
 				lines.push(customMsg.content);

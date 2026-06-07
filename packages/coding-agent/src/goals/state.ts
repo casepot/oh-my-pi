@@ -16,6 +16,7 @@ export type GoalRunMode =
 	| "awaiting-background-lane-intake"
 	| "awaiting-user-input";
 export const GOAL_MODE_SCHEMA_VERSION = 2;
+export type GoalDeliverableStatus = "pending" | "partial" | "satisfied" | "blocked" | "stale";
 
 export interface GoalVerificationEvidenceItem {
 	claim: string;
@@ -77,6 +78,24 @@ export interface GoalRef {
 	kind: GoalRefKind;
 	label?: string;
 	uri?: string;
+}
+
+export interface GoalDeliverableMapItem {
+	id: string;
+	summary: string;
+	status: GoalDeliverableStatus;
+	evidenceRefs?: GoalRef[];
+	blockedBy?: string[];
+	nextRelevantTarget?: string;
+}
+
+export interface GoalDeliverableDelta {
+	id: string;
+	summary?: string;
+	status?: GoalDeliverableStatus;
+	evidenceRefs?: GoalRef[];
+	blockedBy?: string[];
+	nextRelevantTarget?: string;
 }
 
 export type GoalClaimStatus = "accepted" | "candidate" | "rejected" | "stale";
@@ -179,6 +198,7 @@ export interface GoalParentFrame {
 
 export interface GoalTarget {
 	id: string;
+	parentDeliverableIds?: string[];
 	sequence: number;
 	status: "active" | "closed" | "superseded";
 	title: string;
@@ -276,6 +296,7 @@ export interface GoalParentStateDelta {
 	externalRecordRefs: GoalRef[];
 	authorityDecisionRefs?: GoalRef[];
 	backgroundLanesToSpawn?: BackgroundLaneSpawnRequest[];
+	deliverableDeltas?: GoalDeliverableDelta[];
 }
 
 export interface GoalCheckpointResolution {
@@ -314,6 +335,7 @@ export interface Goal {
 	createdAt: number;
 	updatedAt: number;
 	rubric?: string;
+	deliverableMap?: GoalDeliverableMapItem[];
 	workEpoch?: number;
 	totalVerificationAttempts?: number;
 	verificationAttempts?: GoalVerificationAttempt[];
@@ -505,6 +527,18 @@ function normalizeRunMode(value: unknown): GoalRunMode {
 	}
 }
 
+function normalizeDeliverableStatus(value: unknown): GoalDeliverableStatus {
+	switch (value) {
+		case "partial":
+		case "satisfied":
+		case "blocked":
+		case "stale":
+			return value;
+		default:
+			return "pending";
+	}
+}
+
 function normalizeLifecycle(value: unknown): GoalModeLifecycle {
 	return value === "exiting" ? "exiting" : "active";
 }
@@ -524,6 +558,28 @@ function normalizeRef(value: unknown): GoalRef | undefined {
 
 function normalizeRefs(value: unknown): GoalRef[] {
 	return Array.isArray(value) ? value.flatMap(ref => normalizeRef(ref) ?? []) : [];
+}
+
+function normalizeDeliverableMapItem(value: unknown): GoalDeliverableMapItem | undefined {
+	if (!isRecord(value) || typeof value.id !== "string" || typeof value.summary !== "string") return undefined;
+	const item: GoalDeliverableMapItem = {
+		id: value.id,
+		summary: value.summary,
+		status: normalizeDeliverableStatus(value.status),
+	};
+	const evidenceRefs = normalizeRefs(value.evidenceRefs ?? value.evidence_refs);
+	if (evidenceRefs.length > 0) item.evidenceRefs = evidenceRefs;
+	const blockedBy = stringArray(value.blockedBy ?? value.blocked_by);
+	if (blockedBy.length > 0) item.blockedBy = blockedBy;
+	const nextRelevantTarget = optionalString(value.nextRelevantTarget ?? value.next_relevant_target);
+	if (nextRelevantTarget !== undefined) item.nextRelevantTarget = nextRelevantTarget;
+	return item;
+}
+
+function normalizeDeliverableMap(value: unknown): GoalDeliverableMapItem[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const items = value.flatMap(item => normalizeDeliverableMapItem(item) ?? []);
+	return items.length > 0 ? items : undefined;
 }
 
 function normalizeClaim(value: unknown, fallbackStatus: GoalClaimStatus): GoalClaim | undefined {
@@ -676,6 +732,14 @@ function cloneRefs(value: GoalRef[] | undefined): GoalRef[] {
 	return value?.map(ref => ({ ...ref })) ?? [];
 }
 
+function cloneDeliverableMap(value: GoalDeliverableMapItem[] | undefined): GoalDeliverableMapItem[] | undefined {
+	return value?.map(item => ({
+		...item,
+		evidenceRefs: item.evidenceRefs ? cloneRefs(item.evidenceRefs) : undefined,
+		blockedBy: item.blockedBy ? [...item.blockedBy] : undefined,
+	}));
+}
+
 function cloneClaims(value: GoalClaim[] | undefined): GoalClaim[] {
 	return (
 		value?.map(claim => ({
@@ -780,6 +844,7 @@ export function cloneTarget(target: GoalTarget | undefined): GoalTarget | undefi
 		forbiddenClaims: [...target.forbiddenClaims],
 		staleIf: [...target.staleIf],
 		linkedVerifierBlockerIds: target.linkedVerifierBlockerIds ? [...target.linkedVerifierBlockerIds] : undefined,
+		parentDeliverableIds: target.parentDeliverableIds ? [...target.parentDeliverableIds] : undefined,
 	};
 }
 
@@ -839,6 +904,11 @@ function cloneParentDelta(delta: GoalParentStateDelta | undefined): GoalParentSt
 					agent: request.agent,
 				}))
 			: undefined,
+		deliverableDeltas: delta.deliverableDeltas?.map(item => ({
+			...item,
+			evidenceRefs: item.evidenceRefs ? cloneRefs(item.evidenceRefs) : undefined,
+			blockedBy: item.blockedBy ? [...item.blockedBy] : undefined,
+		})),
 	};
 }
 
@@ -876,6 +946,7 @@ export function cloneGoal(goal: Goal): Goal {
 			...attempt,
 			structuredFeedback: cloneStructuredFeedback(attempt.structuredFeedback),
 		})),
+		deliverableMap: cloneDeliverableMap(goal.deliverableMap),
 		parentFrame: cloneParentFrame(goal.parentFrame),
 		currentTarget: cloneTarget(goal.currentTarget),
 		targets: goal.targets
@@ -938,6 +1009,7 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 		createdAt: value.createdAt,
 		updatedAt: value.updatedAt,
 		rubric: optionalString(value.rubric),
+		deliverableMap: normalizeDeliverableMap(value.deliverableMap ?? value.deliverable_map),
 		workEpoch: optionalNumber(value.workEpoch),
 		totalVerificationAttempts: optionalNumber(value.totalVerificationAttempts),
 		verificationAttempts: normalizeVerificationAttempts(value.verificationAttempts),

@@ -27,10 +27,11 @@ Orient toward implementation quality. Every recommendation SHOULD point to one o
 `continuationMessage` is the hidden prompt the main agent will read. Make it a compact staff-engineer handoff in this order:
 1. `Action now`: exact `resolve_checkpoint` JSON.
 2. `Bounded truth`: accepted/narrowed/rejected/not-claimed.
-3. `Next target`: one desired-future claim following project/domain target-unit rules.
-4. `Code/evidence orientation`: first seams to inspect; refs to trust; stale-if anchors to reopen.
-5. `Review posture`: lens and blocker definition for the next increment.
-6. `Workstyle feedback`: what worked, next improvement, watchout.
+3. `Deliverables`: compact IDs plus changed status/evidence/blockers/next-target hints; no full rubric text.
+4. `Next target`: one desired-future claim following project/domain target-unit rules.
+5. `Code/evidence orientation`: first seams to inspect; refs to trust; stale-if anchors to reopen.
+6. `Review posture`: lens and blocker definition for the next increment.
+7. `Workstyle feedback`: what worked, next improvement, watchout.
 
 It MUST say:
 - parent goal remains active;
@@ -39,6 +40,7 @@ It MUST say:
 - parent changes require `resolve_checkpoint.parent_delta`;
 - prose guidance does not mutate parent frame;
 - domain records should be referenced, not copied;
+- use compact deliverable-map IDs/statuses, not full rubric text;
 - target-unit rules govern the next target;
 - targets are desired-future claims, not phase/checklist items;
 - prefer `decision:"next_target"` while parent work remains;
