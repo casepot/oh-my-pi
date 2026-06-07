@@ -5,6 +5,7 @@ import {
 	type GoalRuntimeHost,
 	goalTokenDelta,
 	renderGoalPrompt,
+	renderGoalStateSnapshot,
 	renderTrustedObjective,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type {
@@ -430,6 +431,50 @@ describe("goal runtime", () => {
 		expect(continuationPrompt).not.toContain("4 = excellent &lt;evidence&gt; &amp; coherent");
 		expect(activePrompt).toContain("Missing &lt;integration&gt; &amp; proof");
 		expect(continuationPrompt).toContain("Missing &lt;integration&gt; &amp; proof");
+	});
+
+	it("renders compact goal snapshots without duplicating objective or nested checkpoint bodies", async () => {
+		const harness = createHarness();
+		const objective = "Ship compact goal context";
+		await harness.runtime.createGoal({
+			objective,
+			parentFrame: createParentFrame({ desiredFuture: objective }),
+		});
+		await harness.runtime.startTarget({
+			title: "Close compact target",
+			desiredFutureClaim: "Target claim",
+			closureStandard: "Evidence and review close the target",
+			evidenceExpectation: ["Focused evidence"],
+			forbiddenClaims: ["Parent complete"],
+			staleIf: ["API changes"],
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Target closed",
+			localClaims: ["Target claim"],
+			evidence: [{ claim: "Target claim", evidence: "focused test", current: true }],
+			checksRun: ["bun test focused"],
+			artifactsTouched: ["src/example.ts"],
+			notClaimed: ["Parent complete"],
+			remainingQuestions: ["Next target"],
+			risksOrCaveats: ["Bounded claim only"],
+			staleIf: ["API changes"],
+			suggestedControllerQuestions: [],
+		});
+		const checkpointState = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Compact checkpoint review accepted.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 10,
+		});
+
+		const snapshot = renderGoalStateSnapshot(checkpointState, checkpointState.goal);
+		expect(snapshot).toContain('"desiredFuture": "same_as_objective"');
+		expect(snapshot).not.toContain('"objective"');
+		expect(snapshot).not.toContain("targetSnapshot");
+		expect(snapshot).not.toContain(objective);
+		expect(snapshot.length).toBeLessThan(6_000);
 	});
 
 	it("records side-agent usage against the active goal budget", async () => {

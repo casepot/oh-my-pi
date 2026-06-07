@@ -22,7 +22,7 @@
 - Changed goal-mode rubrics to stay verifier-private in main-agent prompts and persisted context while keeping explicit UI display and verifier access.
 
 - Changed goal checkpoint guidance and target aperture prompts to preserve project-defined target units and reject internal phase checkpoints.
-
+- Changed goal-mode checkpoint and compaction continuations to use compact state snapshots and action-first handoff guidance instead of replaying full serialized goal state.
 
 - Changed RPC long-running commands to ACK accepted operations and report completion/cancel/failure through correlated terminal operation frames while keeping legacy response fields.
 - Changed default capability discovery to a lean OMP profile: project-level provider configs remain discoverable, but user/home capability sources stay off unless `discovery.enableUserSources` is enabled.
@@ -36,6 +36,7 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed goal-mode compaction preserve-data merging so current live goal state wins over stale preserved state from earlier compactions.
 
 - Fixed goal-mode todo reminders so pending checkpoint/controller states do not auto-continue into blocked ordinary `todo` calls.
 

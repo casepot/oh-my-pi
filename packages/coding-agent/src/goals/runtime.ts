@@ -165,7 +165,7 @@ export interface GoalContinuationPacket {
 	currentTargetStillOpen: boolean;
 	allowedNextActs: string[];
 	disallowedNextActs: string[];
-	continuationGuidance: string;
+	continuationGuidanceSummary: string;
 	nonClaims: string[];
 	parentBoundaries: string[];
 	parentResiduals: string[];
@@ -249,6 +249,186 @@ function latestResolution(goal: Goal): GoalCheckpointResolution | undefined {
 	return goal.checkpointResolutions?.at(-1);
 }
 
+function compactRefIds(refs: GoalRef[] | undefined): string[] {
+	return refs?.map(ref => ref.id) ?? [];
+}
+
+function compactVerificationGaps(blockers: GoalVerificationGap[]): Record<string, unknown>[] {
+	return blockers.map(blocker => ({
+		id: blocker.id,
+		deliverableId: blocker.deliverableId,
+		severity: blocker.severity,
+		problem: blocker.problem,
+		requiredEvidenceOrFix: blocker.requiredEvidenceOrFix,
+	}));
+}
+
+function compactTarget(target: GoalTarget | undefined): Record<string, unknown> | undefined {
+	if (!target) return undefined;
+	return {
+		id: target.id,
+		sequence: target.sequence,
+		status: target.status,
+		title: target.title,
+		desiredFutureClaim: target.desiredFutureClaim,
+		closureStandard: target.closureStandard,
+		expectedParentContribution: target.expectedParentContribution,
+		baselineRefs: compactRefIds(target.baselineRefs),
+		gateRefs: target.gateRefs,
+		evidenceExpectation: target.evidenceExpectation,
+		nonGoals: target.nonGoals,
+		forbiddenClaims: target.forbiddenClaims,
+		staleIf: target.staleIf,
+		createdBy: target.createdBy,
+		createdFromCheckpointId: target.createdFromCheckpointId,
+		createdFromVerificationAttemptId: target.createdFromVerificationAttemptId,
+		linkedVerifierBlockerIds: target.linkedVerifierBlockerIds,
+	};
+}
+
+function compactParentFrame(
+	frame: GoalParentFrame | undefined,
+	objective: string,
+): Record<string, unknown> | undefined {
+	if (!frame) return undefined;
+	return {
+		kind: frame.kind,
+		desiredFuture: frame.desiredFuture === objective ? "same_as_objective" : frame.desiredFuture,
+		currentTruth: frame.currentTruth,
+		authority: frame.authority,
+		baselineRefs: compactRefIds(frame.baselineRefs),
+		acceptedClaims: frame.acceptedClaims.map(claim => ({
+			id: claim.id,
+			claim: claim.claim,
+			scope: claim.scope,
+			evidenceRefs: compactRefIds(claim.evidenceRefs),
+			nonImplications: claim.nonImplications,
+		})),
+		candidateClaimIds: frame.candidateClaims.map(claim => claim.id),
+		rejectedOrStaleClaimIds: frame.rejectedOrStaleClaims.map(claim => claim.id),
+		boundaries: frame.boundaries.map(boundary => ({
+			id: boundary.id,
+			kind: boundary.kind,
+			statement: boundary.statement,
+			refs: compactRefIds(boundary.refs),
+		})),
+		residuals: frame.residuals.map(residual => ({
+			id: residual.id,
+			classification: residual.classification,
+			statement: residual.statement,
+			targetHorizon: residual.targetHorizon,
+			refs: compactRefIds(residual.refs),
+		})),
+		gates: frame.gates.map(gate => ({
+			id: gate.id,
+			name: gate.name,
+			status: gate.status,
+			evidenceRefs: compactRefIds(gate.evidenceRefs),
+			staleIf: gate.staleIf,
+		})),
+		frontier: frame.frontier.map(item => ({
+			id: item.id,
+			statement: item.statement,
+			activationTrigger: item.activationTrigger,
+			refs: compactRefIds(item.refs),
+		})),
+		staleIf: frame.staleIf,
+		externalRefs: compactRefIds(frame.externalRefs),
+		lastParentDeltaId: frame.lastParentDeltaId,
+	};
+}
+
+function compactCheckpoint(checkpoint: GoalCheckpointPacket | undefined): Record<string, unknown> | undefined {
+	if (!checkpoint) return undefined;
+	return {
+		id: checkpoint.id,
+		sequence: checkpoint.sequence,
+		targetId: checkpoint.targetId,
+		parentFrameVersion: checkpoint.parentFrameVersion,
+		summary: checkpoint.summary,
+		localClaims: checkpoint.localClaims,
+		evidence: checkpoint.evidence.map(item => ({
+			claim: item.claim,
+			evidence: item.evidence,
+			current: item.current,
+		})),
+		checksRun: checkpoint.checksRun,
+		artifactsTouched: checkpoint.artifactsTouched,
+		notClaimed: checkpoint.notClaimed,
+		remainingQuestions: checkpoint.remainingQuestions,
+		risksOrCaveats: checkpoint.risksOrCaveats,
+		staleIf: checkpoint.staleIf,
+		review: checkpoint.review
+			? {
+					status: checkpoint.review.status,
+					blockers: compactVerificationGaps(checkpoint.review.blockers),
+					evidenceChecked: checkpoint.review.evidenceChecked.map(item => ({
+						claim: item.claim,
+						current: item.current,
+					})),
+					feedback: checkpoint.review.status === "rejected" ? checkpoint.review.feedback : undefined,
+				}
+			: undefined,
+	};
+}
+
+function compactParentDelta(delta: GoalParentStateDelta | undefined): Record<string, unknown> | undefined {
+	if (!delta) return undefined;
+	return {
+		admittedClaimIds: delta.admittedClaims.map(claim => claim.id),
+		candidateClaimIds: delta.candidateClaimsAdded.map(claim => claim.id),
+		rejectedClaimIds: delta.rejectedClaims.map(claim => claim.id),
+		boundaryIds: delta.boundariesAdded.map(boundary => boundary.id),
+		residualIds: delta.residualsAddedOrUpdated.map(residual => residual.id),
+		gateDeltas: delta.gateDeltas.map(gate => ({ id: gate.gateId, status: gate.status })),
+		frontierIds: delta.frontierDeltas.map(item => item.id),
+		staleRefs: compactRefIds(delta.staleRefs),
+		externalRecordRefs: compactRefIds(delta.externalRecordRefs),
+		authorityDecisionRefs: compactRefIds(delta.authorityDecisionRefs),
+		backgroundLaneCount: delta.backgroundLanesToSpawn?.length ?? 0,
+	};
+}
+
+function compactResolution(resolution: GoalCheckpointResolution | undefined): Record<string, unknown> | undefined {
+	if (!resolution) return undefined;
+	return {
+		id: resolution.id,
+		sequence: resolution.sequence,
+		checkpointId: resolution.checkpointId,
+		decision: resolution.decision,
+		parentReading: resolution.parentReading,
+		parentDelta: compactParentDelta(resolution.parentDelta),
+		notPropagated: resolution.notPropagated,
+		remainingParentWork: resolution.remainingParentWork,
+		broaderChecksOrInputs: resolution.broaderChecksOrInputs,
+		lessonsForFuture: resolution.lessonsForFuture,
+		nextTarget: compactTarget(resolution.nextTarget),
+	};
+}
+
+function compactGoalVerificationRepair(
+	repair: GoalVerificationRepairState | undefined,
+): Record<string, unknown> | undefined {
+	if (!repair) return undefined;
+	return {
+		verificationAttemptId: repair.verificationAttemptId,
+		feedback: repair.feedback,
+		blockers: compactVerificationGaps(repair.blockers),
+		evidenceToCollect: repair.evidenceToCollect,
+		avoidRepeating: repair.avoidRepeating,
+	};
+}
+
+function guidanceSummary(guidance: string): string {
+	const firstLines = guidance
+		.split("\n")
+		.map(line => line.trim())
+		.filter(Boolean)
+		.slice(0, 6)
+		.join(" ");
+	return firstLines.length > 800 ? `${firstLines.slice(0, 800)}…` : firstLines;
+}
+
 export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: Goal): string {
 	const snapshot = {
 		stateVersion: state?.stateVersion ?? 0,
@@ -256,16 +436,26 @@ export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: 
 		runMode: state?.runMode ?? "working-target",
 		parentGoal: {
 			id: goal.id,
-			objective: goal.objective,
 			status: goal.status,
 		},
-		parentFrame: goal.parentFrame,
-		currentTarget: goal.currentTarget,
-		pendingCheckpoint: latestCheckpoint(goal),
-		latestCheckpointResolution: latestResolution(goal),
-		lastCheckpointRejection: goal.lastCheckpointRejection,
-		verificationRepair: goal.verificationRepair,
-		backgroundLanes: goal.backgroundLanes,
+		parentFrame: compactParentFrame(goal.parentFrame, goal.objective),
+		currentTarget: compactTarget(goal.currentTarget),
+		pendingCheckpoint: compactCheckpoint(latestCheckpoint(goal)),
+		latestCheckpointResolution: compactResolution(latestResolution(goal)),
+		lastCheckpointRejection: goal.lastCheckpointRejection
+			? {
+					candidateSummary: goal.lastCheckpointRejection.candidateSummary,
+					feedback: goal.lastCheckpointRejection.review.feedback,
+					blockers: compactVerificationGaps(goal.lastCheckpointRejection.review.blockers),
+				}
+			: undefined,
+		verificationRepair: compactGoalVerificationRepair(goal.verificationRepair),
+		backgroundLanes: goal.backgroundLanes?.map(lane => ({
+			id: lane.id,
+			status: lane.status,
+			question: lane.contract.question,
+			requiredBeforeParent: lane.contract.requiredBeforeParent,
+		})),
 	};
 	return escapeJsonForPrompt(snapshot);
 }
@@ -294,7 +484,7 @@ export function buildGoalContinuationPacket(
 		currentTargetStillOpen: goal.currentTarget?.status === "active",
 		allowedNextActs: allowedActsForRunMode(state.runMode),
 		disallowedNextActs: disallowedActsForRunMode(state.runMode),
-		continuationGuidance,
+		continuationGuidanceSummary: guidanceSummary(continuationGuidance),
 		nonClaims: [
 			...(checkpoint?.notClaimed ?? []),
 			...(goal.currentTarget?.forbiddenClaims ?? []),

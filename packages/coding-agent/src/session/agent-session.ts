@@ -233,6 +233,7 @@ import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import backgroundLaneIntakeTemplate from "../prompts/background-lanes/lane-intake.md" with { type: "text" };
+import goalCheckpointControllerPrompt from "../prompts/goals/goal-checkpoint-controller.md" with { type: "text" };
 import goalCompactionContextTemplate from "../prompts/goals/goal-compaction-context.md" with { type: "text" };
 import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
 import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
@@ -5254,7 +5255,7 @@ export class AgentSession {
 				signal,
 			});
 		});
-		const basePrompt = renderGoalPrompt("continuation", state.goal, state);
+		const basePrompt = prompt.render(goalCheckpointControllerPrompt);
 		const packet = buildGoalContinuationPacket(
 			state,
 			"target-checkpoint",
@@ -8715,14 +8716,12 @@ export class AgentSession {
 	}
 
 	#renderGoalPostCompactionPrompt(state: GoalModeState, continuationPacket: GoalContinuationPacket): string {
-		const serializedState = serializeGoalModeState(state);
 		return prompt.render(goalPostCompactionContinuationTemplate, {
 			objective: escapeXmlText(state.goal.objective),
 			runMode: state.runMode,
 			stateVersion: String(state.stateVersion),
 			parentFrameVersion: String(state.parentFrameVersion),
 			goalStateSnapshot: renderGoalStateSnapshot(state, state.goal),
-			serializedState: escapeXmlText(JSON.stringify(serializedState, null, 2)),
 			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
 		});
 	}
@@ -8773,7 +8772,6 @@ export class AgentSession {
 			transition: continuationPacket.transition,
 			reason: continuationPacket.reason,
 			stateSnapshot: renderGoalStateSnapshot(state, state.goal),
-			serializedState: escapeXmlText(JSON.stringify(serializedState, null, 2)),
 			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
 		});
 		return {
@@ -8834,7 +8832,8 @@ export class AgentSession {
 		}
 
 		if (hookCompaction) {
-			preserveData ??= hookCompaction.preserveData;
+			const mergedPreserveData = { ...(hookCompaction.preserveData ?? {}), ...(preserveData ?? {}) };
+			preserveData = Object.keys(mergedPreserveData).length > 0 ? mergedPreserveData : undefined;
 			return {
 				kind: "fromHook",
 				summary: hookCompaction.summary,
@@ -9154,7 +9153,7 @@ export class AgentSession {
 				firstKeptEntryId = compactResult.firstKeptEntryId;
 				tokensBefore = compactResult.tokensBefore;
 				details = compactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(compactResult.preserveData ?? {}) };
+				preserveData = { ...(compactResult.preserveData ?? {}), ...(compactionPrep.preserveData ?? {}) };
 			}
 
 			if (autoCompactionSignal.aborted) {

@@ -6,9 +6,6 @@ The following goal-mode state is authoritative. It is not evidence that a target
 
 {{stateSnapshot}}
 
-<serialized_goal_mode_state>
-{{serializedState}}
-</serialized_goal_mode_state>
 
 <goal_continuation_packet>
 {{continuationPacket}}
