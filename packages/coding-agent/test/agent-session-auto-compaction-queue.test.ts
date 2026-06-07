@@ -416,4 +416,68 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 		await session.waitForIdle();
 	});
+
+	it("suppresses todo reminders while goal checkpoint resolution blocks ordinary tools", async () => {
+		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+		await session.goalRuntime.createGoal({ objective: "Improve release reliability" });
+		await session.goalRuntime.startTarget({
+			title: "Close one installer smoke target",
+			desiredFutureClaim: "Installer smoke has bounded current evidence.",
+			closureStandard: "Current smoke output is recorded.",
+		});
+		const candidate = session.goalRuntime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Installer smoke target closed.",
+			localClaims: ["Installer smoke has bounded current evidence"],
+			evidence: [
+				{ claim: "Installer smoke has bounded current evidence", evidence: "Observed smoke output", current: true },
+			],
+			notClaimed: ["Parent goal is complete"],
+			remainingQuestions: ["Which target follows?"],
+		});
+		await session.goalRuntime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Checkpoint accepted.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: Date.now(),
+		});
+		session.setTodoPhases([
+			{
+				name: "Evidence closeout",
+				tasks: [{ content: "Checkpoint current target", status: "in_progress" }],
+			},
+		]);
+		const reminders: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "todo_reminder") reminders.push(event.type);
+		});
+
+		const assistantMsg = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Run mode is now awaiting-checkpoint-resolution." }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+		await session.waitForIdle();
+
+		expect(session.getGoalModeState()?.runMode).toBe("awaiting-checkpoint-resolution");
+		expect(reminders).toHaveLength(0);
+		expect(getRuntimeSignals().some(signal => signal.startsWith("todo:"))).toBe(false);
+		expect(continueSpy).not.toHaveBeenCalled();
+	});
 });
