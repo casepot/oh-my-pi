@@ -21,6 +21,8 @@ export interface CustomMessage<T = unknown> {
 	content: string | (TextContent | ImageContent)[];
 	display: boolean;
 	details?: T;
+	/** false keeps UI/session artifacts out of LLM context. */
+	includeInContext?: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	timestamp: number;
@@ -116,6 +118,7 @@ export function createCustomMessage(
 	details: unknown | undefined,
 	timestamp: string,
 	attribution?: MessageAttribution,
+	includeInContext = true,
 ): CustomMessage {
 	return {
 		role: "custom",
@@ -124,6 +127,7 @@ export function createCustomMessage(
 		display,
 		details,
 		attribution,
+		includeInContext,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -151,6 +155,7 @@ export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 				switch (message.role) {
 					case "custom":
 					case "hookMessage": {
+						if (message.role === "custom" && message.includeInContext === false) return undefined;
 						const content =
 							typeof message.content === "string"
 								? [{ type: "text" as const, text: message.content }]

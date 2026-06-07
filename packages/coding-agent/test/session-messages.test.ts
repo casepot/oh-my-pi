@@ -34,6 +34,22 @@ describe("convertToLlm custom message mapping", () => {
 		expect(inferCopilotInitiator(converted)).toBe("agent");
 	});
 
+	it("omits custom messages that opt out of LLM context", () => {
+		const messages: AgentMessage[] = [
+			{
+				role: "custom",
+				customType: "goal-rubric",
+				content: "Verifier-only rubric",
+				display: true,
+				includeInContext: false,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+		];
+
+		expect(convertToLlm(messages)).toHaveLength(0);
+	});
+
 	it("preserves missing attribution for legacy custom messages", () => {
 		const messages: AgentMessage[] = [
 			{

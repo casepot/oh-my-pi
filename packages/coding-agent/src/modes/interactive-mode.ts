@@ -2115,6 +2115,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			message.display,
 			message.details,
 			message.attribution ?? "agent",
+			message.includeInContext ?? true,
 		);
 	}
 
@@ -2216,6 +2217,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				rubric,
 				generatedAt: Date.now(),
 			},
+			includeInContext: false,
 			attribution: "agent",
 			timestamp: Date.now(),
 		};

@@ -25,7 +25,6 @@ import {
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
 	type GoalCheckpointResolutionMessageDetails,
-	type GoalRubricMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -430,7 +429,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(await toolNamesFor(harness)).not.toContain("goal");
 	});
 
-	it("generates a rubric through a read-only side agent before goal work starts", async () => {
+	it("generates a verifier-only rubric before goal work starts", async () => {
 		const showStatus = vi.spyOn(harness.mode, "showStatus");
 
 		await harness.mode.handleGoalModeCommand("Ship the release");
@@ -453,10 +452,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const artifact = harness.session.sessionManager
 			.getEntries()
 			.find(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
-		if (artifact?.type !== "custom_message") throw new Error("expected rubric artifact");
-		expect(JSON.stringify(artifact.content)).toContain("Strict test rubric");
-		expect((artifact.details as GoalRubricMessageDetails).objective).toBe("Ship the release");
-		expect((artifact.details as GoalRubricMessageDetails).rubric).toContain("Strict test rubric");
+		expect(artifact).toBeUndefined();
 		const renderedChat = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
 		expect(renderedChat).toContain("[goal-rubric]");
 		expect(renderedChat).toContain("ctrl+o to expand");
@@ -477,17 +473,15 @@ describe("InteractiveMode goal mode integration", () => {
 			.filter(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE).length;
 
 		await harness.mode.handleGoalModeCommand("set Replace the objective");
+		const state = harness.session.getGoalModeState();
 
 		expect(showStatus).toHaveBeenCalledWith("Generating goal rubric…");
 		expect(showStatus).toHaveBeenCalledWith("Goal rubric generated.");
 		const rubricEntries = harness.session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
-		expect(rubricEntries.length).toBe(beforeRubricCount + 1);
-		const latestRubricEntry = rubricEntries[rubricEntries.length - 1];
-		if (latestRubricEntry?.type !== "custom_message") throw new Error("expected replacement rubric artifact");
-		expect((latestRubricEntry.details as GoalRubricMessageDetails).objective).toBe("Replace the objective");
-		expect((latestRubricEntry.details as GoalRubricMessageDetails).rubric).toContain("Strict test rubric");
+		expect(rubricEntries.length).toBe(beforeRubricCount);
+		expect(state?.goal.rubric).toContain("Strict test rubric");
 		const renderedChat = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
 		expect(renderedChat).toContain("[goal-rubric]");
 		expect(showStatus.mock.calls.map(call => String(call[0])).join("\n")).not.toContain("Strict test rubric");
@@ -664,7 +658,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const feedbackEntries = entries.filter(
 			entry => entry.type === "custom_message" && entry.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 		);
-		expect(rubricEntries.length).toBeGreaterThan(0);
+		expect(rubricEntries.length).toBe(0);
 		expect(feedbackEntries.length).toBeGreaterThan(0);
 		const latestFeedbackEntry = feedbackEntries[feedbackEntries.length - 1];
 		if (latestFeedbackEntry?.type !== "custom_message") throw new Error("expected verification feedback artifact");
@@ -706,9 +700,14 @@ describe("InteractiveMode goal mode integration", () => {
 		const afterSubcommandEntries = harness.session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "custom_message");
-		expect(afterSubcommandEntries.length).toBe(beforeSubcommandCount);
+		expect(afterSubcommandEntries.length).toBe(beforeSubcommandCount + 1);
 		const addedSubcommandEntries = afterSubcommandEntries.slice(beforeSubcommandCount);
-		expect(addedSubcommandEntries).toEqual([]);
+		const rubricEntry = addedSubcommandEntries.find(
+			entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE,
+		);
+		expect(rubricEntry).toBeDefined();
+		if (rubricEntry?.type !== "custom_message") throw new Error("expected rubric artifact");
+		expect(rubricEntry.includeInContext).toBe(false);
 		const renderedAfterSubcommands = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
 		expect(renderedAfterSubcommands).toContain("[goal-rubric]");
 		expect(renderedAfterSubcommands).toContain("[goal-verification-feedback]");

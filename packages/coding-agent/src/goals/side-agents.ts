@@ -229,7 +229,6 @@ export function renderGoalCompletionVerifierAssignment(input: {
 
 export function renderGoalContinuationCompactorAssignment(input: {
 	objective: string;
-	rubric: string;
 	contextFile: string;
 	goalStateFile?: string;
 	goalStateSnapshot?: string;

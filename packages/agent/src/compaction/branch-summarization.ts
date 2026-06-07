@@ -170,6 +170,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 				entry.details,
 				entry.timestamp,
 				entry.attribution,
+				entry.includeInContext ?? true,
 			);
 
 		case "branch_summary":

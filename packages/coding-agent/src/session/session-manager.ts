@@ -192,8 +192,8 @@ export interface ModeChangeEntry extends SessionEntryBase {
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
  *
- * Unlike CustomEntry, this DOES participate in LLM context.
- * The content participates in LLM context through convertToLlm().
+ * Unlike CustomEntry, this participates in LLM context by default.
+ * Set includeInContext=false for UI/session artifacts that should not steer the model.
  * Use details for extension-specific metadata (not sent to LLM).
  *
  * display controls TUI rendering:
@@ -206,6 +206,7 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	content: string | (TextContent | ImageContent)[];
 	details?: T;
 	display: boolean;
+	includeInContext?: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 }
@@ -684,6 +685,7 @@ export function buildSessionContext(
 					entry.details,
 					entry.timestamp,
 					entry.attribution,
+					entry.includeInContext ?? true,
 				),
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
@@ -2998,6 +3000,7 @@ export class SessionManager {
 		display: boolean,
 		details?: T,
 		attribution: MessageAttribution = "agent",
+		includeInContext = true,
 	): string {
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -3009,6 +3012,7 @@ export class SessionManager {
 			// chokepoint covers every CustomMessage write path.
 			details: stripInternalDetailsFields(details),
 			attribution,
+			includeInContext,
 			id: generateId(this.#byId),
 			parentId: this.#leafId,
 			timestamp: new Date().toISOString(),

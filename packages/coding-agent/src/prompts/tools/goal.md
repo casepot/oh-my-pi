@@ -24,12 +24,13 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 </operations>
 
 <target-aperture>
-Targets are decomposition units, not miniature parent goals.
-- If the parent rubric has multiple deliverables, subsystems, or verification classes, `start_target` should cover one coherent deliverable cluster.
+Targets are completion units, not process phases or miniature parent goals.
+- Project/domain target rules override generic splitting. If they define a minimum target unit, `start_target` MUST use that unit.
+- NEVER start targets for internal process phases such as planning, implementation contact, evidence review, record writing, closure, recomposition, or reviewer passes.
 - A target is too broad when its `closure_standard` would satisfy nearly all parent completion criteria.
 - Include `non_goals` and `forbidden_claims` that prevent target closure from laundering parent completion.
-- If the parent objective is already one atomic deliverable, one target may cover it; otherwise split by evidence boundary or subsystem.
-- At checkpoint resolution, prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. Use `parent_completion_candidate` only when remaining work is genuinely parent verification, not unresolved implementation or evidence collection.
+- Absent project-specific target rules, split by evidence boundary, subsystem, or deliverable; if the parent objective is already one atomic deliverable, one target may cover it.
+- At checkpoint resolution, prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. Use `parent_completion_candidate` only when remaining work is genuinely parent verification, not unresolved implementation, evidence collection, review convergence, or domain closeout.
 </target-aperture>
 
 <checkpoint-resolution>
@@ -56,7 +57,7 @@ Invalid uses:
 - NEVER call `checkpoint` for fatigue, low budget, partial work, or arbitrary phase boundaries. Checkpoint only when the current target is actually closed with evidence.
 - NEVER treat `checkpoint` or `resolve_checkpoint` as parent completion.
 - NEVER call `complete` while a checkpoint is pending. Resolve it first; if the resolution is `parent_completion_candidate`, immediately call `complete`.
-- NEVER start a target whose closure standard is effectively the whole parent completion rubric unless the parent goal is already one atomic deliverable.
+- NEVER start a target that violates project/domain target-unit rules or whose closure standard is effectively the whole parent completion standard unless the parent goal is already one atomic deliverable.
 - NEVER mutate parent frame through prose. Use `resolve_checkpoint.parent_delta`.
 - NEVER include `next_target` unless `decision` is exactly `next_target`.
 - NEVER retry `complete` after verifier rejection until the blockers have fresh repair evidence or a blocker-scoped target links to `linked_verifier_blocker_ids`.

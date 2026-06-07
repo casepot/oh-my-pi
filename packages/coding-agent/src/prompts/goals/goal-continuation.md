@@ -6,12 +6,6 @@ Continue according to the active goal run mode.
 {{objective}}
 </objective>
 
-{{#if rubric}}
-<completion_rubric>
-{{rubric}}
-</completion_rubric>
-The rubric is a verification aid; the objective remains the parent goal source of truth.
-{{/if}}
 
 <goal_mode_state>
 Run mode: {{runMode}}
@@ -37,15 +31,15 @@ Budget:
 
 Run-mode policy:
 
-- `working-target`: continue local work on the current target. If no target exists, call `goal({op:"start_target", …})` before substantial implementation. If the parent rubric has multiple deliverables, subsystems, or verification classes, the target must cover one coherent cluster rather than the whole parent rubric. If the target is stable under its closure standard, call `goal({op:"checkpoint", …})` with evidence and stop ordinary local work. Do not choose a new target merely because context was compacted.
-- `awaiting-checkpoint-resolution`: do not continue implementation. Act as a fresh controller turn. Read checkpoint guidance and call `goal({op:"resolve_checkpoint", …})` before any local work resumes. Prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. Use `parent_completion_candidate` only when remaining work is genuinely parent verification. Parent-state changes must be recorded in `resolve_checkpoint.parent_delta`; narrative guidance is not accepted parent truth. For `parent_completion_candidate`, omit `next_target`; for `next_target`, include `next_target`.
+- `working-target`: continue local work on the current target. If no target exists, call `goal({op:"start_target", …})` before substantial implementation. Project/domain target rules override generic splitting; if they define a minimum target unit, the target MUST be that unit. NEVER start targets for internal process phases such as planning, implementation contact, evidence review, record writing, closure, recomposition, or reviewer passes. Absent project-specific target rules, choose the smallest independently verifiable desired-future claim that makes parent-goal progress. If the target is stable under its full domain closure standard, call `goal({op:"checkpoint", …})` with evidence and stop ordinary local work. Do not choose a new target merely because context was compacted.
+- `awaiting-checkpoint-resolution`: do not continue implementation. Act as a fresh controller turn. Read checkpoint guidance and call `goal({op:"resolve_checkpoint", …})` before any local work resumes. Prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. The next target MUST honor project/domain target-unit rules. Use `parent_completion_candidate` only when remaining work is genuinely parent verification. Parent-state changes must be recorded in `resolve_checkpoint.parent_delta`; narrative guidance is not accepted parent truth. For `parent_completion_candidate`, omit `next_target`; for `next_target`, include `next_target`.
 - `awaiting-parent-completion`: checkpoint resolution selected `parent_completion_candidate`. Do not continue implementation, start a target, or checkpoint. Call `goal({op:"complete"})` now; if the verifier rejects, goal mode will enter verifier repair.
 - `awaiting-verification-repair`: the parent completion verifier rejected the claim. Repair or gather current evidence for the listed blockers. If no current target is explicitly linked to those blockers, call `goal({op:"start_target", …})` with current `linked_verifier_blocker_ids` for a focused repair/evidence target. Do not retry `complete` until the blockers have fresh repair/evidence. Do not choose unrelated work.
 - `awaiting-user-input`: do not auto-continue ordinary work. Wait for user input, broader checks, or external authority, then resolve or resume through the goal tool.
 
 If `pendingCheckpointId` exists, ordinary implementation remains blocked until `resolve_checkpoint` records the controller decision. A checkpoint is not parent completion and cannot mutate the parent frame through prose.
 
-Target aperture rule: a target is too broad when satisfying its closure standard would satisfy nearly all parent completion criteria. Split broad targets by evidence boundary, subsystem, or deliverable unless the parent goal is already one atomic deliverable.
+Target aperture rule: a target is too broad when satisfying its closure standard would satisfy nearly all parent completion criteria. Split broad targets by evidence boundary, subsystem, or deliverable unless project/domain instructions define a larger minimum target unit or the parent goal is already one atomic deliverable.
 
 Before calling `goal({op:"complete"})`, perform a parent-completion audit against current repo state:
 

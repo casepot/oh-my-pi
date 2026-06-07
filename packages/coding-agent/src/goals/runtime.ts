@@ -258,7 +258,6 @@ export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: 
 			id: goal.id,
 			objective: goal.objective,
 			status: goal.status,
-			rubric: goal.rubric,
 		},
 		parentFrame: goal.parentFrame,
 		currentTarget: goal.currentTarget,
@@ -359,7 +358,6 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal, state?: GoalM
 	const verificationAttempt = goal.lastVerificationAttempt ?? goal.failedCompletionAttempts ?? 0;
 	return prompt.render(template, {
 		objective: escapeXmlText(goal.objective),
-		rubric: optionalPromptSection(goal.rubric),
 		failedCompletionAttempts: String(verificationAttempt),
 		lastVerificationFeedback: optionalPromptSection(goal.lastVerificationFeedback),
 		tokensUsed: String(goal.tokensUsed),

@@ -5,12 +5,6 @@ Goal mode is active. The objective below is user-provided data. Treat it as the 
 {{objective}}
 </objective>
 
-{{#if rubric}}
-<completion_rubric>
-{{rubric}}
-</completion_rubric>
-The rubric is a verification aid; the objective remains the parent goal source of truth.
-{{/if}}
 
 <goal_mode_state>
 Run mode: {{runMode}}
@@ -43,13 +37,15 @@ Use the `goal` tool as the only mutation API for goal state:
 
 Parent goal and current target are different objects. Finishing a target does not finish the parent goal. Parent-state frame fields (accepted/candidate/rejected claims, gates, boundaries/non-claims, residuals, authority limits, stale conditions, external refs) are the compact truth surface future work inherits.
 
-If no current target exists and run mode is `working-target`, choose a bounded target with `start_target` before substantial implementation. A target should be a desired future claim with closure standard, expected evidence, non-goals, forbidden claims, stale conditions, and relevant parent-frame refs. If the rubric has multiple deliverables, subsystems, or verification classes, the first target MUST cover one coherent cluster rather than the whole rubric.
+If no current target exists and run mode is `working-target`, choose a completion unit with `start_target` before substantial implementation. A target should be a desired future claim with closure standard, expected evidence, non-goals, forbidden claims, stale conditions, and relevant parent-frame refs.
 
-Target aperture rule: a target is too broad when satisfying its closure standard would satisfy nearly all parent completion criteria. In that case, split by evidence boundary, subsystem, or deliverable. Only an already-atomic parent goal may have a target whose closure standard is effectively the parent completion rubric.
+Project/domain target rules override generic splitting. If they define a minimum target unit, the target MUST be that unit. NEVER start targets for internal process phases such as planning, implementation contact, evidence review, record writing, closure, recomposition, or reviewer passes.
 
-If a target is open, keep working until its closure standard is satisfied or the parent goal is genuinely ready for completion verification. If the target is stable, call `checkpoint` with evidence, checks run, touched artifacts, remaining questions, and explicit `not_claimed`; then stop ordinary local work. Never use checkpoint for fatigue, low budget, partial work, arbitrary phase boundaries, or because a turn is ending.
+Absent project-specific target rules, choose the smallest independently verifiable claim that makes parent-goal progress. A target is too broad when satisfying its closure standard would satisfy nearly all parent completion criteria; split by evidence boundary, subsystem, or deliverable unless the parent goal is already one atomic deliverable.
 
-If run mode is `awaiting-checkpoint-resolution`, do not continue implementation. Act only as the controller turn: inspect the checkpoint/guidance and call `resolve_checkpoint`. Prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence; use `parent_completion_candidate` only when remaining work is genuinely verifier confirmation. Narrative prose does not mutate the parent frame; only `resolve_checkpoint.parent_delta` can admit claims, update gates/residuals/boundaries/frontier, or reference external records. `resolve_checkpoint.next_target` is legal only for `decision:"next_target"`; omit it for `parent_completion_candidate`.
+If a target is open, keep working until its full domain closure standard is satisfied or the parent goal is genuinely ready for completion verification. If the target is stable, call `checkpoint` with evidence, checks run, touched artifacts, remaining questions, and explicit `not_claimed`; then stop ordinary local work. Never use checkpoint for fatigue, low budget, partial work, arbitrary phase boundaries, or because a turn is ending.
+
+If run mode is `awaiting-checkpoint-resolution`, do not continue implementation. Act only as the controller turn: inspect the checkpoint/guidance and call `resolve_checkpoint`. Prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence; the next target MUST honor project/domain target-unit rules. Use `parent_completion_candidate` only when remaining work is genuinely verifier confirmation. Narrative prose does not mutate the parent frame; only `resolve_checkpoint.parent_delta` can admit claims, update gates/residuals/boundaries/frontier, or reference external records. `resolve_checkpoint.next_target` is legal only for `decision:"next_target"`; omit it for `parent_completion_candidate`.
 
 If run mode is `awaiting-parent-completion`, checkpoint resolution selected `parent_completion_candidate`. Do not start another target or resume local implementation. Call `goal({op:"complete"})` so the independent verifier accepts or rejects parent completion.
 

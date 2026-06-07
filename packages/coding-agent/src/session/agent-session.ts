@@ -305,11 +305,9 @@ import {
 	GOAL_CHECKPOINT_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_POST_COMPACTION_MESSAGE_TYPE,
-	GOAL_RUBRIC_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
 	type GoalCheckpointResolutionMessageDetails,
-	type GoalRubricMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 	type PythonExecutionMessage,
 	readPendingDisplayTag,
@@ -4468,10 +4466,7 @@ export class AgentSession {
 			parentFrame: input.parentFrame,
 		});
 		const rubricState = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
-		if (rubricState) {
-			await this.#publishGoalRubricArtifact(rubricState.goal, rubric);
-			return rubricState;
-		}
+		if (rubricState) return rubricState;
 		return state;
 	}
 
@@ -4498,10 +4493,7 @@ export class AgentSession {
 			parentFrame: input.parentFrame,
 		});
 		const rubricState = await this.#goalRuntime.setGoalRubric(state.goal.id, rubric);
-		if (rubricState) {
-			await this.#publishGoalRubricArtifact(rubricState.goal, rubric);
-			return rubricState;
-		}
+		if (rubricState) return rubricState;
 		return state;
 	}
 
@@ -4893,22 +4885,6 @@ export class AgentSession {
 		return (await this.prepareGoalContinuationDispatch(signal))?.prompt;
 	}
 
-	async #publishGoalRubricArtifact(goal: Goal, rubric: string): Promise<void> {
-		const details: GoalRubricMessageDetails = {
-			goalId: goal.id,
-			objective: goal.objective,
-			rubric,
-			generatedAt: Date.now(),
-		};
-		await this.#sendGoalArtifactMessage<GoalRubricMessageDetails>({
-			customType: GOAL_RUBRIC_MESSAGE_TYPE,
-			content: rubric,
-			display: true,
-			details,
-			attribution: "agent",
-		});
-	}
-
 	async #publishGoalVerificationFeedbackArtifact(input: {
 		goal: Goal;
 		attempt: number;
@@ -5117,7 +5093,10 @@ export class AgentSession {
 		return sections.join("\n");
 	}
 	#appendGoalArtifactMessage(
-		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<
+			CustomMessage<unknown>,
+			"customType" | "content" | "display" | "details" | "attribution" | "includeInContext"
+		>,
 	): void {
 		this.sessionManager.appendCustomMessageEntry(
 			message.customType,
@@ -5125,6 +5104,7 @@ export class AgentSession {
 			message.display,
 			message.details,
 			message.attribution ?? "agent",
+			message.includeInContext ?? true,
 		);
 	}
 
@@ -5419,7 +5399,6 @@ export class AgentSession {
 			const goalStateFile = state ? await this.#writeGoalStateSnapshotFile("continue", state) : undefined;
 			const assignment = renderGoalContinuationCompactorAssignment({
 				objective: goal.objective,
-				rubric: goal.rubric ?? "",
 				contextFile,
 				goalStateFile,
 				goalStateSnapshot: state ? renderGoalStateSnapshot(state, state.goal) : undefined,
@@ -6398,7 +6377,10 @@ export class AgentSession {
 	 * - Not streaming + no trigger: appends to state/session, no turn
 	 */
 	async sendCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<
+			CustomMessage<T>,
+			"customType" | "content" | "display" | "details" | "attribution" | "includeInContext"
+		>,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void> {
 		const appMessage: CustomMessage<T> = {
@@ -6408,6 +6390,7 @@ export class AgentSession {
 			display: message.display,
 			details: message.details,
 			attribution: message.attribution ?? "agent",
+			includeInContext: message.includeInContext,
 			timestamp: Date.now(),
 		};
 		if (this.isStreaming) {
@@ -6440,6 +6423,7 @@ export class AgentSession {
 				message.display,
 				message.details,
 				message.attribution ?? "agent",
+				message.includeInContext ?? true,
 			);
 			return;
 		}
@@ -6460,6 +6444,7 @@ export class AgentSession {
 			message.display,
 			message.details,
 			message.attribution ?? "agent",
+			message.includeInContext ?? true,
 		);
 	}
 
@@ -8225,6 +8210,21 @@ export class AgentSession {
 		const lastServedLabel = this.#toolChoiceQueue.consumeLastServedLabel();
 		if (lastServedLabel === "user-force") {
 			return;
+		}
+
+		const goalState = this.#goalModeState;
+		if (goalState?.enabled === true && goalState.goal.status === "active") {
+			switch (goalState.runMode) {
+				case "awaiting-checkpoint-resolution":
+				case "awaiting-parent-completion":
+				case "awaiting-background-lane-intake":
+				case "awaiting-user-input":
+					this.#todoReminderCount = 0;
+					logger.debug("Todo completion: skipped because goal mode blocks todo continuation", {
+						runMode: goalState.runMode,
+					});
+					return;
+			}
 		}
 
 		const remindersEnabled = this.settings.get("todo.reminders");

@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Changed
+- Changed custom session/compaction messages to support `includeInContext: false` for UI artifacts that should not enter LLM context.
+
 
 - Changed branch summaries to accept the same explicit thinking-level override used by compaction and handoff summarizers.
 ## [15.9.5] - 2026-06-05

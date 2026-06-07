@@ -412,7 +412,7 @@ describe("goal runtime", () => {
 		expect(state?.runMode).toBe("completed");
 	});
 
-	it("stores verifier metadata in rendered goal prompts", async () => {
+	it("keeps rubric private while rendering verifier feedback in goal prompts", async () => {
 		const harness = createHarness();
 
 		const state = await harness.runtime.createGoal({ objective: "Ship <safe> & audited" });
@@ -426,7 +426,8 @@ describe("goal runtime", () => {
 		const continuationPrompt = renderGoalPrompt("continuation", goal);
 
 		expect(goal.failedCompletionAttempts).toBe(1);
-		expect(activePrompt).toContain("4 = excellent &lt;evidence&gt; &amp; coherent");
+		expect(activePrompt).not.toContain("4 = excellent &lt;evidence&gt; &amp; coherent");
+		expect(continuationPrompt).not.toContain("4 = excellent &lt;evidence&gt; &amp; coherent");
 		expect(activePrompt).toContain("Missing &lt;integration&gt; &amp; proof");
 		expect(continuationPrompt).toContain("Missing &lt;integration&gt; &amp; proof");
 	});

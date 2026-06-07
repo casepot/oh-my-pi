@@ -18,15 +18,17 @@ Review the proposed goal checkpoint for local target closure.
 
 Use read/search/find only. NEVER modify files. NEVER run tests/checks/linters/formatters/project-wide commands.
 
-Evaluate only whether the current target is closed under its closure standard. Do not decide parent completion and do not choose the next target.
+Evaluate whether the current target is a valid target unit and is closed under its closure standard. Do not decide parent completion and do not choose the next target.
 
 Check:
 - target claim and closure standard are clear;
+- target respects project/domain target-unit rules when they exist;
+- checkpoint is not closing an internal process phase: planning, implementation contact, evidence review, record writing, closure, recomposition, or reviewer pass;
 - target baseline/gate refs match the parent frame assumptions;
 - evidence supports the local target claim and is current enough under target/parent stale rules;
 - `not_claimed` and forbidden claims prevent parent-goal, CI, external-check, and authority overclaim;
 - remaining questions are explicit;
-- checkpoint is not being used for fatigue, budget, phase boundary, or partial work.
+- checkpoint is not being used for fatigue, budget, arbitrary phase boundary, or partial work.
 
 Return structured output:
 - `status`: `accepted` or `rejected`.
