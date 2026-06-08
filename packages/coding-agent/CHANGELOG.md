@@ -36,6 +36,11 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed inline provider-call context maintenance so tool-result continuations compact and rematerialize before the next request, fail closed with a persisted maintenance error when unsafe maintenance fails, avoid inline handoff/auto-continue, and reset Codex/OpenAI replay state after history rewrites.
+- Fixed provider-call and pre-prompt context maintenance estimates to use materialized provider context with a bounded same-model usage floor, ignoring aborted/error, old-model, and pre-compaction usage.
+- Fixed compaction commits so manual, auto, and inline maintenance discard stale branch summaries, avoid duplicate branch-window compactions, and route `session_compact` hooks by the appended entry id.
+- Fixed auto-compaction scheduling so concurrent checks coalesce around active work, idle maintenance cannot abort recovery, recovery can supersede idle work, and inline provider-call maintenance keeps continuation scheduling disabled.
+- Fixed remote compaction cancellation handling with a configurable timeout so caller aborts stop maintenance, while timeout and live remote failures fall back locally with structured diagnostics.
 - Fixed goal-mode compaction preserve-data merging so current live goal state wins over stale preserved state from earlier compactions.
 - Fixed goal side-agent transcript artifacts so UI-only/no-context rubric artifacts are omitted from non-verifier checkpoint and continuation agents.
 

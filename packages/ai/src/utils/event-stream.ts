@@ -5,6 +5,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	queue: T[] = [];
 	waiting: Array<{ resolve: (value: IteratorResult<T>) => void; reject: (err: unknown) => void }> = [];
 	done = false;
+	pushedCount = 0;
 	#failed = false;
 	#error: unknown = undefined;
 	finalResultPromise: Promise<R>;
@@ -33,6 +34,8 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			this.resolveFinalResult(this.extractResult(event));
 		}
 
+		this.pushedCount += 1;
+
 		// Deliver to waiting consumer or queue it
 		const waiter = this.waiting.shift();
 		if (waiter) {
@@ -43,6 +46,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	}
 
 	deliver(event: T): void {
+		this.pushedCount += 1;
 		const waiter = this.waiting.shift();
 		if (waiter) {
 			waiter.resolve({ value: event, done: false });

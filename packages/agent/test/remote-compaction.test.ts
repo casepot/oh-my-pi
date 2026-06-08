@@ -1,7 +1,16 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	CompactionCancelledError,
+	type CompactionPreparation,
+	compact,
+	createFileOps,
+	DEFAULT_COMPACTION_SETTINGS,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import { buildOpenAiNativeHistory, requestOpenAiRemoteCompaction } from "@oh-my-pi/pi-agent-core/compaction/openai";
+import * as ai from "@oh-my-pi/pi-ai";
 import type { AssistantMessage, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
-import { hookFetch } from "@oh-my-pi/pi-utils";
+import { hookFetch, logger } from "@oh-my-pi/pi-utils";
 
 function makeOpenAiModel(overrides: Partial<Model<"openai-responses">> = {}): Model<"openai-responses"> {
 	return {
@@ -10,7 +19,7 @@ function makeOpenAiModel(overrides: Partial<Model<"openai-responses">> = {}): Mo
 		api: "openai-responses",
 		provider: "openai",
 		baseUrl: "https://api.openai.com/v1",
-		reasoning: true,
+		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 400000,
@@ -18,6 +27,78 @@ function makeOpenAiModel(overrides: Partial<Model<"openai-responses">> = {}): Mo
 		...overrides,
 	};
 }
+
+function makeAnthropicModel(overrides: Partial<Model<"anthropic-messages">> = {}): Model<"anthropic-messages"> {
+	return {
+		id: "claude-test",
+		name: "Claude Test",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200000,
+		maxTokens: 8192,
+		...overrides,
+	};
+}
+
+function makeUserMessage(text: string): AgentMessage {
+	return { role: "user", content: text, timestamp: Date.now() };
+}
+
+function makeAssistantStop(text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		timestamp: Date.now(),
+		provider: "openai",
+		model: "gpt-5",
+		api: "openai-responses",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+	};
+}
+
+function makePreparation(overrides: Partial<CompactionPreparation> = {}): CompactionPreparation {
+	const settings = {
+		...DEFAULT_COMPACTION_SETTINGS,
+		remoteEnabled: true,
+		remoteTimeoutMs: 5,
+		...(overrides.settings ?? {}),
+	};
+	return {
+		firstKeptEntryId: "kept-1",
+		messagesToSummarize: [makeUserMessage("history msg"), makeAssistantStop("history reply")],
+		turnPrefixMessages: [],
+		recentMessages: [makeUserMessage("recent msg")],
+		isSplitTurn: false,
+		tokensBefore: 12_345,
+		fileOps: createFileOps(),
+		...overrides,
+		settings,
+	};
+}
+
+function mockLocalSummaries() {
+	return vi.spyOn(ai, "completeSimple").mockResolvedValue(makeAssistantStop("local summary"));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("buildOpenAiNativeHistory custom tool calls", () => {
 	test("serializes customWireName tool calls as custom_tool_call + custom_tool_call_output", () => {
@@ -158,6 +239,131 @@ describe("requestOpenAiRemoteCompaction abort", () => {
 
 		queueMicrotask(() => controller.abort());
 
-		await expect(promise).rejects.toThrow();
+		const error = await promise.catch(err => err);
+		expect(error).toBeInstanceOf(CompactionCancelledError);
+	});
+});
+
+describe("compact remote fallback classification", () => {
+	test("does not fall back to local summarization when caller aborts remote compaction", async () => {
+		const controller = new AbortController();
+		const completeSpy = mockLocalSummaries();
+		using _hook = hookFetch((_input, init) => {
+			const signal = init?.signal as AbortSignal | undefined;
+			const { promise, reject } = Promise.withResolvers<Response>();
+			signal?.addEventListener(
+				"abort",
+				() => reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError")),
+				{ once: true },
+			);
+			queueMicrotask(() => controller.abort());
+			return promise;
+		});
+
+		const error = await compact(makePreparation(), makeOpenAiModel(), "test-key", undefined, controller.signal).catch(
+			err => err,
+		);
+
+		expect(error).toBeInstanceOf(CompactionCancelledError);
+		expect(completeSpy).not.toHaveBeenCalled();
+	});
+
+	test("falls back locally when remote compaction times out while caller is live", async () => {
+		const completeSpy = mockLocalSummaries();
+		let sawTimeoutAbort = false;
+		using _hook = hookFetch((_input, init) => {
+			const signal = init?.signal as AbortSignal | undefined;
+			const { promise, reject } = Promise.withResolvers<Response>();
+			signal?.addEventListener(
+				"abort",
+				() => {
+					sawTimeoutAbort = true;
+					reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
+				},
+				{ once: true },
+			);
+			return promise;
+		});
+
+		const result = await compact(makePreparation(), makeOpenAiModel(), "test-key");
+
+		expect(sawTimeoutAbort).toBe(true);
+		expect(result.summary).toContain("local summary");
+		expect(completeSpy).toHaveBeenCalled();
+	});
+
+	test("falls back locally and logs structured fields for non-OK remote responses", async () => {
+		const completeSpy = mockLocalSummaries();
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using _hook = hookFetch(() => new Response("remote broke", { status: 500, statusText: "Server Error" }));
+
+		const result = await compact(makePreparation(), makeOpenAiModel(), "test-key");
+
+		expect(result.summary).toContain("local summary");
+		expect(completeSpy).toHaveBeenCalled();
+		const fields = warnSpy.mock.calls.map(call => call[1]).find(isRecord);
+		expect(fields?.status).toBe(500);
+		expect(fields?.statusText).toBe("Server Error");
+		expect(fields?.callerSignalAborted).toBe(false);
+		expect(fields?.timedOut).toBe(false);
+		expect(String(fields?.endpoint)).toContain("/responses/compact");
+		expect(fields?.model).toBe("gpt-5");
+		expect(fields?.provider).toBe("openai");
+	});
+
+	test("threads remote timeout through custom endpoint short-summary fallback", async () => {
+		const completeSpy = mockLocalSummaries();
+		let fetchCalls = 0;
+		let timeoutAborts = 0;
+		using _hook = hookFetch((_input, init) => {
+			fetchCalls++;
+			const signal = init?.signal as AbortSignal | undefined;
+			const { promise, reject } = Promise.withResolvers<Response>();
+			signal?.addEventListener(
+				"abort",
+				() => {
+					timeoutAborts++;
+					reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
+				},
+				{ once: true },
+			);
+			return promise;
+		});
+
+		const result = await compact(
+			makePreparation({
+				settings: {
+					...DEFAULT_COMPACTION_SETTINGS,
+					remoteEnabled: true,
+					remoteEndpoint: "https://compact.example.test/summarize",
+					remoteTimeoutMs: 5,
+				},
+			}),
+			makeAnthropicModel(),
+			"test-key",
+		);
+
+		expect(result.summary).toContain("local summary");
+		expect(result.shortSummary).toContain("local summary");
+		expect(fetchCalls).toBe(2);
+		expect(timeoutAborts).toBe(2);
+		expect(completeSpy).toHaveBeenCalledTimes(2);
+	});
+
+	test("falls back locally and logs output types for malformed remote responses", async () => {
+		const completeSpy = mockLocalSummaries();
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		using _hook = hookFetch(() => Response.json({ output: [{ type: "message", role: "assistant" }] }));
+
+		const result = await compact(makePreparation(), makeOpenAiModel(), "test-key");
+
+		expect(result.summary).toContain("local summary");
+		expect(completeSpy).toHaveBeenCalled();
+		const fields = warnSpy.mock.calls
+			.map(call => call[1])
+			.filter(isRecord)
+			.find(candidate => candidate.kind === "malformed");
+		expect(fields?.outputTypes).toEqual(["message"]);
+		expect(String(fields?.endpoint)).toContain("/responses/compact");
 	});
 });

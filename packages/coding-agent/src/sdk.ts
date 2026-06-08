@@ -2040,6 +2040,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			onResponse,
 			sessionId: providerSessionId,
 			transformContext,
+			syncContextBeforeModelCall: (context, signal) => {
+				if (!hasSession) return;
+				return session.syncContextBeforeModelCall(context, signal);
+			},
+			preflightProviderContext: input => {
+				if (!hasSession) return { action: "continue" };
+				return session.preflightProviderContext(input);
+			},
 			steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 			followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 			interruptMode: settings.get("interruptMode") ?? "immediate",

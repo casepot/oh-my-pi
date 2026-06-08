@@ -8,6 +8,7 @@ import {
 	type CursorExecHandlers,
 	type CursorToolResultHandler,
 	type Effort,
+	type EventStream,
 	getBundledModel,
 	type ImageContent,
 	type Message,
@@ -24,16 +25,17 @@ import {
 import { agentLoop, agentLoopContinue } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import type { HarmonyAuditEvent } from "./harmony-leak";
-import type {
-	AgentContext,
-	AgentEvent,
-	AgentLoopConfig,
-	AgentMessage,
-	AgentState,
-	AgentTool,
-	AgentToolContext,
-	StreamFn,
-	ToolCallContext,
+import {
+	type AgentContext,
+	type AgentEvent,
+	type AgentLoopConfig,
+	type AgentMessage,
+	type AgentState,
+	type AgentTool,
+	type AgentToolContext,
+	ContextMaintenanceError,
+	type StreamFn,
+	type ToolCallContext,
 } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
 
@@ -90,6 +92,18 @@ export interface AgentOptions {
 	 * Use for context pruning, injecting external context, etc.
 	 */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+
+	/**
+	 * Refreshes or rewrites agent-domain context immediately before each provider call.
+	 * Runs after the Agent has consumed already-pushed events and settled listener
+	 * promises for those events.
+	 */
+	syncContextBeforeModelCall?: AgentLoopConfig["syncContextBeforeModelCall"];
+
+	/**
+	 * Preflights the materialized provider request immediately before the stream function.
+	 */
+	preflightProviderContext?: AgentLoopConfig["preflightProviderContext"];
 
 	/**
 	 * Steering mode: "all" = send all steering messages at once, "one-at-a-time" = one per turn
@@ -272,10 +286,12 @@ export class Agent {
 		error: undefined,
 	};
 
-	#listeners = new Set<(e: AgentEvent) => void>();
+	#listeners = new Set<(e: AgentEvent) => unknown>();
 	#abortController?: AbortController;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	#syncContextBeforeModelCall?: AgentLoopConfig["syncContextBeforeModelCall"];
+	#preflightProviderContext?: AgentLoopConfig["preflightProviderContext"];
 	#steeringQueue: AgentMessage[] = [];
 	#followUpQueue: AgentMessage[] = [];
 	#steeringMode: "all" | "one-at-a-time";
@@ -315,6 +331,10 @@ export class Agent {
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
 
+	#processedStreamEventOrdinal = 0;
+	#processedStreamEventWaiters = new Set<() => void>();
+	#listenerTasksByStreamOrdinal = new Map<number, Set<Promise<void>>>();
+
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
 
@@ -338,6 +358,8 @@ export class Agent {
 			this.#state.pendingToolCalls = new Set(opts.initialState.pendingToolCalls);
 		this.#convertToLlm = opts.convertToLlm || defaultConvertToLlm;
 		this.#transformContext = opts.transformContext;
+		this.#syncContextBeforeModelCall = opts.syncContextBeforeModelCall;
+		this.#preflightProviderContext = opts.preflightProviderContext;
 		this.#steeringMode = opts.steeringMode || "one-at-a-time";
 		this.#followUpMode = opts.followUpMode || "one-at-a-time";
 		this.#interruptMode = opts.interruptMode || "immediate";
@@ -584,7 +606,7 @@ export class Agent {
 		this.#appendOnlyContext = manager;
 	}
 
-	subscribe(fn: (e: AgentEvent) => void): () => void {
+	subscribe(fn: (e: AgentEvent) => unknown): () => void {
 		this.#listeners.add(fn);
 		return () => this.#listeners.delete(fn);
 	}
@@ -888,6 +910,7 @@ export class Agent {
 
 		// Clear Cursor tool result buffer at start of each run
 		this.#cursorToolResultBuffer = [];
+		this.#resetStreamAcknowledgements();
 
 		const reasoning = this.#state.thinkingLevel;
 
@@ -922,6 +945,8 @@ export class Agent {
 		const getToolChoice = () =>
 			this.#getToolChoice?.() ?? refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
 
+		let activeStream: EventStream<AgentEvent, AgentMessage[]> | undefined;
+
 		const config: AgentLoopConfig = {
 			model,
 			reasoning,
@@ -950,13 +975,16 @@ export class Agent {
 			onSseEvent: this.#onSseEvent,
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
-			syncContextBeforeModelCall: async context => {
-				if (this.#listeners.size > 0) {
-					await Bun.sleep(0);
-				}
+			syncContextBeforeModelCall: async (context, signal) => {
+				await this.#drainPushedAgentEvents(activeStream, signal);
+				if (signal?.aborted) return;
 				context.systemPrompt = this.#state.systemPrompt;
 				context.tools = this.#state.tools;
+				await this.#syncContextBeforeModelCall?.(context, signal);
 			},
+			preflightProviderContext: this.#preflightProviderContext
+				? input => this.#preflightProviderContext?.(input) ?? { action: "continue" }
+				: undefined,
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
 			transformToolCallArguments: this.#transformToolCallArguments,
@@ -986,8 +1014,10 @@ export class Agent {
 			const stream = messages
 				? agentLoop(messages, context, config, this.#abortController.signal, this.streamFn)
 				: agentLoopContinue(context, config, this.#abortController.signal, this.streamFn);
+			activeStream = stream;
 
 			for await (const event of stream) {
+				const eventOrdinal = this.#processedStreamEventOrdinal + 1;
 				// Update internal state based on events
 				switch (event.type) {
 					case "message_start":
@@ -1005,7 +1035,8 @@ export class Agent {
 						// Check if this is an assistant message with buffered Cursor tool results.
 						// If so, split the message to emit tool results at the correct position.
 						if (event.message.role === "assistant" && this.#cursorToolResultBuffer.length > 0) {
-							this.#emitCursorSplitAssistantMessage(event.message as AssistantMessage);
+							this.#emitCursorSplitAssistantMessage(event.message as AssistantMessage, eventOrdinal);
+							this.#markStreamEventProcessed(eventOrdinal);
 							continue; // Skip default emit - split method handles everything
 						}
 						this.#state.streamMessage = null;
@@ -1033,7 +1064,8 @@ export class Agent {
 				}
 
 				// Emit to listeners
-				this.#emit(event);
+				this.#emit(event, eventOrdinal);
+				this.#markStreamEventProcessed(eventOrdinal);
 			}
 
 			// Handle any remaining partial message
@@ -1056,6 +1088,7 @@ export class Agent {
 			const errorMessage = err instanceof Error ? err.message : String(err);
 			const stoppedForAbort = this.#abortController?.signal.aborted === true;
 			const shouldEmitVisibleOutputBlockedError = !stoppedForAbort && isAnthropicOutputBlockedError(errorMessage);
+			const shouldEmitMaintenanceError = !stoppedForAbort && err instanceof ContextMaintenanceError;
 			const assistantPartial = partial?.role === "assistant" ? partial : undefined;
 			const hadAssistantStart = assistantPartial !== undefined;
 			const errorMsg: AssistantMessage =
@@ -1080,7 +1113,7 @@ export class Agent {
 							timestamp: Date.now(),
 						};
 
-			if (shouldEmitVisibleOutputBlockedError) {
+			if (shouldEmitVisibleOutputBlockedError || shouldEmitMaintenanceError) {
 				if (!hadAssistantStart) {
 					this.#state.streamMessage = errorMsg;
 					this.#emit({ type: "message_start", message: errorMsg });
@@ -1107,14 +1140,122 @@ export class Agent {
 		}
 	}
 
-	#emit(e: AgentEvent) {
+	#resetStreamAcknowledgements(): void {
+		this.#processedStreamEventOrdinal = 0;
+		for (const resolve of this.#processedStreamEventWaiters) {
+			resolve();
+		}
+		this.#processedStreamEventWaiters.clear();
+		this.#listenerTasksByStreamOrdinal.clear();
+	}
+
+	#markStreamEventProcessed(ordinal: number): void {
+		if (ordinal > this.#processedStreamEventOrdinal) {
+			this.#processedStreamEventOrdinal = ordinal;
+		}
+		for (const resolve of this.#processedStreamEventWaiters) {
+			resolve();
+		}
+		this.#processedStreamEventWaiters.clear();
+	}
+
+	async #drainPushedAgentEvents(
+		stream: EventStream<AgentEvent, AgentMessage[]> | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<void> {
+		if (!stream) return;
+		while (!signal?.aborted) {
+			const target = stream.pushedCount;
+			await this.#waitForProcessedStreamEvent(target, signal);
+			await this.#waitForListenerTasks(target, signal);
+			if (stream.pushedCount === target) return;
+		}
+	}
+
+	async #waitForProcessedStreamEvent(target: number, signal: AbortSignal | undefined): Promise<void> {
+		while (this.#processedStreamEventOrdinal < target && !signal?.aborted) {
+			const processed = Promise.withResolvers<void>();
+			this.#processedStreamEventWaiters.add(processed.resolve);
+			let abortListener: (() => void) | undefined;
+			let abortPromise: Promise<void> | undefined;
+			if (signal) {
+				const aborted = Promise.withResolvers<void>();
+				abortListener = () => aborted.resolve();
+				signal.addEventListener("abort", abortListener, { once: true });
+				abortPromise = aborted.promise;
+			}
+			try {
+				if (abortPromise) {
+					await Promise.race([processed.promise, abortPromise]);
+				} else {
+					await processed.promise;
+				}
+			} finally {
+				this.#processedStreamEventWaiters.delete(processed.resolve);
+				if (abortListener) {
+					signal?.removeEventListener("abort", abortListener);
+				}
+			}
+		}
+	}
+
+	async #waitForListenerTasks(target: number, signal: AbortSignal | undefined): Promise<void> {
+		while (!signal?.aborted) {
+			const tasks: Promise<void>[] = [];
+			for (const [ordinal, ordinalTasks] of this.#listenerTasksByStreamOrdinal) {
+				if (ordinal <= target) {
+					tasks.push(...ordinalTasks);
+				}
+			}
+			if (tasks.length === 0) return;
+
+			const settled = Promise.all(tasks).then(() => {});
+			let abortListener: (() => void) | undefined;
+			let abortPromise: Promise<void> | undefined;
+			if (signal) {
+				const aborted = Promise.withResolvers<void>();
+				abortListener = () => aborted.resolve();
+				signal.addEventListener("abort", abortListener, { once: true });
+				abortPromise = aborted.promise;
+			}
+			try {
+				if (abortPromise) {
+					await Promise.race([settled, abortPromise]);
+				} else {
+					await settled;
+				}
+			} finally {
+				if (abortListener) {
+					signal?.removeEventListener("abort", abortListener);
+				}
+			}
+		}
+	}
+
+	#emit(e: AgentEvent, streamOrdinal?: number) {
 		for (const listener of this.#listeners) {
 			try {
-				const result = listener(e) as unknown;
+				const result = listener(e);
 				if (isPromise(result)) {
-					result.catch(err => {
-						console.error("Agent listener rejected:", err instanceof Error ? err.message : err);
-					});
+					const task = result
+						.catch(err => {
+							console.error("Agent listener rejected:", err instanceof Error ? err.message : err);
+						})
+						.then(() => {});
+					if (streamOrdinal !== undefined) {
+						let tasks = this.#listenerTasksByStreamOrdinal.get(streamOrdinal);
+						if (!tasks) {
+							tasks = new Set();
+							this.#listenerTasksByStreamOrdinal.set(streamOrdinal, tasks);
+						}
+						tasks.add(task);
+						task.finally(() => {
+							tasks.delete(task);
+							if (tasks.size === 0) {
+								this.#listenerTasksByStreamOrdinal.delete(streamOrdinal);
+							}
+						});
+					}
 				}
 			} catch (err) {
 				console.error("Agent listener threw:", err instanceof Error ? err.message : err);
@@ -1142,7 +1283,7 @@ export class Agent {
 	 *
 	 * Output order: Assistant(preamble) -> ToolResults -> Assistant(continuation)
 	 */
-	#emitCursorSplitAssistantMessage(assistantMessage: AssistantMessage): void {
+	#emitCursorSplitAssistantMessage(assistantMessage: AssistantMessage, streamOrdinal?: number): void {
 		const buffer = this.#cursorToolResultBuffer;
 		this.#cursorToolResultBuffer = [];
 
@@ -1150,7 +1291,7 @@ export class Agent {
 			// No tool results, emit normally
 			this.#state.streamMessage = null;
 			this.appendMessage(assistantMessage);
-			this.#emit({ type: "message_end", message: assistantMessage });
+			this.#emit({ type: "message_end", message: assistantMessage }, streamOrdinal);
 			return;
 		}
 
@@ -1171,13 +1312,13 @@ export class Agent {
 			// Emit assistant message first, then tool results (original behavior but with buffered results)
 			this.#state.streamMessage = null;
 			this.appendMessage(assistantMessage);
-			this.#emit({ type: "message_end", message: assistantMessage });
+			this.#emit({ type: "message_end", message: assistantMessage }, streamOrdinal);
 
 			// Emit buffered tool results
 			for (const { toolResult } of buffer) {
-				this.#emit({ type: "message_start", message: toolResult });
+				this.#emit({ type: "message_start", message: toolResult }, streamOrdinal);
 				this.appendMessage(toolResult);
-				this.#emit({ type: "message_end", message: toolResult });
+				this.#emit({ type: "message_end", message: toolResult }, streamOrdinal);
 			}
 			return;
 		}
@@ -1201,13 +1342,13 @@ export class Agent {
 		// Emit preamble
 		this.#state.streamMessage = null;
 		this.appendMessage(preambleMessage);
-		this.#emit({ type: "message_end", message: preambleMessage });
+		this.#emit({ type: "message_end", message: preambleMessage }, streamOrdinal);
 
 		// Emit buffered tool results
 		for (const { toolResult } of buffer) {
-			this.#emit({ type: "message_start", message: toolResult });
+			this.#emit({ type: "message_start", message: toolResult }, streamOrdinal);
 			this.appendMessage(toolResult);
-			this.#emit({ type: "message_end", message: toolResult });
+			this.#emit({ type: "message_end", message: toolResult }, streamOrdinal);
 		}
 
 		// Emit continuation message (text after tools) if non-empty
@@ -1228,9 +1369,9 @@ export class Agent {
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
 			};
-			this.#emit({ type: "message_start", message: continuationMessage });
+			this.#emit({ type: "message_start", message: continuationMessage }, streamOrdinal);
 			this.appendMessage(continuationMessage);
-			this.#emit({ type: "message_end", message: continuationMessage });
+			this.#emit({ type: "message_end", message: continuationMessage }, streamOrdinal);
 		}
 	}
 }

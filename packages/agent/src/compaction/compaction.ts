@@ -20,10 +20,13 @@ import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
 import type { AgentMessage, AgentTool } from "../types";
 import type { CompactionEntry, SessionEntry } from "./entries";
+import { CompactionCancelledError } from "./errors";
 import { type ConvertToLlm, convertToLlm, createBranchSummaryMessage, createCustomMessage } from "./messages";
 import {
 	buildOpenAiNativeHistory,
+	DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS,
 	getPreservedOpenAiRemoteCompactionData,
+	RemoteCompactionError,
 	requestOpenAiRemoteCompaction,
 	requestRemoteCompaction,
 	shouldUseOpenAiRemoteCompaction,
@@ -144,6 +147,7 @@ export interface CompactionSettings {
 	autoContinue?: boolean;
 	remoteEnabled?: boolean;
 	remoteEndpoint?: string;
+	remoteTimeoutMs?: number;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
@@ -155,7 +159,31 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	keepRecentTokens: 20000,
 	autoContinue: true,
 	remoteEnabled: true,
+	remoteTimeoutMs: DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS,
 };
+
+function isCompactionCancelled(err: unknown, signal: AbortSignal | undefined): boolean {
+	return err instanceof CompactionCancelledError || signal?.aborted === true;
+}
+
+function toCompactionCancelledError(err: unknown): CompactionCancelledError {
+	return err instanceof CompactionCancelledError ? err : new CompactionCancelledError("Compaction cancelled");
+}
+
+function getRemoteCompactionDiagnosticFields(err: unknown): Record<string, unknown> {
+	const message = err instanceof Error ? err.message : String(err);
+	const fields: Record<string, unknown> = {
+		error: message,
+		errorMessage: message,
+	};
+	if (err instanceof Error) {
+		fields.errorName = err.name;
+	}
+	if (err instanceof RemoteCompactionError) {
+		return { ...fields, ...err.details };
+	}
+	return fields;
+}
 
 // ============================================================================
 // Token calculation
@@ -576,6 +604,7 @@ export interface SummaryOptions {
 	promptOverride?: string;
 	extraContext?: string[];
 	remoteEndpoint?: string;
+	remoteTimeoutMs?: number;
 	remoteInstructions?: string;
 	initiatorOverride?: MessageAttribution;
 	metadata?: Record<string, unknown>;
@@ -641,15 +670,26 @@ export async function generateSummary(
 	];
 
 	if (options?.remoteEndpoint) {
-		const remote = await requestRemoteCompaction(
-			options.remoteEndpoint,
-			{
-				systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-				prompt: promptText,
-			},
-			signal,
-		);
-		return remote.summary;
+		try {
+			const remote = await requestRemoteCompaction(
+				options.remoteEndpoint,
+				{
+					systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+					prompt: promptText,
+				},
+				signal,
+				options.remoteTimeoutMs,
+			);
+			return remote.summary;
+		} catch (err) {
+			if (isCompactionCancelled(err, signal)) {
+				throw toCompactionCancelledError(err);
+			}
+			logger.warn("Remote compaction endpoint failed, falling back to local summarization", {
+				...getRemoteCompactionDiagnosticFields(err),
+				endpoint: options.remoteEndpoint,
+			});
+		}
 	}
 
 	const response = await instrumentedCompleteSimple(
@@ -779,15 +819,26 @@ async function generateShortSummary(
 	promptText += SHORT_SUMMARY_PROMPT;
 
 	if (options?.remoteEndpoint) {
-		const remote = await requestRemoteCompaction(
-			options.remoteEndpoint,
-			{
-				systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-				prompt: promptText,
-			},
-			signal,
-		);
-		return remote.summary;
+		try {
+			const remote = await requestRemoteCompaction(
+				options.remoteEndpoint,
+				{
+					systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+					prompt: promptText,
+				},
+				signal,
+				options.remoteTimeoutMs,
+			);
+			return remote.summary;
+		} catch (err) {
+			if (isCompactionCancelled(err, signal)) {
+				throw toCompactionCancelledError(err);
+			}
+			logger.warn("Remote short-summary compaction endpoint failed, falling back to local summarization", {
+				...getRemoteCompactionDiagnosticFields(err),
+				endpoint: options.remoteEndpoint,
+			});
+		}
 	}
 
 	const response = await instrumentedCompleteSimple(
@@ -982,6 +1033,7 @@ export async function compact(
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
+		remoteTimeoutMs: settings.remoteTimeoutMs,
 		remoteInstructions: options?.remoteInstructions,
 		initiatorOverride: options?.initiatorOverride,
 		metadata: options?.metadata,
@@ -1016,11 +1068,15 @@ export async function compact(
 					remoteHistory,
 					summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
 					signal,
+					summaryOptions.remoteTimeoutMs,
 				);
 				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
 			} catch (err) {
+				if (isCompactionCancelled(err, signal)) {
+					throw toCompactionCancelledError(err);
+				}
 				logger.warn("OpenAI remote compaction failed, falling back to local summarization", {
-					error: err instanceof Error ? err.message : String(err),
+					...getRemoteCompactionDiagnosticFields(err),
 					model: model.id,
 					provider: model.provider,
 				});
@@ -1080,6 +1136,7 @@ export async function compact(
 		{
 			extraContext: options?.extraContext,
 			remoteEndpoint: summaryOptions.remoteEndpoint,
+			remoteTimeoutMs: summaryOptions.remoteTimeoutMs,
 			initiatorOverride: summaryOptions.initiatorOverride,
 			metadata: summaryOptions.metadata,
 			telemetry: summaryOptions.telemetry,

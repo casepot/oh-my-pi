@@ -1305,6 +1305,16 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteEndpoint": { type: "string", default: undefined },
 
+	"compaction.remoteTimeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "context",
+			label: "Remote Compaction Timeout",
+			description: "Maximum time to wait for remote compaction before falling back to local summarization",
+		},
+	},
+
 	// Idle compaction
 	"compaction.idleEnabled": {
 		type: "boolean",
@@ -3421,6 +3431,7 @@ export interface CompactionSettings {
 	autoContinue: boolean;
 	remoteEnabled: boolean;
 	remoteEndpoint: string | undefined;
+	remoteTimeoutMs: number;
 	idleEnabled: boolean;
 	idleThresholdTokens: number;
 	idleTimeoutSeconds: number;

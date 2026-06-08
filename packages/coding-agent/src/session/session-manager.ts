@@ -545,6 +545,22 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+export interface PreparedCompactionAppendInput<T = unknown> {
+	baseLeafId: string | null;
+	baseLatestCompactionId?: string;
+	summary: string;
+	shortSummary: string | undefined;
+	firstKeptEntryId: string;
+	tokensBefore: number;
+	details?: T;
+	fromExtension?: boolean;
+	preserveData?: Record<string, unknown>;
+}
+
+export type PreparedCompactionAppendResult =
+	| { status: "appended"; entryId: string }
+	| { status: "already_compacted" | "stale" };
+
 /**
  * Build the session context from entries using tree traversal.
  * If leafId is provided, walks from that entry to root.
@@ -2960,6 +2976,29 @@ export class SessionManager {
 		};
 		this.#appendEntry(entry);
 		return entry.id;
+	}
+
+	/** Append a compaction only if the branch still matches the snapshot used to prepare it. */
+	tryAppendPreparedCompaction<T = unknown>(input: PreparedCompactionAppendInput<T>): PreparedCompactionAppendResult {
+		if (this.#leafId !== input.baseLeafId) {
+			const currentLatestCompactionId = getLatestCompactionEntry(this.getBranch())?.id;
+			return currentLatestCompactionId !== input.baseLatestCompactionId
+				? { status: "already_compacted" }
+				: { status: "stale" };
+		}
+
+		return {
+			status: "appended",
+			entryId: this.appendCompaction(
+				input.summary,
+				input.shortSummary,
+				input.firstKeptEntryId,
+				input.tokensBefore,
+				input.details,
+				input.fromExtension,
+				input.preserveData,
+			),
+		};
 	}
 
 	/** Append a custom entry (for extensions) as child of current leaf, then advance leaf. Returns entry id. */

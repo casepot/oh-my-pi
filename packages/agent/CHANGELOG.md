@@ -7,6 +7,13 @@
 
 
 - Changed branch summaries to accept the same explicit thinking-level override used by compaction and handoff summarizers.
+
+### Fixed
+
+- Added provider-call maintenance hooks, materialized-context preflight/rematerialization, abort guards, event-consumption acknowledgements, and a visible `ContextMaintenanceError` lifecycle so embedders can fail closed before sending an unsafe continuation request.
+- Fixed remote compaction to classify caller cancellation separately from timeout, HTTP, malformed-response, and transport failures, preserving cancellation while allowing live remote failures to fall back locally with structured diagnostics.
+
+
 ## [15.9.5] - 2026-06-05
 
 ### Fixed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `EventStream.pushedCount` so consumers can acknowledge all events pushed before a provider-call barrier, including events delivered directly to a waiting iterator.
+
 ## [15.10.0] - 2026-06-06
 
 ### Added

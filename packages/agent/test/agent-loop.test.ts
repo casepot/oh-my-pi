@@ -805,6 +805,152 @@ it("refreshes tools and system prompt between same-turn model calls", async () =
 	expect(mock.calls[1]?.context.tools?.map(tool => tool.name)).toEqual(["alpha", "beta"]);
 });
 
+it("lets syncContextBeforeModelCall rewrite tool-result continuations before the next provider call", async () => {
+	const toolSchema = z.object({ value: z.string() });
+	const tool: AgentTool<typeof toolSchema, { value: string }> = {
+		name: "echo",
+		label: "Echo",
+		description: "Echo tool",
+		parameters: toolSchema,
+		async execute(_toolCallId, params) {
+			return {
+				content: [{ type: "text", text: `echo:${params.value}` }],
+				details: { value: params.value },
+			};
+		},
+	};
+	const context: AgentContext = { systemPrompt: ["sync"], messages: [], tools: [tool] };
+	const mock = createMockModel({
+		responses: [
+			{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+			{ content: ["done"] },
+		],
+	});
+	let rewroteContinuation = false;
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: identityConverter,
+		syncContextBeforeModelCall: currentContext => {
+			if (!rewroteContinuation && currentContext.messages.some(message => message.role === "toolResult")) {
+				currentContext.messages = [createUserMessage("compacted before continuation")];
+				rewroteContinuation = true;
+			}
+		},
+	};
+
+	const stream = agentLoop([createUserMessage("use tool")], context, config, undefined, mock.stream);
+	for await (const _ of stream) {
+		// drain
+	}
+
+	expect(rewroteContinuation).toBe(true);
+	expect(mock.calls).toHaveLength(2);
+	expect(mock.calls[1]?.context.messages.map(message => message.content)).toEqual(["compacted before continuation"]);
+});
+
+it("preflights transformed provider context and rematerializes before streaming", async () => {
+	const context: AgentContext = { systemPrompt: ["preflight"], messages: [], tools: [] };
+	const mock = createMockModel({ responses: [{ content: ["done"] }] });
+	let compacted = false;
+	const preflightMessages: string[][] = [];
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		transformContext: async messages => {
+			if (compacted) return messages;
+			return [...messages, createUserMessage("extension-injected provider context")];
+		},
+		convertToLlm: identityConverter,
+		preflightProviderContext: input => {
+			preflightMessages.push(
+				input.providerContext.messages.map(message =>
+					typeof message.content === "string"
+						? message.content
+						: message.content.map(block => (block.type === "text" ? block.text : block.type)).join(" "),
+				),
+			);
+			if (!compacted) {
+				input.agentContext.messages = [createUserMessage("compacted provider context")];
+				compacted = true;
+				return { action: "rematerialize" };
+			}
+			return { action: "continue" };
+		},
+	};
+
+	const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+	for await (const _ of stream) {
+		// drain
+	}
+
+	expect(preflightMessages).toEqual([
+		["start", "extension-injected provider context"],
+		["compacted provider context"],
+	]);
+	expect(mock.calls).toHaveLength(1);
+	expect(mock.calls[0]?.context.messages.map(message => message.content)).toEqual(["compacted provider context"]);
+});
+
+it("does not call the provider after sync aborts the request", async () => {
+	const context: AgentContext = { systemPrompt: ["abort"], messages: [], tools: [] };
+	const mock = createMockModel();
+	const controller = new AbortController();
+	let providerCalls = 0;
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: identityConverter,
+		syncContextBeforeModelCall: (_currentContext, signal) => {
+			expect(signal).toBe(controller.signal);
+			controller.abort();
+		},
+	};
+	const streamFn: StreamFn = () => {
+		providerCalls++;
+		return new AssistantMessageEventStream();
+	};
+
+	const stream = agentLoop([createUserMessage("abort")], context, config, controller.signal, streamFn);
+	for await (const _ of stream) {
+		// drain
+	}
+
+	const messages = await stream.result();
+	const finalMessage = messages.at(-1);
+	if (finalMessage?.role !== "assistant") throw new Error("Expected assistant abort message");
+	expect(finalMessage.stopReason).toBe("aborted");
+	expect(providerCalls).toBe(0);
+});
+
+it("does not call the provider after provider preflight aborts the request", async () => {
+	const context: AgentContext = { systemPrompt: ["abort"], messages: [], tools: [] };
+	const mock = createMockModel();
+	const controller = new AbortController();
+	let providerCalls = 0;
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: identityConverter,
+		preflightProviderContext: input => {
+			expect(input.signal).toBe(controller.signal);
+			controller.abort();
+			return { action: "continue" };
+		},
+	};
+	const streamFn: StreamFn = () => {
+		providerCalls++;
+		return new AssistantMessageEventStream();
+	};
+
+	const stream = agentLoop([createUserMessage("abort")], context, config, controller.signal, streamFn);
+	for await (const _ of stream) {
+		// drain
+	}
+
+	const messages = await stream.result();
+	const finalMessage = messages.at(-1);
+	if (finalMessage?.role !== "assistant") throw new Error("Expected assistant abort message");
+	expect(finalMessage.stopReason).toBe("aborted");
+	expect(providerCalls).toBe(0);
+});
+
 describe("agentLoopContinue with AgentMessage", () => {
 	it("should throw when context has no messages", () => {
 		const context: AgentContext = {

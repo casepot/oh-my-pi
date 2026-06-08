@@ -27,6 +27,7 @@ import {
 	normalizeResponsesToolCallId,
 } from "@oh-my-pi/pi-ai/utils";
 import { logger } from "@oh-my-pi/pi-utils";
+import { CompactionCancelledError } from "./errors";
 
 // ============================================================================
 // Public types
@@ -62,6 +63,151 @@ export interface RemoteCompactionRequest {
 export interface RemoteCompactionResponse {
 	summary: string;
 	shortSummary?: string;
+}
+
+export const DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS = 30_000;
+
+export type RemoteCompactionFailureKind = "timeout" | "http" | "malformed" | "network";
+
+export interface RemoteCompactionErrorDetails {
+	kind: RemoteCompactionFailureKind;
+	endpoint: string;
+	model?: string;
+	provider?: string;
+	callerSignalAborted: boolean;
+	timeoutMs?: number;
+	timedOut: boolean;
+	status?: number;
+	statusText?: string;
+	errorName?: string;
+	errorMessage?: string;
+	errorText?: string;
+	outputTypes?: string[];
+}
+
+export class RemoteCompactionError extends Error {
+	readonly name = "RemoteCompactionError" as const;
+	readonly details: RemoteCompactionErrorDetails;
+
+	constructor(message: string, details: RemoteCompactionErrorDetails) {
+		super(message);
+		this.details = details;
+	}
+}
+
+interface RemoteCompactionErrorInput {
+	kind: RemoteCompactionFailureKind;
+	endpoint: string;
+	model?: string;
+	provider?: string;
+	callerSignal?: AbortSignal;
+	timeoutMs?: number;
+	timedOut?: boolean;
+	status?: number;
+	statusText?: string;
+	error?: unknown;
+	errorText?: string;
+	outputTypes?: string[];
+}
+
+interface RemoteSignalScope {
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	timedOut(): boolean;
+	cleanup(): void;
+}
+
+function normalizeRemoteTimeoutMs(timeoutMs: number | undefined): number | undefined {
+	if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return undefined;
+	return Math.floor(timeoutMs);
+}
+
+function createRemoteSignalScope(
+	callerSignal: AbortSignal | undefined,
+	timeoutMs: number | undefined,
+): RemoteSignalScope {
+	if (callerSignal?.aborted) {
+		throw new CompactionCancelledError("Remote compaction cancelled");
+	}
+
+	const resolvedTimeoutMs = normalizeRemoteTimeoutMs(timeoutMs);
+	if (resolvedTimeoutMs === undefined) {
+		return {
+			signal: callerSignal,
+			timedOut: () => false,
+			cleanup: () => {},
+		};
+	}
+
+	const controller = new AbortController();
+	let timedOut = false;
+	const onCallerAbort = () => {
+		controller.abort(callerSignal?.reason);
+	};
+	const timeoutId = setTimeout(() => {
+		timedOut = true;
+		controller.abort(new DOMException(`Remote compaction timed out after ${resolvedTimeoutMs}ms`, "TimeoutError"));
+	}, resolvedTimeoutMs);
+	const maybeTimer = timeoutId as unknown as { unref?: () => void };
+	maybeTimer.unref?.();
+
+	if (callerSignal) {
+		callerSignal.addEventListener("abort", onCallerAbort, { once: true });
+	}
+
+	return {
+		signal: controller.signal,
+		timeoutMs: resolvedTimeoutMs,
+		timedOut: () => timedOut,
+		cleanup: () => {
+			clearTimeout(timeoutId);
+			callerSignal?.removeEventListener("abort", onCallerAbort);
+		},
+	};
+}
+
+function makeRemoteCompactionError(message: string, input: RemoteCompactionErrorInput): RemoteCompactionError {
+	const errorName = input.error instanceof Error ? input.error.name : undefined;
+	const errorMessage =
+		input.error instanceof Error ? input.error.message : input.error === undefined ? undefined : String(input.error);
+	return new RemoteCompactionError(message, {
+		kind: input.kind,
+		endpoint: input.endpoint,
+		model: input.model,
+		provider: input.provider,
+		callerSignalAborted: input.callerSignal?.aborted === true,
+		timeoutMs: input.timeoutMs,
+		timedOut: input.timedOut === true,
+		status: input.status,
+		statusText: input.statusText,
+		errorName,
+		errorMessage,
+		errorText: input.errorText,
+		outputTypes: input.outputTypes,
+	});
+}
+
+function classifyRemoteRequestError(
+	err: unknown,
+	endpoint: string,
+	callerSignal: AbortSignal | undefined,
+	scope: RemoteSignalScope,
+	model?: Model,
+): never {
+	if (callerSignal?.aborted) {
+		throw new CompactionCancelledError("Remote compaction cancelled");
+	}
+	const timedOut = scope.timedOut();
+	throw makeRemoteCompactionError(timedOut ? "Remote compaction timed out" : "Remote compaction request failed", {
+		kind: timedOut ? "timeout" : "network",
+		endpoint,
+		model: model?.id,
+		provider: model?.provider,
+		callerSignal,
+		timeoutMs: scope.timeoutMs,
+		timedOut,
+		error: err,
+	});
 }
 
 // ============================================================================
@@ -451,6 +597,7 @@ export async function requestOpenAiRemoteCompaction(
 	compactInput: Array<Record<string, unknown>>,
 	instructions: string,
 	signal?: AbortSignal,
+	remoteTimeoutMs?: number,
 ): Promise<OpenAiRemoteCompactionResponse> {
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const request: OpenAiRemoteCompactionRequest = {
@@ -474,79 +621,166 @@ export async function requestOpenAiRemoteCompaction(
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 	}
 
-	const response = await fetch(endpoint, {
-		method: "POST",
-		headers,
-		body: JSON.stringify(request),
-		signal,
-	});
-
-	if (!response.ok) {
-		const errorText = await response.text().catch(() => "");
-		logger.warn("OpenAI remote compaction failed", {
-			endpoint,
-			status: response.status,
-			statusText: response.statusText,
-			errorText,
+	const signalScope = createRemoteSignalScope(signal, remoteTimeoutMs);
+	try {
+		const response = await fetch(endpoint, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(request),
+			signal: signalScope.signal,
 		});
-		throw new Error(`Remote compaction failed (${response.status} ${response.statusText})`);
-	}
 
-	const data = (await response.json()) as { output?: unknown[] } | undefined;
-	const rawOutput = data?.output ?? [];
-	const replacementHistory = rawOutput.filter(
-		(item): item is Record<string, unknown> =>
-			!!item && typeof item === "object" && shouldKeepOpenAiCompactOutputItem(item as Record<string, unknown>),
-	);
-	const compactionItem = replacementHistory.findLast((item): item is OpenAiRemoteCompactionItem => {
-		if (item.type === "compaction" && typeof item.encrypted_content === "string") return true;
-		if (item.type === "compaction_summary") return true;
-		return false;
-	});
-	if (!compactionItem) {
-		const outputTypes = rawOutput.map(item =>
-			typeof item === "object" && item !== null ? (item as Record<string, unknown>).type : typeof item,
+		if (!response.ok) {
+			const errorText = await response.text().catch(() => "");
+			const error = makeRemoteCompactionError(
+				`Remote compaction failed (${response.status} ${response.statusText})`,
+				{
+					kind: "http",
+					endpoint,
+					model: model.id,
+					provider: model.provider,
+					callerSignal: signal,
+					timeoutMs: signalScope.timeoutMs,
+					timedOut: signalScope.timedOut(),
+					status: response.status,
+					statusText: response.statusText,
+					errorText,
+				},
+			);
+			logger.warn("OpenAI remote compaction failed", { ...error.details });
+			throw error;
+		}
+
+		let data: { output?: unknown[] } | undefined;
+		try {
+			data = (await response.json()) as { output?: unknown[] } | undefined;
+		} catch (err) {
+			if (signal?.aborted || signalScope.timedOut()) {
+				throw classifyRemoteRequestError(err, endpoint, signal, signalScope, model);
+			}
+			throw makeRemoteCompactionError("Remote compaction response invalid JSON", {
+				kind: "malformed",
+				endpoint,
+				model: model.id,
+				provider: model.provider,
+				callerSignal: signal,
+				timeoutMs: signalScope.timeoutMs,
+				timedOut: false,
+				error: err,
+			});
+		}
+
+		const rawOutput = data?.output ?? [];
+		const replacementHistory = rawOutput.filter(
+			(item): item is Record<string, unknown> =>
+				!!item && typeof item === "object" && shouldKeepOpenAiCompactOutputItem(item as Record<string, unknown>),
 		);
-		logger.warn("Remote compaction response missing compaction item", {
-			endpoint,
-			model: model.id,
-			provider: model.provider,
-			rawOutputLength: rawOutput.length,
-			outputTypes,
-			replacementHistoryLength: replacementHistory.length,
+		const compactionItem = replacementHistory.findLast((item): item is OpenAiRemoteCompactionItem => {
+			if (item.type === "compaction" && typeof item.encrypted_content === "string") return true;
+			if (item.type === "compaction_summary") return true;
+			return false;
 		});
-		throw new Error("Remote compaction response missing compaction item");
+		if (!compactionItem) {
+			const outputTypes = rawOutput.map(item =>
+				typeof item === "object" && item !== null ? String((item as Record<string, unknown>).type) : typeof item,
+			);
+			const error = makeRemoteCompactionError("Remote compaction response missing compaction item", {
+				kind: "malformed",
+				endpoint,
+				model: model.id,
+				provider: model.provider,
+				callerSignal: signal,
+				timeoutMs: signalScope.timeoutMs,
+				timedOut: signalScope.timedOut(),
+				outputTypes,
+			});
+			logger.warn("Remote compaction response missing compaction item", {
+				...error.details,
+				rawOutputLength: rawOutput.length,
+				replacementHistoryLength: replacementHistory.length,
+			});
+			throw error;
+		}
+		return { provider: model.provider, replacementHistory, compactionItem };
+	} catch (err) {
+		if (err instanceof RemoteCompactionError || err instanceof CompactionCancelledError) {
+			throw err;
+		}
+		throw classifyRemoteRequestError(err, endpoint, signal, signalScope, model);
+	} finally {
+		signalScope.cleanup();
 	}
-	return { provider: model.provider, replacementHistory, compactionItem };
 }
 
 export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
+	remoteTimeoutMs?: number,
 ): Promise<RemoteCompactionResponse> {
-	const response = await fetch(endpoint, {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify(request),
-		signal,
-	});
-
-	if (!response.ok) {
-		const errorText = await response.text().catch(() => "");
-		logger.warn("Remote compaction failed", {
-			endpoint,
-			status: response.status,
-			statusText: response.statusText,
-			errorText,
+	const signalScope = createRemoteSignalScope(signal, remoteTimeoutMs);
+	try {
+		const response = await fetch(endpoint, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(request),
+			signal: signalScope.signal,
 		});
-		throw new Error(`Remote compaction failed (${response.status} ${response.statusText})`);
-	}
 
-	const data = (await response.json()) as RemoteCompactionResponse | undefined;
-	if (!data || typeof data.summary !== "string") {
-		throw new Error("Remote compaction response missing summary");
-	}
+		if (!response.ok) {
+			const errorText = await response.text().catch(() => "");
+			const error = makeRemoteCompactionError(
+				`Remote compaction failed (${response.status} ${response.statusText})`,
+				{
+					kind: "http",
+					endpoint,
+					callerSignal: signal,
+					timeoutMs: signalScope.timeoutMs,
+					timedOut: signalScope.timedOut(),
+					status: response.status,
+					statusText: response.statusText,
+					errorText,
+				},
+			);
+			logger.warn("Remote compaction failed", { ...error.details });
+			throw error;
+		}
 
-	return data;
+		let data: RemoteCompactionResponse | undefined;
+		try {
+			data = (await response.json()) as RemoteCompactionResponse | undefined;
+		} catch (err) {
+			if (signal?.aborted || signalScope.timedOut()) {
+				throw classifyRemoteRequestError(err, endpoint, signal, signalScope);
+			}
+			throw makeRemoteCompactionError("Remote compaction response invalid JSON", {
+				kind: "malformed",
+				endpoint,
+				callerSignal: signal,
+				timeoutMs: signalScope.timeoutMs,
+				timedOut: false,
+				error: err,
+			});
+		}
+		if (!data || typeof data.summary !== "string") {
+			const error = makeRemoteCompactionError("Remote compaction response missing summary", {
+				kind: "malformed",
+				endpoint,
+				callerSignal: signal,
+				timeoutMs: signalScope.timeoutMs,
+				timedOut: signalScope.timedOut(),
+			});
+			logger.warn("Remote compaction response missing summary", { ...error.details });
+			throw error;
+		}
+
+		return data;
+	} catch (err) {
+		if (err instanceof RemoteCompactionError || err instanceof CompactionCancelledError) {
+			throw err;
+		}
+		throw classifyRemoteRequestError(err, endpoint, signal, signalScope);
+	} finally {
+		signalScope.cleanup();
+	}
 }

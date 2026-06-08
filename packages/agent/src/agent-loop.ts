@@ -41,14 +41,16 @@ import {
 	startExecuteToolSpan,
 	startInvokeAgentSpan,
 } from "./telemetry";
-import type {
-	AgentContext,
-	AgentEvent,
-	AgentLoopConfig,
-	AgentMessage,
-	AgentTool,
-	AgentToolResult,
-	StreamFn,
+import {
+	type AgentContext,
+	type AgentEvent,
+	type AgentLoopConfig,
+	type AgentMessage,
+	type AgentTool,
+	type AgentToolResult,
+	ContextMaintenanceError,
+	type ProviderContextPreflightResult,
+	type StreamFn,
 } from "./types";
 import { yieldIfDue } from "./utils/yield";
 
@@ -384,6 +386,30 @@ export function normalizeTools(tools: AgentContext["tools"], injectIntent: boole
 	});
 }
 
+async function materializeProviderContext(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+): Promise<Context> {
+	let messages = context.messages;
+	if (config.transformContext) {
+		messages = await config.transformContext(messages, signal);
+	}
+
+	const llmMessages = await config.convertToLlm(messages);
+	const normalizedMessages = normalizeMessagesForProvider(llmMessages, config.model);
+	if (config.appendOnlyContext) {
+		config.appendOnlyContext.syncMessages(normalizedMessages);
+		return config.appendOnlyContext.build(context, { intentTracing: !!config.intentTracing });
+	}
+
+	return {
+		systemPrompt: context.systemPrompt,
+		messages: normalizedMessages,
+		tools: normalizeTools(context.tools, !!config.intentTracing),
+	};
+}
+
 function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" | "omit" {
 	if (typeof intent === "function") return "omit";
 	if (intent === "optional" || intent === "omit") return intent;
@@ -507,9 +533,9 @@ async function runLoopBody(
 				pendingMessages = [];
 			}
 
-			// Refresh prompt/tool context from live state before each model call
+			// Refresh prompt/tool context from live state before each model call.
 			if (config.syncContextBeforeModelCall) {
-				await config.syncContextBeforeModelCall(currentContext);
+				await config.syncContextBeforeModelCall(currentContext, signal);
 			}
 
 			// Stream assistant response
@@ -698,28 +724,48 @@ async function streamAssistantResponse(
 	streamFn?: StreamFn,
 	harmonyRetryAttempt = 0,
 ): Promise<AssistantMessage> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
-	let messages = context.messages;
-	if (config.transformContext) {
-		messages = await config.transformContext(messages, signal);
+	if (signal?.aborted) {
+		return emitAbortedAssistantMessage(null, false, context, config, stream);
 	}
 
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
-	const llmMessages = await config.convertToLlm(messages);
-	const normalizedMessages = normalizeMessagesForProvider(llmMessages, config.model);
+	let llmContext = await materializeProviderContext(context, config, signal);
+	for (let rematerializations = 0; config.preflightProviderContext; ) {
+		if (signal?.aborted) {
+			return emitAbortedAssistantMessage(null, false, context, config, stream);
+		}
+		let result: ProviderContextPreflightResult;
+		try {
+			result = await config.preflightProviderContext({
+				agentContext: context,
+				providerContext: llmContext,
+				signal,
+			});
+		} catch (err) {
+			if (signal?.aborted) {
+				return emitAbortedAssistantMessage(null, false, context, config, stream);
+			}
+			throw err;
+		}
+		if (signal?.aborted) {
+			return emitAbortedAssistantMessage(null, false, context, config, stream);
+		}
+		if (result.action === "continue") {
+			break;
+		}
+		if (result.action === "abort") {
+			throw result.error;
+		}
+		if (rematerializations >= 2) {
+			throw new ContextMaintenanceError(
+				"Context maintenance requested too many provider-context rematerializations before a model call.",
+			);
+		}
+		rematerializations++;
+		llmContext = await materializeProviderContext(context, config, signal);
+	}
 
-	// Build LLM context — append-only mode caches system prompt + tools
-	// AND keeps an append-only message log so prior-turn bytes are stable.
-	let llmContext: Context;
-	if (config.appendOnlyContext) {
-		config.appendOnlyContext.syncMessages(normalizedMessages);
-		llmContext = config.appendOnlyContext.build(context, { intentTracing: !!config.intentTracing });
-	} else {
-		llmContext = {
-			systemPrompt: context.systemPrompt,
-			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, !!config.intentTracing),
-		};
+	if (signal?.aborted) {
+		return emitAbortedAssistantMessage(null, false, context, config, stream);
 	}
 
 	const streamFunction = streamFn || streamSimple;
@@ -750,6 +796,9 @@ async function streamAssistantResponse(
 			: requestSignals.length === 1
 				? requestSignals[0]
 				: AbortSignal.any(requestSignals);
+	if (requestSignal?.aborted) {
+		return emitAbortedAssistantMessage(null, false, context, config, stream);
+	}
 	const effectiveTemperature =
 		harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature;
 	const effectiveToolChoice = dynamicToolChoice ?? config.toolChoice;

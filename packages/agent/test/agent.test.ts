@@ -1,9 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { Agent, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentEvent,
+	type AgentTool,
+	ContextMaintenanceError,
+	ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
 import { type SimpleStreamOptions, z } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { createAssistantMessage } from "./helpers";
+import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
 	it("should support steering message queueing", async () => {
@@ -249,6 +255,123 @@ describe("Agent", () => {
 			{ systemPrompt: "prompt-one", toolNames: ["alpha"] },
 			{ systemPrompt: "prompt-two", toolNames: ["alpha", "beta"] },
 		]);
+	});
+
+	it("waits for async already-pushed message listeners before provider-call sync observes state", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `echo:${params.value}` }], details: { value: params.value } };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const syncSawSettled: boolean[] = [];
+		let listenerSettled = false;
+		let releaseListener: (() => void) | undefined;
+		const listenerStarted = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [tool], messages: [] },
+			streamFn: mock.stream,
+			syncContextBeforeModelCall: context => {
+				if (context.messages.some(message => message.role === "toolResult")) {
+					syncSawSettled.push(listenerSettled);
+				}
+			},
+		});
+		const unsubscribe = agent.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				const gate = Promise.withResolvers<void>();
+				releaseListener = () => {
+					listenerSettled = true;
+					gate.resolve();
+				};
+				listenerStarted.resolve();
+				return gate.promise;
+			}
+		});
+
+		const promptPromise = agent.prompt("use tool");
+		await listenerStarted.promise;
+		expect(syncSawSettled).toEqual([]);
+		releaseListener?.();
+		await promptPromise;
+		unsubscribe();
+
+		expect(syncSawSettled).toEqual([true]);
+		expect(mock.calls).toHaveLength(2);
+	});
+
+	it("does not block provider-call sync on unscoped external listener promises", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const neverSettles = Promise.withResolvers<void>();
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const unsubscribe = agent.subscribe(event => {
+			if (
+				event.type === "message_start" &&
+				event.message.role === "user" &&
+				event.message.content === "external slow listener"
+			) {
+				return neverSettles.promise;
+			}
+		});
+
+		agent.emitExternalEvent({ type: "message_start", message: createUserMessage("external slow listener") });
+		await agent.prompt("continue despite external listener");
+		unsubscribe();
+
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("prompt() emits assistant error lifecycle for context maintenance failures before provider calls", async () => {
+		const mock = createMockModel({ responses: [] });
+		const errorText = "Context maintenance failed before provider call";
+		let providerCalls = 0;
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				providerCalls++;
+				return new AssistantMessageEventStream();
+			},
+			syncContextBeforeModelCall: () => {
+				throw new ContextMaintenanceError(errorText);
+			},
+		});
+		const events: AgentEvent[] = [];
+		const unsubscribe = agent.subscribe(event => events.push(event));
+
+		await agent.prompt("trigger");
+		unsubscribe();
+
+		expect(providerCalls).toBe(0);
+		const assistantStartIndex = events.findIndex(
+			event => event.type === "message_start" && event.message.role === "assistant",
+		);
+		const assistantEndIndex = events.findIndex(
+			event => event.type === "message_end" && event.message.role === "assistant",
+		);
+		const turnEndIndex = events.findIndex(event => event.type === "turn_end");
+		const agentEndIndex = events.findIndex(event => event.type === "agent_end");
+		expect(assistantStartIndex).toBeGreaterThan(-1);
+		expect(assistantEndIndex).toBeGreaterThan(assistantStartIndex);
+		expect(turnEndIndex).toBeGreaterThan(assistantEndIndex);
+		expect(agentEndIndex).toBeGreaterThan(turnEndIndex);
+
+		const lastMessage = agent.state.messages.at(-1);
+		if (lastMessage?.role !== "assistant") throw new Error("assistant maintenance error was not appended");
+		expect(lastMessage.stopReason).toBe("error");
+		expect(lastMessage.errorMessage).toBe(errorText);
 	});
 
 	it("prompt() drops stale forced toolChoice after same-turn tool refresh", async () => {

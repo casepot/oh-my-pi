@@ -2,6 +2,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	Context,
 	Effort,
 	ImageContent,
 	Message,
@@ -24,6 +25,24 @@ import type { AgentTelemetryConfig } from "./telemetry";
 export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
+
+export class ContextMaintenanceError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "ContextMaintenanceError";
+	}
+}
+
+export interface ProviderContextPreflightInput {
+	readonly agentContext: AgentContext;
+	readonly providerContext: Context;
+	readonly signal?: AbortSignal;
+}
+
+export type ProviderContextPreflightResult =
+	| { action: "continue" }
+	| { action: "rematerialize" }
+	| { action: "abort"; error: Error };
 
 /**
  * Configuration for the agent loop.
@@ -147,9 +166,20 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/**
 	 * Refreshes prompt/tool context from live session state before each model call.
-	 * Use this when tool availability or the system prompt can change mid-turn.
+	 * Use this when tool availability, the system prompt, or compacted messages
+	 * can change mid-turn before provider request materialization.
 	 */
-	syncContextBeforeModelCall?: (context: AgentContext) => void | Promise<void>;
+	syncContextBeforeModelCall?: (context: AgentContext, signal?: AbortSignal) => void | Promise<void>;
+
+	/**
+	 * Preflights the exact materialized provider context immediately before a model call.
+	 * Return `rematerialize` after mutating `agentContext` so the loop rebuilds the
+	 * provider request from the updated messages/system prompt/tools. Return `abort`
+	 * to fail closed before the provider stream function is invoked.
+	 */
+	preflightProviderContext?: (
+		input: ProviderContextPreflightInput,
+	) => ProviderContextPreflightResult | Promise<ProviderContextPreflightResult>;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.
