@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import {
+	buildGoalContextSurface,
 	escapeXmlText,
 	GoalRuntime,
 	type GoalRuntimeHost,
 	goalTokenDelta,
 	renderGoalPrompt,
+	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
 	renderTrustedObjective,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
@@ -484,6 +486,214 @@ describe("goal runtime", () => {
 		expect(snapshot).not.toContain("targetSnapshot");
 		expect(snapshot).not.toContain(objective);
 		expect(snapshot.length).toBeLessThan(6_000);
+	});
+
+	it("renders checkpoint prompt surface without full audit checkpoint packets", async () => {
+		const harness = createHarness();
+		const initialState = await harness.runtime.createGoal({
+			objective: "Ship compact goal context",
+			parentFrame: createParentFrame({ desiredFuture: "Ship compact goal context" }),
+		});
+		await harness.runtime.setGoalRubric(initialState.goal.id, "Verifier-only rubric", [
+			{ id: "D1", summary: "Compact deliverable.", status: "pending", nextRelevantTarget: "Close compact target" },
+		]);
+		const workingState = await harness.runtime.startTarget({
+			title: "Close compact target",
+			desiredFutureClaim: "Target claim",
+			closureStandard: "Evidence and review close the target",
+			evidenceExpectation: ["Focused evidence"],
+			nonGoals: ["Do not claim parent completion"],
+			forbiddenClaims: ["Parent complete"],
+			staleIf: ["API changes"],
+			parentDeliverableIds: ["D1"],
+		});
+		const workingSurface = renderGoalPromptSurface(workingState, workingState.goal);
+		expect(workingSurface).toContain("Evidence and review close the target");
+		expect(workingSurface).toContain("Focused evidence");
+		expect(workingSurface).toContain("Do not claim parent completion");
+		expect(workingSurface).toContain("API changes");
+
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Target closed with bounded truth",
+			localClaims: ["Target claim"],
+			evidence: [
+				{
+					claim: "Target claim",
+					evidence: "FULL CHECKPOINT EVIDENCE DETAIL SHOULD STAY IN AUDIT STATE",
+					current: true,
+				},
+			],
+			checksRun: ["FULL CHECKS LIST SHOULD STAY IN AUDIT STATE"],
+			artifactsTouched: ["src/full-audit-only.ts"],
+			notClaimed: ["Parent complete"],
+			remainingQuestions: ["Next target"],
+			risksOrCaveats: ["Bounded claim only"],
+			staleIf: ["API changes"],
+		});
+		const checkpointState = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Compact checkpoint review accepted.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 10,
+		});
+
+		const surface = renderGoalPromptSurface(checkpointState, checkpointState.goal);
+		expect(surface).toContain('"requiredAction": "resolve_checkpoint"');
+		expect(surface).toContain("Target closed with bounded truth");
+		expect(surface).toContain("Target claim");
+		expect(surface).toContain("Parent complete");
+		expect(surface).toContain("Next target");
+		expect(surface).not.toContain("FULL CHECKPOINT EVIDENCE DETAIL SHOULD STAY IN AUDIT STATE");
+		expect(surface).not.toContain("FULL CHECKS LIST SHOULD STAY IN AUDIT STATE");
+		expect(surface).not.toContain("src/full-audit-only.ts");
+		expect(surface).not.toContain("targetSnapshot");
+		expect(surface).not.toContain("evidenceChecked");
+		expect(surface).not.toContain("Verifier-only rubric");
+		expect(surface).not.toContain("[]");
+
+		const serializedState = JSON.stringify(serializeGoalModeState(checkpointState), null, 2);
+		expect(serializedState).toContain("targetSnapshot");
+		expect(serializedState).toContain("FULL CHECKPOINT EVIDENCE DETAIL SHOULD STAY IN AUDIT STATE");
+		expect(serializedState).toContain("evidenceChecked");
+
+		const continuationPrompt = renderGoalPrompt("continuation", checkpointState.goal, checkpointState);
+		expect(continuationPrompt).toContain("Checkpoint-resolution action");
+		expect(continuationPrompt).toContain("resolve_checkpoint");
+		expect(continuationPrompt).not.toContain("Working-target action");
+		expect(continuationPrompt).not.toContain("FULL CHECKPOINT EVIDENCE DETAIL SHOULD STAY IN AUDIT STATE");
+	});
+
+	it("groups deliverables, compacts older parent truth, and avoids duplicate resolution targets", async () => {
+		const harness = createHarness();
+		const oldClaim = `Older accepted claim ${"x".repeat(140)} UNIQUE_OLD_DETAIL_SHOULD_NOT_BE_IN_PROMPT`;
+		const initialState = await harness.runtime.createGoal({
+			objective: "Improve release reliability",
+			parentFrame: createParentFrame({
+				kind: "claim-gated",
+				desiredFuture: "Release truth is explicit",
+				acceptedClaims: [
+					{
+						id: "old-claim",
+						claim: oldClaim,
+						status: "accepted",
+						evidenceRefs: [{ id: "checkpoint:old", kind: "artifact" }],
+						nonImplications: ["Old claim non-implication remains visible."],
+					},
+				],
+				boundaries: [
+					{
+						id: "release-not-complete",
+						kind: "forbidden-inference",
+						statement: "Accepted target evidence is not parent completion.",
+					},
+				],
+			}),
+		});
+		await harness.runtime.setGoalRubric(initialState.goal.id, "Verifier-only rubric", [
+			{ id: "D1", summary: "Source-link smoke.", status: "pending" },
+			{ id: "D2", summary: "Tarball smoke.", status: "pending" },
+			{
+				id: "D3",
+				summary: "Already satisfied archive migration.",
+				status: "satisfied",
+				nextRelevantTarget: "OLD SATISFIED NEXT HINT SHOULD NOT APPEAR",
+			},
+			{
+				id: "D4",
+				summary: "Partial documentation update.",
+				status: "partial",
+				nextRelevantTarget: "Continue partial documentation proof.",
+			},
+		]);
+		await harness.runtime.startTarget({
+			title: "Prove source-link smoke",
+			desiredFutureClaim: "Source-link install exercises smoke path.",
+			closureStandard: "Smoke output is observed.",
+			parentDeliverableIds: ["D1"],
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			localClaims: ["Source-link install exercises smoke path"],
+			evidence: [
+				{ claim: "Source-link install exercises smoke path", evidence: "Observed smoke output", current: true },
+			],
+			notClaimed: ["Tarball path is verified"],
+			remainingQuestions: ["Check tarball path next?"],
+		});
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Closed locally.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+		const resolved = await harness.runtime.recordCheckpointResolution({
+			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			decision: "next_target",
+			parentReading: "Source-link smoke claim accepted; tarball path remains open.",
+			parentDelta: {
+				admittedClaims: [
+					{
+						id: "source-link-smoke",
+						claim: "Latest accepted source-link smoke claim remains fully visible.",
+						status: "accepted",
+						evidenceRefs: [{ id: `checkpoint:${candidate.id}`, kind: "artifact" }],
+						nonImplications: ["Tarball path is verified"],
+					},
+				],
+				candidateClaimsAdded: [],
+				rejectedClaims: [],
+				boundariesAdded: [],
+				residualsAddedOrUpdated: [],
+				gateDeltas: [],
+				frontierDeltas: [],
+				staleRefs: [],
+				externalRecordRefs: [],
+				deliverableDeltas: [
+					{
+						id: "D1",
+						status: "satisfied",
+						evidenceRefs: [{ id: `checkpoint:${candidate.id}`, kind: "artifact" }],
+					},
+					{ id: "D2", status: "partial", nextRelevantTarget: "Run tarball smoke." },
+				],
+			},
+			notPropagated: ["Tarball path is verified"],
+			remainingParentWork: ["Tarball install evidence"],
+			nextTarget: {
+				title: "Prove tarball smoke",
+				desiredFutureClaim: "Tarball installs exercise smoke path.",
+				closureStandard: "Tarball smoke output is observed.",
+				forbiddenClaims: ["Release is ready"],
+				parentDeliverableIds: ["D2"],
+			},
+		});
+
+		const surface = buildGoalContextSurface(resolved, resolved.goal);
+		expect(surface.current_target).toMatchObject({
+			title: "Prove tarball smoke",
+			closureStandard: "Tarball smoke output is observed.",
+			parentDeliverableIds: ["D2"],
+		});
+		const surfaceText = renderGoalPromptSurface(resolved, resolved.goal);
+		expect(surfaceText).toContain("Latest accepted source-link smoke claim remains fully visible.");
+		expect(surfaceText).toContain("old-claim");
+		expect(surfaceText).not.toContain("UNIQUE_OLD_DETAIL_SHOULD_NOT_BE_IN_PROMPT");
+		expect(surfaceText).toContain("Old claim non-implication remains visible.");
+		expect(surfaceText).toContain("Accepted target evidence is not parent completion.");
+		expect(surfaceText).toContain('"active_or_partial"');
+		expect(surfaceText).toContain("Run tarball smoke.");
+		expect(surfaceText).toContain("Continue partial documentation proof.");
+		expect(surfaceText).toContain('"satisfied"');
+		expect(surfaceText).not.toContain("OLD SATISFIED NEXT HINT SHOULD NOT APPEAR");
+		expect(surfaceText).toContain('"nextTargetId"');
+		expect(surfaceText).not.toContain('"nextTarget":');
+		expect(surfaceText).not.toContain('"nextTargetTitle"');
+		expect(surfaceText).not.toContain("[]");
+		expect(surfaceText.length).toBeLessThan(5_000);
 	});
 
 	it("records side-agent usage against the active goal budget", async () => {
@@ -1242,7 +1452,14 @@ describe("goal runtime", () => {
 				verificationRepair: {
 					verificationAttemptId: "attempt-1",
 					feedback: "Missing current evidence.",
-					blockers: [],
+					blockers: [
+						{
+							id: "B1",
+							severity: "blocking",
+							problem: "Missing current evidence.",
+							requiredEvidenceOrFix: "Run focused verification.",
+						},
+					],
 					evidenceToCollect: ["current evidence"],
 					avoidRepeating: ["old evidence"],
 					createdAt: 0,
@@ -1255,9 +1472,12 @@ describe("goal runtime", () => {
 		expect(renderGoalPrompt("active", goal, createGoalModeState({ goal }))).toContain("start_target");
 		expect(renderGoalPrompt("continuation", checkpointState.goal, checkpointState)).toContain("resolve_checkpoint");
 		expect(renderGoalPrompt("continuation", parentCompletionState.goal, parentCompletionState)).toContain(
-			'Call `goal({op:"complete"})` now',
+			'Call `goal({op:"complete"})`; do not resume implementation.',
 		);
-		expect(renderGoalPrompt("continuation", repairState.goal, repairState)).toContain("Do not retry");
+		const repairPrompt = renderGoalPrompt("continuation", repairState.goal, repairState);
+		expect(repairPrompt).toContain("Do not retry `complete` without fresh evidence");
+		expect(repairPrompt).toContain("B1");
+		expect(repairPrompt).toContain("Run focused verification.");
 		expect(systemPromptTemplate).toContain("Goal mode exception");
 		expect(systemPromptTemplate).toContain("It is not parent completion");
 	});

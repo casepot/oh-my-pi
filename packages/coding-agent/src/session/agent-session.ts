@@ -189,6 +189,7 @@ import {
 	GoalRuntime,
 	remainingTokens,
 	renderGoalPrompt,
+	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
 } from "../goals/runtime";
 import {
@@ -9152,11 +9153,9 @@ export class AgentSession {
 
 	#renderGoalPostCompactionPrompt(state: GoalModeState, continuationPacket: GoalContinuationPacket): string {
 		return prompt.render(goalPostCompactionContinuationTemplate, {
-			objective: escapeXmlText(state.goal.objective),
 			runMode: state.runMode,
-			stateVersion: String(state.stateVersion),
-			parentFrameVersion: String(state.parentFrameVersion),
-			goalStateSnapshot: renderGoalStateSnapshot(state, state.goal),
+			objective: escapeXmlText(state.goal.objective),
+			goalContextSurface: renderGoalPromptSurface(state, state.goal),
 			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
 		});
 	}
@@ -9206,7 +9205,7 @@ export class AgentSession {
 		const context = prompt.render(goalCompactionContextTemplate, {
 			transition: continuationPacket.transition,
 			reason: continuationPacket.reason,
-			stateSnapshot: renderGoalStateSnapshot(state, state.goal),
+			stateSnapshot: renderGoalPromptSurface(state, state.goal),
 			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
 		});
 		return {

@@ -1,20 +1,14 @@
 <!-- Hidden goal continuation steer. role=user, suppressed from visible transcript. -->
 
-Continue according to the active goal run mode.
+Continue according to the active goal controller surface.
 
 <objective>
 {{objective}}
 </objective>
 
-
-<goal_mode_state>
-Run mode: {{runMode}}
-State version: {{stateVersion}}
-Parent frame version: {{parentFrameVersion}}
-
-Structured snapshot:
-{{goalStateSnapshot}}
-</goal_mode_state>
+<controller_surface>
+{{goalContextSurface}}
+</controller_surface>
 
 {{#if lastVerificationFeedback}}
 Previous parent-completion verification rejected attempt {{failedCompletionAttempts}}. Address this feedback before trying parent completion again:
@@ -30,24 +24,46 @@ Budget:
 - Time used: {{timeUsedSeconds}} seconds
 
 Run-mode policy:
+- Follow `policy.now`; avoid every `policy.blocked` item.
+- Need full audit state? Call `goal({op:"get"})`.
 
-- `working-target`: continue local work on the current target. If no target exists, call `goal({op:"start_target", …})` before substantial implementation. Project/domain target rules override generic splitting; if they define a minimum target unit, the target MUST be that unit. NEVER start targets for internal process phases such as planning, implementation contact, evidence review, record writing, closure, recomposition, or reviewer passes. Absent project-specific target rules, choose the smallest independently verifiable desired-future claim that makes parent-goal progress. If the target is stable under its full domain closure standard, call `goal({op:"checkpoint", …})` with evidence and stop ordinary local work. Do not choose a new target merely because context was compacted.
-- `awaiting-checkpoint-resolution`: do not continue implementation. Act as a fresh controller turn. Read checkpoint guidance and call `goal({op:"resolve_checkpoint", …})` before any local work resumes. Prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. The next target MUST honor project/domain target-unit rules. Use `parent_completion_candidate` only when remaining work is genuinely parent verification. Parent-state changes must be recorded in `resolve_checkpoint.parent_delta`; narrative guidance is not accepted parent truth. For `parent_completion_candidate`, omit `next_target`; for `next_target`, include `next_target`.
-- `awaiting-parent-completion`: checkpoint resolution selected `parent_completion_candidate`. Do not continue implementation, start a target, or checkpoint. Call `goal({op:"complete"})` now; if the verifier rejects, goal mode will enter verifier repair.
-- `awaiting-verification-repair`: the parent completion verifier rejected the claim. Repair or gather current evidence for the listed blockers. If no current target is explicitly linked to those blockers, call `goal({op:"start_target", …})` with current `linked_verifier_blocker_ids` for a focused repair/evidence target. Do not retry `complete` until the blockers have fresh repair/evidence. Do not choose unrelated work.
-- `awaiting-user-input`: do not auto-continue ordinary work. Wait for user input, broader checks, or external authority, then resolve or resume through the goal tool.
+{{#when runMode "==" "working-target"}}
+Working-target action:
+- Continue the current target. If none exists, start one before substantial work.
+- Project/domain target rules override generic splitting; use their minimum target unit when present.
+- NEVER start targets for internal process phases: planning, evidence review, closure, recomposition, reviewer passes.
+- Choose the smallest independently verifiable desired-future claim that advances the parent goal.
+- Checkpoint only after full target closure evidence.
+{{/when}}
 
-If `pendingCheckpointId` exists, ordinary implementation remains blocked until `resolve_checkpoint` records the controller decision. A checkpoint is not parent completion and cannot mutate the parent frame through prose.
+{{#when runMode "==" "awaiting-checkpoint-resolution"}}
+Checkpoint-resolution action:
+- Do not implement; inspect checkpoint guidance and call `resolve_checkpoint`.
+- Prefer `decision:"next_target"` until every parent deliverable has accepted current evidence.
+- Parent truth changes only through `resolve_checkpoint.parent_delta`, never prose.
+{{/when}}
 
-Target aperture rule: a target is too broad when satisfying its closure standard would satisfy nearly all parent completion criteria. Split broad targets by evidence boundary, subsystem, or deliverable unless project/domain instructions define a larger minimum target unit or the parent goal is already one atomic deliverable.
+{{#when runMode "==" "awaiting-parent-completion"}}
+Parent-completion action:
+- Call `goal({op:"complete"})`; do not resume implementation.
+- Before `complete`, audit every parent deliverable against direct current-state evidence.
+{{/when}}
 
-Before calling `goal({op:"complete"})`, perform a parent-completion audit against current repo state:
+{{#when runMode "==" "awaiting-verification-repair"}}
+Verifier-repair action:
+- Repair blockers or start a blocker-linked target.
+- Do not retry `complete` without fresh evidence.
+{{/when}}
 
-1. Restate the parent objective as concrete deliverables.
-2. Map each deliverable to authoritative current evidence.
-3. Inspect the actual current state. Read files and run the relevant checks; do not rely on memory.
-4. Match verification scope to claim scope.
-5. Treat uncertainty as not-yet-achieved.
-6. Do not retry completion after verifier rejection without fresh repair/evidence.
+{{#when runMode "==" "awaiting-background-lane-intake"}}
+Background-lane-intake action:
+- Disposition blocked background lanes before ordinary implementation resumes.
+{{/when}}
 
-Call `goal({op:"complete"})` only when every parent deliverable has direct, current-state evidence. If the work is not done, execute the next valid run-mode action.
+{{#when runMode "==" "awaiting-user-input"}}
+Awaiting-input action:
+- Wait for user input, broader checks, or external authority.
+{{/when}}
+
+Parent invariant:
+- Target closure is not parent completion.

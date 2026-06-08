@@ -663,10 +663,20 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	}
 }
 
+function visibleGoalObjective(goal: Goal, op: GoalToolInput["op"]): string {
+	if (op === "create" || op === "get") return goal.objective;
+	const firstLine = goal.objective
+		.split("\n")
+		.find(line => line.trim().length > 0)
+		?.trim();
+	const title = firstLine || goal.objective.trim();
+	return title.length <= TRUNCATE_LENGTHS.TITLE ? title : `${title.slice(0, TRUNCATE_LENGTHS.TITLE - 1)}…`;
+}
+
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
 	const goal = response.goal;
 	if (!goal) return "No active goal.";
-	let text = `Goal: ${goal.objective}\nStatus: ${goal.status}`;
+	let text = `Goal: ${visibleGoalObjective(goal, op)}\nStatus: ${goal.status}`;
 	const runMode = response.state?.runMode;
 	if (runMode) text += `\nRun mode: ${runMode}`;
 	text += `\nTokens: ${goal.tokensUsed} used`;

@@ -788,6 +788,9 @@ describe("InteractiveMode goal mode integration", () => {
 		const guidanceState = await Bun.file(goalStateFile).text();
 		expect(guidanceState).not.toContain("Strict test rubric");
 		expect(guidanceState).toContain("Ship release behavior.");
+		expect(guidanceState).toContain("targetSnapshot");
+		expect(guidanceState).toContain("Observed smoke output");
+		expect(guidance?.prompt).not.toContain("Observed smoke output");
 		const guidanceTranscriptFile = /<full_transcript_file>\n([^<]+)\n<\/full_transcript_file>/.exec(
 			guidanceCall?.task ?? "",
 		)?.[1];
@@ -1154,7 +1157,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(postCompactDispatch?.kind).toBe("post-compaction");
 		expect(postCompactDispatch?.customType).toBe(GOAL_POST_COMPACTION_MESSAGE_TYPE);
 		expect(postCompactDispatch?.prompt).toContain("Context was compacted while goal mode was active");
-		expect(postCompactDispatch?.prompt).toContain('goal({ op: "get" })');
+		expect(postCompactDispatch?.prompt).toContain('goal({op:"get"})');
 
 		goalSideAgentMock.completionStatus = "rejected";
 		goalSideAgentMock.feedback = "Tarball smoke evidence is still missing.";

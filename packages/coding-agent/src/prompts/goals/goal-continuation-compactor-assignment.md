@@ -19,8 +19,6 @@ Prepare a hidden goal continuation delta for the main agent.
 <objective>
 {{objective}}
 </objective>
-
-
 {{#if verificationFeedback}}
 <verification_feedback>
 {{verificationFeedback}}

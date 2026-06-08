@@ -452,6 +452,368 @@ function compactGoalVerificationRepair(
 	};
 }
 
+type GoalPromptObject = Record<string, unknown>;
+
+export interface GoalContextSurface {
+	goal: GoalPromptObject;
+	run: GoalPromptObject;
+	policy: GoalPromptObject;
+	deliverables?: GoalPromptObject;
+	parent_truth?: GoalPromptObject;
+	current_target?: GoalPromptObject;
+	checkpoint?: GoalPromptObject;
+	latest_resolution?: GoalPromptObject;
+	parent_completion?: GoalPromptObject;
+	verifier_repair?: GoalPromptObject;
+	background_lane_intake?: GoalPromptObject;
+	blocked_state?: GoalPromptObject;
+	refs?: GoalPromptObject;
+}
+
+const PROMPT_LABEL_MAX_LENGTH = 120;
+
+function shortPromptLabel(value: string): string {
+	const trimmed = value.trim();
+	return trimmed.length <= PROMPT_LABEL_MAX_LENGTH ? trimmed : `${trimmed.slice(0, PROMPT_LABEL_MAX_LENGTH - 1)}…`;
+}
+
+function compactTargetForPrompt(target: GoalTarget | undefined): GoalPromptObject | undefined {
+	if (!target) return undefined;
+	return {
+		id: target.id,
+		title: target.title,
+		parentDeliverableIds: target.parentDeliverableIds,
+		desiredFutureClaim: target.desiredFutureClaim,
+		closureStandard: target.closureStandard,
+		expectedParentContribution: target.expectedParentContribution,
+		baselineRefs: compactRefIds(target.baselineRefs),
+		gateRefs: target.gateRefs,
+		evidenceExpectation: target.evidenceExpectation,
+		nonGoals: target.nonGoals,
+		forbiddenClaims: target.forbiddenClaims,
+		staleIf: target.staleIf,
+		createdFromCheckpointId: target.createdFromCheckpointId,
+		createdFromVerificationAttemptId: target.createdFromVerificationAttemptId,
+		linkedVerifierBlockerIds: target.linkedVerifierBlockerIds,
+	};
+}
+
+function compactDeliverableForPrompt(
+	item: GoalDeliverableMapItem,
+	mode: "full" | "pending" | "satisfied",
+): GoalPromptObject {
+	if (mode === "satisfied") {
+		return {
+			id: item.id,
+			status: item.status,
+			label: shortPromptLabel(item.summary),
+			evidenceRefs: compactRefIds(item.evidenceRefs),
+		};
+	}
+	return {
+		id: item.id,
+		status: item.status,
+		summary: item.summary,
+		evidenceRefs: compactRefIds(item.evidenceRefs),
+		blockedBy: item.blockedBy,
+		nextRelevantTarget: item.nextRelevantTarget,
+	};
+}
+
+function compactDeliverablesForPrompt(
+	items: GoalDeliverableMapItem[] | undefined,
+	currentTarget: GoalTarget | undefined,
+): GoalPromptObject | undefined {
+	if (!items?.length) return undefined;
+	const currentIds = new Set(currentTarget?.parentDeliverableIds ?? []);
+	const activeOrPartial: GoalPromptObject[] = [];
+	const pending: GoalPromptObject[] = [];
+	const satisfied: GoalPromptObject[] = [];
+	const blockedOrStale: GoalPromptObject[] = [];
+	for (const item of items) {
+		if (item.status === "blocked" || item.status === "stale") {
+			blockedOrStale.push(compactDeliverableForPrompt(item, "full"));
+		} else if (item.status === "partial" || currentIds.has(item.id)) {
+			activeOrPartial.push(compactDeliverableForPrompt(item, "full"));
+		} else if (item.status === "satisfied") {
+			satisfied.push(compactDeliverableForPrompt(item, "satisfied"));
+		} else {
+			pending.push(compactDeliverableForPrompt(item, "pending"));
+		}
+	}
+	return {
+		active_or_partial: activeOrPartial,
+		pending,
+		satisfied,
+		blocked_or_stale: blockedOrStale,
+	};
+}
+
+function currentDeliverableEvidenceRefIds(
+	items: GoalDeliverableMapItem[] | undefined,
+	currentTarget: GoalTarget | undefined,
+): Set<string> {
+	const refIds = new Set<string>();
+	const currentIds = new Set(currentTarget?.parentDeliverableIds ?? []);
+	if (currentIds.size === 0) return refIds;
+	for (const item of items ?? []) {
+		if (!currentIds.has(item.id)) continue;
+		for (const ref of item.evidenceRefs ?? []) refIds.add(ref.id);
+	}
+	return refIds;
+}
+
+function compactParentTruthForPrompt(
+	frame: GoalParentFrame | undefined,
+	latest: GoalCheckpointResolution | undefined,
+	deliverables: GoalDeliverableMapItem[] | undefined,
+	currentTarget: GoalTarget | undefined,
+): GoalPromptObject | undefined {
+	if (!frame) return undefined;
+	const latestAdmittedIds = new Set(latest?.parentDelta?.admittedClaims.map(claim => claim.id) ?? []);
+	const relevantEvidenceRefIds = currentDeliverableEvidenceRefIds(deliverables, currentTarget);
+	const acceptedRecent: GoalPromptObject[] = [];
+	const acceptedCompact: GoalPromptObject[] = [];
+	const claimNonImplications: GoalPromptObject[] = [];
+	for (const claim of frame.acceptedClaims) {
+		const isRecent = latestAdmittedIds.has(claim.id);
+		const isCurrentRelevant =
+			claim.evidenceRefs?.some(ref => relevantEvidenceRefIds.has(ref.id)) ||
+			(currentTarget?.parentDeliverableIds?.some(id => claim.scope === id) ?? false);
+		if (isRecent || isCurrentRelevant) {
+			acceptedRecent.push({
+				id: claim.id,
+				claim: claim.claim,
+				scope: claim.scope,
+				evidenceRefs: compactRefIds(claim.evidenceRefs),
+				nonImplications: claim.nonImplications,
+			});
+		} else {
+			acceptedCompact.push({
+				id: claim.id,
+				label: shortPromptLabel(claim.claim),
+				evidenceRefs: compactRefIds(claim.evidenceRefs),
+			});
+			for (const statement of claim.nonImplications ?? []) {
+				claimNonImplications.push({ claimId: claim.id, statement });
+			}
+		}
+	}
+	return {
+		kind: frame.kind,
+		currentTruth: frame.currentTruth,
+		authority: frame.authority,
+		accepted_recent: acceptedRecent,
+		accepted_compact: acceptedCompact,
+		boundaries: frame.boundaries.map(boundary => ({
+			id: boundary.id,
+			kind: boundary.kind,
+			statement: boundary.statement,
+			refs: compactRefIds(boundary.refs),
+		})),
+		claimNonImplications,
+		residuals: frame.residuals.map(residual => ({
+			id: residual.id,
+			classification: residual.classification,
+			statement: residual.statement,
+			targetHorizon: residual.targetHorizon,
+		})),
+		gates: frame.gates.map(gate => ({
+			id: gate.id,
+			name: gate.name,
+			status: gate.status,
+			evidenceRefs: compactRefIds(gate.evidenceRefs),
+			staleIf: gate.staleIf,
+		})),
+		frontier: frame.frontier.map(item => ({
+			id: item.id,
+			statement: item.statement,
+			activationTrigger: item.activationTrigger,
+		})),
+		staleIf: frame.staleIf,
+		externalRefs: compactRefIds(frame.externalRefs),
+		lastParentDeltaId: frame.lastParentDeltaId,
+	};
+}
+
+function compactCheckpointForPrompt(checkpoint: GoalCheckpointPacket | undefined): GoalPromptObject | undefined {
+	if (!checkpoint) return undefined;
+	return {
+		id: checkpoint.id,
+		sequence: checkpoint.sequence,
+		targetId: checkpoint.targetId,
+		targetTitle: checkpoint.targetSnapshot.title,
+		reviewStatus: checkpoint.review?.status,
+		summary: checkpoint.summary,
+		localClaims: checkpoint.localClaims,
+		notClaimed: checkpoint.notClaimed,
+		remainingQuestions: checkpoint.remainingQuestions,
+		risksOrCaveats: checkpoint.risksOrCaveats,
+		staleIf: checkpoint.staleIf,
+		requiredAction: "resolve_checkpoint",
+	};
+}
+
+function compactDeliverableDeltaForPrompt(delta: GoalDeliverableDelta): GoalPromptObject {
+	return {
+		id: delta.id,
+		status: delta.status,
+		summary: delta.summary,
+		evidenceRefs: compactRefIds(delta.evidenceRefs),
+		blockedBy: delta.blockedBy,
+		nextRelevantTarget: delta.nextRelevantTarget,
+	};
+}
+
+function compactResolutionForPrompt(
+	resolution: GoalCheckpointResolution | undefined,
+	currentTarget: GoalTarget | undefined,
+): GoalPromptObject | undefined {
+	if (!resolution) return undefined;
+	const nextTargetMatchesCurrent =
+		resolution.nextTarget !== undefined &&
+		currentTarget !== undefined &&
+		resolution.nextTarget.id === currentTarget.id;
+	return {
+		id: resolution.id,
+		sequence: resolution.sequence,
+		checkpointId: resolution.checkpointId,
+		decision: resolution.decision,
+		parentReading: resolution.parentReading,
+		admittedClaimIds: resolution.parentDelta?.admittedClaims.map(claim => claim.id),
+		deliverableDeltas: resolution.parentDelta?.deliverableDeltas?.map(compactDeliverableDeltaForPrompt),
+		notPropagated: resolution.notPropagated,
+		remainingParentWork: resolution.remainingParentWork,
+		broaderChecksOrInputs: resolution.broaderChecksOrInputs,
+		lessonsForFuture: resolution.lessonsForFuture,
+		nextTargetId: resolution.nextTarget?.id,
+		nextTargetTitle: resolution.nextTarget && !nextTargetMatchesCurrent ? resolution.nextTarget.title : undefined,
+	};
+}
+
+function compactVerifierRepairForPrompt(repair: GoalVerificationRepairState | undefined): GoalPromptObject | undefined {
+	if (!repair) return undefined;
+	return {
+		attempt: repair.verificationAttemptId,
+		feedback: repair.feedback,
+		blockers: compactVerificationGaps(repair.blockers),
+		evidenceToCollect: repair.evidenceToCollect,
+		avoidRepeating: repair.avoidRepeating,
+		requiredAction: "repair_verifier_blockers",
+	};
+}
+
+function compactBackgroundLaneIntakeForPrompt(lanes: BackgroundLane[] | undefined): GoalPromptObject | undefined {
+	const blocked = structuredBlockingBackgroundLanes(lanes);
+	const required = requiredBlockingBackgroundLanes(lanes);
+	if (blocked.length === 0 && required.length === 0) return undefined;
+	return {
+		requiredAction: "disposition_background_lanes",
+		blocked: blocked.map(lane => ({
+			id: lane.id,
+			status: lane.status,
+			question: lane.contract.question,
+			blocksIf: lane.contract.blocksIf,
+			requiredBeforeParent: lane.contract.requiredBeforeParent,
+			latestReportRef: lane.latestReportRef,
+		})),
+		requiredOpen: required.map(lane => ({
+			id: lane.id,
+			status: lane.status,
+			question: lane.contract.question,
+			latestReportRef: lane.latestReportRef,
+		})),
+	};
+}
+
+function policyForRunMode(runMode: GoalRunMode): GoalPromptObject {
+	return {
+		invariant: [
+			"target closure is not parent completion",
+			"parent truth changes only through goal.resolve_checkpoint.parent_delta",
+		],
+		now: allowedActsForRunMode(runMode),
+		blocked: disallowedActsForRunMode(runMode),
+	};
+}
+
+function isPromptObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function prunePromptValue(value: unknown): unknown {
+	if (value === undefined || value === null) return undefined;
+	if (Array.isArray(value)) {
+		const prunedItems = value.map(prunePromptValue).filter(item => item !== undefined);
+		return prunedItems.length ? prunedItems : undefined;
+	}
+	if (!isPromptObject(value)) return value;
+	const output: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(value)) {
+		const pruned = prunePromptValue(item);
+		if (pruned !== undefined) output[key] = pruned;
+	}
+	return Object.keys(output).length ? output : undefined;
+}
+
+export function buildGoalContextSurface(state: GoalModeState | undefined, goal: Goal): GoalContextSurface {
+	const runMode = state?.runMode ?? "working-target";
+	const currentTarget = goal.currentTarget;
+	const checkpoint = latestCheckpoint(goal);
+	const resolution = latestResolution(goal);
+	const surface: GoalContextSurface = {
+		goal: {
+			id: goal.id,
+			status: goal.status,
+			invariant: "Target closure is not parent completion; parent completion requires verifier acceptance.",
+		},
+		run: {
+			mode: runMode,
+			stateVersion: state?.stateVersion ?? 0,
+			parentFrameVersion: state?.parentFrameVersion ?? (goal.parentFrame ? 1 : 0),
+		},
+		policy: policyForRunMode(runMode),
+		deliverables: compactDeliverablesForPrompt(goal.deliverableMap, currentTarget),
+		parent_truth: compactParentTruthForPrompt(goal.parentFrame, resolution, goal.deliverableMap, currentTarget),
+		latest_resolution: compactResolutionForPrompt(resolution, currentTarget),
+		refs: {
+			fullState: 'goal({op:"get"})',
+			checkpointDetails: checkpoint ? `goal({op:"get"}) checkpoint ${checkpoint.id}` : undefined,
+		},
+	};
+	if (runMode === "working-target") {
+		surface.current_target = compactTargetForPrompt(currentTarget);
+	} else if (runMode === "awaiting-checkpoint-resolution") {
+		surface.checkpoint = compactCheckpointForPrompt(checkpoint);
+	} else if (runMode === "awaiting-parent-completion") {
+		surface.parent_completion = {
+			requiredAction: "complete",
+			latestResolutionId: resolution?.id,
+			remainingParentWork: resolution?.remainingParentWork,
+			notPropagated: resolution?.notPropagated,
+		};
+	} else if (runMode === "awaiting-verification-repair") {
+		surface.verifier_repair = compactVerifierRepairForPrompt(goal.verificationRepair);
+		surface.current_target = targetLinksBlockers(currentTarget, goal.verificationRepair?.blockers ?? [])
+			? compactTargetForPrompt(currentTarget)
+			: undefined;
+	} else if (runMode === "awaiting-background-lane-intake") {
+		surface.background_lane_intake = compactBackgroundLaneIntakeForPrompt(goal.backgroundLanes);
+	} else if (runMode === "awaiting-user-input") {
+		surface.blocked_state = {
+			requiredAction: "await_user_input_or_external_authority",
+			latestResolutionId: resolution?.id,
+			broaderChecksOrInputs: resolution?.broaderChecksOrInputs,
+			remainingParentWork: resolution?.remainingParentWork,
+		};
+	}
+	return surface;
+}
+
+export function renderGoalPromptSurface(state: GoalModeState | undefined, goal: Goal): string {
+	return escapeJsonForPrompt(prunePromptValue(buildGoalContextSurface(state, goal)) ?? {});
+}
+
 function guidanceSummary(guidance: string): string {
 	const firstLines = guidance
 		.split("\n")
@@ -533,13 +895,13 @@ export function buildGoalContinuationPacket(
 function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
 		case "awaiting-checkpoint-resolution":
-			return ["Inspect checkpoint guidance", 'Call goal({ op: "resolve_checkpoint", ... })'];
+			return ['Call goal({op:"resolve_checkpoint", ...}) before ordinary tools'];
 		case "completed":
 			return ["Report completed parent goal outcome"];
 		case "awaiting-parent-completion":
-			return ['Call goal({ op: "complete" }) for parent completion verification'];
+			return ['Call goal({op:"complete"}) for parent completion verification'];
 		case "awaiting-verification-repair":
-			return ["Repair verifier blockers", "Start a blocker-scoped target", "Gather fresh evidence"];
+			return ['Call goal({op:"start_target", linked_verifier_blocker_ids:[...]}) or gather repair evidence'];
 		case "awaiting-background-lane-intake":
 			return ["Disposition blocked background lanes before ordinary implementation resumes"];
 		case "awaiting-user-input":
@@ -547,8 +909,8 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 		default:
 			return [
 				"Continue current target",
-				"Start a target if none exists",
-				"Checkpoint only after target closure evidence",
+				'Call goal({op:"start_target", ...}) if no current target exists',
+				'Call goal({op:"checkpoint", ...}) only after target closure evidence',
 			];
 	}
 }
@@ -591,12 +953,7 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal, state?: GoalM
 		runMode: state?.runMode ?? "working-target",
 		stateVersion: String(state?.stateVersion ?? 0),
 		parentFrameVersion: String(state?.parentFrameVersion ?? (goal.parentFrame ? 1 : 0)),
-		goalStateSnapshot: renderGoalStateSnapshot(state, goal),
-		parentFrame: escapeJsonForPrompt(goal.parentFrame ?? null),
-		currentTarget: escapeJsonForPrompt(goal.currentTarget ?? null),
-		pendingCheckpoint: escapeJsonForPrompt(latestCheckpoint(goal) ?? null),
-		latestCheckpointResolution: escapeJsonForPrompt(latestResolution(goal) ?? null),
-		verificationRepair: escapeJsonForPrompt(goal.verificationRepair ?? null),
+		goalContextSurface: renderGoalPromptSurface(state, goal),
 	});
 }
 

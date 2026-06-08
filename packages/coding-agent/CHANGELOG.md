@@ -19,6 +19,8 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed goal-mode prompts to render a load-bearing controller surface by run mode, keeping full audit checkpoint state in tool details and side-agent artifacts instead of the always-on context.
+
 - Changed goal-mode rubrics to stay verifier-private in main-agent prompts and side-agent context while exposing compact deliverable maps with target deliverable IDs.
 
 - Changed goal checkpoint guidance and target aperture prompts to preserve project-defined target units and reject internal phase checkpoints.
