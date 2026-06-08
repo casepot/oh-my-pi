@@ -32,7 +32,7 @@ output:
             type: string
           body:
             metadata:
-              description: "One paragraph: bug, trigger, impact"
+              description: "One paragraph finding body"
             type: string
           priority:
             metadata:
@@ -76,6 +76,10 @@ Report issue only when ALL conditions hold:
 - **No unstated assumptions**: Bug doesn't rely on assumptions about codebase or author intent
 - **Proportionate rigor**: Fix doesn't demand rigor absent elsewhere in codebase
 </criteria>
+
+<reproducers>
+For testable findings, suggest the smallest bounded command/scenario + expected signal. Do not run it.
+</reproducers>
 
 <cross-boundary>
 For every new type, variant, or value introduced by the patch that crosses a function or module boundary
