@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Message } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 
@@ -13,8 +13,49 @@ function expectAttribution(message: Message | undefined, expected: "user" | "age
 	expect(message.attribution).toBe(expected);
 }
 
+describe("convertToLlm compaction summary", () => {
+	it("appends snapcompact frames as image blocks after the summary text", () => {
+		// Regression: the live session uses THIS converter (not agent-core's
+		// defaultConvertToLlm). Dropping the frames here silently severs the
+		// archive from the provider request — the model sees a summary that
+		// references attached frames that never arrive.
+		const images: ImageContent[] = [
+			{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+			{ type: "image", data: "ZmFrZTI=", mimeType: "image/png" },
+		];
+		const messages: AgentMessage[] = [
+			{
+				role: "compactionSummary",
+				summary: "the film archive",
+				tokensBefore: 1000,
+				images,
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted).toHaveLength(1);
+		expect(converted[0]?.role).toBe("user");
+		const content = converted[0]?.content as Array<TextContent | ImageContent>;
+		expect(content).toHaveLength(3);
+		expect(content[0].type).toBe("text");
+		expect((content[0] as TextContent).text).toContain("the film archive");
+		expect(content[1]).toEqual(images[0]);
+		expect(content[2]).toEqual(images[1]);
+	});
+
+	it("emits text-only content when no frames are archived", () => {
+		const messages: AgentMessage[] = [
+			{ role: "compactionSummary", summary: "plain summary", tokensBefore: 1000, timestamp: Date.now() },
+		];
+		const converted = convertToLlm(messages);
+		expect((converted[0]?.content as unknown[]).length).toBe(1);
+	});
+});
+
 describe("convertToLlm custom message mapping", () => {
-	it("uses async-result attribution without special role mapping", () => {
+	it("maps custom messages to developer role with explicit agent attribution", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
@@ -29,7 +70,7 @@ describe("convertToLlm custom message mapping", () => {
 		const converted = convertToLlm(messages);
 
 		expect(converted).toHaveLength(1);
-		expect(converted[0]?.role).toBe("user");
+		expect(converted[0]?.role).toBe("developer");
 		expectAttribution(converted[0], "agent");
 		expect(inferCopilotInitiator(converted)).toBe("agent");
 	});
@@ -50,7 +91,7 @@ describe("convertToLlm custom message mapping", () => {
 		expect(convertToLlm(messages)).toHaveLength(0);
 	});
 
-	it("preserves missing attribution for legacy custom messages", () => {
+	it("maps legacy custom messages to developer role", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
@@ -64,17 +105,17 @@ describe("convertToLlm custom message mapping", () => {
 		const converted = convertToLlm(messages);
 
 		expect(converted).toHaveLength(1);
-		expect(converted[0]?.role).toBe("user");
+		expect(converted[0]?.role).toBe("developer");
 		expectAttribution(converted[0], undefined);
-		expect(inferCopilotInitiator(converted)).toBe("user");
+		expect(inferCopilotInitiator(converted)).toBe("agent");
 	});
 
 	it("uses explicit agent attribution for custom messages", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
-				customType: "ttsr-injection",
-				content: "<system-reminder>Read file</system-reminder>",
+				customType: "agent-reminder",
+				content: "Read file",
 				display: false,
 				attribution: "agent",
 				timestamp: Date.now(),
@@ -84,9 +125,31 @@ describe("convertToLlm custom message mapping", () => {
 		const converted = convertToLlm(messages);
 
 		expect(converted).toHaveLength(1);
-		expect(converted[0]?.role).toBe("user");
+		expect(converted[0]?.role).toBe("developer");
 		expectAttribution(converted[0], "agent");
 		expect(inferCopilotInitiator(converted)).toBe("agent");
+	});
+
+	it("maps file mention reminders to developer role", () => {
+		const messages: AgentMessage[] = [
+			{
+				role: "fileMention",
+				files: [{ path: "src/config.ts", content: "export const config = {};" }],
+				timestamp: Date.now(),
+			},
+		];
+
+		const converted = convertToLlm(messages);
+
+		expect(converted).toHaveLength(1);
+		expect(converted[0]?.role).toBe("developer");
+		expectAttribution(converted[0], "user");
+		if (converted[0]?.role !== "developer" || !Array.isArray(converted[0].content)) {
+			throw new Error("Expected developer array content");
+		}
+		const text = converted[0].content.find(content => content.type === "text")?.text ?? "";
+		expect(text).toContain('<file path="src/config.ts">');
+		expect(text).toContain("export const config = {};");
 	});
 
 	it("allows custom messages to opt into user attribution", () => {
@@ -104,7 +167,7 @@ describe("convertToLlm custom message mapping", () => {
 		const converted = convertToLlm(messages);
 
 		expect(converted).toHaveLength(1);
-		expect(converted[0]?.role).toBe("user");
+		expect(converted[0]?.role).toBe("developer");
 		expectAttribution(converted[0], "user");
 		expect(inferCopilotInitiator(converted)).toBe("user");
 	});

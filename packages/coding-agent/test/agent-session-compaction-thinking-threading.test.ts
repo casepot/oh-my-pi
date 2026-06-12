@@ -20,9 +20,12 @@ const AGENT_SESSION_PATH = `${import.meta.dir}/../src/session/agent-session.ts`;
 // - The `async compact(...)` method declaration itself.
 // - `this.compact(...)` invocations that route through the method (and from
 //   there into the threaded `#compactWithFallbackModel`).
+// - `snapcompact.compact(...)` invocations render deterministic image frames
+//   locally; they do not call an LLM or resolve a compaction effort.
 const NON_LLM_CALL_PATTERNS = [
 	/async compact\(customInstructions/, // method declaration
 	/await this\.compact\(/, // self-invocation routes to threaded site
+	/snapcompact\.compact\(/, // local deterministic renderer
 ];
 
 interface CallSite {

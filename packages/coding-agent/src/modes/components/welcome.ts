@@ -47,37 +47,42 @@ export function renderWelcomeShaderPanel(elapsedMs = WELCOME_SHADER_SETTLED_MS):
 	const left = theme.fg("dim", theme.boxRound.vertical);
 	const right = theme.fg("dim", theme.boxRound.vertical);
 	const t = elapsedMs / 1000;
-	const aspect = (innerWidth / innerHeight) * 0.48;
-	const top = `${theme.fg("dim", theme.boxRound.topLeft)}${border.repeat(innerWidth)}${theme.fg("dim", theme.boxRound.topRight)}`;
-	const bottom = `${theme.fg("dim", theme.boxRound.bottomLeft)}${border.repeat(innerWidth)}${theme.fg("dim", theme.boxRound.bottomRight)}`;
-	const rows = [top];
-
+	const aspect = innerWidth / Math.max(1, innerHeight);
+	const rows: string[] = [
+		theme.fg("dim", theme.boxRound.topLeft + border.repeat(innerWidth) + theme.boxRound.topRight),
+	];
 	for (let y = 0; y < innerHeight; y++) {
 		let body = "";
-		const v = 1 - (2 * (y + 0.5)) / innerHeight;
 		for (let x = 0; x < innerWidth; x++) {
-			const u = ((2 * (x + 0.5)) / innerWidth - 1) * aspect;
-			const radius = Math.sqrt(u * u + v * v);
-			const angle = Math.atan2(v, u);
-			const z = fract(t * 0.58 + radius * 1.85) - 0.5;
-			const fold = Math.abs(z) * 2;
-			const ridge =
-				Math.sin(angle * 5.5 + z * 9.5 + t * 1.8) * 0.28 +
-				Math.sin(angle * 10 - z * 13 + t * 2.7) * 0.14 +
-				Math.sin((radius - t * 0.34) * 24) * 0.12;
-			const tunnel = 1 - Math.abs(radius - (0.45 + ridge));
-			const depth = 1 - fold * 0.62;
-			const centerGlow = Math.max(0, 0.5 - radius) * 0.7;
-			const intensity = clamp01(tunnel * depth + centerGlow);
+			const nx = (x / Math.max(1, innerWidth - 1) - 0.5) * aspect;
+			const ny = y / Math.max(1, innerHeight - 1) - 0.5;
+			const radius = Math.hypot(nx, ny);
+			const angle = Math.atan2(ny, nx);
+			const wave = Math.sin(radius * 17 - t * 2.4) * 0.5 + 0.5;
+			const sweep = Math.sin(angle * 3 + t * 1.7 + radius * 8) * 0.5 + 0.5;
+			const fold = Math.sin((nx - ny) * 9 + t) * 0.5 + 0.5;
+			const vignette = 1 - clamp01(radius * 1.15);
+			const intensity = clamp01((wave * 0.45 + sweep * 0.35 + fold * 0.2) * (0.35 + vignette * 0.9));
 			const color = fract(0.63 + angle / (Math.PI * 2) + fold * 0.35 + t * 0.09);
 			body += `${gradientEscape(color)}${shaderGlyph(intensity)}${WELCOME_SHADER_RESET}`;
 		}
 		rows.push(`${left}${body}${right}`);
 	}
-
-	rows.push(bottom);
+	rows.push(theme.fg("dim", theme.boxRound.bottomLeft + border.repeat(innerWidth) + theme.boxRound.bottomRight));
 	return rows;
 }
+
+/**
+ * Fixed number of session rows in the welcome box so its height stays stable
+ * across recent-session updates.
+ */
+export const WELCOME_SESSION_SLOTS = 4;
+
+/**
+ * Fixed number of LSP-server rows, for the same reason. Overflow is sliced so
+ * the welcome box never changes height when more servers are discovered.
+ */
+export const WELCOME_LSP_SLOTS = 4;
 
 export function renderWelcomeTip(tip: string, boxWidth: number): string[] {
 	const label = "Tip: ";
@@ -110,7 +115,7 @@ export interface RecentSession {
 
 export interface LspServerInfo {
 	name: string;
-	status: "ready" | "error" | "connecting";
+	status: "ready" | "error" | "connecting" | "available";
 	fileTypes: string[];
 }
 
@@ -119,6 +124,11 @@ export class WelcomeComponent implements Component {
 	#animTimer: ReturnType<typeof setInterval> | null = null;
 	/** Tip chosen once per instance so re-renders (intro, LSP updates) don't shuffle it. */
 	readonly #tip: string | undefined = TIPS.length > 0 ? TIPS[Math.floor(Math.random() * TIPS.length)] : undefined;
+	// Render cache: the welcome box is the first transcript-area component, so
+	// returning a stable array reference keeps the whole frame prefix stable.
+	// Bypassed while the intro animation runs (every frame differs).
+	#cachedWidth = -1;
+	#cachedLines: string[] | undefined;
 
 	constructor(
 		private readonly version: string,
@@ -128,7 +138,10 @@ export class WelcomeComponent implements Component {
 		private lspServers: LspServerInfo[] = [],
 	) {}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.#cachedWidth = -1;
+		this.#cachedLines = undefined;
+	}
 
 	/**
 	 * Start the welcome shader render loop. Safe to call multiple times —
@@ -150,6 +163,8 @@ export class WelcomeComponent implements Component {
 			this.#animTimer = null;
 		}
 		this.#animStart = null;
+		// The settled (resting) frame differs from the last intro frame.
+		this.invalidate();
 	}
 
 	dispose(): void {
@@ -159,17 +174,36 @@ export class WelcomeComponent implements Component {
 	setModel(modelName: string, providerName: string): void {
 		this.modelName = modelName;
 		this.providerName = providerName;
+		this.invalidate();
 	}
 
 	setRecentSessions(sessions: RecentSession[]): void {
 		this.recentSessions = sessions;
+		this.invalidate();
 	}
 
 	setLspServers(servers: LspServerInfo[]): void {
 		this.lspServers = servers;
+		this.invalidate();
 	}
 
-	render(termWidth: number): string[] {
+	render(termWidth: number): readonly string[] {
+		const animating = this.#animStart != null;
+		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth) {
+			return this.#cachedLines;
+		}
+		const lines = this.#renderLines(termWidth);
+		if (animating) {
+			this.#cachedLines = undefined;
+			this.#cachedWidth = -1;
+		} else {
+			this.#cachedLines = lines;
+			this.#cachedWidth = termWidth;
+		}
+		return lines;
+	}
+
+	#renderLines(termWidth: number): string[] {
 		// Box dimensions - responsive with max width and small-terminal support
 		const maxWidth = 100;
 		const boxWidth = Math.min(maxWidth, Math.max(0, termWidth - 2));
@@ -224,7 +258,7 @@ export class WelcomeComponent implements Component {
 			// absorbs whatever space is left.
 			const bulletPrefix = ` ${theme.md.bullet} `;
 			const prefixWidth = visibleWidth(bulletPrefix);
-			for (const session of this.recentSessions.slice(0, 3)) {
+			for (const session of this.recentSessions.slice(0, WELCOME_SESSION_SLOTS)) {
 				const timeSuffixRaw = ` (${session.timeAgo})`;
 				const timeWidth = visibleWidth(timeSuffixRaw);
 				const nameBudget = Math.max(1, rightCol - prefixWidth - timeWidth);
@@ -235,22 +269,32 @@ export class WelcomeComponent implements Component {
 				);
 			}
 		}
+		// Pad to the fixed slot count so the box height doesn't depend on session count.
+		while (sessionLines.length < WELCOME_SESSION_SLOTS) {
+			sessionLines.push("");
+		}
 
 		// LSP servers content
 		const lspLines: string[] = [];
 		if (this.lspServers.length === 0) {
 			lspLines.push(` ${theme.fg("dim", "No LSP servers")}`);
 		} else {
-			for (const server of this.lspServers) {
+			for (const server of this.lspServers.slice(0, WELCOME_LSP_SLOTS)) {
 				const icon =
 					server.status === "ready"
-						? theme.styledSymbol("status.success", "success")
-						: server.status === "connecting"
-							? theme.styledSymbol("status.pending", "muted")
-							: theme.styledSymbol("status.error", "error");
+						? theme.styledSymbol("status.enabled", "success")
+						: server.status === "available"
+							? theme.styledSymbol("status.enabled", "dim")
+							: server.status === "connecting"
+								? theme.styledSymbol("status.pending", "muted")
+								: theme.styledSymbol("status.error", "error");
 				const exts = server.fileTypes.slice(0, 3).join(" ");
 				lspLines.push(` ${icon} ${theme.fg("muted", server.name)} ${theme.fg("dim", exts)}`);
 			}
+		}
+		// Pad to the fixed slot count so the box height doesn't depend on server count.
+		while (lspLines.length < WELCOME_LSP_SLOTS) {
+			lspLines.push("");
 		}
 
 		// Right column

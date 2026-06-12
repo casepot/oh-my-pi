@@ -5,11 +5,18 @@
  * describe protocol-only payloads so embedders can import them without pulling
  * the runtime server/client implementation into their program.
  */
-import type { AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import type { BackgroundLane, BackgroundLaneCloseOutcome, BackgroundLaneListItem } from "../../background-lanes/state";
-import type { SessionEntry, SessionTreeNode } from "../../session/session-manager";
-import type { AgentProgress } from "../../task";
+import type { AgentSessionEvent } from "../../session/agent-session";
+import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-manager";
+import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
+import type {
+	AgentProgress,
+	SubagentEventPayload,
+	SubagentLifecyclePayload,
+	SubagentProgressPayload,
+} from "../../task";
 import type { TodoPhase } from "../../tools/todo";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -237,6 +244,8 @@ export type RpcCommand =
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State / host extension registration
+	| { id?: string; type: "get_state" }
+	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
 	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
 	| { id?: string; type: "add_host_tools"; tools: RpcHostToolDefinition[] }
@@ -244,6 +253,9 @@ export type RpcCommand =
 	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "add_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "remove_host_uri_schemes"; schemes: string[] }
+	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
+	| { id?: string; type: "get_subagents" }
+	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -355,6 +367,20 @@ export interface RpcSessionState {
 	backgroundLanes: BackgroundLaneListItem[];
 }
 
+export interface RpcAvailableSlashCommand {
+	name: string;
+	aliases?: string[];
+	description?: string;
+	input?: { hint?: string };
+	subcommands?: Array<{ name: string; description?: string; usage?: string }>;
+	source: AvailableSlashCommandSource;
+}
+
+export interface RpcAvailableCommandsUpdateFrame {
+	type: "available_commands_update";
+	commands: RpcAvailableSlashCommand[];
+}
+
 export interface RpcHandoffResult {
 	savedPath?: string;
 }
@@ -397,6 +423,32 @@ export interface RpcObservableSessionView {
 	summary?: string;
 	startedAt?: string;
 	updatedAt?: string;
+}
+
+export type RpcSubagentSubscriptionLevel = "off" | "progress" | "events";
+
+export interface RpcSubagentSnapshot {
+	id: string;
+	index: number;
+	agent: string;
+	agentSource: AgentProgress["agentSource"];
+	description?: string;
+	status: AgentProgress["status"];
+	task?: string;
+	assignment?: string;
+	sessionFile?: string;
+	lastUpdate: number;
+	progress?: AgentProgress;
+	parentToolCallId?: string;
+}
+
+export interface RpcSubagentMessagesResult {
+	sessionFile: string;
+	fromByte: number;
+	nextByte: number;
+	reset: boolean;
+	entries: FileEntry[];
+	messages: AgentMessage[];
 }
 
 // ============================================================================
@@ -528,7 +580,7 @@ export interface RpcTaskResult {
 	outputRef?: RpcLargeContentRef;
 }
 
-export type RpcSubagentLifecycleFrame = RpcFrameMetadata &
+export type RpcTaskSubagentLifecycleFrame = RpcFrameMetadata &
 	RpcCorrelation & {
 		type: "subagent_lifecycle";
 		schemaVersion: 1;
@@ -566,6 +618,29 @@ export type RpcShutdownFrame = RpcFrameMetadata & {
 	reason: string;
 	status: "graceful" | "peer_closed" | "one_shot_complete";
 };
+
+// ============================================================================
+// Subagent Events (stdout)
+// ============================================================================
+
+export interface RpcSubagentLifecycleFrame {
+	type: "subagent_lifecycle";
+	payload: SubagentLifecyclePayload;
+}
+
+export interface RpcSubagentProgressFrame {
+	type: "subagent_progress";
+	payload: SubagentProgressPayload;
+}
+
+export interface RpcSubagentEventFrame {
+	type: "subagent_event";
+	payload: SubagentEventPayload;
+}
+
+export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
+
+export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
 
 // ============================================================================
 // Extension UI Events (stdout) and responses (stdin)
@@ -824,7 +899,8 @@ export type RpcNotificationFrame =
 	| RpcStateChangedFrame
 	| RpcTaskProgressFrame
 	| RpcTaskResultFrame
-	| RpcSubagentLifecycleFrame
+	| RpcTaskSubagentLifecycleFrame
+	| RpcSubagentFrame
 	| RpcObservableSessionUpdateFrame
 	| RpcHeartbeatFrame
 	| RpcBackgroundLaneUpdateFrame

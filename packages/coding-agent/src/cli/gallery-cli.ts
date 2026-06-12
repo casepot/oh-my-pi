@@ -69,7 +69,7 @@ function fakeToolFor(name: string, fixture: GalleryFixture | undefined): AgentTo
 	if (!fixture?.label && !fixture?.editMode && !fixture?.customRendered) return undefined;
 	const tool: Record<string, unknown> = { name, label: fixture.label ?? name, mode: fixture.editMode };
 	if (fixture.customRendered) {
-		const renderer = toolRenderers[name] as
+		const renderer = toolRenderers[fixture.renderer ?? name] as
 			| { renderCall?: unknown; renderResult?: unknown; mergeCallAndResult?: unknown; inline?: unknown }
 			| undefined;
 		if (renderer) {
@@ -104,13 +104,18 @@ export async function renderGalleryState(
 	state: GalleryState,
 	width: number,
 	expanded = false,
-): Promise<string[]> {
+): Promise<readonly string[]> {
+	if (fixture.renderState) {
+		return await fixture.renderState(state, width, expanded);
+	}
+
 	const tool = fakeToolFor(name, fixture);
 	const streamingArgs = state === "streaming" ? (fixture.streamingArgs ?? fixture.args) : fixture.args;
-	// The component only calls `requestRender` during a static render;
-	// `imageBudget` is consulted solely when images render, which the gallery
-	// disables. A cast avoids constructing a real terminal.
-	const ui = { requestRender() {} } as unknown as TUI;
+	// The component only calls `requestRender`/`requestComponentRender` (via
+	// its loader) during a static render; `imageBudget` is consulted solely
+	// when images render, which the gallery disables. A cast avoids
+	// constructing a real terminal.
+	const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
 	const component = new ToolExecutionComponent(name, streamingArgs, { showImages: false }, tool, ui, getProjectDir());
 	component.setExpanded(expanded);
 
@@ -196,7 +201,10 @@ export async function runGalleryCommand(args: GalleryCommandArgs): Promise<void>
 	const expanded = args.expanded ?? false;
 	const states = args.states && args.states.length > 0 ? args.states : [...GALLERY_STATES];
 
-	const allNames = Object.keys(toolRenderers).sort();
+	// Renderer-registry tools plus fixture-only tools (no dedicated renderer,
+	// e.g. `report_tool_issue` / custom extension tools) so the gallery covers
+	// the generic fallback + custom-tool branches too.
+	const allNames = Array.from(new Set([...Object.keys(toolRenderers), ...Object.keys(galleryFixtures)])).sort();
 	const names = args.tool ? allNames.filter(name => name === args.tool) : allNames;
 	if (args.tool && names.length === 0) {
 		process.stdout.write(`Unknown tool '${args.tool}'. Known tools: ${allNames.join(", ")}\n`);

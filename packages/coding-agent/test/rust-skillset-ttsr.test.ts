@@ -315,7 +315,11 @@ describe("built-in Rust skillset TTSR pack", () => {
 				})
 				.map(rule => rule.name),
 		).toEqual(["rs-from-not-into"]);
-		expect(getActiveRules().some(rule => rule.name === "rs-from-not-into")).toBe(false);
+		expect(
+			getActiveRules()
+				.filter(rule => rule.name === "rs-from-not-into")
+				.map(rule => rule._source.level),
+		).toEqual(["project"]);
 	});
 
 	for (const ruleCase of RULE_CASES) {

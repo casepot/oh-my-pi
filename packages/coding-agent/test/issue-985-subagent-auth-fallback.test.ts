@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { kNoAuth, type ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import {
 	type ModelLookupRegistry,
@@ -25,7 +26,7 @@ import {
  * parent-model substitution.
  */
 
-const parentModel: Model<Api> = {
+const parentModel: Model<Api> = buildModel({
 	id: "deepseek-v4-pro",
 	name: "DeepSeek V4 Pro",
 	api: "openai-completions",
@@ -36,9 +37,9 @@ const parentModel: Model<Api> = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 128000,
 	maxTokens: 8192,
-};
+});
 
-const unauthedTaskModel: Model<Api> = {
+const unauthedTaskModel: Model<Api> = buildModel({
 	id: "qwen3.6-plus-free",
 	name: "Qwen3.6 Plus Free",
 	api: "openai-completions",
@@ -49,9 +50,9 @@ const unauthedTaskModel: Model<Api> = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 128000,
 	maxTokens: 8192,
-};
+});
 
-const sharedModel: Model<Api> = {
+const sharedModel: Model<Api> = buildModel({
 	id: "shared-id",
 	name: "Shared",
 	api: "openai-completions",
@@ -62,7 +63,7 @@ const sharedModel: Model<Api> = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 128000,
 	maxTokens: 8192,
-};
+});
 
 interface MockRegistryOptions {
 	models: Model<Api>[];

@@ -10,7 +10,7 @@
  *   2. duplicate name (first wins)
  *   3. forced always-apply
  *   4. forced rulebook
- *   5. TTSR
+ *   5. TTSR — non-empty `condition`/`astCondition` accepted by `TtsrManager.addRule`
  *   6. alwaysApply
  *   7. described rulebook rule
  */
@@ -104,7 +104,9 @@ export function bucketRules(
 			continue;
 		}
 
-		if (rule.condition && rule.condition.length > 0) {
+		const hasTtsrCondition =
+			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
+		if (hasTtsrCondition) {
 			if (!ttsrEnabled) {
 				continue;
 			}
@@ -112,7 +114,6 @@ export function bucketRules(
 				continue;
 			}
 		}
-
 		if (rule.alwaysApply === true) {
 			alwaysApplyRules.push(rule);
 			continue;

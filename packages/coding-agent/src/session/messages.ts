@@ -8,8 +8,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	type BranchSummaryMessage,
 	type CompactionSummaryMessage,
-	renderBranchSummaryContext,
-	renderCompactionSummaryContext,
+	convertMessageToLlm,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type {
 	AssistantMessage,
@@ -17,7 +16,6 @@ import type {
 	Message,
 	MessageAttribution,
 	TextContent,
-	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -28,6 +26,7 @@ export {
 	type CompactionSummaryMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
+	createCustomMessage,
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 
 import type { BackgroundLane } from "../background-lanes/state";
@@ -52,6 +51,7 @@ export const BACKGROUND_LANE_CREATED_MESSAGE_TYPE = "background-lane-created";
 export const BACKGROUND_LANE_UPDATED_MESSAGE_TYPE = "background-lane-updated";
 export const BACKGROUND_LANE_REPORT_MESSAGE_TYPE = "background-lane-report";
 export const BACKGROUND_LANE_CLOSED_MESSAGE_TYPE = "background-lane-closed";
+export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 
 export interface GoalRubricMessageDetails {
 	goalId: string;
@@ -123,7 +123,7 @@ export interface SkillPromptDetails {
  *
  *  Consumers: `AgentSession.#handleAgentEvent` (stamper) writes this value;
  *  `EventController.#handleMessageEnd`, `AssistantMessageComponent`,
- *  `ui-helpers.addMessageToChat` (renderers), `SessionObserverOverlay
+ *  `ui-helpers.addMessageToChat` (renderers), `AgentHubOverlayComponent
  *  #buildTranscriptLines`, `runPrintMode`, and `AcpAgent#replayAssistantMessage`
  *  (fallback error emission) read it via `isSilentAbort`. */
 export const SILENT_ABORT_MARKER = "__omp.silent_abort__";
@@ -133,6 +133,40 @@ export const SILENT_ABORT_MARKER = "__omp.silent_abort__";
  *  namespacing changes) propagate through every consumer in lockstep. */
 export function isSilentAbort(errorMessage: string | undefined): boolean {
 	return errorMessage === SILENT_ABORT_MARKER;
+}
+
+/** Reason threaded through `AbortController.abort(reason)` when the user aborts
+ *  the turn with Esc (see `AgentSession.abort`). The agent keeps it on the
+ *  aborted assistant message's `errorMessage` so queued follow-ups/tool-result
+ *  placeholders can distinguish a deliberate interrupt from a bare lifecycle
+ *  abort, but interactive renderers suppress this redundant transcript line. */
+export const USER_INTERRUPT_LABEL = "Interrupted by user";
+
+export function isUserInterruptAbort(errorMessage: string | undefined): boolean {
+	return errorMessage === USER_INTERRUPT_LABEL;
+}
+
+export function shouldRenderAbortReason(errorMessage: string | undefined): boolean {
+	return !isSilentAbort(errorMessage) && !isUserInterruptAbort(errorMessage);
+}
+
+/** Sentinel `errorMessage` the agent stamps on any abort that carried no custom
+ *  reason (bare `abort()`). Renderers treat it as "no specific reason given". */
+const GENERIC_ABORT_SENTINEL = "Request was aborted";
+
+/** Resolve the operator-facing label for an aborted assistant turn. A custom
+ *  abort reason threaded onto `errorMessage` is returned verbatim; aborts with
+ *  no threaded reason fall back to the retry-aware generic label. Call
+ *  `shouldRenderAbortReason` before rendering when user interrupts should stay
+ *  visually quiet. */
+export function resolveAbortLabel(errorMessage: string | undefined, retryAttempt = 0): string {
+	if (errorMessage && errorMessage !== GENERIC_ABORT_SENTINEL && !isSilentAbort(errorMessage)) {
+		return errorMessage;
+	}
+	if (retryAttempt > 0) {
+		return `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`;
+	}
+	return "Operation aborted";
 }
 
 /** Extract the optional `__pendingDisplayTag` field from a CustomMessage's
@@ -248,15 +282,6 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 		wrappedMessages[i] = wrappedMessage;
 	}
 	return wrappedMessages ?? messages;
-}
-
-function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
-	if (message.prunedAt === undefined) {
-		return message.content;
-	}
-	const textBlocks = message.content.filter((content): content is TextContent => content.type === "text");
-	const text = textBlocks.map(block => block.text).join("") || "[Output truncated]";
-	return [{ type: "text", text }];
 }
 
 /** Result of filtering image blocks out of a `(TextContent | ImageContent)[]` array. */
@@ -510,28 +535,6 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	};
 }
 
-/** Convert CustomMessageEntry to AgentMessage format */
-export function createCustomMessage(
-	customType: string,
-	content: string | (TextContent | ImageContent)[],
-	display: boolean,
-	details: unknown | undefined,
-	timestamp: string,
-	attribution?: MessageAttribution,
-	includeInContext = true,
-): CustomMessage {
-	return {
-		role: "custom",
-		customType,
-		content,
-		display,
-		details,
-		attribution,
-		includeInContext,
-		timestamp: new Date(timestamp).getTime(),
-	};
-}
-
 /**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *
@@ -564,80 +567,38 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						attribution: "user",
 						timestamp: m.timestamp,
 					};
-				case "custom":
-				case "hookMessage": {
-					if (m.role === "custom" && m.includeInContext === false) {
-						return undefined;
-					}
-					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
-					const role = "user";
-					const attribution = m.attribution;
-					return {
-						role,
-						content,
-						attribution,
-						timestamp: m.timestamp,
-					};
-				}
-				case "branchSummary":
-					return {
-						role: "user",
-						content: [
-							{
-								type: "text" as const,
-								text: renderBranchSummaryContext(m.summary),
-							},
-						],
-						attribution: "agent",
-						timestamp: m.timestamp,
-					};
-				case "compactionSummary":
-					return {
-						role: "user",
-						content: [
-							{
-								type: "text" as const,
-								text: renderCompactionSummaryContext(m.summary),
-							},
-						],
-						attribution: "agent",
-						providerPayload: m.providerPayload,
-						timestamp: m.timestamp,
-					};
 				case "fileMention": {
 					const fileContents = m.files
 						.map(file => {
 							const inner = file.content ? `\n${file.content}\n` : "\n";
 							return `<file path="${file.path}">${inner}</file>`;
 						})
-						.join("\n\n");
-					const content: (TextContent | ImageContent)[] = [
-						{ type: "text" as const, text: `<system-reminder>\n${fileContents}\n</system-reminder>` },
-					];
+						.join("\n");
+					const content: (TextContent | ImageContent)[] = [{ type: "text" as const, text: fileContents }];
 					for (const file of m.files) {
 						if (file.image) {
 							content.push(file.image);
 						}
 					}
 					return {
-						role: "user",
+						role: "developer",
 						content,
 						attribution: "user",
 						timestamp: m.timestamp,
 					};
 				}
+				case "custom":
+				case "hookMessage":
+				case "branchSummary":
+				case "compactionSummary":
 				case "user":
-					return { ...m, attribution: m.attribution ?? "user" };
 				case "developer":
-					return { ...m, attribution: m.attribution ?? "agent" };
 				case "assistant":
-					return m;
 				case "toolResult":
-					return {
-						...m,
-						content: getPrunedToolResultContent(m as ToolResultMessage),
-						attribution: m.attribution ?? "agent",
-					};
+					// Core roles share one transformer with agent-core —
+					// duplicating them here is how snapcompact frames once
+					// silently fell off the provider request.
+					return convertMessageToLlm(m);
 				default:
 					m satisfies never;
 					return undefined;

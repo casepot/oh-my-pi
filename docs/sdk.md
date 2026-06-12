@@ -389,7 +389,12 @@ type CreateAgentSessionResult = {
   setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
   mcpManager?: MCPManager;
   modelFallbackMessage?: string;
-  lspServers?: LspStartupServerInfo[];
+  lspServers?: Array<{
+    name: string;
+    status: "connecting" | "ready" | "error" | "available";
+    fileTypes: string[];
+    error?: string;
+  }>;
   eventBus: EventBus;
 };
 ```
@@ -402,8 +407,16 @@ Use `setToolUIContext(...)` only if your embedder provides UI capabilities that 
 - The SDK runs in the same process as the host. Tool execution, extension code, and global singletons are not isolated from host process state.
 - The SDK is not a JSON-RPC or stdio protocol; use RPC mode for cross-process embedding.
 - `hasUI` defaults false. Interactive tools/extensions require a UI context supplied through the returned `setToolUIContext` callback.
-- Startup LSP warmup only runs when `enableLsp !== false`, `hasUI === true`, and `lsp.diagnosticsOnWrite` is enabled. Non-UI SDK sessions can still start LSP servers on demand when an LSP tool needs one.
-- Model-host preconnect is best-effort and silently skipped if `fetch.preconnect` is unavailable or throws.
+
+`createAgentSession()` runs two background optimizations to overlap I/O with the rest of session setup:
+
+- **Model-host preconnect.** As soon as the model is resolved, the SDK fires a best-effort `fetch.preconnect(model.baseUrl)` so DNS + TCP + TLS + HTTP/2 to the provider's host happens in parallel with extension/skill load, tool registry build, and system-prompt assembly. The first real `fetch(...)` then reuses the warm connection, saving 100–300 ms on transcontinental hops (e.g. residential IP → `api.anthropic.com`). Implementation lives in `preconnectModelHost()` in `packages/coding-agent/src/sdk.ts`. If `fetch.preconnect` is unavailable (non-Bun runtime) or the call throws, the optimization is silently skipped — never a hard dependency. Applies to every mode (interactive, print, RPC, ACP).
+- **Conditional LSP warmup.** Startup LSP servers (those returned by `discoverStartupLspServers(cwd)`) are only warmed when **all** of these hold:
+  - `enableLsp !== false` on the session options, **and**
+  - `options.hasUI === true` (interactive TUI), **and**
+  - the `lsp.lazy` setting is disabled (it defaults to `true`).
+
+  With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` list reports startup warmup state only.
 
 ## Minimal controlled embed example
 

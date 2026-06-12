@@ -25,8 +25,10 @@ import tsNoAny from "./ts-no-any.md" with { type: "text" };
 import tsNoDeprecatedLeftovers from "./ts-no-deprecated-leftovers.md" with { type: "text" };
 import tsNoDynamicImport from "./ts-no-dynamic-import.md" with { type: "text" };
 import tsNoReturnType from "./ts-no-return-type.md" with { type: "text" };
+import tsNoTestTimers from "./ts-no-test-timers.md" with { type: "text" };
 import tsNoTinyFunctions from "./ts-no-tiny-functions.md" with { type: "text" };
 import tsPromiseWithResolvers from "./ts-promise-with-resolvers.md" with { type: "text" };
+import tsRedundantClearGuard from "./ts-redundant-clear-guard.md" with { type: "text" };
 import tsSetMap from "./ts-set-map.md" with { type: "text" };
 
 export type BuiltinRulePack = "global" | "skillset:rust";
@@ -46,8 +48,10 @@ export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
 	{ name: "ts-no-deprecated-leftovers", content: tsNoDeprecatedLeftovers, pack: "global" },
 	{ name: "ts-no-dynamic-import", content: tsNoDynamicImport, pack: "global" },
 	{ name: "ts-no-return-type", content: tsNoReturnType, pack: "global" },
+	{ name: "ts-no-test-timers", content: tsNoTestTimers, pack: "global" },
 	{ name: "ts-no-tiny-functions", content: tsNoTinyFunctions, pack: "global" },
 	{ name: "ts-promise-with-resolvers", content: tsPromiseWithResolvers, pack: "global" },
+	{ name: "ts-redundant-clear-guard", content: tsRedundantClearGuard, pack: "global" },
 	{ name: "ts-set-map", content: tsSetMap, pack: "global" },
 	{ name: "rs-async-std-mpsc", content: rsAsyncStdMpsc, pack: "skillset:rust" },
 	{ name: "rs-box-leak", content: rsBoxLeak, pack: "skillset:rust" },

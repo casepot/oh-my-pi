@@ -1,4 +1,4 @@
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { VERSION } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../../session/agent-session";
 import type { RpcHostToolBridge } from "./host-tools";

@@ -49,7 +49,8 @@ Skillset-provided condition rules are TTSR by default. Built-in Rust guardrails 
 
 Registration is skipped when:
 
-- `rule.condition` is absent or all condition regexes fail to compile
+- TTSR is disabled (`ttsr.enabled === false`)
+- both `rule.condition` (regex) and `rule.astCondition` (ast-grep patterns) are absent, or every regex condition fails to compile and there are no AST conditions
 - a rule with the same `rule.name` was already registered in this manager
 - the rule scope excludes all monitored streams
 
@@ -57,7 +58,17 @@ Invalid regex conditions and unreachable scopes are logged as warnings and ignor
 
 ### `ttsr.enabled`
 
-`ttsr.enabled: false` is enforced before registration and matching. `bucketRules(...)` suppresses unforced condition rules instead of promoting them into the rulebook, `TtsrManager.addRule()` returns `false`, and `TtsrManager.checkDelta()` returns `[]` without appending to stream buffers.
+`ttsr.enabled: false` is enforced before registration and matching. `bucketRules(...)` suppresses unforced condition/AST-condition rules instead of promoting them into the rulebook, `TtsrManager.addRule()` returns `false`, and `TtsrManager.checkDelta()` / `checkSnapshot()` / `checkAstSnapshot()` return empty results without appending to stream buffers.
+
+### AST conditions (`astCondition`)
+
+A rule may carry `astCondition`: a list of [ast-grep](https://ast-grep.github.io/) patterns (OR'd, same as regex `condition`), matched structurally instead of textually. A repeated metavariable inside one pattern requires both occurrences to be equal (`if ($X) clearTimeout($X)` matches but `if ($X) clearTimeout($Y)` does not).
+
+AST conditions only evaluate on **edit/write tool-argument streams** — they need a language, which is inferred from the file extension on the tool's path argument, and they match against the tool's reconstructed source snapshot (`matcherDigest`), not the raw wire delta. Matching is performed in memory by the native `astMatch` engine (no temp files) with Smart strictness. Streams without a usable file path (prose, thinking, path-less tool calls) skip AST conditions entirely. A rule may mix `condition` and `astCondition`; the regex paths keep working on every scope while AST paths apply only to those tool streams.
+
+### Setting gating
+
+`TtsrSettings.enabled` gates the manager: when `ttsr.enabled === false`, `addRule()` refuses registration and `checkDelta()`/`checkSnapshot()`/`checkAstSnapshot()`/`hasRules()`/`hasAstRules()` all return empty/false, so no matching runs.
 
 ## 2. Streaming monitor lifecycle
 
@@ -74,10 +85,10 @@ On `turn_start`, the stream buffer is reset:
 When assistant updates arrive and rules exist:
 
 - monitor `text_delta`, `thinking_delta`, and `toolcall_delta`
-- append delta into a source/tool scoped manager buffer
-- call `checkDelta(delta, matchContext)`
+- for tools exposing `matcherDigest` (edit/write), replace the scoped buffer with the reconstructed source snapshot and call `checkSnapshot(snapshot, matchContext)`; otherwise append the delta into a source/tool scoped manager buffer and call `checkDelta(delta, matchContext)` (synchronous regex matching either way)
+- for edit/write tool streams, when `hasAstRules()` is true, `await checkAstSnapshot(snapshot, matchContext)` (asynchronous AST matching)
 
-`checkDelta()` iterates registered rules and returns all matching rules that pass scope, global path-glob, condition, and repeat policy checks.
+`checkDelta()`/`checkSnapshot()` iterate registered rules and return all matching rules that pass scope, global path-glob, regex condition, and repeat policy checks. `checkAstSnapshot()` applies the same scope/path/repeat gates, then runs each candidate rule's `astCondition` patterns against the snapshot via the native `astMatch` engine. It is throttled per stream key: an identical consecutive snapshot (common when only non-source arguments change between deltas) is skipped without re-running the matcher. Both paths feed their matches through the same trigger-decision handler.
 
 For tool-call deltas, `AgentSession` builds a `TtsrMatchContext` with normalized path candidates from structured `path`/`paths` arguments, edit entry arrays, apply-patch file headers, and hashline edit section headers such as `¶src/lib.rs#ABCD`. Scoped rules like `tool:edit(*.rs)` do not match until a path candidate is known; once a later argument delta reveals the path, already-buffered content for that tool call can match.
 
@@ -223,7 +234,7 @@ Net effect: injected-rule suppression is persisted/restored across session reloa
 
 ### Between abort and continue
 
-During the timer window, state can change (user interruption, mode actions, additional events). The retry call is best-effort: `agent.continue().catch(() => {})` swallows follow-up errors.
+During the timer window, state can change (user interruption, mode actions, additional events). The retry call is best-effort: `agent.continue()` is awaited in a try/catch; on failure the error is swallowed and the TTSR resume gate is resolved.
 
 ## 9. Edge cases summary
 

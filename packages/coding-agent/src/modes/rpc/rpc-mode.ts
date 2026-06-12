@@ -1,13 +1,15 @@
 /**
  * RPC mode: orchestration-grade local stdio NDJSON protocol.
  */
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { $env, Snowflake } from "@oh-my-pi/pi-utils";
 import type {
 	BackgroundLaneCloseInput,
 	BackgroundLaneMessageInput,
 	BackgroundLaneSpawnInput,
 } from "../../background-lanes";
+import { reset as resetCapabilities } from "../../capability";
+import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	type ExtensionUIContext,
 	type ExtensionUIDialogOptions,
@@ -15,10 +17,15 @@ import {
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
+import { buildSkillPromptMessage } from "../../extensibility/skills";
+import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { SessionObserverRegistry } from "../../modes/session-observer-registry";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "../../session/messages";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
+import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import {
 	type AgentProgress,
 	type SingleResult,
@@ -43,6 +50,7 @@ import {
 	RpcProtocolError,
 	rpcErrorInfo,
 } from "./rpc-protocol";
+import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	JsonObject,
 	RpcBackgroundLaneCommand,
@@ -65,6 +73,7 @@ import type {
 	RpcSessionEntryView,
 	RpcSessionState,
 	RpcSessionTreeNodeView,
+	RpcSubagentSubscriptionLevel,
 	RpcTaskAgentProgress,
 	RpcTaskResult,
 } from "./rpc-types";
@@ -113,6 +122,69 @@ function optionalPositiveInteger(value: unknown, field: string, owner: string): 
 	if (value === undefined || value === null) return undefined;
 	if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
 	throw new RpcProtocolError("invalid_arguments", `${owner} ${field} must be a positive safe integer`, { field });
+}
+
+export type RpcSessionChangeCommand = Extract<
+	RpcCommand,
+	{ type: "new_session" } | { type: "switch_session" } | { type: "branch" }
+>;
+
+export type RpcSessionChangeResult =
+	| { type: "new_session"; data: { cancelled: boolean } }
+	| { type: "switch_session"; data: { cancelled: boolean } }
+	| { type: "branch"; data: { text: string; cancelled: boolean } };
+
+export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchSession" | "branch">;
+
+export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
+
+export async function tryRunRpcSkillCommand(session: RpcSkillCommandSession, text: string): Promise<boolean> {
+	if (!text.startsWith("/skill:")) return false;
+	if (!session.skillsSettings?.enableSkillCommands) return false;
+	const spaceIndex = text.indexOf(" ");
+	const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+	const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
+	const skillName = commandName.slice("skill:".length);
+	const skill = session.skills.find(candidate => candidate.name === skillName);
+	if (!skill) return false;
+	const built = await buildSkillPromptMessage(skill, args);
+	await session.promptCustomMessage({
+		customType: SKILL_PROMPT_MESSAGE_TYPE,
+		content: built.message,
+		display: true,
+		details: built.details,
+		attribution: "user",
+	});
+	return true;
+}
+export type RpcSubagentResetRegistry = Pick<RpcSubagentRegistry, "clear">;
+
+export async function handleRpcSessionChange(
+	session: RpcSessionChangeSession,
+	command: RpcSessionChangeCommand,
+	subagentRegistry?: RpcSubagentResetRegistry,
+): Promise<RpcSessionChangeResult> {
+	switch (command.type) {
+		case "new_session": {
+			const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
+			const cancelled = !(await session.newSession(options));
+			if (!cancelled) subagentRegistry?.clear();
+			return { type: "new_session", data: { cancelled } };
+		}
+
+		case "switch_session": {
+			const cancelled = !(await session.switchSession(command.sessionPath));
+			if (!cancelled) subagentRegistry?.clear();
+			return { type: "switch_session", data: { cancelled } };
+		}
+
+		case "branch": {
+			const result = await session.branch(command.entryId);
+			if (!result.cancelled) subagentRegistry?.clear();
+			return { type: "branch", data: { text: result.selectedText, cancelled: result.cancelled } };
+		}
+	}
+	throw new Error("Unsupported RPC session change command");
 }
 
 function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostToolDefinition[] {
@@ -335,6 +407,10 @@ function backgroundLaneCloseInput(
 	};
 }
 
+function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
+	return value === "off" || value === "progress" || value === "events";
+}
+
 export function requestRpcEditor(
 	pendingRequests: Map<string, PendingExtensionRequest>,
 	output: RpcOutput,
@@ -420,6 +496,9 @@ export async function runRpcMode(
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	options: RpcModeOptions = {},
 ): Promise<void> {
+	// Signal to RPC clients that the server is ready to accept commands
+	// Suppress terminal notifications: they write control bytes directly to stdout,
+	// which is the JSON protocol channel in RPC mode.
 	process.env.PI_NOTIFICATIONS = "off";
 
 	const mode = options.mode ?? (setToolUIContext ? "rpc-ui" : "rpc");
@@ -436,6 +515,7 @@ export async function runRpcMode(
 	let operationManager: RpcOperationManager;
 	let shutdownRequested = false;
 	let shutdownReason = "shutdown_requested";
+	const subagentRegistry = options.eventBus ? new RpcSubagentRegistry(options.eventBus, output) : undefined;
 
 	const protocolInfo = () => buildRpcProtocolInfo(mode, session, hostToolBridge, hostUriBridge);
 
@@ -787,20 +867,7 @@ export async function runRpcMode(
 				payload.taskRunId ?? taskRunIdsBySubagentId.get(payload.id) ?? taskRunIdFor(payload.id, payload.id);
 			taskRunIdsBySubagentId.set(payload.id, taskRunId);
 			if (payload.parentTaskRunId) parentTaskRunIdsBySubagentId.set(payload.id, payload.parentTaskRunId);
-			output({
-				type: "subagent_lifecycle",
-				schemaVersion: 1,
-				toolCallId: payload.toolCallId,
-				taskRunId,
-				parentTaskRunId: payload.parentTaskRunId,
-				subagentId: payload.id,
-				parentSubagentId: payload.id.includes(".") ? payload.id.slice(0, payload.id.lastIndexOf(".")) : null,
-				status: payload.status,
-				agentType: payload.agent,
-				description: payload.description,
-				sessionFile: payload.sessionFile,
-				index: payload.index,
-			});
+			output({ type: "subagent_lifecycle", payload: { ...payload, taskRunId } });
 		});
 		observerRegistry.onChange(() => {
 			output({ type: "observable_session_update", schemaVersion: 1, sessions: observerToViews() });
@@ -990,6 +1057,27 @@ export async function runRpcMode(
 			run,
 		});
 
+	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
+	const reloadPluginState = async () => {
+		const cwd = session.sessionManager.getCwd();
+		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		resetCapabilities();
+		session.setSlashCommands(await loadSlashCommands({ cwd }));
+		await session.refreshSshTool({ activateIfAvailable: true });
+		await emitAvailableCommandsUpdate();
+	};
+	const emitAvailableCommandsUpdate = async () => {
+		output({ type: "available_commands_update", commands: await getAvailableCommands() });
+	};
+	if (!options.oneShotCommand) {
+		session.subscribeCommandMetadataChanged(() => {
+			void emitAvailableCommandsUpdate();
+		});
+		await emitAvailableCommandsUpdate();
+	}
+
+	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
 		switch (command.type) {
@@ -1033,11 +1121,42 @@ export async function runRpcMode(
 					startOperation(
 						"prompt",
 						id,
-						() =>
-							session.prompt(command.message, {
+						async () => {
+							if (await tryRunRpcSkillCommand(session, command.message)) return;
+							const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+								session,
+								sessionManager: session.sessionManager,
+								settings: session.settings,
+								cwd: session.sessionManager.getCwd(),
+								output: text => output({ type: "command_output", text }),
+								refreshCommands: emitAvailableCommandsUpdate,
+								reloadPlugins: reloadPluginState,
+								notifyTitleChanged: async () => {
+									output({
+										type: "session_info_update",
+										title: session.sessionName,
+										sessionId: session.sessionId,
+									});
+								},
+								notifyConfigChanged: async () => {
+									output({
+										type: "config_update",
+										model: session.model,
+										thinkingLevel: session.thinkingLevel,
+									});
+								},
+							});
+							if (builtinResult !== false) {
+								if ("prompt" in builtinResult) {
+									await session.prompt(builtinResult.prompt, { images: command.images });
+								}
+								return;
+							}
+							await session.prompt(command.message, {
 								images: command.images,
 								streamingBehavior: command.streamingBehavior,
-							}),
+							});
+						},
 						() => session.abort(),
 					),
 				);
@@ -1162,6 +1281,61 @@ export async function runRpcMode(
 				emitStateChanged(["hostUriSchemes", "security"]);
 				return success(id, "remove_host_uri_schemes", { schemes });
 			}
+
+			case "set_subagent_subscription": {
+				if (!subagentRegistry) {
+					return error(
+						id,
+						"set_subagent_subscription",
+						rpcErrorInfo("internal_error", "Subagent event bus is unavailable"),
+					);
+				}
+				if (!isSubagentSubscriptionLevel(command.level)) {
+					return error(
+						id,
+						"set_subagent_subscription",
+						rpcErrorInfo("invalid_arguments", `Invalid subagent subscription level: ${String(command.level)}`),
+					);
+				}
+				subagentRegistry.setSubscriptionLevel(command.level);
+				return success(id, "set_subagent_subscription", { level: subagentRegistry.getSubscriptionLevel() });
+			}
+
+			case "get_subagents": {
+				if (!subagentRegistry) {
+					return error(id, "get_subagents", rpcErrorInfo("internal_error", "Subagent event bus is unavailable"));
+				}
+				return success(id, "get_subagents", { subagents: subagentRegistry.getSubagents() });
+			}
+
+			case "get_subagent_messages": {
+				if (!subagentRegistry) {
+					return error(
+						id,
+						"get_subagent_messages",
+						rpcErrorInfo("internal_error", "Subagent event bus is unavailable"),
+					);
+				}
+				try {
+					if (command.fromByte !== undefined && !Number.isFinite(command.fromByte)) {
+						return error(
+							id,
+							"get_subagent_messages",
+							rpcErrorInfo("invalid_arguments", "fromByte must be a finite number"),
+						);
+					}
+					const sessionFile = subagentRegistry.resolveSessionFile(command);
+					const transcript = await readRpcSubagentTranscript(sessionFile, command.fromByte);
+					return success(id, "get_subagent_messages", transcript);
+				} catch (err) {
+					return error(id, "get_subagent_messages", errorInfoFromUnknown(err));
+				}
+			}
+
+			// =================================================================
+			// Model
+			// =================================================================
+
 			case "set_model": {
 				const models = session.getAvailableModels();
 				const model = models.find(item => item.provider === command.provider && item.id === command.modelId);
@@ -1404,6 +1578,8 @@ export async function runRpcMode(
 						return { providerId: command.providerId };
 					}),
 				);
+			default:
+				return error(id, command.type, rpcErrorInfo("unknown_command", `Unknown command: ${command.type}`));
 		}
 	};
 
@@ -1516,6 +1692,7 @@ export async function runRpcMode(
 		hostToolBridge.rejectAllPending("RPC client disconnected before host tool execution completed");
 		hostUriBridge.clear("RPC client disconnected before host URI request completed");
 		observerRegistry.dispose();
+		subagentRegistry?.dispose();
 		if (session.extensionRunner?.hasHandlers("session_shutdown")) {
 			await session.extensionRunner.emit({ type: "session_shutdown" });
 		}

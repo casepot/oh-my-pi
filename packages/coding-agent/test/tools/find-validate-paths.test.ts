@@ -2,13 +2,18 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { FindTool, findToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/find";
+import {
+	expandDelimitedPathEntries,
+	parseFindPattern,
+	resolveToolSearchScope,
+	splitDelimitedPathEntry,
+} from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Settings } from "../../src/config/settings";
-import type { RenderResultOptions } from "../../src/extensibility/custom-tools/types";
-import { getThemeByName, initTheme, type Theme } from "../../src/modes/theme/theme";
-import type { ToolSession } from "../../src/tools";
-import { FindTool, findToolRenderer } from "../../src/tools/find";
-import { expandDelimitedPathEntries, parseFindPattern, splitDelimitedPathEntry } from "../../src/tools/path-utils";
 
 let uiTheme: Theme;
 
@@ -100,6 +105,33 @@ describe("delimited path expansion", () => {
 				splitter: parseFindPattern,
 			}),
 		).toEqual(["apps/**/*.txt", "packages/**/*.txt"]);
+	});
+
+	it("normalizes Windows path separators before parsing find globs", async () => {
+		expect(parseFindPattern("apps\\**\\*.txt")).toEqual({
+			basePath: "apps",
+			globPattern: "**/*.txt",
+			hasGlob: true,
+		});
+
+		expect(await splitDelimitedPathEntry("apps/a.txt\\,packages/b.txt", tempDir)).toBeNull();
+		const parsed = parseFindPattern("C:\\work\\repo\\src\\**\\*.ts");
+		expect(parsed).toEqual({
+			basePath: "C:/work/repo/src",
+			globPattern: "**/*.ts",
+			hasGlob: true,
+		});
+	});
+
+	it("normalizes Windows separators for search scope globs", async () => {
+		const scope = await resolveToolSearchScope({
+			rawPaths: ["apps\\**\\*.txt"],
+			cwd: tempDir,
+			internalUrlAction: "search",
+		});
+
+		expect(scope.searchPath).toBe(path.join(tempDir, "apps"));
+		expect(scope.globFilter).toBe("**/*.txt");
 	});
 });
 

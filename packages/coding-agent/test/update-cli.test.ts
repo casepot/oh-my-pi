@@ -90,6 +90,56 @@ describe("update-cli install target detection", () => {
 		const realDir = await fs.realpath(dir);
 		expect(target).toEqual({ method: "source", root: realDir, mode: "linked" });
 	});
+
+	it("detects when the prioritized omp resolves into the Homebrew formula", async () => {
+		const dir = await makeTempDir();
+		const prefix = path.join(dir, "opt", "omp");
+		const linkedBin = path.join(dir, "bin");
+		await fs.mkdir(path.join(prefix, "bin"), { recursive: true });
+		await fs.mkdir(linkedBin, { recursive: true });
+		await Bun.write(path.join(prefix, "bin", "omp"), "binary");
+		await fs.symlink(path.join(prefix, "bin", "omp"), path.join(linkedBin, "omp"));
+
+		const method = resolveUpdateMethodForTest(path.join(linkedBin, "omp"), "/Users/test/.bun/bin", {
+			homebrewPrefix: prefix,
+		});
+
+		expect(method).toBe("brew");
+	});
+
+	it("migrates Homebrew-owned installs to the fork source checkout", () => {
+		const target = resolveUpdateTargetForTest({
+			ompPath: "/opt/homebrew/opt/omp/bin/omp",
+			homebrewPrefix: "/opt/homebrew/opt/omp",
+			defaultSourceRoot: "/Users/test/.local/share/omp/source/oh-my-pi",
+		});
+
+		expect(target).toEqual({
+			method: "source",
+			root: "/Users/test/.local/share/omp/source/oh-my-pi",
+			mode: "migrate",
+		});
+	});
+
+	it("detects when the prioritized omp is in an active mise bin path", () => {
+		const method = resolveUpdateMethodForTest(
+			"/Users/test/.local/share/mise/installs/github-can1357-oh-my-pi/latest/bin/omp",
+			undefined,
+			{
+				miseBinDirs: ["/Users/test/.local/share/mise/installs/github-can1357-oh-my-pi/latest/bin"],
+			},
+		);
+
+		expect(method).toBe("mise");
+	});
+
+	it("detects when the prioritized omp is a mise shim", () => {
+		const method = resolveUpdateMethodForTest("/Users/test/.local/share/mise/shims/omp", undefined, {
+			miseDataDir: "/Users/test/.local/share/mise",
+		});
+
+		expect(method).toBe("mise");
+	});
 });
 
 describe("update-cli source checkout safety", () => {

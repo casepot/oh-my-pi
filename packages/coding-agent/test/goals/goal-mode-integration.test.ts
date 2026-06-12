@@ -84,6 +84,7 @@ function createSideAgentResult(options: ExecutorOptions, data: unknown): SingleR
 		truncated: false,
 		durationMs: 25,
 		tokens: 7,
+		requests: 1,
 		modelOverride: options.modelOverride,
 	};
 }
@@ -1176,7 +1177,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const repairDispatch = await harness.session.prepareGoalContinuationDispatch();
 		expect(repairDispatch?.kind).toBe("verification-repair");
 		expect(repairDispatch?.prompt).toContain("Tarball smoke evidence is still missing.");
-		expect(repairDispatch?.prompt).toContain("Do not retry `complete`");
+		expect(repairDispatch?.prompt).toContain("Do not call `complete` again until blockers are addressed");
 
 		await goalTool.execute("repair-target", {
 			op: "start_target",

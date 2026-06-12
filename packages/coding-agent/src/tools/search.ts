@@ -37,7 +37,7 @@ import {
 	parseArchivePathCandidates,
 } from "./archive-reader";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
-import { formatGroupedFiles } from "./grouped-file-output";
+import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import { formatMatchLine } from "./match-line-format";
 import type { OutputMeta } from "./output-meta";
 import {
@@ -62,7 +62,6 @@ import {
 	formatMoreItems,
 	PREVIEW_LIMITS,
 	replaceTabs,
-	splitGroupsByBlankLine,
 } from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -85,6 +84,7 @@ const searchSchema = z
 		gitignore: z.boolean().optional().describe("respect gitignore"),
 		skip: z
 			.number()
+			.nullable()
 			.optional()
 			.describe("files to skip before collecting results — use to paginate when the prior call hit the file limit"),
 	})
@@ -109,6 +109,14 @@ export const SINGLE_FILE_MATCHES = 200;
  * (DEFAULT_FILE_LIMIT files × MULTI_FILE_PER_FILE_MATCHES matches) plus
  * pagination headroom so the caller can see total file count. */
 const INTERNAL_TOTAL_CAP = 2000;
+/** Mirrors `MAX_FILE_BYTES` in `crates/pi-natives/src/grep.rs`. Native grep
+ * silently returns no matches for files larger than this; surface a warning
+ * when the caller explicitly targeted such a file so they know to chunk it. */
+const NATIVE_GREP_MAX_FILE_BYTES = 4 * 1024 * 1024;
+/** Wall-clock budget for a single native grep invocation. Without it, an
+ * aborted or runaway search (huge tree, network mount) keeps burning CPU on
+ * the native thread pool after the JS promise is abandoned. */
+const SEARCH_GREP_TIMEOUT_MS = 30_000;
 
 /**
  * Parsed `paths` entry — a path (possibly archive-shaped) plus an optional
@@ -288,7 +296,6 @@ interface IndexedContentLines {
 	starts: number[];
 }
 
-const INTERNAL_URL_DISPLAY_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 const OMP_ROOT_URL_RE = /^omp:\/\/(?:\/?|docs\/?)$/i;
 
 function normalizeSearchLine(line: string): string {
@@ -349,6 +356,8 @@ function makeVirtualMatch(
 	lineIndex: number,
 	contextBefore: number,
 	contextAfter: number,
+	lastEmittedLine: number,
+	nextMatchLine: number,
 ): GrepMatch {
 	const lineNumber = lineIndex + 1;
 	const { text, wasTruncated } = truncateLine(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
@@ -361,7 +370,9 @@ function makeVirtualMatch(
 
 	if (contextBefore > 0) {
 		const before: NonNullable<GrepMatch["contextBefore"]> = [];
-		const start = Math.max(0, lineIndex - contextBefore);
+		// Start after the previous match's last emitted line so adjacent matches
+		// never repeat or rewind context lines (mirrors native grep's sink).
+		const start = Math.max(0, lineIndex - contextBefore, lastEmittedLine);
 		for (let idx = start; idx < lineIndex; idx++) {
 			const contextLineNumber = idx + 1;
 			if (lineAllowed(contextLineNumber, resource.ranges)) {
@@ -373,7 +384,8 @@ function makeVirtualMatch(
 
 	if (contextAfter > 0) {
 		const after: NonNullable<GrepMatch["contextAfter"]> = [];
-		const end = Math.min(lines.length - 1, lineIndex + contextAfter);
+		// Stop before the next match line; it is emitted as a match itself.
+		const end = Math.min(lines.length - 1, lineIndex + contextAfter, nextMatchLine - 2);
 		for (let idx = lineIndex + 1; idx <= end; idx++) {
 			const contextLineNumber = idx + 1;
 			if (lineAllowed(contextLineNumber, resource.ranges)) {
@@ -384,6 +396,38 @@ function makeVirtualMatch(
 	}
 
 	return match;
+}
+
+/** Build matches for ascending matched line indexes with forward-only,
+ * deduplicated context windows (line numbers never repeat or go backwards
+ * within one resource). */
+function buildVirtualMatches(
+	resource: VirtualSearchResource,
+	lines: readonly string[],
+	matchedIndexes: readonly number[],
+	contextBefore: number,
+	contextAfter: number,
+	maxCount: number,
+): GrepMatch[] {
+	const matches: GrepMatch[] = [];
+	let lastEmittedLine = 0;
+	for (let i = 0; i < matchedIndexes.length && matches.length < maxCount; i++) {
+		const lineIndex = matchedIndexes[i];
+		const nextMatchLine = i + 1 < matchedIndexes.length ? matchedIndexes[i + 1] + 1 : Number.POSITIVE_INFINITY;
+		const match = makeVirtualMatch(
+			resource,
+			lines,
+			lineIndex,
+			contextBefore,
+			contextAfter,
+			lastEmittedLine,
+			nextMatchLine,
+		);
+		const after = match.contextAfter;
+		lastEmittedLine = after && after.length > 0 ? after[after.length - 1].lineNumber : match.lineNumber;
+		matches.push(match);
+	}
+	return matches;
 }
 
 function compileVirtualRegex(pattern: string, ignoreCase: boolean, multiline: boolean): RegExp {
@@ -404,24 +448,18 @@ function searchVirtualResourceLines(
 	maxCount: number,
 ): { matches: GrepMatch[]; totalMatches: number; limitReached: boolean } {
 	const lines = splitSearchLines(resource.content);
-	const matches: GrepMatch[] = [];
-	let totalMatches = 0;
-	let limitReached = false;
+	const matchedIndexes: number[] = [];
 
 	for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
 		const lineNumber = lineIndex + 1;
 		if (!lineAllowed(lineNumber, resource.ranges)) continue;
 		regex.lastIndex = 0;
 		if (!regex.test(lines[lineIndex] ?? "")) continue;
-		totalMatches++;
-		if (matches.length >= maxCount) {
-			limitReached = true;
-			continue;
-		}
-		matches.push(makeVirtualMatch(resource, lines, lineIndex, contextBefore, contextAfter));
+		matchedIndexes.push(lineIndex);
 	}
 
-	return { matches, totalMatches, limitReached };
+	const matches = buildVirtualMatches(resource, lines, matchedIndexes, contextBefore, contextAfter, maxCount);
+	return { matches, totalMatches: matchedIndexes.length, limitReached: matchedIndexes.length > matches.length };
 }
 
 function searchVirtualResourceMultiline(
@@ -432,10 +470,8 @@ function searchVirtualResourceMultiline(
 	maxCount: number,
 ): { matches: GrepMatch[]; totalMatches: number; limitReached: boolean } {
 	const indexed = indexSearchLines(resource.content);
-	const matches: GrepMatch[] = [];
 	const matchedLines = new Set<number>();
-	let totalMatches = 0;
-	let limitReached = false;
+	const matchedIndexes: number[] = [];
 
 	while (true) {
 		const match = regex.exec(resource.content);
@@ -445,12 +481,7 @@ function searchVirtualResourceMultiline(
 			const lineNumber = lineIndex + 1;
 			if (!matchedLines.has(lineNumber) && lineAllowed(lineNumber, resource.ranges)) {
 				matchedLines.add(lineNumber);
-				totalMatches++;
-				if (matches.length >= maxCount) {
-					limitReached = true;
-				} else {
-					matches.push(makeVirtualMatch(resource, indexed.lines, lineIndex, contextBefore, contextAfter));
-				}
+				matchedIndexes.push(lineIndex);
 			}
 		}
 		if (match[0].length === 0) {
@@ -458,7 +489,8 @@ function searchVirtualResourceMultiline(
 		}
 	}
 
-	return { matches, totalMatches, limitReached };
+	const matches = buildVirtualMatches(resource, indexed.lines, matchedIndexes, contextBefore, contextAfter, maxCount);
+	return { matches, totalMatches: matchedIndexes.length, limitReached: matchedIndexes.length > matches.length };
 }
 
 function searchVirtualResources(
@@ -631,6 +663,10 @@ export interface SearchToolDetails {
 	/** Absolute base directory used during search. Used by the renderer to resolve
 	 * display-relative paths to absolute paths for OSC 8 hyperlinks. */
 	searchPath?: string;
+	/** Session cwd at search time. The renderer resolves the display-relative
+	 * (cwd-relative) header/match paths against this for OSC 8 hyperlinks;
+	 * `searchPath` is the scope label target, not the display-path base. */
+	cwd?: string;
 	/** User-supplied paths whose base directory was missing on disk. The tool
 	 * skipped these and continued with the surviving entries; surfaced as a
 	 * non-fatal warning in the renderer and in the model-facing text. */
@@ -667,12 +703,15 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 		const { pattern, paths: rawPaths, i, gitignore, skip } = params;
 
 		return untilAborted(signal, async () => {
-			const normalizedPattern = pattern.trim();
-			if (!normalizedPattern) {
+			// Preserve the pattern verbatim — leading/trailing whitespace is
+			// meaningful in regexes (indentation anchors, trailing-space matches).
+			if (!pattern.trim()) {
 				throw new ToolError("Pattern must not be empty");
 			}
+			const normalizedPattern = pattern;
 
-			const normalizedSkip = skip === undefined ? 0 : Number.isFinite(skip) ? Math.floor(skip) : Number.NaN;
+			const normalizedSkip =
+				skip === undefined || skip === null ? 0 : Number.isFinite(skip) ? Math.floor(skip) : Number.NaN;
 			if (normalizedSkip < 0 || !Number.isFinite(normalizedSkip)) {
 				throw new ToolError("Skip must be a non-negative number");
 			}
@@ -730,12 +769,16 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					}
 				}
 
-				if (archiveUnreadable.length > 0 && searchablePaths.length === archiveUnreadable.length) {
+				if (
+					archiveUnreadable.length > 0 &&
+					searchablePaths.length === archiveUnreadable.length &&
+					virtualResources.length === 0
+				) {
 					// All inputs were archive selectors we couldn't materialize; surface the
 					// reason instead of a downstream "path not found" from the scope resolver.
 					throw new ToolError(
 						`Cannot search archive member(s): ${archiveUnreadable.join(", ")}. ` +
-							`Read the file directly with \`read <archive>:<member>\` and grep the returned content, ` +
+							`Read the member with \`read <archive>:<member>\` and inspect the returned text, ` +
 							`or pass a UTF-8 text member.`,
 					);
 				}
@@ -761,6 +804,7 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 						internalUrlAction: "search",
 						trackImmutableSources: true,
 						surfaceExactFilePaths: true,
+						fanOutFileTargets: true,
 						multipathStatHint: " (`paths` entries must each exist relative to cwd)",
 						settings: this.session.settings,
 						signal,
@@ -825,10 +869,12 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					filesSearched: 0,
 					limitReached: false,
 				};
+				let skippedOversizedCount = 0;
 				try {
 					if (searchablePaths.length > 0) {
 						if (exactFilePaths || multiTargets) {
 							const matches: GrepMatch[] = [];
+							const seenMatchKeys = new Set<string>();
 							let limitReached = false;
 							let totalMatches = 0;
 							let filesSearched = 0;
@@ -854,14 +900,27 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 										contextAfter: normalizedContextAfter,
 										maxColumns: DEFAULT_MAX_COLUMN,
 										mode: effectiveOutputMode,
+										maxCountPerFile: perFileMatchCap + 1,
+										signal,
+										timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 									},
 									undefined,
 								);
+								skippedOversizedCount += targetResult.skippedOversized ?? 0;
 								limitReached = limitReached || Boolean(targetResult.limitReached);
 								totalMatches += targetResult.totalMatches;
 								filesSearched += targetResult.filesSearched;
 								for (const match of targetResult.matches) {
 									const absolute = path.resolve(target.basePath, match.path);
+									// Overlapping targets (a directory plus a file nested
+									// inside it) surface the same physical line twice;
+									// keep the first occurrence.
+									const matchKey = `${absolute}\0${match.lineNumber}`;
+									if (seenMatchKeys.has(matchKey)) {
+										totalMatches = Math.max(0, totalMatches - 1);
+										continue;
+									}
+									seenMatchKeys.add(matchKey);
 									const rebased = path.relative(searchPath, absolute).replace(/\\/g, "/");
 									matches.push({ ...match, path: rebased });
 								}
@@ -889,14 +948,23 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 									contextAfter: normalizedContextAfter,
 									maxColumns: DEFAULT_MAX_COLUMN,
 									mode: effectiveOutputMode,
+									maxCountPerFile: perFileMatchCap + 1,
+									signal,
+									timeoutMs: SEARCH_GREP_TIMEOUT_MS,
 								},
 								undefined,
 							);
+							skippedOversizedCount = result.skippedOversized ?? 0;
 						}
 					}
 				} catch (err) {
 					if (err instanceof Error && /^regex(?: parse)? error/i.test(err.message)) {
 						throw new ToolError(err.message.replace(/^regex(?: parse)? error:?\s*/i, "Invalid regex: "));
+					}
+					if (err instanceof Error && err.message.includes("Aborted: Timeout")) {
+						throw new ToolError(
+							`Search timed out after ${SEARCH_GREP_TIMEOUT_MS / 1000}s; narrow paths or pattern, or scope with \`find\` first`,
+						);
 					}
 					throw err;
 				}
@@ -973,6 +1041,9 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					}
 				}
 				const totalFiles = fileOrder.length;
+				// When native grep stopped at its internal cap, files past the cap were
+				// never surfaced — the file total is only a lower bound.
+				const totalFilesLabel = result.limitReached ? `${totalFiles}+` : `${totalFiles}`;
 				// Single-file scopes can't paginate — there is one file by definition.
 				const canPaginate = isMultiScope;
 				const skipFiles = canPaginate ? Math.min(normalizedSkip, totalFiles) : 0;
@@ -995,10 +1066,44 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 				}
 				const nextSkip = skipFiles + windowFiles.length;
 				const limitMessage = fileLimitReached
-					? `Showing files ${skipFiles + 1}-${nextSkip} of ${totalFiles}. Use skip=${nextSkip} for the next page, or narrow paths/pattern.`
+					? `Showing files ${skipFiles + 1}-${nextSkip} of ${totalFilesLabel}. Use skip=${nextSkip} for the next page, or narrow paths/pattern.`
 					: "";
 				const { record: recordFile, list: fileList } = createFileRecorder();
 				const fileMatchCounts = new Map<string, number>();
+				// Detect explicit file targets that exceed the native grep size cap.
+				// Native silently returns no matches above the cap; without this note the
+				// caller sees "no matches" for a literal pattern that visibly exists.
+				const oversizedNote = await (async (): Promise<string | undefined> => {
+					const explicitFileTargets: string[] = [];
+					if (exactFilePaths) {
+						explicitFileTargets.push(...exactFilePaths);
+					} else if (searchablePaths.length > 0 && !isDirectory && !multiTargets) {
+						explicitFileTargets.push(searchPath);
+					}
+					if (explicitFileTargets.length === 0) return undefined;
+					const oversized: string[] = [];
+					await Promise.all(
+						explicitFileTargets.map(async target => {
+							try {
+								const st = await stat(target);
+								if (st.isFile() && st.size > NATIVE_GREP_MAX_FILE_BYTES) {
+									oversized.push(path.relative(this.session.cwd, target) || target);
+								}
+							} catch {
+								// Stat failures here are surfaced by other code paths.
+							}
+						}),
+					);
+					if (oversized.length === 0) return undefined;
+					const limitMb = Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024));
+					return `Skipped oversized files (>${limitMb}MB grep limit; split the file or narrow with \`read\`): ${oversized.join(", ")}`;
+				})();
+				// Directory/multi-target scopes: native grep counts oversized skips but
+				// cannot name them; explicit-file scopes are covered (with names) above.
+				const oversizedScanNote =
+					!oversizedNote && skippedOversizedCount > 0
+						? `Skipped ${skippedOversizedCount} oversized file(s) (>${Math.floor(NATIVE_GREP_MAX_FILE_BYTES / (1024 * 1024))}MB grep limit); target them directly with \`read\``
+						: undefined;
 				const archiveNote =
 					archiveUnreadable.length > 0
 						? `Skipped archive entries (search supports text members only): ${archiveUnreadable.join(", ")}`
@@ -1013,7 +1118,9 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					? `Search stopped after the internal ${INTERNAL_TOTAL_CAP}-match safety cap; narrow paths/pattern before concluding later files do not match.`
 					: undefined;
 				const warningNote =
-					[missingPathsNote, archiveNote, capNote].filter((s): s is string => Boolean(s)).join("\n") || undefined;
+					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote, capNote]
+						.filter((s): s is string => Boolean(s))
+						.join("\n") || undefined;
 				if (selectedMatches.length === 0) {
 					const skippedWindowNote =
 						totalFiles > 0 && skipFiles >= totalFiles
@@ -1022,6 +1129,7 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 					const details: SearchToolDetails = {
 						scopePath,
 						searchPath,
+						cwd: this.session.cwd,
 						matchCount: 0,
 						totalMatchCount: result.totalMatches,
 						fileCount: 0,
@@ -1033,8 +1141,14 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 						internalLimitReached: result.limitReached || undefined,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
-					const text = warningNote ? `${skippedWindowNote}\n${warningNote}` : skippedWindowNote;
-					return toolResult(details).text(text).done();
+					const skipPastEnd = canPaginate && normalizedSkip > 0 && totalFiles > 0 && skipFiles >= totalFiles;
+					const noMatchText = skipPastEnd
+						? `No more results (${totalFilesLabel} files total; skip=${normalizedSkip} is past the end)`
+						: skippedWindowNote;
+					const text = warningNote ? `${noMatchText}\n${warningNote}` : noMatchText;
+					// Zero matches is useless regardless of warnings: by the time
+					// compaction runs, the follow-up call has already corrected course.
+					return toolResult(details).text(text).useless().done();
 				}
 				const outputLines: string[] = [];
 				let linesTruncated = false;
@@ -1153,6 +1267,7 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 				const details: SearchToolDetails = {
 					scopePath,
 					searchPath,
+					cwd: this.session.cwd,
 					matchCount: selectedMatches.length,
 					fileCount: fileList.length,
 					totalMatchCount: result.totalMatches,
@@ -1237,69 +1352,49 @@ function isSearchMatchLine(line: string): boolean {
 }
 
 function isSearchHeaderLine(line: string): boolean {
-	return line.startsWith("# ") || line.startsWith("## ");
+	return /^#+ /.test(line);
 }
 
-function renderSearchDisplayGroup(
-	group: string[],
-	searchBase: string | undefined,
+const URL_HEADER_PREFIX_RE = /^#+\s+/;
+
+function renderSearchDisplayLines(
+	lines: readonly string[],
+	headerBase: string | undefined,
+	fileScope: string | undefined,
 	uiTheme: Theme,
 ): RenderedSearchLine[] {
-	// Track directory/file context within a group so headers and code-frame
-	// lines link to the backing file, with line-specific links for matches.
-	let contextDir = searchBase ?? "";
-	const hasFileHeader = group.some(line => line.startsWith("# "));
-	let currentFilePath: string | undefined = hasFileHeader ? undefined : searchBase;
-	return group.map(line => {
-		if (line.startsWith("## ")) {
-			// Strip optional ` (suffix)` and `#hash` before resolving.
-			const fileName = line
-				.slice(3)
-				.trimEnd()
-				.replace(/\s+\([^)]*\)\s*$/, "")
-				.replace(/#[0-9a-f]+$/, "");
-			const absPath = contextDir && fileName ? path.join(contextDir, fileName) : undefined;
-			currentFilePath = absPath;
-			const styled = uiTheme.fg("dim", line);
-			return { raw: line, styled: absPath ? fileHyperlink(absPath, styled) : styled };
+	const contexts = classifyGroupedLines(lines, headerBase, fileScope);
+	// `classifyGroupedLines` can't resolve internal URLs (TUI-only), so track the
+	// resolved URL target here and use it for the body lines that follow.
+	let urlFile: string | undefined;
+	return lines.map((line, index) => {
+		const ctx = contexts[index]!;
+		if (ctx.kind === "dir") {
+			urlFile = undefined;
+			const styled = uiTheme.fg("accent", line);
+			return { raw: line, styled: ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled };
 		}
-		if (line.startsWith("# ")) {
-			const raw = line
-				.slice(2)
-				.trimEnd()
-				.replace(/\s+\([^)]*\)\s*$/, "");
-			if (INTERNAL_URL_DISPLAY_RE.test(raw)) {
-				contextDir = "";
-				const styled = uiTheme.fg("accent", line);
-				const linked = linkUrlLikeSearchHeader(raw, styled);
-				currentFilePath = linked.absPath;
+		if (ctx.kind === "file") {
+			if (ctx.isUrl) {
+				const raw = line
+					.replace(URL_HEADER_PREFIX_RE, "")
+					.trimEnd()
+					.replace(/\s+\([^)]*\)\s*$/, "");
+				const linked = linkUrlLikeSearchHeader(raw, uiTheme.fg("accent", line));
+				urlFile = linked.absPath;
 				return { raw: line, styled: linked.line };
 			}
-			const isDirectory = raw.endsWith("/");
-			const name = isDirectory ? raw.replace(/\/$/, "") : raw.replace(/#[0-9a-f]+$/, "");
-			if (isDirectory) {
-				const absPath = searchBase ? (name === "." ? searchBase : path.join(searchBase, name)) : undefined;
-				if (absPath) {
-					contextDir = absPath;
-				}
-				currentFilePath = undefined;
-				const styled = uiTheme.fg("accent", line);
-				return { raw: line, styled: absPath ? fileHyperlink(absPath, styled) : styled };
-			}
-			// Root-level file emitted by formatGroupedFiles when the directory is `.`.
-			const absPath = searchBase && name ? path.join(searchBase, name) : undefined;
-			currentFilePath = absPath;
-			const styled = uiTheme.fg("accent", line);
-			return { raw: line, styled: absPath ? fileHyperlink(absPath, styled) : styled };
+			urlFile = undefined;
+			// Root-level files keep the bright accent; nested file headers are dimmed.
+			const styled = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
+			return { raw: line, styled: ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled };
 		}
 		const styled = uiTheme.fg("toolOutput", line);
 		const lineNumber = parseSearchDisplayLineNumber(line);
+		const filePath = ctx.filePath ?? urlFile;
 		return {
 			raw: line,
-			styled:
-				currentFilePath && lineNumber !== undefined
-					? fileHyperlink(currentFilePath, styled, { line: lineNumber })
-					: styled,
+			styled: filePath && lineNumber !== undefined ? fileHyperlink(filePath, styled, { line: lineNumber }) : styled,
 		};
 	});
 }
@@ -1315,19 +1410,15 @@ function countPreviewMatches(lines: readonly RenderedSearchLine[], hasMarkedMatc
 }
 
 function renderBudgetedSearchGroups(
-	groups: string[][],
+	groups: RenderedSearchLine[][],
 	maxLines: number,
 	matchCount: number,
-	searchBase: string | undefined,
 	uiTheme: Theme,
 	compact: boolean,
 ): string[] {
 	if (maxLines <= 0) return [];
 	const renderedGroups = groups
-		.map(group => {
-			const rendered = renderSearchDisplayGroup(group, searchBase, uiTheme);
-			return compact ? compactSearchPreviewGroup(rendered) : rendered;
-		})
+		.map(group => (compact ? compactSearchPreviewGroup(group) : group))
 		.filter(group => group.length > 0);
 	if (renderedGroups.length === 0) return [];
 
@@ -1379,6 +1470,10 @@ function renderBudgetedSearchGroups(
 	return lines;
 }
 
+function searchStatusIcon(uiTheme: Theme): string {
+	return uiTheme.fg("toolTitle", uiTheme.symbol("icon.search"));
+}
+
 export const searchToolRenderer = {
 	inline: true,
 	renderCall(args: SearchRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
@@ -1390,10 +1485,10 @@ export const searchToolRenderer = {
 		if (args.skip !== undefined && args.skip > 0) meta.push(`skip:${args.skip}`);
 
 		const text = renderStatusLine(
-			{ icon: "pending", title: "Search", description: args.pattern || "?", meta },
+			{ icon: "pending", title: "Search", titleColor: "toolTitle", description: args.pattern || "?", meta },
 			uiTheme,
 		);
-		return new Text(text, 0, 0);
+		return new Text(text, 1, 0);
 	},
 
 	renderResult(
@@ -1406,7 +1501,7 @@ export const searchToolRenderer = {
 
 		if (result.isError || details?.error) {
 			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 0, 0);
+			return new Text(formatErrorMessage(errorText, uiTheme), 1, 0);
 		}
 
 		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
@@ -1414,12 +1509,18 @@ export const searchToolRenderer = {
 		if (!hasDetailedData) {
 			const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text;
 			if (!textContent || textContent === "No matches found") {
-				return new Text(formatEmptyMessage("No matches found", uiTheme), 0, 0);
+				return new Text(formatEmptyMessage("No matches found", uiTheme), 1, 0);
 			}
 			const lines = textContent.split("\n").filter(line => line.trim() !== "");
 			const description = args?.pattern ?? undefined;
 			const header = renderStatusLine(
-				{ icon: "success", title: "Search", description, meta: [formatCount("item", lines.length)] },
+				{
+					iconOverride: searchStatusIcon(uiTheme),
+					title: "Search",
+					titleColor: "toolTitle",
+					description,
+					meta: [formatCount("item", lines.length)],
+				},
 				uiTheme,
 			);
 			return createCachedComponent(
@@ -1438,6 +1539,7 @@ export const searchToolRenderer = {
 					);
 					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
 				},
+				{ paddingX: 1 },
 			);
 		}
 
@@ -1458,12 +1560,12 @@ export const searchToolRenderer = {
 			const scopeMeta = searchScopeMeta(details);
 			if (scopeMeta) meta.push(scopeMeta);
 			const header = renderStatusLine(
-				{ icon: "warning", title: "Search", description: args?.pattern, meta },
+				{ icon: "warning", title: "Search", titleColor: "toolTitle", description: args?.pattern, meta },
 				uiTheme,
 			);
 			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
 			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 0, 0);
+			return new Text(lines.join("\n"), 1, 0);
 		}
 
 		const summaryParts = [formatCount("match", matchCount), formatCount("file", fileCount)];
@@ -1473,12 +1575,30 @@ export const searchToolRenderer = {
 		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
 		const description = args?.pattern ?? undefined;
 		const header = renderStatusLine(
-			{ icon: truncated ? "warning" : "success", title: "Search", description, meta },
+			{
+				...(truncated ? { icon: "warning" as const } : { iconOverride: searchStatusIcon(uiTheme) }),
+				title: "Search",
+				titleColor: "toolTitle",
+				description,
+				meta,
+			},
 			uiTheme,
 		);
 
 		const textContent = result.details?.displayContent ?? result.content?.find(c => c.type === "text")?.text ?? "";
-		const matchGroups = splitGroupsByBlankLine(textContent.split("\n"));
+		const allLines = textContent.split("\n");
+		// Resolve hyperlinks once over the whole output so a nested directory stack
+		// reconstructs correctly across blank-line group boundaries.
+		// Header/match display paths are cwd-relative, so resolve them against cwd
+		// (falling back to searchPath for legacy results that predate `cwd`); the
+		// scoped file's absolute path seeds body lines in single-file searches.
+		const renderedLines = renderSearchDisplayLines(
+			allLines,
+			details?.cwd ?? details?.searchPath,
+			details?.searchPath,
+			uiTheme,
+		);
+		const matchGroups = groupLineIndicesByBlank(allLines).map(indices => indices.map(i => renderedLines[i]!));
 
 		const extraLines: string[] = [];
 		if (missingNote) extraLines.push(missingNote);
@@ -1490,17 +1610,10 @@ export const searchToolRenderer = {
 					(options.expanded ? EXPANDED_TEXT_LIMIT : COLLAPSED_TEXT_LIMIT) - extraLines.length,
 					0,
 				);
-				const searchBase = details?.searchPath;
-				const matchLines = renderBudgetedSearchGroups(
-					matchGroups,
-					budget,
-					matchCount,
-					searchBase,
-					uiTheme,
-					!options.expanded,
-				);
+				const matchLines = renderBudgetedSearchGroups(matchGroups, budget, matchCount, uiTheme, !options.expanded);
 				return [header, ...matchLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
 			},
+			{ paddingX: 1 },
 		);
 	},
 	mergeCallAndResult: true,

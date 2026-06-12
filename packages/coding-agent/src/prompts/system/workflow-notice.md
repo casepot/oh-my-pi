@@ -1,11 +1,10 @@
 <system-notice>
-The user's message above contains the **workflow** keyword: drive this task as an explicit workflow. Decompose first, use independent/adversarial coverage when it materially improves correctness, and keep going until the task is closed.
+The user's message above contains the **workflowz** keyword: drive this task as an explicit workflow. Decompose first, use independent/adversarial coverage when it materially improves correctness, and keep going until the task is closed.
 
 <capabilities>
-Allowed subagent spawns now: {{allowedAgentSummary}}.
-{{#if planMode}}Plan mode is active: use read/search/find/lsp/web_search directly; nested subagent spawning is unavailable.{{/if}}
-{{#if canUseEvalAgents}}Use Python `eval` orchestration for fan-out. Current safe agent call shape: `{{agentCallExample}}`.{{else}}{{#if canUseTaskTool}}Use the `task` tool for fan-out. Do not use eval `agent()` here: {{agentUnavailableReason}}.{{else}}Subagent fan-out is unavailable in this session: {{agentUnavailableReason}}; {{taskUnavailableReason}}. Do not call eval `agent()` or the `task` tool unless the user explicitly requests a forbidden agent and accepts the runtime error.{{/if}}{{/if}}
-{{#if restrictedSpawns}}This is a restricted-spawn session. If you spawn, specify an allowed agent type explicitly unless the safe call shape above omits it.{{/if}}
+{{spawnPolicy}}
+Eval available: {{evalAvailable}}
+Task tool available: {{taskToolAvailable}}
 </capabilities>
 
 <when>

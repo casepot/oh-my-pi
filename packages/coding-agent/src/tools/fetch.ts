@@ -1,13 +1,15 @@
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
-import { parseHTML } from "linkedom";
 import { LRUCache } from "lru-cache/raw";
 import type { Settings } from "../config/settings";
+import { readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
 import type { ToolSession } from "../sdk";
@@ -20,12 +22,14 @@ import { ensureTool } from "../utils/tools-manager";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import { specialHandlers } from "../web/scrapers";
 import type { RenderResult } from "../web/scrapers/types";
-import { finalizeOutput, loadPage, looksLikeHtml, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
+import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
+import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "./archive-reader";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { type LineRange, parseLineRanges } from "./path-utils";
-import { formatExpandHint, getDomain, replaceTabs } from "./render-utils";
+import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
+import { listTables, looksLikeSqlite, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -46,8 +50,6 @@ const CONVERTIBLE_MIMES = new Set([
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 	"application/rtf",
 	"application/epub+zip",
-	"application/x-ipynb+json",
-	"application/zip",
 	"image/png",
 	"image/jpeg",
 	"image/gif",
@@ -67,7 +69,6 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 	".xlsx",
 	".rtf",
 	".epub",
-	".ipynb",
 	".png",
 	".jpg",
 	".jpeg",
@@ -77,6 +78,27 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 	".wav",
 	".ogg",
 ]);
+
+const NOTEBOOK_MIMES = new Set(["application/x-ipynb+json"]);
+const NOTEBOOK_EXTENSIONS = new Set([".ipynb"]);
+
+const SQLITE_MIMES = new Set([
+	"application/vnd.sqlite3",
+	"application/x-sqlite3",
+	"application/sqlite3",
+	"application/sqlite",
+]);
+const SQLITE_EXTENSIONS = new Set([".sqlite", ".sqlite3", ".db", ".db3"]);
+
+const ARCHIVE_MIMES = new Set([
+	"application/zip",
+	"application/x-zip-compressed",
+	"application/x-tar",
+	"application/tar",
+	"application/gzip",
+	"application/x-gzip",
+]);
+const ARCHIVE_EXTENSIONS = new Set([".zip", ".tar", ".tar.gz", ".tgz", ".gz"]);
 
 const IMAGE_MIME_BY_EXTENSION = new Map<string, string>([
 	[".png", "image/png"],
@@ -168,7 +190,7 @@ export interface ParsedReadUrlTarget {
 
 /** Recognize a single selector token (`raw` or one/many line ranges). */
 function isUrlSelectorToken(token: string): boolean {
-	if (token === "raw") return true;
+	if (token.toLowerCase() === "raw") return true;
 	try {
 		return parseLineRanges(token) !== null;
 	} catch {
@@ -190,7 +212,7 @@ export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null
 	let raw = false;
 	let ranges: readonly LineRange[] | undefined;
 	for (const sel of embedded?.sels ?? []) {
-		if (sel === "raw") {
+		if (sel.toLowerCase() === "raw") {
 			raw = true;
 			continue;
 		}
@@ -261,6 +283,12 @@ function normalizeMime(contentType: string): string {
 	return contentType.split(";")[0].trim().toLowerCase();
 }
 
+function getFilenameExtensionHint(filename: string): string {
+	const lower = filename.toLowerCase();
+	if (lower.endsWith(".tar.gz")) return ".tar.gz";
+	return path.extname(filename).toLowerCase();
+}
+
 /**
  * Get extension from URL or Content-Disposition
  */
@@ -269,7 +297,7 @@ function getExtensionHint(url: string, contentDisposition?: string): string {
 	if (contentDisposition) {
 		const match = contentDisposition.match(/filename[*]?=["']?([^"';\n]+)/i);
 		if (match) {
-			const ext = path.extname(match[1]).toLowerCase();
+			const ext = getFilenameExtensionHint(match[1]);
 			if (ext) return ext;
 		}
 	}
@@ -277,7 +305,7 @@ function getExtensionHint(url: string, contentDisposition?: string): string {
 	// Fall back to URL path
 	try {
 		const pathname = new URL(url).pathname;
-		const ext = path.extname(pathname).toLowerCase();
+		const ext = getFilenameExtensionHint(pathname);
 		if (ext) return ext;
 	} catch {}
 
@@ -520,7 +548,8 @@ function cleanFeedText(text: string): string {
 /**
  * Parse RSS/Atom feed to markdown
  */
-function parseFeedToMarkdown(content: string, maxItems = 10): string {
+async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<string> {
+	const { parseHTML } = await import("linkedom");
 	try {
 		const doc = parseHTML(content).document;
 
@@ -608,6 +637,7 @@ export async function renderHtmlToText(
 	settings: Settings,
 	userSignal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	fetchOverride?: FetchImpl,
 ): Promise<{ content: string; ok: boolean; method: string }> {
 	const overallSignal = ptree.combineSignals(userSignal, timeout * 1000);
 	const execOptions = {
@@ -621,6 +651,7 @@ export async function renderHtmlToText(
 	// Per-attempt budget for remote endpoints so one stall cannot consume the
 	// whole reader-mode budget and starve the local fallbacks.
 	const remoteSignal = () => ptree.combineSignals(userSignal, remoteBudgetMs);
+	const fetchImpl = fetchOverride ?? fetch;
 
 	const runners: Record<FetchProvider, () => Promise<string | null>> = {
 		// Purely local, no network/subprocess: still works on already-loaded HTML
@@ -641,14 +672,20 @@ export async function renderHtmlToText(
 			if (!findParallelApiKey(storage)) return null;
 			const parallelResult = await extractWithParallel(
 				[url],
-				{ objective: "Extract the main content", excerpts: true, fullContent: false, signal: remoteSignal() },
+				{
+					objective: "Extract the main content",
+					excerpts: true,
+					fullContent: false,
+					signal: remoteSignal(),
+					fetch: fetchImpl,
+				},
 				storage,
 			);
 			const firstDocument = parallelResult.results[0];
 			return firstDocument ? getParallelExtractContent(firstDocument) : null;
 		},
 		jina: async () => {
-			const response = await fetch(`https://r.jina.ai/${url}`, {
+			const response = await fetchImpl(`https://r.jina.ai/${url}`, {
 				headers: { Accept: "text/markdown" },
 				signal: remoteSignal(),
 			});
@@ -738,6 +775,270 @@ type FetchRenderResult = RenderResult & {
 	image?: FetchImagePayload;
 };
 
+const BINARY_SAMPLE_CHARS = 4096;
+const URL_ARCHIVE_LIST_LIMIT = 500;
+const URL_SQLITE_LIST_LIMIT = 500;
+
+function sampleLooksBinary(text: string): boolean {
+	const limit = Math.min(text.length, BINARY_SAMPLE_CHARS);
+	if (limit === 0) return false;
+
+	let replacementCount = 0;
+	for (let index = 0; index < limit; index++) {
+		const code = text.charCodeAt(index);
+		if (code === 0) return true;
+		if (code === 0xfffd) replacementCount++;
+	}
+
+	return replacementCount >= 3 && replacementCount / limit > 0.01;
+}
+
+function isNotebookHint(mime: string, extensionHint: string): boolean {
+	return NOTEBOOK_MIMES.has(mime) || NOTEBOOK_EXTENSIONS.has(extensionHint);
+}
+
+function isSqliteHint(mime: string, extensionHint: string): boolean {
+	return SQLITE_MIMES.has(mime) || SQLITE_EXTENSIONS.has(extensionHint);
+}
+
+function isArchiveHint(mime: string, extensionHint: string): boolean {
+	return ARCHIVE_MIMES.has(mime) || ARCHIVE_EXTENSIONS.has(extensionHint);
+}
+
+/**
+ * Content types whose payload renderUrl always re-fetches via fetchBinary.
+ * Skipping the initial body read for them avoids downloading and
+ * string-decoding huge binaries (PDFs, archives, images) twice.
+ */
+function shouldSkipBodyDownload(contentType: string): boolean {
+	return (
+		CONVERTIBLE_MIMES.has(contentType) ||
+		NOTEBOOK_MIMES.has(contentType) ||
+		SQLITE_MIMES.has(contentType) ||
+		ARCHIVE_MIMES.has(contentType) ||
+		SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(contentType)
+	);
+}
+
+function getArchiveFormatHint(mime: string, extensionHint: string): ArchiveFormat | undefined {
+	if (extensionHint === ".zip" || mime === "application/zip" || mime === "application/x-zip-compressed") {
+		return "zip";
+	}
+	if (extensionHint === ".tar" || mime === "application/x-tar" || mime === "application/tar") {
+		return "tar";
+	}
+	if (
+		extensionHint === ".tar.gz" ||
+		extensionHint === ".tgz" ||
+		extensionHint === ".gz" ||
+		mime === "application/gzip" ||
+		mime === "application/x-gzip"
+	) {
+		return "tar.gz";
+	}
+	return undefined;
+}
+
+function formatErrorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function binaryContentType(mime: string): string {
+	return mime || "application/octet-stream";
+}
+
+function buildBinaryNotice(finalUrl: string, mime: string, byteLength?: number): string {
+	const size = byteLength === undefined ? "unknown size" : formatBytes(byteLength);
+	return `[Binary content: ${binaryContentType(mime)}, ${size}] ${finalUrl}`;
+}
+
+function buildBinaryPayloadResult(
+	url: string,
+	finalUrl: string,
+	mime: string,
+	method: string,
+	content: string,
+	fetchedAt: string,
+	notes: string[],
+): FetchRenderResult {
+	const output = finalizeOutput(content);
+	return {
+		url,
+		finalUrl,
+		contentType: binaryContentType(mime),
+		method,
+		content: output.content,
+		fetchedAt,
+		truncated: output.truncated,
+		notes,
+	};
+}
+
+async function withTempBinaryFile<T>(
+	prefix: string,
+	extension: string,
+	bytes: Uint8Array,
+	readTempFile: (tempPath: string) => Promise<T>,
+): Promise<T> {
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	const tempPath = path.join(tempDir, `payload${extension}`);
+	try {
+		await Bun.write(tempPath, bytes);
+		return await readTempFile(tempPath);
+	} finally {
+		await fs.rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+async function renderNotebookPayload(bytes: Uint8Array, displayUrl: string): Promise<string> {
+	return withTempBinaryFile("omp-url-notebook-", ".ipynb", bytes, tempPath =>
+		readEditableNotebookText(tempPath, displayUrl),
+	);
+}
+
+async function renderSqlitePayload(bytes: Uint8Array): Promise<string> {
+	return withTempBinaryFile("omp-url-sqlite-", ".sqlite", bytes, async tempPath => {
+		let db: Database | null = null;
+		try {
+			db = new Database(tempPath, { readonly: true, strict: true });
+			db.run("PRAGMA busy_timeout = 3000");
+			const listLimit = applyListLimit(listTables(db), { limit: URL_SQLITE_LIST_LIMIT });
+			return renderTableList(listLimit.items);
+		} finally {
+			db?.close();
+		}
+	});
+}
+
+async function tryRenderBinaryPayload(
+	url: string,
+	finalUrl: string,
+	mime: string,
+	extHint: string,
+	rawContent: string,
+	bodySkipped: boolean,
+	timeout: number,
+	signal: AbortSignal | undefined,
+	fetchedAt: string,
+	notes: readonly string[],
+): Promise<FetchRenderResult | null> {
+	const hasNotebookHint = isNotebookHint(mime, extHint);
+	const hasSqliteHint = isSqliteHint(mime, extHint);
+	const hasArchiveHint = isArchiveHint(mime, extHint);
+	const rawLooksBinary = bodySkipped || sampleLooksBinary(rawContent);
+	if (!hasNotebookHint && !hasSqliteHint && !hasArchiveHint && !rawLooksBinary) {
+		return null;
+	}
+
+	const resultNotes = [...notes];
+	const binary = await fetchBinary(finalUrl, timeout, signal);
+	if (!binary.ok) {
+		resultNotes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
+		return buildBinaryPayloadResult(
+			url,
+			finalUrl,
+			mime,
+			"binary",
+			buildBinaryNotice(finalUrl, mime),
+			fetchedAt,
+			resultNotes,
+		);
+	}
+
+	const binaryExtHint = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
+	if (isNotebookHint(mime, binaryExtHint)) {
+		try {
+			return buildBinaryPayloadResult(
+				url,
+				finalUrl,
+				mime,
+				"notebook",
+				await renderNotebookPayload(binary.buffer, finalUrl),
+				fetchedAt,
+				resultNotes,
+			);
+		} catch (error) {
+			resultNotes.push(`Notebook rendering failed: ${formatErrorMessage(error)}`);
+			return buildBinaryPayloadResult(
+				url,
+				finalUrl,
+				mime,
+				"binary",
+				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+				fetchedAt,
+				resultNotes,
+			);
+		}
+	}
+
+	if (isSqliteHint(mime, binaryExtHint) || looksLikeSqlite(binary.buffer)) {
+		try {
+			return buildBinaryPayloadResult(
+				url,
+				finalUrl,
+				mime,
+				"sqlite",
+				await renderSqlitePayload(binary.buffer),
+				fetchedAt,
+				resultNotes,
+			);
+		} catch (error) {
+			resultNotes.push(`SQLite rendering failed: ${formatErrorMessage(error)}`);
+			return buildBinaryPayloadResult(
+				url,
+				finalUrl,
+				mime,
+				"binary",
+				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+				fetchedAt,
+				resultNotes,
+			);
+		}
+	}
+
+	const hintedArchiveFormat = getArchiveFormatHint(mime, binaryExtHint);
+	const shouldArchiveSniff = hintedArchiveFormat !== undefined || !isConvertible(mime, binaryExtHint);
+	const archiveFormat = hintedArchiveFormat ?? (shouldArchiveSniff ? sniffArchiveFormat(binary.buffer) : undefined);
+	if (archiveFormat) {
+		try {
+			return buildBinaryPayloadResult(
+				url,
+				finalUrl,
+				mime,
+				"archive",
+				await listArchiveRoot(binary.buffer, archiveFormat, { limit: URL_ARCHIVE_LIST_LIMIT }),
+				fetchedAt,
+				resultNotes,
+			);
+		} catch (error) {
+			resultNotes.push(`Archive rendering failed: ${formatErrorMessage(error)}`);
+			return buildBinaryPayloadResult(
+				url,
+				finalUrl,
+				mime,
+				"binary",
+				buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+				fetchedAt,
+				resultNotes,
+			);
+		}
+	}
+
+	if (rawLooksBinary) {
+		return buildBinaryPayloadResult(
+			url,
+			finalUrl,
+			mime,
+			"binary",
+			buildBinaryNotice(finalUrl, mime, binary.buffer.byteLength),
+			fetchedAt,
+			resultNotes,
+		);
+	}
+
+	return null;
+}
+
 // =============================================================================
 // Unified Special Handler Dispatch
 // =============================================================================
@@ -775,6 +1076,7 @@ async function renderUrl(
 	settings: Settings,
 	signal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	fetchOverride?: FetchImpl,
 ): Promise<FetchRenderResult> {
 	const notes: string[] = [];
 	const fetchedAt = new Date().toISOString();
@@ -806,7 +1108,7 @@ async function renderUrl(
 	}
 
 	// Step 2: Fetch page
-	const response = await loadPage(url, { timeout, signal });
+	const response = await loadPage(url, { timeout, signal, skipBodyForContentType: shouldSkipBodyDownload });
 	if (signal?.aborted) {
 		throw new ToolAbortError();
 	}
@@ -819,11 +1121,17 @@ async function renderUrl(
 			content: "",
 			fetchedAt,
 			truncated: false,
-			notes: [response.status ? `Failed to fetch URL (HTTP ${response.status})` : "Failed to fetch URL"],
+			notes: [
+				response.status ? `Failed to fetch URL (HTTP ${response.status})` : "Failed to fetch URL",
+				...(response.error ? [`Cause: ${response.error}`] : []),
+			],
 		};
 	}
 
 	const { finalUrl, content: rawContent } = response;
+	if (response.truncated) {
+		notes.push(`Response body exceeded ${formatBytes(MAX_BYTES)} and was cut mid-stream; content is incomplete`);
+	}
 	const mime = normalizeMime(response.contentType);
 	const extHint = getExtensionHint(finalUrl);
 
@@ -984,6 +1292,20 @@ async function renderUrl(
 		}
 	}
 
+	const binaryPayloadResult = await tryRenderBinaryPayload(
+		url,
+		finalUrl,
+		mime,
+		extHint,
+		rawContent,
+		response.bodySkipped === true,
+		timeout,
+		signal,
+		fetchedAt,
+		notes,
+	);
+	if (binaryPayloadResult) return binaryPayloadResult;
+
 	// Step 4: Handle non-HTML text content
 	const isHtml = mime.includes("html") || mime.includes("xhtml");
 	const isJson = mime.includes("json");
@@ -992,7 +1314,7 @@ async function renderUrl(
 	const isFeed = mime.includes("rss") || mime.includes("atom") || mime.includes("feed");
 
 	// Raw mode skips every text-shaping branch below (JSON pretty-print, feed-to-markdown,
-	// HTML extraction) and returns the response body verbatim. The image/markit branches
+	// HTML extraction) and returns the response body verbatim. Binary-oriented branches
 	// above already ran because raw isn't useful for binary payloads.
 	if (raw) {
 		const output = finalizeOutput(rawContent);
@@ -1022,7 +1344,7 @@ async function renderUrl(
 	}
 
 	if (isFeed || (isXml && (rawContent.includes("<rss") || rawContent.includes("<feed")))) {
-		const parsed = parseFeedToMarkdown(rawContent);
+		const parsed = await parseFeedToMarkdown(rawContent);
 		const output = finalizeOutput(parsed);
 		return {
 			url,
@@ -1115,7 +1437,7 @@ async function renderUrl(
 			const altResult = await loadPage(resolved, { timeout, signal });
 			if (altResult.ok && altResult.content.trim().length > 200) {
 				notes.push(`Used feed alternate: ${resolved}`);
-				const parsed = parseFeedToMarkdown(altResult.content);
+				const parsed = await parseFeedToMarkdown(altResult.content);
 				const output = finalizeOutput(parsed);
 				return {
 					url,
@@ -1135,7 +1457,15 @@ async function renderUrl(
 		}
 
 		// 5E: Render HTML via the reader-backend chain (native/trafilatura/lynx/parallel/jina)
-		const htmlResult = await renderHtmlToText(finalUrl, rawContent, timeout, settings, signal, storage);
+		const htmlResult = await renderHtmlToText(
+			finalUrl,
+			rawContent,
+			timeout,
+			settings,
+			signal,
+			storage,
+			fetchOverride,
+		);
 		if (!htmlResult.ok) {
 			notes.push("html rendering failed (no reader backend produced usable output)");
 
@@ -1336,7 +1666,7 @@ async function buildReadUrlCacheEntry(
 	}
 
 	const storage = session.settings.getStorage();
-	const result = await renderUrl(url, effectiveTimeout, raw, session.settings, signal, storage);
+	const result = await renderUrl(url, effectiveTimeout, raw, session.settings, signal, storage, session.fetch);
 	const output = buildUrlReadOutput(result, result.content);
 	const artifactId = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
 

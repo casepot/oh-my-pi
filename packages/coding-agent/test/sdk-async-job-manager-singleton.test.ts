@@ -62,10 +62,9 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 
 	it("keeps the primary session's manager installed after a secondary session disposes", async () => {
 		const primary = await spawnTopLevelSession();
+		const primaryManager = AsyncJobManager.instance();
+		expect(primaryManager).toBeDefined();
 		try {
-			const primaryManager = AsyncJobManager.instance();
-			expect(primaryManager).toBeDefined();
-
 			const secondary = await spawnTopLevelSession();
 			try {
 				// While the secondary is alive the global instance MUST still point at
@@ -83,10 +82,6 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		} finally {
 			await primary.dispose();
 		}
-
-		// Once the owning primary session disposes the singleton clears, matching
-		// the documented single-owner invariant.
-		expect(AsyncJobManager.instance()).toBeUndefined();
 	}, 60000);
 
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {

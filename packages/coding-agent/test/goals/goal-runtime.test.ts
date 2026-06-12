@@ -1475,7 +1475,7 @@ describe("goal runtime", () => {
 			'Call `goal({op:"complete"})`; do not resume implementation.',
 		);
 		const repairPrompt = renderGoalPrompt("continuation", repairState.goal, repairState);
-		expect(repairPrompt).toContain("Do not retry `complete` without fresh evidence");
+		expect(repairPrompt).toContain("Do not call `complete` again until blockers are addressed with fresh evidence");
 		expect(repairPrompt).toContain("B1");
 		expect(repairPrompt).toContain("Run focused verification.");
 		expect(systemPromptTemplate).toContain("Goal mode exception");

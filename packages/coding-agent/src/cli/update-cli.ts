@@ -5,18 +5,15 @@
  * Uses fork source checkouts when possible, otherwise downloads fork release binaries.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { $which, APP_NAME, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import chalk from "chalk";
 import { FORK_REPO } from "../fork-policy";
 import { theme } from "../modes/theme/theme";
-import {
-	getBunGlobalBinDir,
-	getDefaultSourceCheckoutDir,
-	isPathInDirectory,
-	resolveSourceRootFromOmpPath,
-} from "../update/source-status";
+import { getBunGlobalBinDir, getDefaultSourceCheckoutDir, resolveSourceRootFromOmpPath } from "../update/source-status";
 import { updateViaSource } from "../update/source-updater";
 
 export { ensureSourceCheckoutCleanForUpdate } from "../update/source-updater";
@@ -57,31 +54,134 @@ export function parseUpdateArgs(args: string[]): { force: boolean; check: boolea
 }
 
 type UpdateTarget = { method: "source"; root: string; mode: "linked" | "migrate" } | { method: "binary"; path: string };
+type UpdateMethod = "brew" | "mise" | "bun" | "binary";
+
+const MISE_TOOL = `github:${FORK_REPO}`;
 
 interface UpdateTargetResolutionInput {
 	ompPath?: string;
 	bunGlobalBinDir?: string;
 	defaultSourceRoot?: string;
+	homebrewPrefix?: string;
+	miseBinDirs?: readonly string[];
+	miseDataDir?: string;
 }
 
-function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
-	if (!bunBinDir) return "binary";
-	return isPathInDirectory(ompPath, bunBinDir) ? "bun" : "binary";
+type UpdateMethodResolutionOptions = Pick<
+	UpdateTargetResolutionInput,
+	"homebrewPrefix" | "miseBinDirs" | "miseDataDir"
+>;
+
+async function getHomebrewFormulaPrefix(): Promise<string | undefined> {
+	if (!$which("brew")) return undefined;
+	try {
+		const result = await $`brew --prefix ${APP_NAME}`.quiet().nothrow();
+		if (result.exitCode !== 0) return undefined;
+		const output = result.text().trim();
+		return output.length > 0 ? output : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
-export function resolveUpdateMethodForTest(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
-	return resolveUpdateMethod(ompPath, bunBinDir);
+async function getMiseBinDirs(): Promise<string[]> {
+	if (!$which("mise")) return [];
+	try {
+		const result = await $`mise bin-paths ${MISE_TOOL}`.quiet().nothrow();
+		if (result.exitCode !== 0) return [];
+		return result
+			.text()
+			.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(line => line.length > 0);
+	} catch {
+		return [];
+	}
+}
+
+function getMiseDataDir(): string {
+	const override = process.env.MISE_DATA_DIR;
+	if (override && override.length > 0) return override;
+	if (process.platform === "win32") {
+		const localAppData = process.env.LOCALAPPDATA;
+		if (localAppData && localAppData.length > 0) return path.join(localAppData, "mise");
+	}
+	const xdgDataHome = process.env.XDG_DATA_HOME;
+	if (xdgDataHome && xdgDataHome.length > 0) return path.join(xdgDataHome, "mise");
+	return path.join(os.homedir(), ".local", "share", "mise");
+}
+
+function normalizePathForComparison(filePath: string): string {
+	const normalized = path.normalize(filePath);
+	if (process.platform === "win32") return normalized.toLowerCase();
+	return normalized;
+}
+
+function tryRealpath(p: string): string | undefined {
+	try {
+		return fs.realpathSync.native(p);
+	} catch {
+		return undefined;
+	}
+}
+
+function isPathInDirectoryLexical(filePath: string, directoryPath: string): boolean {
+	const normalizedPath = normalizePathForComparison(path.resolve(filePath));
+	const normalizedDirectory = normalizePathForComparison(path.resolve(directoryPath));
+	const relativePath = path.relative(normalizedDirectory, normalizedPath);
+	return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
+}
+
+function isPathInDirectory(filePath: string, directoryPath: string): boolean {
+	if (isPathInDirectoryLexical(filePath, directoryPath)) return true;
+	const dirReal = tryRealpath(path.resolve(directoryPath));
+	if (!dirReal) return false;
+	const fileReal = tryRealpath(path.resolve(filePath));
+	if (fileReal && isPathInDirectoryLexical(fileReal, dirReal)) return true;
+	const fileDir = tryRealpath(path.dirname(path.resolve(filePath)));
+	if (!fileDir) return false;
+	const resolvedFile = path.join(fileDir, path.basename(filePath));
+	return isPathInDirectoryLexical(resolvedFile, dirReal);
+}
+
+function resolveUpdateMethod(
+	ompPath: string,
+	bunBinDir: string | undefined,
+	options: UpdateMethodResolutionOptions = {},
+): UpdateMethod {
+	const { homebrewPrefix, miseBinDirs = [], miseDataDir } = options;
+	if (homebrewPrefix && isPathInDirectory(ompPath, path.join(homebrewPrefix, "bin"))) return "brew";
+	if (miseBinDirs.some(dir => isPathInDirectory(ompPath, dir))) return "mise";
+	if (miseDataDir && isPathInDirectory(ompPath, path.join(miseDataDir, "shims"))) return "mise";
+	if (bunBinDir && isPathInDirectory(ompPath, bunBinDir)) return "bun";
+	return "binary";
+}
+
+export function resolveUpdateMethodForTest(
+	ompPath: string,
+	bunBinDir: string | undefined,
+	options: UpdateMethodResolutionOptions = {},
+): UpdateMethod {
+	return resolveUpdateMethod(ompPath, bunBinDir, options);
 }
 
 function resolveUpdateTargetFromPaths(input: UpdateTargetResolutionInput): UpdateTarget | undefined {
 	const sourceRoot = resolveSourceRootFromOmpPath(input.ompPath);
 	if (sourceRoot) return { method: "source", root: sourceRoot, mode: "linked" };
 
-	if (input.ompPath && resolveUpdateMethod(input.ompPath, input.bunGlobalBinDir) === "binary") {
+	const method = input.ompPath
+		? resolveUpdateMethod(input.ompPath, input.bunGlobalBinDir, {
+				homebrewPrefix: input.homebrewPrefix,
+				miseBinDirs: input.miseBinDirs,
+				miseDataDir: input.miseDataDir,
+			})
+		: undefined;
+
+	if (method === "binary" && input.ompPath) {
 		return { method: "binary", path: input.ompPath };
 	}
 
-	if (input.bunGlobalBinDir) {
+	if (method || input.bunGlobalBinDir) {
 		return {
 			method: "source",
 			root: input.defaultSourceRoot ?? getDefaultSourceCheckoutDir(),
@@ -98,8 +198,12 @@ export function resolveUpdateTargetForTest(input: UpdateTargetResolutionInput): 
 
 async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	const bunGlobalBinDir = await getBunGlobalBinDir();
+	const homebrewPrefix = await getHomebrewFormulaPrefix();
+	const miseAvailable = $which("mise") !== undefined;
+	const miseBinDirs = miseAvailable ? await getMiseBinDirs() : [];
+	const miseDataDir = miseAvailable ? getMiseDataDir() : undefined;
 	const ompPath = resolveOmpPath();
-	const target = resolveUpdateTargetFromPaths({ ompPath, bunGlobalBinDir });
+	const target = resolveUpdateTargetFromPaths({ ompPath, bunGlobalBinDir, homebrewPrefix, miseBinDirs, miseDataDir });
 	if (target) return target;
 
 	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);

@@ -35,6 +35,17 @@ describe("ResolveTool", () => {
 		);
 	});
 
+	it("treats discard with no pending action as a successful cancellation, not an error", async () => {
+		const tool = new ResolveTool(createSession());
+		const result = await tool.execute("call-discard-none", {
+			action: "discard",
+			reason: "Abandoning the staged edit.",
+		});
+		expect(result.isError ?? false).toBe(false);
+		expect(getText(result)).toContain("Nothing to discard");
+		expect(result.details).toMatchObject({ action: "discard", reason: "Abandoning the staged edit." });
+	});
+
 	it("discards pending action and clears store", async () => {
 		let discardedReason: string | undefined;
 		const handler = async (input: unknown) => {
@@ -130,4 +141,32 @@ it("renders a highlighted apply summary", async () => {
 	expect(rendered).not.toContain("Applied 2 replacements in 1 file.");
 	expect(rendered).not.toContain("Decision");
 	expect(rendered).not.toContain("┌");
+});
+
+it("keeps the inverse block color across the full line (no mid-line fg reset)", async () => {
+	const theme = await getThemeByName("dark");
+	expect(theme).toBeDefined();
+	const uiTheme = theme!;
+
+	const component = resolveToolRenderer.renderResult(
+		{
+			content: [{ type: "text", text: "Applied 2 replacements in 1 file." }],
+			details: {
+				action: "apply",
+				reason: "All replacements are correct",
+				sourceToolName: "ast_edit",
+				label: "AST Edit: 2 replacements in 1 file",
+			},
+		},
+		{ expanded: false, isPartial: false },
+		uiTheme,
+	);
+
+	// Each line is inverse(fg(color, ...)): under inverse the fg paints the block
+	// background, so an embedded fg reset (e.g. a styledSymbol icon's \x1b[39m)
+	// turns everything after it white. Exactly one reset — the outer close — may
+	// appear per line.
+	for (const line of component.render(90)) {
+		expect(line.split("\x1b[39m")).toHaveLength(2);
+	}
 });

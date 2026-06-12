@@ -22,6 +22,12 @@ omp --mode rpc-ui [session/model/tool/config options]
 
 `rpc` is a protocol-only embedding mode. `rpc-ui` also installs an RPC-backed extension/tool UI context. Both modes are keyless for protocol introspection commands such as `get_protocol_info`, `get_state`, `ping`, and `shutdown`.
 
+Behavior notes:
+
+- RPC mode disables automatic session title generation by default to avoid an extra model call.
+- RPC mode resets workflow-altering `todo.*`, `task.*`, `memory.backend`/`memories.enabled`, `async.*`, and `bash.autoBackground.*` settings to their built-in defaults instead of inheriting user overrides.
+- The process reads stdin as JSONL (`readJsonl(Bun.stdin.stream())`).
+
 Deterministic one-shot probing:
 
 ```bash
@@ -40,11 +46,126 @@ Startup behavior:
 - `PI_NOTIFICATIONS=off` is applied to prevent terminal control bytes on stdout.
 - stdin close is treated as `peer_closed`: pending operations, host calls, URI requests, and UI requests receive typed terminal/rejection handling before shutdown.
 
-## Transport
+## Transport and Framing
+
+Each frame is a single JSON object followed by `\n`. There is no envelope beyond the object shape itself.
+
+### Outbound frame categories (stdout)
+
+1. Ready frame (`{ type: "ready" }`)
+2. `RpcResponse` (`{ type: "response", ... }`)
+3. `AgentSessionEvent` objects (`agent_start`, `message_update`, etc.)
+4. `RpcExtensionUIRequest` (`{ type: "extension_ui_request", ... }`)
+5. Host tool requests/cancellations (`host_tool_call`, `host_tool_cancel`)
+6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
+7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
+8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
+9. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
+10. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+
+### Streams
 
 - **stdin**: commands, extension UI responses, host-tool updates/results/cancel ACKs, host URI results/cancel ACKs.
 - **stdout**: `ready`, command `response`, protocol/session/operation/task/subagent/state frames, host-tool requests/cancels, host URI requests/cancels, extension UI requests, extension errors, `pong` health responses, and `shutdown`.
 - **stderr**: diagnostics only; never parse it as protocol.
+
+### Inbound frame categories (stdin)
+
+1. `RpcCommand`
+2. `RpcExtensionUIResponse` (`{ type: "extension_ui_response", ... }`)
+3. Host tool updates/results (`host_tool_update`, `host_tool_result`)
+4. Host URI results (`host_uri_result`)
+
+## Request/Response Correlation
+
+All commands accept optional `id?: string`.
+
+- If provided, normal command responses echo the same `id`.
+- `RpcClient` relies on this for pending-request resolution.
+
+Important edge behavior from runtime:
+
+- Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
+- Parse/handler exceptions in the input loop emit `command: "parse"` with `id: undefined`.
+- `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
+
+## Command Schema (canonical)
+
+`RpcCommand` is defined in `src/modes/rpc/rpc-types.ts`:
+
+### Prompting
+
+- `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
+- `{ id?, type: "steer", message: string, images?: ImageContent[] }`
+- `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "abort" }`
+- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
+- `{ id?, type: "new_session", parentSession?: string }`
+
+### State
+
+- `{ id?, type: "get_state" }`
+- `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "set_todos", phases: TodoPhase[] }`
+- `{ id?, type: "set_host_tools", tools: RpcHostToolDefinition[] }`
+- `{ id?, type: "set_host_uri_schemes", schemes: RpcHostUriSchemeDefinition[] }`
+- `{ id?, type: "set_subagent_subscription", level: "off" | "progress" | "events" }`
+- `{ id?, type: "get_subagents" }`
+- `{ id?, type: "get_subagent_messages", subagentId?: string, sessionFile?: string, fromByte?: number }`
+
+### Model
+
+- `{ id?, type: "set_model", provider: string, modelId: string }`
+- `{ id?, type: "cycle_model" }`
+- `{ id?, type: "get_available_models" }`
+
+### Thinking
+
+- `{ id?, type: "set_thinking_level", level: ThinkingLevel }`
+- `{ id?, type: "cycle_thinking_level" }`
+
+### Queue modes
+
+- `{ id?, type: "set_steering_mode", mode: "all" | "one-at-a-time" }`
+- `{ id?, type: "set_follow_up_mode", mode: "all" | "one-at-a-time" }`
+- `{ id?, type: "set_interrupt_mode", mode: "immediate" | "wait" }`
+
+### Compaction
+
+- `{ id?, type: "compact", customInstructions?: string }`
+- `{ id?, type: "set_auto_compaction", enabled: boolean }`
+
+### Retry
+
+- `{ id?, type: "set_auto_retry", enabled: boolean }`
+- `{ id?, type: "abort_retry" }`
+
+### Bash
+
+- `{ id?, type: "bash", command: string }`
+- `{ id?, type: "abort_bash" }`
+
+### Session
+
+- `{ id?, type: "get_session_stats" }`
+- `{ id?, type: "export_html", outputPath?: string }`
+- `{ id?, type: "switch_session", sessionPath: string }`
+- `{ id?, type: "branch", entryId: string }`
+- `{ id?, type: "get_branch_messages" }`
+- `{ id?, type: "get_last_assistant_text" }`
+- `{ id?, type: "set_session_name", name: string }`
+- `{ id?, type: "handoff", customInstructions?: string }`
+
+### Messages
+
+- `{ id?, type: "get_messages" }`
+
+### Login
+
+- `{ id?, type: "get_login_providers" }`
+- `{ id?, type: "login", providerId: string }`
+
+## Frame metadata
 
 Every stdout frame is written by `RpcFrameWriter` and includes:
 
