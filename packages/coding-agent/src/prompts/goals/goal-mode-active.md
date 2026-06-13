@@ -29,8 +29,6 @@ Goal tool contract:
 - `goal({op:"resolve_checkpoint", …})` is the fresh controller turn after a checkpoint; parent truth changes require `parent_delta`.
 - `goal({op:"complete"})` is only for verified parent-goal completion.
 
-You MUST keep the full objective intact across turns. NEVER redefine success around a smaller, easier, or already-completed subset.
-
 Run-mode contract:
 - `policy.now` is the allowed action surface for the current run mode.
 - `policy.blocked` actions are forbidden until state changes through the `goal` tool.

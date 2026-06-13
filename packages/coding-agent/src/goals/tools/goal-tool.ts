@@ -10,7 +10,7 @@ import { formatDuration } from "../../slash-commands/helpers/format";
 import type { ToolSession } from "../../tools";
 import { formatErrorDetail, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
-import { framedBlock, renderStatusLine, truncateToWidth } from "../../tui";
+import { renderStatusLine, truncateToWidth } from "../../tui";
 import {
 	completionBudgetReport,
 	type GoalCheckpointInput,
@@ -811,7 +811,8 @@ export const goalToolRenderer = {
 		if (args.op === "resolve_checkpoint" && args.decision) meta.push(args.decision);
 		if (args.op === "create" && args.token_budget !== undefined)
 			meta.push(`budget ${formatNumber(args.token_budget)}`);
-		return new Text(renderStatusLine({ icon: "pending", title: "Goal", description, meta }, uiTheme), 0, 0);
+		const text = renderStatusLine({ icon: "pending", title: "Goal", description, meta }, uiTheme);
+		return new Text(text, 0, 0);
 	},
 
 	renderResult(
@@ -827,60 +828,56 @@ export const goalToolRenderer = {
 
 		if (result.isError) {
 			const header = renderStatusLine({ icon: "error", title: "Goal", description }, uiTheme);
-			return framedBlock(uiTheme, width => ({
-				header,
-				sections: [{ lines: formatErrorDetail(fallbackText || "Goal tool failed", uiTheme).split("\n") }],
-				state: "error",
-				borderColor: "error",
-				width,
-			}));
+			const body = formatErrorDetail(fallbackText || "Goal tool failed", uiTheme);
+			return new Text([header, body].join("\n"), 0, 0);
 		}
 
 		const goal = details?.goal ?? null;
 		if (!goal) {
-			return new Text(
-				renderStatusLine({ icon: "warning", title: "Goal", description, meta: ["no active goal"] }, uiTheme),
-				0,
-				0,
-			);
+			const header = renderStatusLine({ icon: "warning", title: "Goal", description }, uiTheme);
+			const body = uiTheme.fg("muted", "No active goal.");
+			return new Text([header, body].join("\n"), 0, 0);
 		}
 
 		const verification = details?.completionVerification;
 		const verificationRejected = verification?.status === "rejected";
 		const checkpointRejected = details?.checkpointReview?.status === "rejected";
-		const header = renderStatusLine(
-			{
-				icon: verificationRejected || checkpointRejected ? "warning" : "success",
-				title: "Goal",
-				description,
-				badge: {
-					label: verificationRejected
-						? "verification rejected"
-						: checkpointRejected
-							? "checkpoint rejected"
-							: goal.status,
-					color: verificationRejected || checkpointRejected ? "warning" : goalBadgeColor(goal.status),
+		const lines: string[] = [];
+		lines.push(
+			renderStatusLine(
+				{
+					icon: verificationRejected || checkpointRejected ? "warning" : "success",
+					title: "Goal",
+					description,
+					badge: {
+						label: verificationRejected
+							? "verification rejected"
+							: checkpointRejected
+								? "checkpoint rejected"
+								: goal.status,
+						color: verificationRejected || checkpointRejected ? "warning" : goalBadgeColor(goal.status),
+					},
+					meta: verificationRejected
+						? [
+								verification.totalAttempts === undefined
+									? `attempt ${verification.attempt}/${verification.maxAttempts}`
+									: `attempt ${verification.attempt}/${verification.maxAttempts}, total ${verification.totalAttempts}`,
+							]
+						: details?.state?.runMode
+							? [details.state.runMode]
+							: undefined,
 				},
-				meta: verificationRejected
-					? [
-							verification.totalAttempts === undefined
-								? `attempt ${verification.attempt}/${verification.maxAttempts}`
-								: `attempt ${verification.attempt}/${verification.maxAttempts}, total ${verification.totalAttempts}`,
-						]
-					: details?.state?.runMode
-						? [details.state.runMode]
-						: undefined,
-			},
-			uiTheme,
+				uiTheme,
+			),
 		);
 
-		const lines: string[] = [];
 		const objectiveText = humanPreview(goal.objective);
-		lines.push(uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`)));
-		if (goal.currentTarget) lines.push(uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`));
+		lines.push(`  ${uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`))}`);
+		if (goal.currentTarget)
+			lines.push(`  ${uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`)}`);
 		if (goal.pendingCheckpointId) {
-			lines.push(uiTheme.fg("warning", `checkpoint pending: resolve ${goal.pendingCheckpointId}`));
-			lines.push(uiTheme.fg("muted", "ordinary tools blocked until resolve_checkpoint"));
+			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: resolve ${goal.pendingCheckpointId}`)}`);
+			lines.push(`  ${uiTheme.fg("muted", "ordinary tools blocked until resolve_checkpoint")}`);
 		}
 
 		const used = formatNumber(goal.tokensUsed);
@@ -888,37 +885,31 @@ export const goalToolRenderer = {
 			goal.tokenBudget !== undefined
 				? `${used} / ${formatNumber(goal.tokenBudget)} tokens (${formatNumber(Math.max(0, goal.tokenBudget - goal.tokensUsed))} left)`
 				: `${used} tokens`;
-		const metaParts = [tokensLine];
-		if (goal.timeUsedSeconds > 0) {
-			metaParts.push(`${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`);
-		}
-		lines.push(uiTheme.fg("dim", metaParts.join(" · ")));
+		lines.push(`  ${uiTheme.fg("dim", tokensLine)}`);
+
+		if (goal.timeUsedSeconds > 0)
+			lines.push(`  ${uiTheme.fg("dim", `${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`)}`);
 		if (details?.checkpoint && !checkpointRejected) {
-			lines.push(uiTheme.fg("muted", "Target closed; parent goal still active"));
-			lines.push(uiTheme.fg("muted", "Next: resolve_checkpoint after checkpoint guidance"));
+			lines.push(`  ${uiTheme.fg("muted", "Target closed; parent goal still active")}`);
+			lines.push(`  ${uiTheme.fg("muted", "Next: resolve_checkpoint after checkpoint guidance")}`);
 		}
 		if (details?.checkpointResolution)
-			lines.push(uiTheme.fg("muted", `checkpoint resolution: ${details.checkpointResolution.decision}`));
+			lines.push(`  ${uiTheme.fg("muted", `checkpoint resolution: ${details.checkpointResolution.decision}`)}`);
 		if (verificationRejected) {
-			lines.push(uiTheme.fg("warning", humanPreview(verification.feedback)));
-			if (verification.compactorMemo) lines.push(uiTheme.fg("muted", humanPreview(verification.compactorMemo)));
+			lines.push(`  ${uiTheme.fg("warning", humanPreview(verification.feedback))}`);
+			if (verification.compactorMemo)
+				lines.push(`  ${uiTheme.fg("muted", humanPreview(verification.compactorMemo))}`);
 		}
 		if (checkpointRejected && details?.checkpointReview)
-			lines.push(uiTheme.fg("warning", humanPreview(details.checkpointReview.feedback)));
+			lines.push(`  ${uiTheme.fg("warning", humanPreview(details.checkpointReview.feedback))}`);
 
 		const report = details?.completionBudgetReport;
-		const sections: Array<{ label?: string; lines: string[] }> = [{ lines }];
 		if (report) {
-			sections.push({ label: "Report", lines: report.split("\n").map(line => uiTheme.fg("muted", line)) });
+			lines.push("");
+			lines.push(uiTheme.italic(uiTheme.fg("muted", report)));
 		}
 
-		return framedBlock(uiTheme, width => ({
-			header,
-			sections,
-			state: "success",
-			borderColor: "borderMuted",
-			width,
-		}));
+		return new Text(lines.join("\n"), 0, 0);
 	},
 
 	mergeCallAndResult: true,

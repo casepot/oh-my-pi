@@ -1177,7 +1177,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const repairDispatch = await harness.session.prepareGoalContinuationDispatch();
 		expect(repairDispatch?.kind).toBe("verification-repair");
 		expect(repairDispatch?.prompt).toContain("Tarball smoke evidence is still missing.");
-		expect(repairDispatch?.prompt).toContain("Do not call `complete` again until blockers are addressed");
+		expect(repairDispatch?.prompt).toContain("Do not retry `complete`");
 
 		await goalTool.execute("repair-target", {
 			op: "start_target",
