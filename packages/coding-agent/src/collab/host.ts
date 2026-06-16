@@ -20,7 +20,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
-import type { SessionEntry as StoredSessionEntry } from "../session/session-manager";
+import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task";
 import { generateRoomKey, generateWriteToken, importRoomKey } from "./crypto";
 import {
@@ -365,13 +365,8 @@ export class CollabHost {
 		const name = peer.name;
 		const content: string | (TextContent | ImageContent)[] =
 			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
-		const details: CollabPromptDetails & { __pendingDisplayTag?: string } = { from: name };
+		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {
-			// Mid-turn guest prompts are steered: register the pending-display twin
-			// so queuedMessageCount reflects the queued steer (host pending bar +
-			// guests' "queued ×N" badge). The tag dequeues the entry when the agent
-			// consumes the message (mirrors the skill-prompt path).
-			details.__pendingDisplayTag = this.#ctx.session.enqueueCustomMessageDisplay(text, "steer");
 			this.#ctx.updatePendingMessagesDisplay();
 			this.#ctx.ui.requestRender();
 			this.#scheduleStateBroadcast();
@@ -385,7 +380,7 @@ export class CollabHost {
 					details,
 					attribution: "user",
 				},
-				{ streamingBehavior: "steer" },
+				{ streamingBehavior: "steer", queueChipText: text },
 			)
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
@@ -401,7 +396,7 @@ export class CollabHost {
 		}
 		const name = peer.name;
 		void this.#ctx.session
-			.abort()
+			.abort({ reason: USER_INTERRUPT_LABEL })
 			.then(() => this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab"))
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
 	}
@@ -416,21 +411,23 @@ export class CollabHost {
 
 	#buildState(): CollabSessionState {
 		const session = this.#ctx.session;
-		// Context numbers come from the status line's breakdown — not
-		// session.getContextUsage() — so guests render exactly what the host's
-		// own footer shows.
+		// Context numbers come from the status line's memoized breakdown so guests
+		// render exactly the same anchored, provider-real count the host's own
+		// status line shows.
 		const breakdown = this.#ctx.statusLine.getCachedContextBreakdown();
+		const tokens = breakdown.usedTokens;
 		return {
 			isStreaming: session.isStreaming,
+			isAborting: session.isAborting,
 			queuedMessageCount: session.queuedMessageCount,
 			sessionName: session.sessionName,
 			cwd: this.#ctx.sessionManager.getCwd(),
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
 			contextUsage: {
-				tokens: breakdown.usedTokens,
+				tokens,
 				contextWindow: breakdown.contextWindow,
-				percent: breakdown.contextWindow > 0 ? (breakdown.usedTokens / breakdown.contextWindow) * 100 : null,
+				percent: tokens !== null && breakdown.contextWindow > 0 ? (tokens / breakdown.contextWindow) * 100 : null,
 			},
 			participants: this.participants,
 		};

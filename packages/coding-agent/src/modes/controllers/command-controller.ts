@@ -38,7 +38,7 @@ import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
-import type { NewSessionOptions } from "../../session/session-manager";
+import type { NewSessionOptions } from "../../session/session-entries";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { outputMeta } from "../../tools/output-meta";
@@ -84,9 +84,9 @@ export class CommandController {
 		}
 	}
 
-	handleDumpCommand() {
+	handleDumpCommand(isRaw = false) {
 		try {
-			const formatted = this.ctx.session.formatSessionAsText();
+			const formatted = this.ctx.session.formatSessionAsText({ compact: !isRaw });
 			if (!formatted) {
 				this.ctx.showError("No messages to dump yet.");
 				return;
@@ -95,6 +95,26 @@ export class CommandController {
 			this.ctx.showStatus("Session copied to clipboard");
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		}
+	}
+
+	handleAdvisorDumpCommand(isRaw = false) {
+		try {
+			const advisorHistory = this.ctx.session.formatAdvisorHistoryAsText({ compact: !isRaw });
+			if (advisorHistory === null) {
+				this.ctx.showError("Advisor is not active for this session.");
+				return;
+			}
+			if (!advisorHistory) {
+				this.ctx.showError("Advisor has no history yet.");
+				return;
+			}
+			copyToClipboard(advisorHistory);
+			this.ctx.showStatus("Advisor history copied to clipboard");
+		} catch (error: unknown) {
+			this.ctx.showError(
+				`Failed to copy advisor history: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
 		}
 	}
 
@@ -302,6 +322,53 @@ export class CommandController {
 			}
 		}
 
+		this.ctx.present([new Spacer(1), new Text(info, 1, 0)]);
+	}
+
+	async handleAdvisorStatusCommand(): Promise<void> {
+		const stats = this.ctx.session.getAdvisorStats();
+		if (!stats.active) {
+			this.ctx.present([
+				new Spacer(1),
+				new Text(
+					stats.configured
+						? "Advisor setting is enabled, but no model is assigned to the 'advisor' role."
+						: "Advisor is disabled.",
+					1,
+					0,
+				),
+			]);
+			return;
+		}
+		const model = stats.model!;
+		let info = `${theme.bold("Advisor Status")}\n\n`;
+		info += `${theme.bold("Provider")}\n`;
+		info += `${theme.fg("dim", "Model:")} ${model.provider}/${model.id}\n`;
+		info += `\n${theme.bold("Messages")}\n`;
+		info += `${theme.fg("dim", "User:")} ${stats.messages.user.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Assistant:")} ${stats.messages.assistant.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Total:")} ${stats.messages.total.toLocaleString()}\n`;
+		info += `\n${theme.bold("Context")}\n`;
+		if (stats.contextWindow > 0) {
+			const percent = Math.round((stats.contextTokens / stats.contextWindow) * 100);
+			info += `${theme.fg("dim", "Tokens:")} ${stats.contextTokens.toLocaleString()} / ${stats.contextWindow.toLocaleString()} (${percent}%)\n`;
+		} else {
+			info += `${theme.fg("dim", "Tokens:")} ${stats.contextTokens.toLocaleString()}\n`;
+		}
+		info += `\n${theme.bold("Spend")}\n`;
+		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
+		if (stats.tokens.cacheRead > 0) {
+			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
+		}
+		if (stats.tokens.cacheWrite > 0) {
+			info += `${theme.fg("dim", "Cache Write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
+		}
+		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
+		if (stats.cost > 0) {
+			info += `\n${theme.bold("Cost")}\n`;
+			info += `${theme.fg("dim", "Total:")} $${stats.cost.toFixed(4)}\n`;
+		}
 		this.ctx.present([new Spacer(1), new Text(info, 1, 0)]);
 	}
 
@@ -965,7 +1032,10 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 	}
 
-	async handleCompactCommand(customInstructions?: string): Promise<CompactionOutcome> {
+	async handleCompactCommand(
+		customInstructions?: string,
+		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
+	): Promise<CompactionOutcome> {
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
 
@@ -974,7 +1044,7 @@ export class CommandController {
 			return "ok";
 		}
 
-		return this.executeCompaction(customInstructions, false);
+		return this.executeCompaction(customInstructions, false, beforeFlush);
 	}
 
 	/**
@@ -1019,6 +1089,7 @@ export class CommandController {
 	async executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto = false,
+		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 	): Promise<CompactionOutcome> {
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
@@ -1026,12 +1097,6 @@ export class CommandController {
 		}
 		this.ctx.statusContainer.clear();
 
-		const originalOnEscape = this.ctx.editor.onEscape;
-		this.ctx.editor.onEscape = () => {
-			this.ctx.session.abortCompaction();
-		};
-
-		this.ctx.chatContainer.addChild(new Spacer(1));
 		const label = isAuto ? "Auto-compacting context... (esc to cancel)" : "Compacting context... (esc to cancel)";
 		const compactingLoader = new Loader(
 			this.ctx.ui,
@@ -1052,6 +1117,8 @@ export class CommandController {
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
 
+			compactingLoader.stop();
+			this.ctx.statusContainer.clear();
 			this.ctx.rebuildChatFromMessages();
 
 			this.ctx.statusLine.invalidate();
@@ -1068,8 +1135,12 @@ export class CommandController {
 		} finally {
 			compactingLoader.stop();
 			this.ctx.statusContainer.clear();
-			this.ctx.editor.onEscape = originalOnEscape;
 		}
+		// Run the caller's pre-flush hook (e.g. the plan-approval model transition)
+		// before queued user input is dispatched, so any turn queued during
+		// compaction executes on the post-compaction model rather than the model
+		// compaction itself ran on.
+		if (beforeFlush) await beforeFlush(outcome);
 		await this.ctx.flushCompactionQueue({ willRetry: false });
 		return outcome;
 	}
@@ -1088,11 +1159,6 @@ export class CommandController {
 			this.ctx.loadingAnimation = undefined;
 		}
 		this.ctx.statusContainer.clear();
-
-		const originalOnEscape = this.ctx.editor.onEscape;
-		this.ctx.editor.onEscape = () => {
-			this.ctx.session.abortHandoff();
-		};
 
 		const handoffLoader = new Loader(
 			this.ctx.ui,
@@ -1138,7 +1204,6 @@ export class CommandController {
 		} finally {
 			handoffLoader.stop();
 			this.ctx.statusContainer.clear();
-			this.ctx.editor.onEscape = originalOnEscape;
 		}
 		this.ctx.ui.requestRender();
 	}

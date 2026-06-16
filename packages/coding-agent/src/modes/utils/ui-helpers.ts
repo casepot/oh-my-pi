@@ -1,14 +1,20 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
+import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
+import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { BranchSummaryMessageComponent } from "../../modes/components/branch-summary-message";
 import { CollabPromptMessageComponent } from "../../modes/components/collab-prompt-message";
-import { CompactionSummaryMessageComponent } from "../../modes/components/compaction-summary-message";
+import {
+	CompactionSummaryMessageComponent,
+	createHandoffSummaryMessageComponent,
+} from "../../modes/components/compaction-summary-message";
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
@@ -28,11 +34,13 @@ import {
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
+import { createUsageRowBlock } from "../../modes/components/usage-row";
 import { UserMessageComponent } from "../../modes/components/user-message";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
 import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext } from "../../modes/types";
 import {
+	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
 	GOAL_CHECKPOINT_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
@@ -48,10 +56,11 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
-import type { SessionContext } from "../../session/session-manager";
+import type { SessionContext } from "../../session/session-context";
 import { createIrcMessageCard } from "../../tools/irc";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
 import type { StartupUpdateNotification } from "../../update/source-status";
+import { canonicalizeMessage } from "../../utils/thinking-display";
 
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
@@ -280,6 +289,25 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(card);
 						return [card];
 					}
+					if (message.customType === "advisor") {
+						const details = (message as CustomMessage<AdvisorMessageDetails>).details;
+						this.ctx.chatContainer.addChild(
+							createAdvisorMessageCard(details, () => this.ctx.toolOutputExpanded, theme),
+						);
+						break;
+					}
+					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
+						break;
+					}
+					const handoffComponent = createHandoffSummaryMessageComponent(
+						message as CustomMessage<unknown>,
+						this.ctx.toolOutputExpanded,
+					);
+					if (handoffComponent) {
+						this.ctx.chatContainer.addChild(handoffComponent);
+						break;
+					}
 					const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
 					// Both HookMessage and CustomMessage have the same structure, cast for compatibility
 					const component = new CustomMessageComponent(message as CustomMessage<unknown>, renderer);
@@ -386,6 +414,22 @@ export class UiHelpers {
 		let readGroup: ReadToolGroupComponent | null = null;
 		const readToolCallArgs = new Map<string, Record<string, unknown>>();
 		const readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
+		// The per-turn token-usage row (display.showTokenUsage) must land below the
+		// turn's tool blocks. Read tool blocks are only created when their toolResult
+		// message is processed (below), so appending the row in the assistant branch
+		// would place it above a read run. Defer instead: stash the usage on the
+		// assistant message, then flush it once the turn's tools are placed — right
+		// before the next non-toolResult message and at end of rebuild — sealing the
+		// read run so the row sits under it. Mirrors the live path, where the read
+		// group is created during streaming and the row is appended below it.
+		let pendingUsage: Usage | undefined;
+		const flushPendingUsage = () => {
+			if (!pendingUsage) return;
+			readGroup?.seal();
+			readGroup = null;
+			this.ctx.chatContainer.addChild(createUsageRowBlock(pendingUsage));
+			pendingUsage = undefined;
+		};
 		// Rebuild-time mirror of the event controller's displaceable-poll
 		// bookkeeping: a `job` poll that found every watched job still running is
 		// superseded by the next `job` call, so a rebuilt transcript collapses a
@@ -403,18 +447,16 @@ export class UiHelpers {
 			previous.seal();
 		};
 		for (const message of sessionContext.messages) {
+			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.ctx.addMessageToChat(message);
 				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
 				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
-				if (assistantComponent) {
-					assistantComponent.setUsageInfo(message.usage);
-				}
 				const hasVisibleAssistantContent = message.content.some(
 					content =>
-						(content.type === "text" && content.text.trim().length > 0) ||
-						(content.type === "thinking" && content.thinking.trim().length > 0),
+						(content.type === "text" && canonicalizeMessage(content.text)) ||
+						(content.type === "thinking" && canonicalizeMessage(content.thinking)),
 				);
 				if (hasVisibleAssistantContent) {
 					// Rebuild reconstructs immutable history; seal (not finalize) so the
@@ -507,6 +549,7 @@ export class UiHelpers {
 						this.ctx.pendingTools.set(content.id, component);
 					}
 				}
+				pendingUsage = this.ctx.settings.get("display.showTokenUsage") ? message.usage : undefined;
 			} else if (message.role === "toolResult") {
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
 				const isReadGroupResult =
@@ -569,6 +612,7 @@ export class UiHelpers {
 				this.ctx.addMessageToChat(message, options);
 			}
 		}
+		flushPendingUsage();
 
 		// The trailing read run has no following break to close it; seal so the
 		// rebuilt group freezes (even with a never-persisted result) and commits to

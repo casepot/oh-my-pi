@@ -6,10 +6,11 @@
  * the runtime server/client implementation into their program.
  */
 import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
 import type { BackgroundLane, BackgroundLaneCloseOutcome, BackgroundLaneListItem } from "../../background-lanes/state";
+import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-manager";
+import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type {
 	AgentProgress,
@@ -359,9 +360,11 @@ export interface RpcSessionState {
 	messageCount: number;
 	queuedMessageCount: number;
 	todoPhases: TodoPhase[];
-	systemPrompt?: string | string[];
-	dumpTools?: Array<{ name: string; description: string; parameters: unknown }>;
-	contextUsage?: unknown;
+	/** For session dump / export (plain-text parity with /dump). */
+	systemPrompt?: string[];
+	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
+	/** Current context window usage. Null tokens/percent when unknown (e.g. right after compaction). */
+	contextUsage?: ContextUsage;
 	hostTools: RpcHostToolDefinition[];
 	hostUriSchemes: RpcHostUriSchemeDefinition[];
 	backgroundLanes: BackgroundLaneListItem[];
@@ -379,6 +382,12 @@ export interface RpcAvailableSlashCommand {
 export interface RpcAvailableCommandsUpdateFrame {
 	type: "available_commands_update";
 	commands: RpcAvailableSlashCommand[];
+}
+
+export interface RpcPromptResultFrame {
+	type: "prompt_result";
+	id?: string;
+	agentInvoked: boolean;
 }
 
 export interface RpcHandoffResult {

@@ -64,6 +64,7 @@ import type {
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
 import { loadSlashCommands } from "../extensibility/slash-commands";
+import { type GuidedGoalMessage, runGuidedGoalTurn } from "../goals/guided-setup";
 import {
 	type Goal,
 	type GoalCompletionVerifierStructuredOutput,
@@ -73,6 +74,7 @@ import {
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
+import { formatMCPConnectingMessage, isMcpConnectingEvent, MCP_CONNECTING_EVENT_CHANNEL } from "../mcp/startup-events";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -98,8 +100,9 @@ import {
 	type GoalRubricMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 } from "../session/messages";
-import type { SessionContext, SessionManager } from "../session/session-manager";
-import { getRecentSessions } from "../session/session-manager";
+import type { SessionContext } from "../session/session-context";
+import { getRecentSessions } from "../session/session-listing";
+import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, BUILTIN_SLASH_COMMANDS } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
@@ -107,17 +110,25 @@ import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { formatTaskId } from "../task/render";
 import type { LspStartupServerInfo } from "../tools";
+import { isImageProviderPreference, setPreferredImageProvider } from "../tools/image-gen";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve";
 import { formatPhaseDisplayName, selectStickyTodoWindow, todoMatchesAnyDescription } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
+import { vocalizer } from "../tts/vocalizer";
 import type { StartupUpdateNotification } from "../update/source-status";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
+import {
+	isSearchProviderId,
+	isSearchProviderPreference,
+	setExcludedSearchProviders,
+	setPreferredSearchProvider,
+} from "../web/search";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
@@ -229,6 +240,25 @@ const EDITOR_MAX_HEIGHT_MIN = 6;
 const EDITOR_MAX_HEIGHT_MAX = 18;
 const EDITOR_RESERVED_ROWS = 12;
 const EDITOR_FALLBACK_ROWS = 24;
+const EDITOR_MIN_CHROME_ROWS = 4; // rows reserved for transcript + status on small terms
+const EDITOR_MIN_RENDERED_ROWS = 3; // bordered editor floor: top+bottom border + 1 content row
+
+/**
+ * Editor max-height cap for a terminal of `terminalRows` rows.
+ *
+ * Roomy terminals get the comfortable [6, 18] band. Small terminals shrink the
+ * cap so the editor leaves at least EDITOR_MIN_CHROME_ROWS rows for the
+ * transcript + status line. The editor is bordered, so it never renders fewer
+ * than EDITOR_MIN_RENDERED_ROWS rows; once the terminal is too small for both
+ * (terminalRows < EDITOR_MIN_RENDERED_ROWS + EDITOR_MIN_CHROME_ROWS) the cap is
+ * pinned to that floor — returning a smaller number would not shrink the editor
+ * any further, it would only misreport the rows it actually occupies.
+ */
+export function computeEditorMaxHeight(terminalRows: number): number {
+	const rows = Number.isFinite(terminalRows) && terminalRows > 0 ? terminalRows : EDITOR_FALLBACK_ROWS;
+	const comfortable = Math.max(EDITOR_MAX_HEIGHT_MIN, Math.min(EDITOR_MAX_HEIGHT_MAX, rows - EDITOR_RESERVED_ROWS));
+	return Math.max(EDITOR_MIN_RENDERED_ROWS, Math.min(comfortable, rows - EDITOR_MIN_CHROME_ROWS));
+}
 
 const HUD_NOTE_SUP_DIGITS: Record<string, string> = {
 	"0": "\u2070",
@@ -354,6 +384,10 @@ class StatusContainer extends Container implements NativeScrollbackLiveRegion {
 	}
 }
 
+/** How long the ctrl+p model-role cycle chip track lingers above the editor
+ *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
+const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
+
 /**
  * Build the anchored subagent HUD block: a bold accent "Subagents" header plus
  * one hooked row per running agent in the same `Id: description` shape the
@@ -412,6 +446,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	btwContainer: Container;
 	omfgContainer: Container;
 	errorBannerContainer: Container;
+	modelCycleContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
@@ -432,6 +467,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopLimit: LoopLimitRuntime | undefined = undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
+	#modelCycleClearTimer: NodeJS.Timeout | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
 	pendingImages: ImageContent[] = [];
@@ -455,8 +491,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	get #defaultWorkingMessage(): string {
 		return `Working…${interruptHint()}`;
 	}
-	autoCompactionEscapeHandler?: () => void;
-	retryEscapeHandler?: () => void;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
 	optimisticUserMessageSignature: string | undefined = undefined;
@@ -468,6 +502,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
+	/** True once `shutdown()` has begun teardown. Surfaced to the input
+	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
+	 *  abort the remaining work instead of stacking another no-op call. */
+	get isShuttingDown(): boolean {
+		return this.#isShuttingDown;
+	}
 	hookSelector: HookSelectorComponent | undefined = undefined;
 	hookInput: HookInputComponent | undefined = undefined;
 	hookEditor: HookEditorComponent | undefined = undefined;
@@ -539,6 +579,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.statusContainer.clear();
 		this.pendingMessagesContainer.clear();
+		this.#cancelModelCycleClearTimer();
+		this.modelCycleContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -582,7 +624,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
+					if (this.settings.get("startup.quiet")) return;
 					this.#handleLspStartupEvent(data as LspStartupEvent);
+				}),
+			);
+			this.#eventBusUnsubscribers.push(
+				eventBus.on(MCP_CONNECTING_EVENT_CHANNEL, data => {
+					if (!isMcpConnectingEvent(data)) {
+						logger.warn("Ignoring malformed mcp:connecting event", { data });
+						return;
+					}
+					if (this.settings.get("startup.quiet")) return;
+					this.showStatus(formatMCPConnectingMessage(data.serverNames));
 				}),
 			);
 		}
@@ -601,6 +654,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.btwContainer = new Container();
 		this.omfgContainer = new Container();
 		this.errorBannerContainer = new Container();
+		this.modelCycleContainer = new Container();
 		this.editor = new CustomEditor(getEditorTheme());
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
@@ -610,6 +664,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 		this.#syncEditorMaxHeight();
 		this.#resizeHandler = () => {
 			this.#syncEditorMaxHeight();
@@ -769,6 +824,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.btwContainer);
 		this.ui.addChild(this.omfgContainer);
 		this.ui.addChild(this.errorBannerContainer);
+		this.ui.addChild(this.modelCycleContainer);
 		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
@@ -815,6 +871,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession());
 		await this.#reconcileModeFromSession();
+
+		// Brand-new sessions optionally start in plan mode when the user has made it
+		// the startup default. "Brand-new" means the resolved branch carries no
+		// conversation context (buildSessionContext().messages — covers messages,
+		// custom messages, branch summaries, and compaction summaries) and the user
+		// set no explicit `mode_change` (which #reconcileModeFromSession just
+		// restored). SDK startup metadata and extension `custom` state entries are
+		// ignored. This way `omp --continue` (or auto-resume) that finds no recent
+		// session and creates a fresh one still honors the default, while a session
+		// with restored context or an explicit mode keeps its reconciled mode. Scoped
+		// to launch (not the switch reconciler above) so /new and the plan-approval →
+		// execution handoff clear never get dragged back into plan mode. #enterPlanMode
+		// is idempotent and self-guards against an already-active plan/goal mode; it
+		// does not check plan.enabled itself.
+		const hasConversationContext = this.sessionManager.buildSessionContext().messages.length > 0;
+		const hasExplicitMode = this.sessionManager.getEntries().some(entry => entry.type === "mode_change");
+		const isFreshSession = !hasConversationContext && !hasExplicitMode;
+		if (
+			isFreshSession &&
+			this.session.settings.get("plan.defaultOnStartup") &&
+			this.session.settings.get("plan.enabled")
+		) {
+			await this.#enterPlanMode();
+		}
 
 		// Restore unsent editor draft from previous session shutdown (Ctrl+D).
 		// One-shot: consumeDraft removes the sidecar after read so the next
@@ -887,8 +967,30 @@ export class InteractiveMode implements InteractiveModeContext {
 			name: cmd.name,
 			description: cmd.description,
 		}));
+		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
+		// `expandSlashCommand` before `expandPromptTemplate`, and builtin command
+		// execution resolves aliases before template expansion. Mirror that command
+		// resolution order by skipping templates whose names already appear in any
+		// builtin/hook/custom/skill/file command token.
+		const reservedNames = new Set<string>();
+		for (const command of this.#pendingSlashCommands) {
+			reservedNames.add(command.name);
+			for (const alias of command.aliases ?? []) reservedNames.add(alias);
+		}
+		for (const command of fileSlashCommands) {
+			reservedNames.add(command.name);
+			for (const alias of command.aliases ?? []) reservedNames.add(alias);
+		}
+		const promptTemplateCommands: SlashCommand[] = this.session.promptTemplates
+			.filter(template => !reservedNames.has(template.name))
+			.map(template => ({
+				name: template.name,
+				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
+				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
+				description: template.description,
+			}));
 		const autocompleteProvider = this.#inputController.createAutocompleteProvider(
-			[...this.#pendingSlashCommands, ...fileSlashCommands],
+			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
 			basePath,
 		);
 		this.editor.setAutocompleteProvider(autocompleteProvider);
@@ -908,6 +1010,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		// up the destination project's configuration.
 		if (isSettingsInitialized()) {
 			await settings.reloadForCwd(newCwd);
+			// Reapply provider preferences from the newly-loaded settings so the
+			// module-level search/image provider state reflects the destination
+			// project's configuration. Without this, the previous project's
+			// exclusions leak and newly-excluded providers are still used.
+			const excludedWebSearchProviders = settings.get("providers.webSearchExclude");
+			if (Array.isArray(excludedWebSearchProviders)) {
+				setExcludedSearchProviders(excludedWebSearchProviders.filter(isSearchProviderId));
+			}
+			const webSearchProvider = settings.get("providers.webSearch");
+			if (typeof webSearchProvider === "string" && isSearchProviderPreference(webSearchProvider)) {
+				setPreferredSearchProvider(webSearchProvider);
+			}
+			const imageProvider = settings.get("providers.image");
+			if (isImageProviderPreference(imageProvider)) {
+				setPreferredImageProvider(imageProvider);
+			}
 		}
 		// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
 		// the next prompt sees everything scoped to the new project directory.
@@ -1043,7 +1161,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#isLoopAutoSubmitBlocked(): boolean {
+	#isAutoSubmitBlocked(): boolean {
 		return this.session.isStreaming || this.session.isCompacting || this.session.hasPostPromptWork;
 	}
 
@@ -1053,7 +1171,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.disableLoopMode("Loop time limit reached. Loop mode disabled.");
 			return;
 		}
-		if (this.#isLoopAutoSubmitBlocked()) {
+		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => this.#submitLoopPromptWhenReady(prompt));
 			return;
 		}
@@ -1062,7 +1180,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #runLoopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
 		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
-		if (this.#isLoopAutoSubmitBlocked()) {
+		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => {
 				void this.#runLoopIteration(action, prompt);
 			});
@@ -1159,6 +1277,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		imageLinks?: (string | undefined)[];
 		customType?: string;
 		display?: boolean;
+		streamingBehavior?: "steer" | "followUp";
 	}): SubmittedUserInput {
 		const submission: SubmittedUserInput = {
 			text: input.text,
@@ -1166,6 +1285,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			imageLinks: input.imageLinks,
 			customType: input.customType,
 			display: input.display,
+			streamingBehavior: input.streamingBehavior,
 			cancelled: false,
 			started: false,
 		};
@@ -1257,10 +1377,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#computeEditorMaxHeight(): number {
-		const rows = this.ui.terminal.rows;
-		const terminalRows = Number.isFinite(rows) && rows > 0 ? rows : EDITOR_FALLBACK_ROWS;
-		const maxHeight = terminalRows - EDITOR_RESERVED_ROWS;
-		return Math.max(EDITOR_MAX_HEIGHT_MIN, Math.min(EDITOR_MAX_HEIGHT_MAX, maxHeight));
+		return computeEditorMaxHeight(this.ui.terminal.rows);
 	}
 
 	#syncEditorMaxHeight(): void {
@@ -1458,6 +1575,41 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		}, delaySeconds * 1000);
 		this.#todoAutoClearTimer.unref?.();
+	}
+
+	/**
+	 * Render the ctrl+p model-role cycle chip track into its own anchored
+	 * container (just above the editor), mirroring the todo HUD: the container is
+	 * cleared and rebuilt in place on every cycle, so rapid presses or concurrent
+	 * chat activity can never stack duplicate tracks into the scrollback.
+	 */
+	showModelCycleTrack(track: string): void {
+		this.#renderModelCycleTrack(track);
+		this.#syncModelCycleClearTimer();
+		this.ui.requestRender();
+	}
+
+	#renderModelCycleTrack(track: string | null): void {
+		this.modelCycleContainer.clear();
+		if (!track) return;
+		this.modelCycleContainer.addChild(new Spacer(1));
+		this.modelCycleContainer.addChild(new Text(track, 1, 0));
+	}
+
+	#cancelModelCycleClearTimer(): void {
+		if (!this.#modelCycleClearTimer) return;
+		clearTimeout(this.#modelCycleClearTimer);
+		this.#modelCycleClearTimer = undefined;
+	}
+
+	#syncModelCycleClearTimer(): void {
+		this.#cancelModelCycleClearTimer();
+		this.#modelCycleClearTimer = setTimeout(() => {
+			this.#modelCycleClearTimer = undefined;
+			this.#renderModelCycleTrack(null);
+			this.ui.requestRender();
+		}, MODEL_CYCLE_TRACK_CLEAR_MS);
+		this.#modelCycleClearTimer.unref?.();
 	}
 
 	#getActivePhase(phases: TodoPhase[]): TodoPhase | undefined {
@@ -1847,7 +1999,40 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	async #exitPlanMode(options?: { silent?: boolean; paused?: boolean }): Promise<void> {
+	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ThinkingLevel }): Promise<void> {
+		if (modelsAreEqual(this.session.model, prev.model)) {
+			// Same model — only thinking level may differ. Avoid setModelTemporary()
+			// which would reset provider-side sessions and break continuity.
+			this.session.setThinkingLevel(prev.thinkingLevel);
+		} else if (this.session.isStreaming) {
+			this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
+		} else {
+			await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+		}
+	}
+
+	/**
+	 * Idempotent post-compaction model transition for the plan-approval compact
+	 * path. The deferred pre-plan state is consumed on first application, so a
+	 * second call (the before-flush hook vs. the short-circuit fallback) is a
+	 * no-op. "failed" intentionally stays on the plan model — the context is
+	 * intact and we dispatch best-effort.
+	 */
+	async #applyDeferredPlanModelTransition(
+		outcome: CompactionOutcome | undefined,
+		executionModel: ResolvedRoleModel | undefined,
+	): Promise<void> {
+		const deferredPrev = this.#planModePreviousModelState;
+		if (deferredPrev === undefined || outcome === "failed") return;
+		this.#planModePreviousModelState = undefined;
+		if (executionModel) {
+			await this.#applyPlanExecutionModel(executionModel);
+		} else {
+			await this.#restorePlanPreviousModel(deferredPrev);
+		}
+	}
+
+	async #exitPlanMode(options?: { silent?: boolean; paused?: boolean; deferModelRestore?: boolean }): Promise<void> {
 		if (!this.planModeEnabled) {
 			return;
 		}
@@ -1857,23 +2042,18 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.session.setActiveToolsByName(previousTools);
 		}
 		if (this.#planModePreviousModelState) {
-			const prev = this.#planModePreviousModelState;
-			if (modelsAreEqual(this.session.model, prev.model)) {
-				// Same model — only thinking level may differ. Avoid setModelTemporary()
-				// which would reset provider-side sessions (openai-responses/Codex) and
-				// break conversation continuity.
-				this.session.setThinkingLevel(prev.thinkingLevel);
-			} else if (this.session.isStreaming) {
-				this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
-			} else {
-				await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+			if (!options?.deferModelRestore) {
+				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
 			// (because the session was streaming on entry), drop it now: we are
 			// leaving plan mode, so flushing it on the next agent_end would land the
 			// session on the plan-role model after the user has exited plan mode
-			// (issue #816). Only clear when the pending target matches the plan-role
-			// model — leave any unrelated user-queued switch intact.
+			// (issue #816). This runs even when deferModelRestore is set
+			// (compact-approval path): otherwise the stale plan switch survives and
+			// flushPendingModelSwitch() later clobbers the restored/execution model.
+			// Only clear when the pending target matches the plan-role model — leave
+			// any unrelated user-queued switch intact.
 			const pending = this.#pendingModelSwitch;
 			if (pending) {
 				const planResolution = this.session.resolveRoleModelWithThinking("plan");
@@ -1888,7 +2068,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
 		this.#planModePreviousTools = undefined;
-		this.#planModePreviousModelState = undefined;
+		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
 		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
@@ -2234,7 +2414,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		let compactOutcome: CompactionOutcome | undefined;
 		try {
-			await this.#exitPlanMode({ silent: true, paused: false });
+			await this.#exitPlanMode({
+				silent: true,
+				paused: false,
+				deferModelRestore: options.compactBeforeExecute === true,
+			});
 
 			if (!options.preserveContext) {
 				await this.handleClearCommand();
@@ -2263,7 +2447,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				// the try/finally is idempotent and kept for the !compactBeforeExecute
 				// branch.
 				this.session.setPlanReferencePath(options.planFilePath);
-				compactOutcome = await this.handleCompactCommand(compactionPrompt);
+				compactOutcome = await this.handleCompactCommand(compactionPrompt, outcome =>
+					this.#applyDeferredPlanModelTransition(outcome, options.executionModel),
+				);
 			}
 		} finally {
 			// Unconditional clear. Idempotent: a no-op when the flag was never set
@@ -2280,21 +2466,32 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.session.setPlanReferencePath(options.planFilePath);
 
+		// Resolve the deferred plan-approval model transition. On the compact path
+		// the before-flush hook passed to handleCompactCommand already ran this (so
+		// any input queued during compaction executed on the post-compaction
+		// model); the re-run here is idempotent and covers the short-circuit where
+		// compaction never executed. It runs for "cancelled" too — the operator
+		// aborted only the compaction, not the approval — so the next turn no longer
+		// lands on the plan model. "failed" stays on the plan model (context
+		// intact) and dispatches best-effort.
+		if (options.compactBeforeExecute) {
+			await this.#applyDeferredPlanModelTransition(compactOutcome, options.executionModel);
+		} else {
+			await this.#applyPlanExecutionModel(options.executionModel);
+		}
+
 		if (compactOutcome === "cancelled") {
 			// Explicit abort: honor it. `executeCompaction` already surfaced
-			// `showError("Compaction cancelled")` to the operator; we add the
-			// deferred-dispatch warning and exit. `markPlanReferenceSent` is
-			// intentionally skipped here: `#planReferenceSent` stays false, so
-			// `AgentSession.#buildPlanReferenceMessage` will inject the plan
-			// reference on the operator's next `prompt()` call. If we marked it
-			// sent here, the executor's first turn would have no plan context.
+			// `showError("Compaction cancelled")`; we add the deferred-dispatch
+			// warning and exit without dispatching the synthetic plan-approved
+			// prompt. `markPlanReferenceSent` stays unset so
+			// `AgentSession.#buildPlanReferenceMessage` injects the plan reference
+			// on the operator's next `prompt()` call.
 			this.showWarning(
 				"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.",
 			);
 			return;
 		}
-
-		await this.#applyPlanExecutionModel(options.executionModel);
 
 		// Approved plans land in a fresh (or compacted) session whose first user-visible
 		// turn is the synthetic plan-approved prompt — that path bypasses the
@@ -2318,6 +2515,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			planFilePath: options.planFilePath,
 			contextPreserved: options.preserveContext === true,
 		});
+		// The executor's first turn must start on an idle session. The agent may still
+		// be streaming the post-`resolve` continuation (Agent.#emit is fire-and-forget)
+		// or a turn kicked off by the compaction/clear above; prompt() would then throw
+		// AgentBusyError ("Failed to finalize approved plan"). Abort the now-irrelevant
+		// in-flight turn first — abort() bumps the prompt generation and cancels pending
+		// continuations, so nothing re-streams in the synchronous gap before prompt().
+		if (this.session.isStreaming) {
+			await this.session.abort();
+		}
 		await this.session.prompt(planModePrompt, { synthetic: true });
 	}
 
@@ -2336,6 +2542,19 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (!confirmed) return;
 			}
 			await this.#exitPlanMode({ paused: true });
+			return;
+		}
+		if (this.planModePaused && !initialPrompt) {
+			// No-arg third toggle: paused → off. Tools, model, and plan state were
+			// already restored by the prior #exitPlanMode({ paused: true }); only the
+			// paused flag, the reentry marker, and the session mode entry remain.
+			// Prompted /plan invocations fall through to #enterPlanMode below so the
+			// supplied prompt is still submitted as the first plan-mode turn.
+			this.planModePaused = false;
+			this.#planModeHasEntered = false;
+			this.#updatePlanModeStatus();
+			this.sessionManager.appendModeChange("none");
+			this.showStatus("Plan mode disabled.");
 			return;
 		}
 		if (!this.session.settings.get("plan.enabled")) {
@@ -2641,6 +2860,70 @@ export class InteractiveMode implements InteractiveModeContext {
 			)?.trim();
 			if (!objective) return;
 			await this.#startGoalFromObjective(objective);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+	async handleGuidedGoalCommand(rest?: string): Promise<void> {
+		try {
+			if (this.planModeEnabled || this.planModePaused) {
+				this.showWarning("Exit plan mode first.");
+				return;
+			}
+			if (!this.session.settings.get("goal.enabled")) {
+				this.showWarning("Goal mode is disabled. Enable it in settings (goal.enabled).");
+				return;
+			}
+			if (this.goalModeEnabled) {
+				this.showStatus("Goal mode is already active. Use /goal to manage it, or /goal drop to start over.");
+				return;
+			}
+			if (this.#getPausedGoalState()) {
+				this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
+				return;
+			}
+
+			const initial = rest?.trim()
+				? rest.trim()
+				: (await this.showHookEditor("Guided goal", undefined, undefined, { promptStyle: true }))?.trim();
+			if (!initial) return;
+
+			const messages: GuidedGoalMessage[] = [{ role: "user", content: initial }];
+			let latestDraftObjective: string | undefined;
+			for (let turn = 0; turn < 6; turn++) {
+				const result = await runGuidedGoalTurn(this.session, { messages });
+				if (result.objective?.trim()) latestDraftObjective = result.objective.trim();
+				if (result.kind === "question") {
+					messages.push({ role: "assistant", content: result.question });
+					const answer = (
+						await this.showHookEditor(result.question, undefined, undefined, { promptStyle: true })
+					)?.trim();
+					if (!answer) return;
+					messages.push({ role: "user", content: answer });
+					continue;
+				}
+
+				const finalObjective = (
+					await this.showHookEditor("Review guided goal", result.objective, undefined, { promptStyle: true })
+				)?.trim();
+				if (!finalObjective) return;
+				await this.#startGoalFromObjective(finalObjective);
+				return;
+			}
+
+			// Hit the turn cap without an explicit `ready`. Rather than discard the whole interview,
+			// salvage the latest non-empty model objective draft seen on any earlier turn. A final
+			// question turn may omit `objective`; that must not erase a usable draft.
+			if (latestDraftObjective) {
+				const finalObjective = (
+					await this.showHookEditor("Review guided goal", latestDraftObjective, undefined, { promptStyle: true })
+				)?.trim();
+				if (finalObjective) {
+					await this.#startGoalFromObjective(finalObjective);
+					return;
+				}
+			}
+			this.showWarning("Guided goal setup needs more detail. Run /guided-goal again with a narrower objective.");
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -3012,7 +3295,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #startGoalFromObjective(objective: string): Promise<void> {
 		await this.#enterGoalMode({ objective, silent: true });
 		this.#resetGoalContinuationSuppression();
-		if (this.onInputCallback) {
+		if (!this.session.isStreaming && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: objective }));
 		}
 	}
@@ -3030,7 +3313,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.isStreaming) {
 			await this.session.sendGoalModeContext({ deliverAs: "steer" });
 		}
-		if (this.onInputCallback) {
+		if (!this.session.isStreaming && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: objective }));
 		}
 	}
@@ -3165,11 +3448,13 @@ export class InteractiveMode implements InteractiveModeContext {
 					return;
 				}
 				// Capture the operator's tier choice and hand it to #approvePlan, which
-				// applies it AFTER #exitPlanMode. #exitPlanMode restores
+				// applies it AFTER #exitPlanMode. #exitPlanMode normally restores
 				// #planModePreviousModelState (the model from before plan mode), so
 				// applying the slider choice any earlier would be silently reverted —
 				// the bug that made "continue with slow" keep executing on the default
-				// model. Deferred application also survives newSession()/compaction.
+				// model. For compact-context approval, the plan model is kept through
+				// compaction, then a successful compaction transitions to the slider model
+				// (or restores the pre-plan model when no slider choice was made).
 				// `cycle.currentIndex` is exactly that restored model, so any chosen tier
 				// differing from it needs an explicit executionModel — this also covers
 				// leaving the slider on its `default` anchor while planning ran elsewhere.
@@ -3371,6 +3656,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);
@@ -3671,8 +3957,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleExportCommand(text);
 	}
 
-	handleDumpCommand() {
-		return this.#commandController.handleDumpCommand();
+	handleDumpCommand(isRaw?: boolean) {
+		return this.#commandController.handleDumpCommand(isRaw);
+	}
+
+	handleAdvisorDumpCommand(isRaw?: boolean) {
+		return this.#commandController.handleAdvisorDumpCommand(isRaw);
 	}
 
 	handleDebugTranscriptCommand(): Promise<void> {
@@ -3689,6 +3979,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleSessionCommand(): Promise<void> {
 		return this.#commandController.handleSessionCommand();
+	}
+
+	handleAdvisorStatusCommand(): Promise<void> {
+		return this.#commandController.handleAdvisorStatusCommand();
 	}
 
 	handleJobsCommand(): Promise<void> {
@@ -3766,7 +4060,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#sttController.toggle(this.editor, {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
+			requestRender: () => this.ui.requestRender(),
 			onStateChange: (state: SttState) => {
+				// Duck assistant speech while the user is talking (push-to-talk); restore after.
+				if (state === "recording") vocalizer.duck();
+				else vocalizer.unduck();
 				if (state === "recording") {
 					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
 					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
@@ -3837,8 +4135,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#selectorController.showDebugSelector();
 	}
 
-	showAgentHub(): void {
-		this.#selectorController.showAgentHub(this.#observerRegistry);
+	showAgentHub(options?: { requireContent?: boolean }): void {
+		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 
 	resetObserverRegistry(): void {
@@ -3864,8 +4162,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		await controller.handle(text);
 	}
 
-	handleCompactCommand(customInstructions?: string): Promise<CompactionOutcome> {
-		return this.#commandController.handleCompactCommand(customInstructions);
+	handleCompactCommand(
+		customInstructions?: string,
+		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
+	): Promise<CompactionOutcome> {
+		return this.#commandController.handleCompactCommand(customInstructions, beforeFlush);
 	}
 
 	handleHandoffCommand(customInstructions?: string): Promise<void> {

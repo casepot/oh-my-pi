@@ -16,8 +16,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { Container, Editor, matchesKey, ScrollView, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { formatAge, formatBytes, formatDuration, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
+import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import type { KeyId } from "../../config/keybindings";
 import { settings } from "../../config/settings";
@@ -27,6 +29,7 @@ import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
 import {
+	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
 	isSilentAbort,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
@@ -35,18 +38,21 @@ import {
 	type SkillPromptDetails,
 	USER_INTERRUPT_LABEL,
 } from "../../session/messages";
-import type { SessionMessageEntry } from "../../session/session-manager";
-import { parseSessionEntries } from "../../session/session-manager";
+import type { SessionMessageEntry } from "../../session/session-entries";
+import { parseSessionEntries } from "../../session/session-loader";
 import { createIrcMessageCard } from "../../tools/irc";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { canonicalizeMessage } from "../../utils/thinking-display";
 import type { ObservableSession, SessionObserverRegistry } from "../session-observer-registry";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
+import { createAdvisorMessageCard } from "./advisor-message";
 import { AssistantMessageComponent } from "./assistant-message";
+import { createBackgroundTanDispatchBlock } from "./background-tan-message";
 import { BashExecutionComponent } from "./bash-execution";
 import { BranchSummaryMessageComponent } from "./branch-summary-message";
 import { CollabPromptMessageComponent } from "./collab-prompt-message";
-import { CompactionSummaryMessageComponent } from "./compaction-summary-message";
+import { CompactionSummaryMessageComponent, createHandoffSummaryMessageComponent } from "./compaction-summary-message";
 import { CustomMessageComponent } from "./custom-message";
 import { DynamicBorder } from "./dynamic-border";
 import { EvalExecutionComponent } from "./eval-execution";
@@ -56,6 +62,7 @@ import { SkillMessageComponent } from "./skill-message";
 import { formatContextUsage } from "./status-line/context-thresholds";
 import { ToolExecutionComponent } from "./tool-execution";
 import { TranscriptBlock, TranscriptContainer } from "./transcript-container";
+import { createUsageRowBlock } from "./usage-row";
 import { UserMessageComponent } from "./user-message";
 
 /** Lines per page for PageUp/PageDown */
@@ -188,6 +195,8 @@ export class AgentHubOverlayComponent extends Container {
 	#rows: AgentRef[] = [];
 	#selectedRow = 0;
 	#notice: string | undefined;
+	/** Captured row order from the first refresh; keeps the hub stable while open. */
+	#rowOrder: Map<string, number> | undefined;
 
 	// Chat state
 	#chatAgentId: string | undefined;
@@ -212,6 +221,7 @@ export class AgentHubOverlayComponent extends Container {
 	#chatPendingTools = new Map<string, ToolExecutionComponent | ReadToolGroupComponent>();
 	#chatReadArgs = new Map<string, Record<string, unknown>>();
 	#chatReadGroup: ReadToolGroupComponent | null = null;
+	#pendingUsage: Usage | undefined;
 	#chatWaitingPoll: ToolExecutionComponent | null = null;
 	#chatExpandables: Array<{ setExpanded(expanded: boolean): void }> = [];
 	#chatExpanded = false;
@@ -261,6 +271,15 @@ export class AgentHubOverlayComponent extends Container {
 
 		if (!this.#remote) registerPersistedSubagents(this.#registry, deps.sessionFile);
 		this.#refreshRows();
+	}
+
+	/**
+	 * Whether the table view has no agents to show (every registered agent except
+	 * Main, after the persisted-subagent scan in the constructor). The double-←
+	 * gesture reads this to stay inert when there is nothing to open.
+	 */
+	get isEmpty(): boolean {
+		return this.#rows.length === 0;
 	}
 
 	/** Tear down every subscription and timer. Called by the overlay owner on close. */
@@ -334,10 +353,32 @@ export class AgentHubOverlayComponent extends Container {
 
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
-		this.#rows = this.#registry
-			.list()
-			.filter(ref => ref.id !== MAIN_AGENT_ID)
-			.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.lastActivity - a.lastActivity);
+		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
+
+		if (!this.#rowOrder) {
+			// First refresh (usually the constructor): order by status, then recency.
+			this.#rows = refs.sort(
+				(a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.lastActivity - a.lastActivity,
+			);
+			this.#rowOrder = new Map(this.#rows.map((ref, i) => [ref.id, i]));
+		} else {
+			// After the hub is open, freeze the relative order so keyboard selection
+			// does not jump around as agents heartbeat or update activity. New agents
+			// are appended at the end and then stay put.
+			this.#rows = refs.sort((a, b) => {
+				const statusDiff = STATUS_ORDER[a.status] - STATUS_ORDER[b.status];
+				if (statusDiff !== 0) return statusDiff;
+				const aOrder = this.#rowOrder!.get(a.id) ?? Number.MAX_SAFE_INTEGER;
+				const bOrder = this.#rowOrder!.get(b.id) ?? Number.MAX_SAFE_INTEGER;
+				return aOrder - bOrder;
+			});
+			for (const ref of this.#rows) {
+				if (!this.#rowOrder.has(ref.id)) {
+					this.#rowOrder.set(ref.id, this.#rowOrder.size);
+				}
+			}
+		}
+
 		const keptIndex = selectedId ? this.#rows.findIndex(ref => ref.id === selectedId) : -1;
 		this.#selectedRow = keptIndex >= 0 ? keptIndex : Math.min(this.#selectedRow, Math.max(0, this.#rows.length - 1));
 	}
@@ -437,6 +478,7 @@ export class AgentHubOverlayComponent extends Container {
 	#renderRow(ref: AgentRef, selected: boolean, width: number): string {
 		const cursor = selected ? theme.fg("accent", theme.nav.cursor) : " ";
 		const parts: string[] = [statusBadge(ref.status), theme.bold(replaceTabs(ref.id))];
+		parts.push(theme.fg("dim", replaceTabs(ref.displayName)));
 		parts.push(theme.fg("dim", ref.parentId ? `${ref.kind} · of ${ref.parentId}` : ref.kind));
 		const observed = this.#observableFor(ref.id);
 		const task = observed?.description ?? observed?.progress?.task;
@@ -849,6 +891,7 @@ export class AgentHubOverlayComponent extends Container {
 		this.#chatPendingTools.clear();
 		this.#chatReadArgs.clear();
 		this.#chatReadGroup = null;
+		this.#pendingUsage = undefined;
 		this.#chatWaitingPoll = null;
 		this.#chatExpandables = [];
 		this.#chatLog.dispose();
@@ -868,6 +911,13 @@ export class AgentHubOverlayComponent extends Container {
 			this.#appendChatMessage(entries[i].message);
 		}
 		this.#chatBuiltCount = entries.length;
+		// Flush the trailing turn's usage row only once its tools are materialized.
+		// A read (or any tool) whose toolResult lands in a later debounced sync stays
+		// pending in #chatReadArgs / #chatPendingTools; flushing now would emit the
+		// row above it. The sync that drains the maps flushes it below the tools.
+		if (this.#chatReadArgs.size === 0 && this.#chatPendingTools.size === 0) {
+			this.#flushPendingUsage();
+		}
 	}
 
 	#trackExpandable(component: { setExpanded(expanded: boolean): void }): void {
@@ -897,7 +947,21 @@ export class AgentHubOverlayComponent extends Container {
 		return this.#chatReadGroup;
 	}
 
+	// The per-turn token-usage row must land below the turn's tool blocks, but
+	// normal `read` calls only materialize their group in #appendToolResult. Defer
+	// the row: stash it on the assistant message and flush once the turn's tools
+	// are placed — before the next non-toolResult message and at the end of each
+	// sync pass — sealing the read run so the row sits under it.
+	#flushPendingUsage(): void {
+		if (!this.#pendingUsage) return;
+		this.#chatReadGroup?.seal();
+		this.#chatReadGroup = null;
+		this.#chatLog.addChild(createUsageRowBlock(this.#pendingUsage));
+		this.#pendingUsage = undefined;
+	}
+
 	#appendChatMessage(message: AgentMessage): void {
+		if (message.role !== "toolResult") this.#flushPendingUsage();
 		switch (message.role) {
 			case "assistant":
 				this.#appendAssistantMessage(message);
@@ -986,13 +1050,12 @@ export class AgentHubOverlayComponent extends Container {
 		const assistantComponent = new AssistantMessageComponent(message, this.#hideThinkingBlock?.() ?? false, () =>
 			this.#requestRender(),
 		);
-		assistantComponent.setUsageInfo(message.usage);
 		this.#chatLog.addChild(assistantComponent);
 
 		const hasVisibleAssistantContent = message.content.some(
 			content =>
-				(content.type === "text" && content.text.trim().length > 0) ||
-				(content.type === "thinking" && content.thinking.trim().length > 0),
+				(content.type === "text" && canonicalizeMessage(content.text)) ||
+				(content.type === "thinking" && canonicalizeMessage(content.thinking)),
 		);
 		if (hasVisibleAssistantContent) {
 			// New visible turn content closes the current read run (mirrors rebuild).
@@ -1065,6 +1128,8 @@ export class AgentHubOverlayComponent extends Container {
 				this.#chatPendingTools.set(content.id, component);
 			}
 		}
+
+		this.#pendingUsage = settings.get("display.showTokenUsage") ? message.usage : undefined;
 	}
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {
@@ -1176,6 +1241,24 @@ export class AgentHubOverlayComponent extends Container {
 				theme,
 			);
 			this.#chatLog.addChild(card);
+			return;
+		}
+		if (message.customType === "advisor") {
+			const details = (message as CustomMessage<AdvisorMessageDetails>).details;
+			this.#chatLog.addChild(createAdvisorMessageCard(details, () => this.#chatExpanded, theme));
+			return;
+		}
+		if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
+			this.#chatLog.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
+			return;
+		}
+		const handoffComponent = createHandoffSummaryMessageComponent(
+			message as CustomMessage<unknown>,
+			this.#chatExpanded,
+		);
+		if (handoffComponent) {
+			this.#trackExpandable(handoffComponent);
+			this.#chatLog.addChild(handoffComponent);
 			return;
 		}
 		const component = new CustomMessageComponent(

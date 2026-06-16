@@ -1,18 +1,10 @@
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import { $env, $flag, extractHttpStatusFromError, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import OpenAI, { APIConnectionTimeoutError as OpenAIConnectionTimeoutError } from "openai";
-import type {
-	Tool as OpenAITool,
-	ResponseCreateParamsStreaming,
-	ResponseInput,
-	ResponseStreamEvent,
-} from "openai/resources/responses/responses";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
 	Context,
-	FetchImpl,
 	MessageAttribution,
 	Model,
 	ProviderSessionState,
@@ -39,11 +31,16 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
+import { postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry } from "../utils/retry";
-import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
-import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
-import { notifyRawSseEvent } from "../utils/sse-debug";
+import {
+	adaptSchemaForStrict,
+	findStrictToolSchemaViolation,
+	NO_STRICT,
+	sanitizeSchemaForOpenAIResponses,
+	toolWireSchema,
+} from "../utils/schema";
 import { mapToOpenAIResponsesToolChoice, type OpenAIResponsesToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
@@ -67,6 +64,12 @@ import {
 	repairOrphanResponsesToolCalls,
 	repairOrphanResponsesToolOutputs,
 } from "./openai-responses-shared";
+import type {
+	Tool as OpenAITool,
+	ResponseCreateParamsStreaming,
+	ResponseInput,
+	ResponseStreamEvent,
+} from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
 
 export function normalizeOpenAIResponsesPromptCacheKey(sessionId: string | undefined): string | undefined {
@@ -119,8 +122,8 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	 */
 	omitReasoningEffort?: boolean;
 	/**
-	 * Extra request headers merged onto the underlying client's
-	 * defaultHeaders. Used by adapter wrappers to inject provider-specific
+	 * Extra request headers merged onto the model/copilot defaults. Used by
+	 * adapter wrappers to inject provider-specific
 	 * routing or cache hints.
 	 */
 	headers?: Record<string, string>;
@@ -203,8 +206,8 @@ function isOpenAIResponsesStatefulEnabled(
 	if (options?.statefulResponses === true) return true;
 	// Default ON only against the official OpenAI API: chaining forces
 	// `store: true`, and third-party /v1/responses proxies routinely ignore or
-	// reject `previous_response_id`. An unset baseUrl means the SDK default
-	// (api.openai.com).
+	// reject `previous_response_id`. An unset baseUrl means the default
+	// endpoint (api.openai.com).
 	return $flag("PI_OPENAI_STATEFUL", !baseUrl || hostMatchesUrl(baseUrl, "openai"));
 }
 
@@ -340,18 +343,6 @@ type OpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	stream_options?: { include_obfuscation?: boolean };
 };
 
-async function* observeDecodedOpenAIResponsesEvents(
-	events: AsyncIterable<ResponseStreamEvent>,
-	observer: (event: RawSseEvent) => void,
-): AsyncGenerator<ResponseStreamEvent> {
-	for await (const event of events) {
-		const data = JSON.stringify(event);
-		// Reconstructed from decoded SDK event; not literal wire bytes.
-		notifyRawSseEvent(observer, { event: event.type, data, raw: [`event: ${event.type}`, `data: ${data}`] });
-		yield event;
-	}
-}
-
 /**
  * Generate function for OpenAI Responses API
  */
@@ -379,7 +370,26 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 		const firstEventTimeoutAbortError = new Error(OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE);
 		const { requestAbortController, requestSignal } = abortTracker;
 		const onSseEvent = options?.onSseEvent;
-		const rawSseObserver = onSseEvent ? (event: RawSseEvent) => onSseEvent(event, model) : undefined;
+		const rawSseObserver = onSseEvent
+			? (event: RawSseEvent) => {
+					if (!event.event && event.data && event.data !== "[DONE]") {
+						try {
+							const parsed = JSON.parse(event.data);
+							const resolvedEvent =
+								typeof parsed.type === "string"
+									? parsed.type
+									: typeof parsed.object === "string"
+										? parsed.object
+										: null;
+							if (resolvedEvent) {
+								event.event = resolvedEvent;
+								event.raw = [`event: ${resolvedEvent}`, ...event.raw];
+							}
+						} catch {}
+					}
+					onSseEvent(event, model);
+				}
+			: undefined;
 
 		try {
 			// Keep request routing on `sessionId` while allowing callers to pin a
@@ -387,18 +397,16 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 			// avoid perturbing provider conversation state without cold-starting the cache.
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const { client, copilotPremiumRequests, baseUrl } = createClient(
-				model,
-				context,
-				apiKey,
-				options?.headers,
-				options?.initiatorOverride,
-				routingSessionId,
-				options?.fetch,
-			);
+			const {
+				headers: requestHeaders,
+				copilotPremiumRequests,
+				baseUrl,
+			} = createRequestSetup(model, context, apiKey, options?.headers, options?.initiatorOverride, routingSessionId);
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
-			const { params, trailingScaffoldingItems } = buildParams(model, context, options, providerSessionState);
+			const builtParams = buildParams(model, context, options, providerSessionState);
+			const params = builtParams.params;
+			const { trailingScaffoldingItems } = builtParams;
 			if (isOpenAIResponsesStatefulEnabled(options, baseUrl) && routingSessionId && providerSessionState) {
 				chainState = getOpenAIResponsesChainState(providerSessionState, model, routingSessionId);
 				if (!chainState.disabled) {
@@ -406,7 +414,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 					params.store = true;
 				}
 			}
-			const chained: OpenAIResponsesChainedParams =
+			let chained: OpenAIResponsesChainedParams =
 				chainState && !chainState.disabled
 					? buildOpenAIResponsesChainedParams(params, trailingScaffoldingItems, chainState)
 					: { params };
@@ -416,19 +424,25 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				options?.streamFirstEventTimeoutMs ?? getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs);
 			const requestTimeoutMs =
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
-			options?.onPayload?.(params);
+			const requestUrl = `${(baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "")}/responses`;
+			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
+				const replacementPayload = await options?.onPayload?.(requestParams, model);
+				return replacementPayload !== undefined
+					? (replacementPayload as OpenAIResponsesSamplingParams)
+					: requestParams;
+			};
+			chained = { ...chained, params: await applyPayloadReplacement(chained.params) };
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
 				model: model.id,
 				method: "POST",
-				url: `${baseUrl ?? "https://api.openai.com/v1"}/responses`,
+				url: requestUrl,
 				body: chained.params,
 			};
 			const openResponsesStream = (requestParams: OpenAIResponsesSamplingParams) =>
 				callWithCopilotModelRetry(
 					async () => {
-						const requestOptions = createSdkStreamRequestOptions(requestSignal, requestTimeoutMs);
 						let requestTimeout: NodeJS.Timeout | undefined;
 						if (requestTimeoutMs !== undefined) {
 							requestTimeout = setTimeout(
@@ -437,22 +451,29 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 							);
 						}
 						try {
-							const { data, response, request_id } = await client.responses
-								.create(requestParams, requestOptions)
-								.withResponse();
+							const headers = { ...requestHeaders };
+							if (requestTimeoutMs !== undefined) {
+								headers["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
+							}
+							const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
+								url: requestUrl,
+								headers,
+								body: requestParams,
+								signal: requestSignal,
+								fetch: options?.fetch,
+								// With a first-event watchdog armed, transport retries must
+								// not silently extend the caller's deadline.
+								maxAttempts: requestTimeoutMs !== undefined ? 1 : undefined,
+								onSseEvent: rawSseObserver,
+							});
 							// Disarm the first-event watchdog as soon as headers arrive — a slow
 							// onResponse callback must not abort an already-connected stream.
 							if (requestTimeout !== undefined) {
 								clearTimeout(requestTimeout);
 								requestTimeout = undefined;
 							}
-							await notifyProviderResponse(options, response, model, request_id);
-							return data;
-						} catch (error) {
-							if (error instanceof OpenAIConnectionTimeoutError && !abortTracker.wasCallerAbort()) {
-								throw firstEventTimeoutAbortError;
-							}
-							throw error;
+							await notifyProviderResponse(options, response, model, requestId);
+							return events;
 						} finally {
 							if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 						}
@@ -485,8 +506,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 					registerOpenAIResponsesChainStaleFailure(chainState, error);
 				}
 				sentPreviousResponseId = undefined;
-				rawRequestDump.body = params;
-				openaiStream = await openResponsesStream(params);
+				const retryParams = await applyPayloadReplacement(params);
+				rawRequestDump.body = retryParams;
+				openaiStream = await openResponsesStream(retryParams);
 			}
 			if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;
 			stream.push({ type: "start", partial: output });
@@ -503,10 +525,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				abortSignal: options?.signal,
 				isProgressItem: isOpenAIResponsesProgressEvent,
 			});
-			const observedOpenaiStream = rawSseObserver
-				? observeDecodedOpenAIResponsesEvents(timedOpenaiStream, rawSseObserver)
-				: timedOpenaiStream;
-			await processResponsesStream(observedOpenaiStream, output, stream, model, {
+			await processResponsesStream(timedOpenaiStream, output, stream, model, {
 				onFirstToken: () => {
 					if (!firstTokenTime) firstTokenTime = Date.now();
 				},
@@ -581,16 +600,15 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 	return stream;
 };
 
-function createClient(
+function createRequestSetup(
 	model: Model<"openai-responses">,
 	context: Context,
 	apiKey?: string,
 	extraHeaders?: Record<string, string>,
 	initiatorOverride?: MessageAttribution,
 	sessionId?: string,
-	fetchOverride?: FetchImpl,
 ): {
-	client: OpenAI;
+	headers: Record<string, string>;
 	copilotPremiumRequests: number | undefined;
 	baseUrl: string | undefined;
 } {
@@ -626,19 +644,8 @@ function createClient(
 		headers.session_id ??= sessionId;
 		headers["x-client-request-id"] ??= sessionId;
 	}
-	const baseFetch = fetchOverride ?? fetch;
-	return {
-		client: new OpenAI({
-			apiKey,
-			baseURL: baseUrl,
-			dangerouslyAllowBrowser: true,
-			maxRetries: 5,
-			defaultHeaders: headers,
-			fetch: baseFetch,
-		}),
-		copilotPremiumRequests,
-		baseUrl,
-	};
+	headers.Authorization ??= `Bearer ${apiKey}`;
+	return { headers, copilotPremiumRequests, baseUrl };
 }
 
 function getOpenAIResponsesPromptCacheKey(
@@ -660,7 +667,8 @@ function getOpenAIResponsesRoutingSessionId(
 	return normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
 }
 
-function buildParams(
+/** @internal Exported for tests. */
+export function buildParams(
 	model: Model<"openai-responses">,
 	context: Context,
 	options: OpenAIResponsesOptions | undefined,
@@ -713,7 +721,21 @@ function buildParams(
 	if (context.tools) {
 		params.tools = convertTools(context.tools, model.compat.supportsStrictMode, model);
 		if (options?.toolChoice) {
-			params.tool_choice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, context.tools, model);
+			// Map tool_choice against the tools that survived quarantine, not the
+			// original list: a forced choice for a dropped tool — or "required" when
+			// every tool was dropped — would otherwise send a tool_choice with no
+			// matching tool, which the provider rejects just like the bad schema did (#2652).
+			const emittedNames = new Set(
+				params.tools.map(t => (t as { name?: string }).name).filter((n): n is string => n !== undefined),
+			);
+			const survivingTools =
+				params.tools.length === context.tools.length
+					? context.tools
+					: context.tools.filter(t => emittedNames.has(t.customWireName ?? t.name));
+			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, survivingTools, model);
+			if (toolChoice !== undefined && params.tools.length > 0) {
+				params.tool_choice = toolChoice;
+			}
 		}
 		// The apply_patch spec §1 marks only `apply_patch` itself as
 		// `supports_parallel_tool_calls = false`. OpenAI's Responses API
@@ -844,22 +866,36 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	model: Model<"openai-responses">,
 ): OpenAIResponsesToolChoice {
 	const mapped = mapToOpenAIResponsesToolChoice(choice);
-	if (!mapped || typeof mapped === "string" || mapped.type !== "function" || !supportsFreeformApplyPatch(model)) {
+	if (!mapped || typeof mapped === "string" || mapped.type !== "function") {
 		return mapped;
 	}
 
-	const customTool = tools.find(
-		tool => tool.customFormat && (tool.name === mapped.name || tool.customWireName === mapped.name),
-	);
+	const directTool = tools.find(tool => tool.name === mapped.name);
+	const customTool = supportsFreeformApplyPatch(model)
+		? tools.find(tool => tool.customFormat && (tool.name === mapped.name || tool.customWireName === mapped.name))
+		: undefined;
+	const offeredTool = customTool ?? directTool;
+	if (!offeredTool) {
+		return undefined;
+	}
 	return customTool ? { type: "custom", name: customTool.customWireName ?? customTool.name } : mapped;
 }
 
 /** @internal Exported for tests. */
-export function convertTools(tools: Tool[], strictMode: boolean, model: Model<"openai-responses">): OpenAITool[] {
+export function convertTools(
+	tools: Tool[],
+	strictMode: boolean,
+	model: Model<"openai-responses">,
+	onQuarantine: (toolName: string, schemaPath: string) => void = (toolName, schemaPath) =>
+		logger.warn(
+			`Tool "${toolName}" omitted from the openai-responses request: its parameter schema is invalid for this provider at ${schemaPath} (an enum/const value cannot match its declared type). Other tools are unaffected.`,
+		),
+): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
-	return tools.map(tool => {
+	const out: OpenAITool[] = [];
+	for (const tool of tools) {
 		if (allowFreeform && tool.customFormat) {
-			return {
+			out.push({
 				type: "custom",
 				// Tool advertises its wire-level name (e.g. `apply_patch`) — the
 				// agent-loop dispatcher will match incoming calls by either the
@@ -871,18 +907,29 @@ export function convertTools(tools: Tool[], strictMode: boolean, model: Model<"o
 					syntax: tool.customFormat.syntax,
 					definition: compactGrammarDefinition(tool.customFormat.syntax, tool.customFormat.definition),
 				},
-			} as unknown as OpenAITool;
+			} as unknown as OpenAITool);
+			continue;
 		}
 		const strict = !NO_STRICT && strictMode && tool.strict !== false;
 		const baseParameters = toolWireSchema(tool);
 		const responseParameters = sanitizeSchemaForOpenAIResponses(baseParameters);
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(responseParameters, strict);
-		return {
+		// Quarantine a tool whose emitted schema carries a provider-rejecting
+		// enum/const-vs-type contradiction: dropping just that tool keeps the rest
+		// of the request valid instead of letting one bad MCP schema 400 the whole
+		// turn (#2652). Other tools and built-ins are unaffected.
+		const violation = findStrictToolSchemaViolation(parameters);
+		if (violation) {
+			onQuarantine(tool.name, violation);
+			continue;
+		}
+		out.push({
 			type: "function",
 			name: tool.name,
 			description: tool.description || "",
 			parameters,
 			...(effectiveStrict && { strict: true }),
-		} as OpenAITool;
-	});
+		} as OpenAITool);
+	}
+	return out;
 }

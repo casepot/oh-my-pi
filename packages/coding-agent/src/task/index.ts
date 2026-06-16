@@ -33,6 +33,7 @@ import { formatBytes, formatDuration } from "../tools/render-utils";
 import {
 	type AgentDefinition,
 	type AgentProgress,
+	canSpawnAtDepth,
 	getTaskSchema,
 	type SingleResult,
 	type TaskItem,
@@ -310,7 +311,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	return [{ id: params.id, description: params.description, assignment: params.assignment }];
+	return [{ id: params.id, description: params.description, role: params.role, assignment: params.assignment }];
 }
 
 /**
@@ -324,6 +325,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): TaskParams {
 	const spawn: TaskParams = { agent: params.agent };
 	if (item.id !== undefined) spawn.id = item.id;
 	if (item.description !== undefined) spawn.description = item.description;
+	if (item.role !== undefined) spawn.role = item.role;
 	if (item.assignment !== undefined) spawn.assignment = item.assignment;
 	if (params.context !== undefined) spawn.context = params.context;
 	if (item.isolated !== undefined) {
@@ -332,6 +334,79 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): TaskParams {
 		spawn.isolated = params.isolated;
 	}
 	return spawn;
+}
+
+/** Generic worker agents whose output sharpens with a tailored `role` rather than the bare type. */
+const GENERIC_SPAWN_AGENTS: ReadonlySet<string> = new Set(["task", "quick_task"]);
+
+/**
+ * Advisory — never a rejection — nudging the spawner toward tailored
+ * specialists when it spawns generic role-less workers and still holds spawn
+ * capacity (DepthCapacity: it currently has the `task` tool). Fires when a
+ * generic `task`/`quick_task` spawn carries no `role`, or when one call clones
+ * the same agent ≥2× all without roles. Returns undefined when no nudge applies.
+ */
+export function buildSpecializationAdvisory(
+	agentName: string | undefined,
+	items: TaskItem[],
+	depthCapacity: boolean,
+): string | undefined {
+	if (!depthCapacity) return undefined;
+	const rolelessCount = items.filter(item => !item.role?.trim()).length;
+	if (rolelessCount === 0) return undefined;
+	const generic = agentName !== undefined && GENERIC_SPAWN_AGENTS.has(agentName);
+	const cloned = items.length >= 2 && rolelessCount === items.length;
+	if (!generic && !cloned) return undefined;
+	const label = agentName ?? "task";
+	return (
+		`Tip: spawned ${rolelessCount} \`${label}\` worker${rolelessCount === 1 ? "" : "s"} without a \`role\`. ` +
+		`Tailored specialists outperform generic workers — give each spawn a \`role\` naming its expertise ` +
+		`(e.g. "Auth-flow security reviewer"). Depth budget remains, so decompose into named specialists ` +
+		`rather than cloning one generic worker.`
+	);
+}
+
+/**
+ * Suggestion — never a rejection — nudging the spawner to coordinate via `irc`
+ * when one call creates ≥2 live siblings and it still holds spawn capacity.
+ * Returns undefined when there is nothing to coordinate or IRC is unavailable.
+ */
+export function buildCoordinationAdvisory(
+	items: TaskItem[],
+	depthCapacity: boolean,
+	ircEnabled: boolean,
+): string | undefined {
+	if (!depthCapacity || !ircEnabled || items.length < 2) return undefined;
+	return (
+		`Coordinate: ${items.length} siblings are running together. If their work overlaps, have them ` +
+		`message each other via \`irc\` (by id, or "all" to broadcast) before editing shared files — ` +
+		`live coordination beats a serial handoff. Check \`irc\` op:"list" to see who is doing what.`
+	);
+}
+
+/**
+ * Compose the non-blocking advisory appended to a `task` result: the
+ * specialization nudge, plus — only when the siblings keep running after this
+ * call (`willRunAsync`) — the coordination suggestion. Coordination is gated on
+ * async because a sync fanout's siblings have already finished, so a
+ * "coordinate while they run" hint would misfire. Returns undefined when
+ * neither applies.
+ */
+export function composeSpawnAdvisory(args: {
+	agentName: string | undefined;
+	items: TaskItem[];
+	depthCapacity: boolean;
+	ircEnabled: boolean;
+	willRunAsync: boolean;
+}): string | undefined {
+	return (
+		[
+			buildSpecializationAdvisory(args.agentName, args.items, args.depthCapacity),
+			args.willRunAsync ? buildCoordinationAdvisory(args.items, args.depthCapacity, args.ircEnabled) : undefined,
+		]
+			.filter(Boolean)
+			.join("\n\n") || undefined
+	);
 }
 
 /** Sentinel for async jobs whose subagent finished with a failing result; progress is already updated. */
@@ -388,6 +463,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (typeof params.agent === "string") {
 			lines.push(`Agent: ${truncateForPrompt(params.agent)}`);
 		}
+		if (typeof params.role === "string" && params.role.trim()) {
+			lines.push(`Role: ${truncateForPrompt(params.role)}`);
+		}
 		if (typeof params.id === "string" && params.id.trim()) {
 			lines.push(`Task: ${truncateForPrompt(params.id)}`);
 		}
@@ -402,6 +480,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (firstTask) {
 			if (typeof firstTask.id === "string" && firstTask.id.trim()) {
 				lines.push(`Task: ${truncateForPrompt(firstTask.id)}`);
+			}
+			if (typeof firstTask.role === "string" && firstTask.role.trim()) {
+				lines.push(`Role: ${truncateForPrompt(firstTask.role)}`);
 			}
 			if (typeof firstTask.assignment === "string") {
 				lines.push(`Assignment:\n${truncateForPrompt(firstTask.assignment)}`);
@@ -497,6 +578,40 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
+		const depthCapacity = canSpawnAtDepth(
+			this.session.settings.get("task.maxRecursionDepth") ?? 2,
+			this.session.taskDepth ?? 0,
+		);
+		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		// Coordination only makes sense when the siblings keep running after this
+		// call returns (async). In the sync fallback they have already completed,
+		// so a "coordinate while they run" hint would misfire.
+		const willRunAsync = !!manager && selectedAgent?.blocking !== true;
+		const advisory = this.session.suppressSpawnAdvisory
+			? undefined
+			: composeSpawnAdvisory({
+					agentName: params.agent,
+					items: spawnItems,
+					depthCapacity,
+					ircEnabled,
+					willRunAsync,
+				});
+		// Returns a fresh result (copied content array, copied text part) rather
+		// than mutating the caller's — task results are short-lived here, but an
+		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
+		const withAdvisory = (result: AgentToolResult<TaskToolDetails>): AgentToolResult<TaskToolDetails> => {
+			if (!advisory) return result;
+			let appended = false;
+			const content = result.content.map(part => {
+				if (!appended && part.type === "text" && typeof part.text === "string") {
+					appended = true;
+					return { ...part, text: `${part.text}\n\n${advisory}` };
+				}
+				return part;
+			});
+			if (!appended) content.push({ type: "text", text: advisory });
+			return { ...result, content };
+		};
 		if (!asyncEnabled || !manager || selectedAgent?.blocking === true) {
 			// Sync fallback: async execution disabled, orphaned host that never
 			// wired a job manager, or an agent definition that declares
@@ -505,7 +620,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (asyncEnabled && !manager) {
 				logger.warn("task: no AsyncJobManager registered; falling back to sync execution");
 			}
-			return this.#executeSyncFanout(toolCallId, params, spawnItems, signal, onUpdate);
+			return withAdvisory(await this.#executeSyncFanout(toolCallId, params, spawnItems, signal, onUpdate));
 		}
 
 		// Resolve agent ids up front so the immediate result can name them.
@@ -561,7 +676,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 		});
 
-		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
 		const started: Array<{ agentId: string; jobId: string; description?: string }> = [];
 		const failedSchedules: string[] = [];
 		for (const spawn of spawns) {
@@ -613,7 +727,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				content: [{ type: "text", text: `Spawned agent \`${agentId}\`...` }],
 				details: buildAsyncDetails("running", jobId),
 			});
-			return {
+			return withAdvisory({
 				content: [
 					{
 						type: "text",
@@ -621,7 +735,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					},
 				],
 				details: buildAsyncDetails("running", jobId),
-			};
+			});
 		}
 
 		const coordinationHint = ircEnabled
@@ -641,7 +755,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			content: [{ type: "text", text: `Spawned ${started.length} agents...` }],
 			details: buildAsyncDetails("running", primaryJobId),
 		});
-		return {
+		return withAdvisory({
 			content: [
 				{
 					type: "text",
@@ -649,7 +763,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				},
 			],
 			details: buildAsyncDetails("running", primaryJobId),
-		};
+		});
 	}
 
 	/**
@@ -1147,6 +1261,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				context: sharedContext,
 				planReference,
 				description: params.description,
+				role: params.role,
 				index: spawnIndex,
 				toolCallId,
 				parentTaskRunId,

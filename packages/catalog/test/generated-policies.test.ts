@@ -109,6 +109,58 @@ describe("generated model policies", () => {
 		});
 	});
 
+	it("pins zai glm-5.2 base id to 1M context", () => {
+		const models = [
+			createSpec({
+				id: "glm-5.2",
+				api: "anthropic-messages",
+				provider: "zai",
+				contextWindow: 200_000,
+				maxTokens: 8192,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.contextWindow).toBe(1_000_000);
+		expect(models[0]?.maxTokens).toBe(131_072);
+	});
+
+	it("pins MiniMax-M3 long-context providers to 1M context", () => {
+		const models = [
+			createSpec({
+				id: "MiniMax-M3",
+				api: "anthropic-messages",
+				provider: "minimax",
+				contextWindow: 512_000,
+				maxTokens: 128_000,
+			}),
+			createSpec({
+				id: "MiniMax-M3",
+				api: "anthropic-messages",
+				provider: "minimax-cn",
+				contextWindow: 512_000,
+				maxTokens: 128_000,
+			}),
+			createSpec({
+				id: "MiniMax-M3",
+				api: "openai-completions",
+				provider: "minimax-code",
+				contextWindow: 512_000,
+				maxTokens: 128_000,
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.contextWindow).toBe(1_000_000);
+		expect(models[0]?.maxTokens).toBe(128_000);
+		expect(models[1]?.contextWindow).toBe(1_000_000);
+		expect(models[1]?.maxTokens).toBe(128_000);
+		expect(models[2]?.contextWindow).toBe(512_000);
+		expect(models[2]?.maxTokens).toBe(128_000);
+	});
+
 	it("normalizes Copilot generated fallback limits", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({
@@ -142,6 +194,34 @@ describe("generated model policies", () => {
 		expect(models[1]?.maxTokens).toBe(128000);
 		expect(models[2]?.contextWindow).toBe(192000);
 		expect(models[2]?.maxTokens).toBe(64000);
+	});
+
+	it("marks OpenCode Go MiMo models as not supporting tool_choice", () => {
+		const models: ModelSpec<"openai-completions">[] = [
+			createSpec({
+				id: "mimo-v2.5-pro",
+				api: "openai-completions",
+				provider: "opencode-go",
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.compat?.supportsToolChoice).toBe(false);
+	});
+
+	it("marks OpenCode Go Kimi K2.7 Code as not supporting forced tool_choice", () => {
+		const models: ModelSpec<"openai-completions">[] = [
+			createSpec({
+				id: "kimi-k2.7-code",
+				api: "openai-completions",
+				provider: "opencode-go",
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.compat?.supportsForcedToolChoice).toBe(false);
 	});
 
 	it("sets freeform apply_patch metadata for first-party GPT-5 Responses models", () => {

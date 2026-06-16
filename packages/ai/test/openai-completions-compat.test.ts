@@ -11,6 +11,7 @@ import type {
 	Model,
 	ModelSpec,
 	OpenAICompat,
+	Tool,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -134,6 +135,7 @@ describe("openai-completions compatibility", () => {
 			reasoningEffortMap: {},
 			supportsUsageInStreaming: true,
 			supportsToolChoice: true,
+			supportsForcedToolChoice: true,
 			disableReasoningOnForcedToolChoice: false,
 			disableReasoningOnToolChoice: false,
 			maxTokensField: "max_completion_tokens",
@@ -593,6 +595,84 @@ describe("openai-completions compatibility", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.content[0]).toMatchObject({ type: "text", text: "done" });
 	});
+	it("surfaces empty Ollama length completions as context-window errors", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "ollama" as Model["provider"],
+			id: "local-12b",
+			baseUrl: "http://ollama.invalid/v1",
+		} as ModelSpec<"openai-completions">);
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-empty-length",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: "length" }],
+				usage: {
+					prompt_tokens: 8191,
+					completion_tokens: 1,
+					total_tokens: 8192,
+				},
+			},
+			"[DONE]",
+		]);
+
+		const stream = streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		});
+		const resultPromise = stream.result();
+		const eventTypes: string[] = [];
+		for await (const event of stream) {
+			eventTypes.push(event.type);
+		}
+		const result = await resultPromise;
+
+		expect(result.stopReason).toBe("error");
+		expect(eventTypes).toContain("error");
+		expect(result.errorMessage).toBe(
+			"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.",
+		);
+		expect(result.content).toEqual([]);
+		expect(result.usage.input).toBe(8191);
+		expect(result.usage.output).toBe(1);
+	});
+	it("preserves empty non-Ollama length completions for recovery", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "custom" as Model["provider"],
+			baseUrl: "https://gateway.example/v1",
+		} as ModelSpec<"openai-completions">);
+		const fetchMock = createMockFetch([
+			{
+				id: "chatcmpl-empty-length",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: "length" }],
+			},
+			"[DONE]",
+		]);
+
+		const stream = streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		});
+		const resultPromise = stream.result();
+		const eventTypes: string[] = [];
+		for await (const event of stream) {
+			eventTypes.push(event.type);
+		}
+		const result = await resultPromise;
+
+		expect(result.stopReason).toBe("length");
+		expect(eventTypes).toContain("done");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([]);
+	});
 
 	it("injects compat.extraBody into OpenAI payload", async () => {
 		const model: Model<"openai-completions"> = buildModel({
@@ -1029,6 +1109,16 @@ describe("kimi model detection via detectCompat", () => {
 			timestamp: Date.now(),
 		};
 
+		const readTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" } },
+				required: ["path"],
+			},
+		};
+
 		const { promise, resolve } = Promise.withResolvers<unknown>();
 		const fetchMock = createMockFetch(["[DONE]"]);
 		streamOpenAICompletions(
@@ -1046,6 +1136,7 @@ describe("kimi model detection via detectCompat", () => {
 						timestamp: Date.now(),
 					},
 				],
+				tools: [readTool],
 			},
 			{
 				apiKey: "test-key",
@@ -1071,6 +1162,96 @@ describe("kimi model detection via detectCompat", () => {
 		// The forced-tool guard must still strip the request-level thinking
 		// signal so neither end of the wire mentions reasoning.
 		expect(payload.reasoning_effort).toBeUndefined();
+	});
+
+	it("downgrades unsupported forced tool_choice without suppressing thinking", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			id: "kimi-k2.7-code",
+			reasoning: true,
+			compat: { supportsForcedToolChoice: false },
+		} as ModelSpec<"openai-completions">);
+		const priorAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Plan first, then call the tool.",
+					thinkingSignature: "reasoning_content",
+				},
+				{
+					type: "toolCall",
+					id: "call_abc123",
+					name: "read",
+					arguments: { path: "README.md" },
+				},
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const readTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" } },
+				required: ["path"],
+			},
+		};
+
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		const fetchMock = createMockFetch(["[DONE]"]);
+		streamOpenAICompletions(
+			model,
+			{
+				messages: [
+					{ role: "user", content: "Summarize the README", timestamp: Date.now() },
+					priorAssistant,
+					{
+						role: "toolResult",
+						toolCallId: "call_abc123",
+						toolName: "read",
+						content: [{ type: "text", text: "# Hello\n" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+				tools: [readTool],
+			},
+			{
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning: "high",
+				toolChoice: { type: "tool", name: "read" },
+				signal: createAbortedSignal(),
+				onPayload: payload => resolve(payload),
+			},
+		);
+
+		const payload = (await promise) as {
+			messages: Array<Record<string, unknown>>;
+			reasoning_effort?: unknown;
+			tool_choice?: unknown;
+		};
+		const assistant = payload.messages.find(m => m.role === "assistant");
+		expect(assistant).toBeDefined();
+		expect(Reflect.get(assistant as object, "reasoning_content")).toBe("Plan first, then call the tool.");
+		expect(payload.reasoning_effort).toBe("high");
+		expect(payload.tool_choice).toBe("auto");
 	});
 
 	// #1484 follow-up: DeepSeek V4 on opencode-go exhibits the same gateway

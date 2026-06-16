@@ -19,7 +19,9 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 	if (usage) {
 		pct =
 			usage.percent ??
-			(usage.tokens != null && usage.contextWindow > 0 ? (usage.tokens / usage.contextWindow) * 100 : null);
+			(usage.tokens != null && usage.contextWindow !== null && usage.contextWindow > 0
+				? (usage.tokens / usage.contextWindow) * 100
+				: null);
 	}
 
 	return (
@@ -40,8 +42,8 @@ export function HeaderBar({ snapshot, subCount, railOpen, onToggleRail, onLeave 
 						read-only
 					</span>
 				)}
-				{state?.model && <span className="sh-chip">{state.model.name}</span>}
-				{state?.thinkingLevel && <span className="sh-chip">{state.thinkingLevel}</span>}
+				{state?.model && <span className="sh-chip sh-chip-meta">{state.model.name}</span>}
+				{state?.thinkingLevel && <span className="sh-chip sh-chip-meta">{state.thinkingLevel}</span>}
 				{pct != null && (
 					<span
 						className={pct > 80 ? "sh-gauge sh-gauge-warn" : "sh-gauge"}

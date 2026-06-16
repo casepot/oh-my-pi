@@ -187,6 +187,12 @@ export interface OpenAICompat {
 	/** Whether the provider supports the `tool_choice` parameter. Default: true. */
 	supportsToolChoice?: boolean;
 	/**
+	 * Whether forced `tool_choice` values (`"required"` or named tools) are accepted.
+	 * When false, request builders keep tools available but downgrade forced choices
+	 * to provider-default auto selection. Default: true.
+	 */
+	supportsForcedToolChoice?: boolean;
+	/**
 	 * Drop reasoning fields (`reasoning_effort`, OpenRouter `reasoning`) for
 	 * the request when `tool_choice` forces a tool call. Mirrors the Anthropic
 	 * `disableThinkingIfToolChoiceForced` rule for backends like Kimi that
@@ -305,6 +311,13 @@ export interface AnthropicCompat {
 	 * Default: auto-detected from provider/baseUrl and `model.reasoning`.
 	 */
 	replayUnsignedThinking?: boolean;
+	/**
+	 * Prefix Anthropic built-in tool names (`web_search`, `code_execution`, ...)
+	 * when they are ordinary client tools. Some Anthropic-compatible gateways
+	 * intercept those exact names as server tools and return raw search/result
+	 * blocks instead of normal `tool_use` calls.
+	 */
+	escapeBuiltinToolNames?: boolean;
 }
 
 /**
@@ -430,6 +443,13 @@ export interface Model<TApi extends Api = Api> {
 	baseUrl: string;
 	reasoning: boolean;
 	input: ("text" | "image")[];
+	/**
+	 * Native provider tool-call support. `false` is the only unsupported signal:
+	 * `true` and `undefined` both mean callers may use native tools. Catalog and
+	 * discovery sources should set this sparsely when an upstream explicitly
+	 * reports that native tool calling is unsupported.
+	 */
+	supportsTools?: boolean;
 	cost: {
 		input: number; // $/million tokens
 		output: number; // $/million tokens
@@ -438,8 +458,8 @@ export interface Model<TApi extends Api = Api> {
 	};
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
-	contextWindow: number;
-	maxTokens: number;
+	contextWindow: number | null;
+	maxTokens: number | null;
 	/**
 	 * When `true`, providers MUST omit `max_output_tokens` (Responses) /
 	 * `max_tokens` / `max_completion_tokens` (Completions) from the outbound

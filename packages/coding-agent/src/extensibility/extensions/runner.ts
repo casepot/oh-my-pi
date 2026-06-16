@@ -6,9 +6,11 @@ import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMeta
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { Settings } from "../../config/settings";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { SessionManager } from "../../session/session-manager";
+import { createExtensionModelQuery } from "./model-api";
 import type {
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
@@ -67,6 +69,28 @@ let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
 
 export function testSetExtensionHandlerTimeoutMs(timeoutMs: number): void {
 	extensionHandlerTimeoutMs = timeoutMs;
+}
+
+/**
+ * Dedicated cap for `session_shutdown` handlers. The generic 30s budget is
+ * appropriate for events extensions can observe (e.g. `session_start`,
+ * `before_provider_request`), but `session_shutdown` is fire-and-forget
+ * teardown — extensions receive no result and the user has already asked to
+ * leave. A hung handler (e.g. an extension waiting on a stuck IPC pipe to a
+ * companion app) MUST NOT hold Ctrl+C / `/exit` hostage for the full window.
+ * See issue #2600.
+ */
+export const SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS = 2_000;
+let sessionShutdownHandlerTimeoutMs = SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS;
+
+export function testSetSessionShutdownHandlerTimeoutMs(timeoutMs: number): void {
+	sessionShutdownHandlerTimeoutMs = timeoutMs;
+}
+
+/** Per-event handler budget. Defaults to the generic cap; `session_shutdown`
+ *  uses its own short cap so teardown stays prompt. */
+function handlerTimeoutForEvent(eventType: string): number {
+	return eventType === "session_shutdown" ? sessionShutdownHandlerTimeoutMs : extensionHandlerTimeoutMs;
 }
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
@@ -207,6 +231,7 @@ export class ExtensionRunner {
 		private readonly sessionManager: SessionManager,
 		private readonly modelRegistry: ModelRegistry,
 		getMemory?: () => MemoryRuntimeContext | undefined,
+		private readonly settings?: Settings,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -479,6 +504,7 @@ export class ExtensionRunner {
 			get model() {
 				return getModel();
 			},
+			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
@@ -517,7 +543,9 @@ export class ExtensionRunner {
 			event.type === "session_before_tree"
 		);
 	}
-
+	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
+		return event.type === "session_shutdown";
+	}
 	async #runHandlerWithTimeout<TEvent extends { type: string }, TResult>(
 		handler: (event: TEvent, ctx: ExtensionContext) => Promise<TResult | undefined> | TResult | undefined,
 		event: TEvent,
@@ -562,6 +590,20 @@ export class ExtensionRunner {
 		const ctx = this.createContext();
 		let result: SessionBeforeEventResult | SessionCompactingResult | undefined;
 
+		if (this.#isSessionShutdownEvent(event)) {
+			const timeoutMs = handlerTimeoutForEvent(event.type);
+			const promises: Promise<unknown>[] = [];
+			for (const ext of this.extensions) {
+				const handlers = ext.handlers.get(event.type);
+				if (!handlers || handlers.length === 0) continue;
+				for (const handler of handlers) {
+					promises.push(this.#runHandlerWithTimeout(handler, event, ctx, ext, timeoutMs));
+				}
+			}
+			await Promise.all(promises);
+			return result as RunnerEmitResult<TEvent>;
+		}
+
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
@@ -572,7 +614,7 @@ export class ExtensionRunner {
 					event,
 					ctx,
 					ext,
-					extensionHandlerTimeoutMs,
+					handlerTimeoutForEvent(event.type),
 				);
 
 				if (this.#isSessionBeforeEvent(event) && handlerResult) {
@@ -903,7 +945,8 @@ export class ExtensionRunner {
 						messages.push(result.message);
 					}
 					if (result.systemPrompt !== undefined) {
-						currentSystemPrompt = result.systemPrompt;
+						currentSystemPrompt =
+							typeof result.systemPrompt === "string" ? [result.systemPrompt] : result.systemPrompt;
 						systemPromptModified = true;
 					}
 				}

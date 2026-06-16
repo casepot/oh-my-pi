@@ -17,8 +17,9 @@ import type {
 	ToolResultMessage,
 	TSchema,
 } from "@oh-my-pi/pi-ai";
+import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import type { AppendOnlyContextManager } from "./append-only-context";
-import type { HarmonyAuditEvent } from "./harmony-leak";
 import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { AgentTelemetryConfig } from "./telemetry";
 
@@ -229,6 +230,27 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	intentTracing?: boolean;
 	/**
+	 * Owned tool calling dialect.
+	 *
+	 * Undefined keeps provider-native tool calling. A dialect value sends no
+	 * native `tools`, forces `toolChoice` off, appends that dialect's tool catalog
+	 * instructions, re-encodes prior tool calls/results as text, and parses the
+	 * model's text output back into canonical `toolCall` blocks.
+	 */
+	dialect?: Dialect;
+	/**
+	 * When owned (in-band) tool calling is active and the model starts
+	 * fabricating a tool result inside its own turn, control how the loop reacts:
+	 * - `true` (default): abort the provider request immediately so it stops
+	 *   generating the hallucinated continuation (cheaper, lower latency).
+	 * - `false`: let the request finish and silently discard everything past the
+	 *   fabrication boundary (keeps the connection alive but pays for the tokens
+	 *   the model spends on the discarded tail).
+	 * Only meaningful when {@link dialect} (or `PI_DIALECT`) selects an
+	 * owned dialect; native tool calling never fabricates results in text.
+	 */
+	abortOnFabricatedToolResult?: boolean;
+	/**
 	 * Append-only context mode — stabilizes system prompt + tool spec bytes
 	 * across turns so provider prefix caches hit at maximum rate.
 	 *
@@ -289,6 +311,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		context: BeforeToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
+	/**
+	 * Called after a turn ends and before the loop polls steering/asides for the
+	 * next iteration. Use this for awaited per-turn bookkeeping that must be
+	 * visible before the next model request (e.g. synchronizing an advisor's
+	 * backlog so advice produced during the wait is injected as an aside).
+	 */
+	onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<void> | void;
 
 	/**
 	 * Called after a tool finishes executing, before `tool_execution_end` and the
@@ -510,6 +539,15 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	concurrency?: "shared" | "exclusive" | ((args: Partial<Static<TParameters>>) => "shared" | "exclusive");
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
+	/**
+	 * If true, the agent loop may abort this tool mid-execution to deliver a
+	 * queued steering message (instead of waiting for the tool to finish on its
+	 * own). Set only on tools that purely *wait* and observe their abort signal
+	 * cleanly (e.g. the `job` poll), so the abort surfaces the tool's current
+	 * snapshot rather than corrupting a side effect. Honored only when
+	 * `interruptMode` is "immediate".
+	 */
+	interruptible?: boolean;
 	/**
 	 * Controls how the INTENT_FIELD (`_i`) is handled for this tool.
 	 * - `"require"` (default): `_i` is injected and required in the parameter schema.

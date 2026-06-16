@@ -1,6 +1,6 @@
 import type { BackgroundLane, BackgroundLaneSpawnRequest } from "../background-lanes/state";
 import { cloneBackgroundLane, normalizeBackgroundLanes } from "../background-lanes/state";
-import type { UsageStatistics } from "../session/session-manager";
+import type { UsageStatistics } from "../session/session-entries";
 
 export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
 export type GoalVerificationStatus = "verified" | "rejected" | "stale" | "max-attempts";

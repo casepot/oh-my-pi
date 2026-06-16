@@ -200,23 +200,23 @@ describe("shape resolution", () => {
 
 	it("detects the ideal shape from the model id across gateways", () => {
 		// A high-res Claude served through an OpenAI-compatible gateway keeps
-		// its own geometry AND its 1932px frame; billing follows the gateway
-		// family, computed for that frame size (32px patches × 1.2).
+		// its own geometry (tracked 8x13) AND its 1932px frame; billing follows
+		// the gateway family, computed for that frame size (32px patches × 1.2).
 		const claudeViaOpenRouter = snapcompact.resolveShape({
 			api: "openai-completions",
 			id: "anthropic/claude-fable-5",
 		});
-		expect(claudeViaOpenRouter.font).toBe("6x12");
-		expect(claudeViaOpenRouter.stopwordDim).toBe(true);
+		expect(claudeViaOpenRouter.font).toBe("8x13");
+		expect(claudeViaOpenRouter.cellWidth).toBe(11); // extra tracking
 		expect(claudeViaOpenRouter.frameSize).toBe(1932);
 		expect(claudeViaOpenRouter.frameTokenEstimate).toBe(Math.ceil(Math.ceil(1932 / 32) ** 2 * 1.2));
 		expect(claudeViaOpenRouter.imageDetail).toBe("original");
 
-		// Claude on Vertex must not inherit the Gemini doc shape; Gemini
-		// billing is a fixed per-image budget at any size.
+		// Claude on Vertex must not inherit the Gemini shape; Gemini billing is
+		// a fixed per-image budget at any size.
 		const claudeOnVertex = snapcompact.resolveShape({ api: "google-vertex", id: "claude-fable-5@20250929" });
-		expect(claudeOnVertex.font).toBe("6x12");
-		expect(claudeOnVertex.columns).toBeUndefined();
+		expect(claudeOnVertex.font).toBe("8x13");
+		expect(claudeOnVertex.cellWidth).toBe(11);
 		expect(claudeOnVertex.frameSize).toBe(1932);
 		expect(claudeOnVertex.frameTokenEstimate).toBe(snapcompact.SHAPES.google.frameTokenEstimate);
 
@@ -227,21 +227,21 @@ describe("shape resolution", () => {
 			snapcompact.SHAPES.anthropic,
 		);
 
-		// Gemini reads 2048px frames at the same fixed bill.
+		// Gemini reads 2048px frames at the same fixed bill, single-column with
+		// extra leading (22px pitch).
 		const gemini = snapcompact.resolveShape({ api: "google-generative-ai", id: "gemini-3.5-flash" });
 		expect(gemini.frameSize).toBe(2048);
-		expect(gemini.columns).toBe(2);
+		expect(gemini.columns).toBeUndefined();
+		expect(gemini.cellHeight).toBe(22); // extra leading
 		expect(gemini.frameTokenEstimate).toBe(1120);
 
-		// Measured openai-compat readers map to the family winner object.
-		expect(snapcompact.resolveShape({ api: "openai-completions", id: "moonshotai/kimi-k2.6" })).toBe(
-			snapcompact.SHAPES.openai,
-		);
-		expect(snapcompact.resolveShape({ api: "openai-completions", id: "z-ai/glm-4.6v" })).toBe(
-			snapcompact.SHAPES.openai,
-		);
+		// Measured openai-compat readers keep their own validated `8on16-bw`
+		// geometry (not the family's leading default), at the gateway's billing.
+		const kimiShape = snapcompact.resolveShape({ api: "openai-completions" }, "8on16-bw");
+		expect(snapcompact.resolveShape({ api: "openai-completions", id: "moonshotai/kimi-k2.6" })).toEqual(kimiShape);
+		expect(snapcompact.resolveShape({ api: "openai-completions", id: "z-ai/glm-4.6v" })).toEqual(kimiShape);
 
-		// Unmeasured model ids fall back to the API family default.
+		// Unmeasured model ids fall back to the API family default object.
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" })).toBe(
 			snapcompact.SHAPES.openai,
 		);
@@ -355,9 +355,9 @@ describe("render", () => {
 		expect(used.has(1)).toBe(false); // no sentence hues in bw
 	});
 
-	it("renders the anthropic default with dimmed stopwords and no highlight bands", () => {
+	it("renders the anthropic default (tracked 8x13) in plain black, no dim or bands", () => {
 		const geometry = snapcompact.geometry(snapcompact.SHAPES.anthropic, TEST_FRAME_SIZE);
-		expect(geometry).toEqual({ cols: 53, rows: 26, capacity: 1378 });
+		expect(geometry).toEqual({ cols: 29, rows: 20, capacity: 580 });
 
 		const frames = snapcompact.renderMany("Reading the films of the archive. Again.", {
 			shape: snapcompact.SHAPES.anthropic,
@@ -366,10 +366,21 @@ describe("render", () => {
 		const decoded = decodePng(Buffer.from(frames[0].data, "base64"));
 		expect(decoded.colorType).toBe(3);
 		const used = new Set(decoded.pixels);
-		expect(used.has(7)).toBe(true); // black ink for content words
-		expect(used.has(9)).toBe(true); // dim gray ink for stopwords ("the", "of")
+		expect(used.has(7)).toBe(true); // black ink for all words
+		expect(used.has(9)).toBe(false); // tracked default does not dim stopwords
 		expect(used.has(8)).toBe(false); // no repeat highlight band
 		expect(used.has(1)).toBe(false); // no sentence hues
+	});
+
+	it("still dims stopwords on the selectable 6x12-dim variant", () => {
+		const dim = snapcompact.resolveShape({ api: "anthropic-messages" }, "6x12-dim");
+		const frames = snapcompact.renderMany("Reading the films of the archive. Again.", {
+			shape: dim,
+			frameSize: TEST_FRAME_SIZE,
+		});
+		const used = new Set(decodePng(Buffer.from(frames[0].data, "base64")).pixels);
+		expect(used.has(7)).toBe(true); // black ink for content words
+		expect(used.has(9)).toBe(true); // dim gray ink for stopwords ("the", "of")
 	});
 
 	it("renders a stretched shape as truecolor RGB", () => {
@@ -448,7 +459,7 @@ describe("serializeConversation", () => {
 		const text = `HEAD-${"x".repeat(5000)}-TAIL`;
 		const out = snapcompact.serializeConversation([createToolResultMessage(text)]);
 		// Default cap 2000 at 0.6 head ratio: 1200 head + 800 tail survive.
-		expect(out).toContain("[Tool result]: ");
+		expect(out).toContain("[Tool Result]: ");
 		expect(out).toContain("HEAD-");
 		expect(out).toContain("[... 3010 chars elided ...]");
 		expect(out.endsWith(`-TAIL${snapcompact.DIM_OFF}`)).toBe(true);
@@ -495,14 +506,14 @@ describe("serializeConversation", () => {
 			createUserMessage(`hello ${snapcompact.DIM_ON}world`),
 			createToolResultMessage("ok"),
 		]);
-		expect(out).toContain(`[Tool result]: ${snapcompact.DIM_ON}ok${snapcompact.DIM_OFF}`);
+		expect(out).toContain(`[Tool Result]: ${snapcompact.DIM_ON}ok${snapcompact.DIM_OFF}`);
 		// A stray toggle in user content cannot forge a dim span.
 		expect(out).toContain("[User]: hello world");
 	});
 
 	it("omits dim toggles when dimToolResults is false", () => {
 		const out = snapcompact.serializeConversation([createToolResultMessage("ok")], { dimToolResults: false });
-		expect(out).toBe("[Tool result]: ok");
+		expect(out).toBe("[Tool Result]: ok");
 	});
 
 	it("skips tool call/result pairs flagged useless", () => {
@@ -530,8 +541,8 @@ describe("compact", () => {
 
 		expect(result.firstKeptEntryId).toBe("kept-1");
 		expect(result.tokensBefore).toBe(99000);
-		// Reading instructions reflect the default (anthropic 6x12-dim) shape.
-		expect(result.summary).toContain("53 characters per row");
+		// Reading instructions reflect the default (anthropic 11on16-bw) shape.
+		expect(result.summary).toContain("29 characters per row");
 		expect(result.summary).toContain("dim gray");
 		expect(result.summary).toContain("plain black ink");
 		expect(result.summary).toContain("snapcompact frame");
@@ -545,9 +556,9 @@ describe("compact", () => {
 		expect(archive?.frames.length).toBe(1);
 		expect(archive?.frames[0].mimeType).toBe("image/png");
 		expect(archive?.frames[0].chars).toBe(archive?.totalChars);
-		expect(archive?.frames[0].font).toBe("6x12");
+		expect(archive?.frames[0].font).toBe("8x13");
 		expect(archive?.frames[0].variant).toBe("bw");
-		expect(archive?.frames[0].stopwordDim).toBe(true);
+		expect(archive?.frames[0].stopwordDim).toBeUndefined();
 		expect(archive?.truncatedChars).toBe(0);
 		// Frame data round-trips as a decodable PNG.
 		const decoded = decodePng(Buffer.from(archive?.frames[0].data ?? "", "base64"));
@@ -778,6 +789,8 @@ describe("archive helpers", () => {
 		expect(snapcompact.providerFrameBudget("anthropic")).toBe(snapcompact.MAX_FRAMES);
 		expect(snapcompact.providerFrameBudget("openrouter")).toBeLessThanOrEqual(8);
 		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
+		expect(snapcompact.providerFrameBudget("openai-codex")).toBe(snapcompact.MAX_FRAMES);
 	});
 });
 

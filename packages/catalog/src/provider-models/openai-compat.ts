@@ -5,13 +5,13 @@ import {
 } from "../discovery/openai-compatible";
 import { Effort } from "../effort";
 import { toFireworksPublicModelId } from "../fireworks-model-id";
+import { isGlmVisionModelId, isReasoningGlmModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { COPILOT_API_HEADERS, getGitHubCopilotBaseUrl, parseGitHubCopilotApiKey } from "../wire/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
-import { UNK_CONTEXT_WINDOW, UNK_MAX_TOKENS } from "./discovery-constants";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
@@ -103,8 +103,8 @@ function mapAnthropicModelsDev(payload: unknown, baseUrl: string): ModelSpec<"an
 				cacheRead: toNumber(model.cost?.cache_read) ?? 0,
 				cacheWrite: toNumber(model.cost?.cache_write) ?? 0,
 			},
-			contextWindow: toPositiveNumber(model.limit?.context, UNK_CONTEXT_WINDOW),
-			maxTokens: toPositiveNumber(model.limit?.output, UNK_MAX_TOKENS),
+			contextWindow: toPositiveNumber(model.limit?.context, null),
+			maxTokens: toPositiveNumber(model.limit?.output, null),
 		});
 	}
 
@@ -569,6 +569,159 @@ function createSimpleAnthropicProviderOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Umans AI Coding Plan
+// ---------------------------------------------------------------------------
+
+const UMANS_BASE_URL = "https://api.code.umans.ai";
+const UMANS_MODELS_INFO_PATH = "/models/info";
+const UMANS_REASONING_EFFORT_BY_LEVEL: Record<string, Effort> = {
+	minimal: Effort.Minimal,
+	low: Effort.Low,
+	medium: Effort.Medium,
+	high: Effort.High,
+	xhigh: Effort.XHigh,
+};
+const UMANS_DEFAULT_REASONING_EFFORTS = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] as const;
+
+export interface UmansModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+interface UmansModelInfo {
+	name?: unknown;
+	display_name?: unknown;
+	capabilities?: unknown;
+}
+
+function normalizeUmansBaseUrl(baseUrl: string | undefined): string {
+	const normalized = normalizeAnthropicBaseUrl(baseUrl, UMANS_BASE_URL);
+	return normalized.endsWith("/v1") ? normalized.slice(0, -3) : normalized;
+}
+
+function umansSupportsVision(value: unknown): boolean {
+	return value === true || (typeof value === "string" && value.length > 0);
+}
+
+function umansReasoningSupported(value: unknown): boolean {
+	return isRecord(value) ? value.supported === true : value === true;
+}
+
+function mapUmansReasoningEfforts(value: unknown): readonly Effort[] {
+	if (!isRecord(value) || !Array.isArray(value.levels)) {
+		return UMANS_DEFAULT_REASONING_EFFORTS;
+	}
+	const efforts: Effort[] = [];
+	for (const level of value.levels) {
+		if (typeof level !== "string") continue;
+		const effort = UMANS_REASONING_EFFORT_BY_LEVEL[level];
+		if (effort !== undefined && !efforts.includes(effort)) {
+			efforts.push(effort);
+		}
+	}
+	return efforts.length > 0 ? efforts : UMANS_DEFAULT_REASONING_EFFORTS;
+}
+
+function mapUmansThinkingConfig(value: unknown): ThinkingConfig | undefined {
+	if (!umansReasoningSupported(value)) return undefined;
+	const efforts = mapUmansReasoningEfforts(value);
+	const thinking: ThinkingConfig = { mode: "budget", efforts };
+	if (isRecord(value)) {
+		if (value.can_disable === false) {
+			thinking.requiresEffort = true;
+		}
+		if (typeof value.default_level === "string") {
+			const defaultLevel = UMANS_REASONING_EFFORT_BY_LEVEL[value.default_level];
+			if (defaultLevel !== undefined && efforts.includes(defaultLevel)) {
+				thinking.defaultLevel = defaultLevel;
+			}
+		}
+	}
+	return thinking;
+}
+
+function mapUmansModelInfo(
+	modelId: string,
+	raw: UmansModelInfo,
+	baseUrl: string,
+	reference: ModelSpec<"anthropic-messages"> | undefined,
+): ModelSpec<"anthropic-messages"> | null {
+	if (!modelId) return null;
+	const capabilities = isRecord(raw.capabilities) ? raw.capabilities : {};
+	const supportsTools = capabilities.supports_tools;
+	const thinking = mapUmansThinkingConfig(capabilities.reasoning);
+	return {
+		...reference,
+		id: modelId,
+		name: toModelName(raw.display_name, toModelName(raw.name, modelId)),
+		api: "anthropic-messages",
+		provider: "umans",
+		baseUrl,
+		compat: { ...reference?.compat, escapeBuiltinToolNames: true },
+		reasoning: thinking !== undefined,
+		...(thinking ? { thinking } : {}),
+		input: umansSupportsVision(capabilities.supports_vision) ? ["text", "image"] : ["text"],
+		...(supportsTools === false ? { supportsTools: false } : {}),
+		cost: reference?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: toPositiveNumber(capabilities.context_window, reference?.contextWindow ?? null),
+		maxTokens: toPositiveNumber(
+			capabilities.recommended_max_tokens,
+			toPositiveNumber(capabilities.max_completion_tokens, reference?.maxTokens ?? null),
+		),
+	};
+}
+
+async function fetchUmansModelsInfo(options: {
+	baseUrl: string;
+	apiKey?: string;
+	fetch?: FetchImpl;
+	references: Map<string, ModelSpec<"anthropic-messages">>;
+}): Promise<ModelSpec<"anthropic-messages">[] | null> {
+	const discoveryBaseUrl = toAnthropicDiscoveryBaseUrl(options.baseUrl);
+	const requestHeaders: Record<string, string> = { Accept: "application/json" };
+	if (options.apiKey) {
+		requestHeaders["x-api-key"] = options.apiKey;
+	}
+	const fetchImpl = options.fetch ?? fetch;
+	let payload: unknown;
+	try {
+		const response = await fetchImpl(`${discoveryBaseUrl}${UMANS_MODELS_INFO_PATH}`, {
+			method: "GET",
+			headers: requestHeaders,
+		});
+		if (!response.ok) {
+			return null;
+		}
+		payload = await response.json();
+	} catch (error) {
+		throw new Error("Failed to fetch Umans models info", { cause: error });
+	}
+	if (!isRecord(payload)) {
+		return null;
+	}
+	const models: ModelSpec<"anthropic-messages">[] = [];
+	for (const [modelId, value] of Object.entries(payload)) {
+		if (!isRecord(value)) continue;
+		const mapped = mapUmansModelInfo(modelId, value, options.baseUrl, options.references.get(modelId));
+		if (mapped) {
+			models.push(mapped);
+		}
+	}
+	return models.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+export function umansModelManagerOptions(config?: UmansModelManagerConfig): ModelManagerOptions<"anthropic-messages"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeUmansBaseUrl(config?.baseUrl);
+	const references = createBundledReferenceMap<"anthropic-messages">("umans");
+	return {
+		providerId: "umans",
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchUmansModelsInfo({ baseUrl, apiKey, fetch: config?.fetch, references }),
+	};
+}
+// ---------------------------------------------------------------------------
 // 1. OpenAI
 // ---------------------------------------------------------------------------
 
@@ -1031,8 +1184,8 @@ export function zhipuCodingPlanModelManagerOptions(
 						const id = defaults.id;
 						return {
 							...defaults,
-							reasoning: ZHIPU_REASONING_MODELS[id] === true || id.includes("thinking"),
-							input: ZHIPU_VISION_PATTERN.test(id) ? (["text", "image"] as const) : ["text"],
+							reasoning: isReasoningGlmModelId(id) || id.includes("thinking"),
+							input: isGlmVisionModelId(id) ? (["text", "image"] as const) : ["text"],
 							compat: {
 								thinkingFormat: "zai",
 								reasoningContentField: "reasoning_content",
@@ -1045,25 +1198,6 @@ export function zhipuCodingPlanModelManagerOptions(
 		}),
 	};
 }
-
-// Reasoning-capable GLM models on the BigModel coding-plan SKU. Keep this
-// explicit rather than regex-matching `glm-[45]\.\d` so newly-added integers
-// like `glm-5` / `glm-5-turbo` are covered and unrelated future SKUs (e.g.
-// `glm-5-preview`) do not silently flip into thinking mode.
-const ZHIPU_REASONING_MODELS: Readonly<Record<string, true>> = {
-	"glm-4.5": true,
-	"glm-4.5-air": true,
-	"glm-4.6": true,
-	"glm-4.7": true,
-	"glm-5": true,
-	"glm-5-turbo": true,
-	"glm-5.1": true,
-};
-
-// Vision-capable GLM models follow the `glm-<N>[.<N>]v[-<variant>]` shape
-// (e.g. `glm-4v`, `glm-4.5v`, `glm-4v-plus`). The previous `id.includes("v")`
-// check matched anything with a `v` — including the non-vision `glm-5-preview`.
-const ZHIPU_VISION_PATTERN = /^glm-[45](?:\.\d+)?v(?:-|$)/;
 
 // ---------------------------------------------------------------------------
 // 7.5 Fireworks
@@ -1095,8 +1229,28 @@ export function isFireworksKimiK2ModelId(modelId: string): boolean {
  * Clamp the Kimi K2 family's `maxTokens` to {@link FIREWORKS_KIMI_MAX_TOKENS}
  * on Fireworks-backed providers, leaving every other model untouched.
  */
-export function clampFireworksKimiMaxTokens(modelId: string, candidate: number): number {
+export function clampFireworksKimiMaxTokens(modelId: string, candidate: number): number;
+export function clampFireworksKimiMaxTokens(modelId: string, candidate: number | null): number | null;
+export function clampFireworksKimiMaxTokens(modelId: string, candidate: number | null): number | null {
+	if (candidate === null) return null;
 	return isFireworksKimiK2ModelId(modelId) ? Math.min(candidate, FIREWORKS_KIMI_MAX_TOKENS) : candidate;
+}
+
+/**
+ * Kimi K2.7 Code's documented recommended output budget. Some provider
+ * discovery rows report the context-sized `max_completion_tokens` instead.
+ */
+export const KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS = 32_768;
+
+export function isKimiK27CodeModelId(modelId: string): boolean {
+	return /(?:^|\/)kimi[-._]?k2(?:[._-]?|p)7[-._]?code$/i.test(modelId);
+}
+
+export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number): number;
+export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | null): number | null;
+export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | null): number | null {
+	if (candidate === null) return null;
+	return isKimiK27CodeModelId(modelId) ? Math.min(candidate, KIMI_K27_CODE_RECOMMENDED_MAX_TOKENS) : candidate;
 }
 
 /**
@@ -1128,17 +1282,156 @@ export interface FireworksModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-function toFireworksModelName(entry: OpenAICompatibleModelRecord, fallback: string): string {
-	const name = toModelName(entry.name, "");
-	if (name) return name;
-	const id = typeof entry.id === "string" ? entry.id : fallback;
-	const shortName = id.split("/").at(-1) ?? fallback;
-	if (fallback !== id && fallback !== shortName) return fallback;
-	return shortName
-		.split("-")
-		.filter(Boolean)
-		.map(part => part.charAt(0).toUpperCase() + part.slice(1))
-		.join(" ");
+const FIREWORKS_CONTROL_PLANE_ACCOUNT = "fireworks";
+const FIREWORKS_SERVERLESS_FILTER = "supports_serverless=true";
+const FIREWORKS_CONTROL_PLANE_PAGE_SIZE = 200;
+const FIREWORKS_CONTROL_PLANE_MAX_PAGES = 25;
+
+/**
+ * One record from the Fireworks control-plane catalog
+ * (`GET /v1/accounts/{account}/models`). This is distinct from the
+ * OpenAI-compatible `/v1/models` inference envelope: the control plane
+ * enumerates the full serverless catalog with camelCase capability metadata,
+ * including on-demand models (e.g. `kimi-k2p7-code`) that never surface in
+ * `/v1/models`. Discovering here is what keeps new serverless models appearing
+ * without catalog edits — see the Fireworks docs `List Models` API.
+ */
+interface FireworksControlPlaneModel {
+	/** Resource name, e.g. `accounts/fireworks/models/kimi-k2p7-code`. */
+	name?: unknown;
+	displayName?: unknown;
+	contextLength?: unknown;
+	supportsImageInput?: unknown;
+	supportsTools?: unknown;
+	supportsServerless?: unknown;
+	state?: unknown;
+}
+
+/**
+ * Derive the control-plane list endpoint from the inference base URL. The
+ * inference API lives under `/inference/v1` while the control plane is
+ * `/v1/accounts/<account>/models` on the same origin, so we route off origin.
+ * Returns null for unparseable overrides (custom gateways) so discovery falls
+ * back to the cached/bundled catalog.
+ */
+function toFireworksControlPlaneModelsUrl(baseUrl: string, account: string): string | null {
+	try {
+		return `${new URL(baseUrl).origin}/v1/accounts/${account}/models`;
+	} catch {
+		return null;
+	}
+}
+
+function mapFireworksControlPlaneModel(
+	record: FireworksControlPlaneModel,
+	publicModelId: string,
+	reference: ModelSpec<"openai-completions"> | undefined,
+	baseUrl: string,
+): ModelSpec<"openai-completions"> {
+	const name = toModelName(record.displayName, reference?.name ?? publicModelId);
+	const supportsImage = toBoolean(record.supportsImageInput) === true;
+	const supportsTools = toBoolean(record.supportsTools);
+	const contextWindow = toPositiveNumber(record.contextLength, reference?.contextWindow ?? null);
+	// The control plane reports no max-output budget; default the Kimi family to
+	// its published cap, everyone else to the discovery fallback, then clamp.
+	const fallbackMaxTokens = isFireworksKimiK2ModelId(publicModelId) ? FIREWORKS_KIMI_MAX_TOKENS : null;
+	const maxTokens = clampFireworksKimiMaxTokens(publicModelId, reference?.maxTokens ?? fallbackMaxTokens);
+	const base: ModelSpec<"openai-completions"> = reference ?? {
+		id: publicModelId,
+		name,
+		api: "openai-completions",
+		provider: "fireworks",
+		baseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens,
+	};
+	const model: ModelSpec<"openai-completions"> = {
+		...base,
+		id: publicModelId,
+		api: "openai-completions",
+		provider: "fireworks",
+		baseUrl,
+		name,
+		// The control plane exposes capability flags but no reasoning bit. Every
+		// serverless chat LLM Fireworks ships reasons, and `buildModel` derives
+		// the Fireworks effort map from the id at build time — so default
+		// unbundled models to reasoning while bundled references keep their value.
+		reasoning: reference?.reasoning ?? true,
+		input: supportsImage ? ["text", "image"] : (reference?.input ?? ["text"]),
+		contextWindow,
+		maxTokens,
+		...(supportsTools === false ? { supportsTools: false } : {}),
+	};
+	return stripFireworksDeepSeekThinkingToggle(model, publicModelId);
+}
+
+/**
+ * Discover Fireworks serverless models via the control-plane `List Models`
+ * API (`supports_serverless=true`), paginating the full catalog. Returns null
+ * on any transport/protocol failure so the model manager keeps the cached or
+ * bundled catalog rather than caching a truncated list as authoritative.
+ */
+async function fetchFireworksServerlessModels(options: {
+	baseUrl: string;
+	apiKey: string;
+	resolveReference: (publicModelId: string) => ModelSpec<"openai-completions"> | undefined;
+	fetch?: FetchImpl;
+}): Promise<ModelSpec<"openai-completions">[] | null> {
+	const listUrl = toFireworksControlPlaneModelsUrl(options.baseUrl, FIREWORKS_CONTROL_PLANE_ACCOUNT);
+	if (!listUrl) return null;
+	const fetchImpl = options.fetch ?? fetch;
+	const collected = new Map<string, ModelSpec<"openai-completions">>();
+	let pageToken = "";
+	for (let page = 0; page < FIREWORKS_CONTROL_PLANE_MAX_PAGES; page++) {
+		const url = new URL(listUrl);
+		url.searchParams.set("filter", FIREWORKS_SERVERLESS_FILTER);
+		url.searchParams.set("pageSize", String(FIREWORKS_CONTROL_PLANE_PAGE_SIZE));
+		if (pageToken) url.searchParams.set("pageToken", pageToken);
+		let response: Response;
+		try {
+			response = await fetchImpl(url.toString(), {
+				method: "GET",
+				headers: { Accept: "application/json", Authorization: `Bearer ${options.apiKey}` },
+			});
+		} catch {
+			return null;
+		}
+		if (!response.ok) return null;
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch {
+			return null;
+		}
+		if (!isRecord(payload)) return null;
+		const models = Array.isArray(payload.models) ? payload.models : [];
+		for (const entry of models) {
+			if (!isRecord(entry)) continue;
+			const record = entry as FireworksControlPlaneModel;
+			if (toBoolean(record.supportsServerless) !== true) continue;
+			if (typeof record.state === "string" && record.state !== "READY") continue;
+			const wireName = typeof record.name === "string" ? record.name : "";
+			if (!wireName) continue;
+			const publicModelId = toFireworksPublicModelId(wireName);
+			if (!publicModelId) continue;
+			collected.set(
+				publicModelId,
+				mapFireworksControlPlaneModel(
+					record,
+					publicModelId,
+					options.resolveReference(publicModelId),
+					options.baseUrl,
+				),
+			);
+		}
+		const next = typeof payload.nextPageToken === "string" ? payload.nextPageToken : "";
+		if (!next) break;
+		pageToken = next;
+	}
+	return Array.from(collected.values());
 }
 
 function createModelsDevReferenceMap<TApi extends Api>(
@@ -1152,11 +1445,14 @@ function createModelsDevReferenceMap<TApi extends Api>(
 			references.set(candidate.id, candidate);
 			continue;
 		}
-		if (candidate.contextWindow > existing.contextWindow) {
+		if ((candidate.contextWindow ?? 0) > (existing.contextWindow ?? 0)) {
 			references.set(candidate.id, candidate);
 			continue;
 		}
-		if (candidate.contextWindow === existing.contextWindow && candidate.maxTokens > existing.maxTokens) {
+		if (
+			candidate.contextWindow === existing.contextWindow &&
+			(candidate.maxTokens ?? 0) > (existing.maxTokens ?? 0)
+		) {
 			references.set(candidate.id, candidate);
 		}
 	}
@@ -1184,35 +1480,11 @@ export function fireworksModelManagerOptions(
 		...(apiKey && {
 			fetchDynamicModels: async () => {
 				const modelsDevReferences = await loadModelsDevReferences<"openai-completions">(config?.fetch);
-				return fetchOpenAICompatibleModels({
-					api: "openai-completions",
-					provider: "fireworks",
+				return fetchFireworksServerlessModels({
 					baseUrl,
 					apiKey,
-					filterModel: entry =>
-						toBoolean(entry.supports_chat) === true && toBoolean(entry.supports_tools) === true,
-					mapModel: (entry, defaults) => {
-						const publicModelId = toFireworksPublicModelId(defaults.id);
-						const reference = modelsDevReferences.get(publicModelId) ?? bundledReferences(publicModelId);
-						const model = stripFireworksDeepSeekThinkingToggle(
-							mapWithBundledReference(entry, defaults, reference),
-							publicModelId,
-						);
-						return {
-							...model,
-							id: publicModelId,
-							api: "openai-completions",
-							provider: "fireworks",
-							baseUrl,
-							name: toFireworksModelName(entry, model.name),
-							input: toBoolean(entry.supports_image_input) === true ? ["text", "image"] : ["text"],
-							contextWindow: toPositiveNumber(entry.context_length, model.contextWindow),
-							maxTokens: clampFireworksKimiMaxTokens(
-								publicModelId,
-								toPositiveNumber(entry.max_completion_tokens, model.maxTokens),
-							),
-						};
-					},
+					resolveReference: publicModelId =>
+						modelsDevReferences.get(publicModelId) ?? bundledReferences(publicModelId),
 					fetch: config?.fetch,
 				});
 			},
@@ -1295,11 +1567,12 @@ function mapWaferModel(
 	const capabilities = wafer?.capabilities ?? {};
 	const reasoning = capabilities.reasoning === true;
 	const vision = capabilities.vision === true;
+	const supportsTools = toBoolean(capabilities.tools) === false ? false : undefined;
 	const contextWindow = toPositiveNumber(
 		wafer?.context_length,
 		toPositiveNumber((entry as { max_model_len?: unknown }).max_model_len, defaults.contextWindow),
 	);
-	const maxTokens = Math.min(contextWindow, WAFER_MAX_TOKENS_CAP);
+	const maxTokens = contextWindow !== null ? Math.min(contextWindow, WAFER_MAX_TOKENS_CAP) : null;
 	const pricing = wafer?.pricing ?? {};
 	// Wafer's `/v1/models` exposes pricing through `*_cents_per_million` fields,
 	// but the values are an internal wholesale unit, not literal cents — across
@@ -1333,6 +1606,7 @@ function mapWaferModel(
 		cost,
 		contextWindow,
 		maxTokens,
+		...(supportsTools === false ? { supportsTools } : {}),
 	};
 	if (reasoning) {
 		// Wafer's `wafer.provider` envelope tells us which upstream backend serves
@@ -2023,6 +2297,7 @@ export function veniceModelManagerOptions(
 					const model = mapWithBundledReference(entry, defaults, reference);
 					return {
 						...model,
+						maxTokens: clampKimiK27CodeMaxTokens(defaults.id, model.maxTokens),
 						compat: { ...model.compat, supportsUsageInStreaming: false },
 					};
 				},
@@ -2203,7 +2478,7 @@ export function xiaomiModelManagerOptions(
 			provider: providerId,
 			baseUrl: url,
 			apiKey,
-			filterModel: (_entry, model) => !model.id.includes("-tts"),
+			filterModel: (_entry, model) => !model.id.includes("-tts") && !model.id.includes("-asr"),
 			mapModel: (entry, defaults) => {
 				const reference = references.get(defaults.id);
 				const model = mapWithBundledReference(entry, defaults, reference);
@@ -2274,6 +2549,8 @@ export function litellmModelManagerOptions(
 // 22. vLLM
 // ---------------------------------------------------------------------------
 
+const VLLM_DISCOVERY_TIMEOUT_MS = 10_000;
+
 export interface VllmModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -2286,6 +2563,7 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 	const references = createBundledReferenceMap<"openai-completions">("vllm" as Parameters<typeof getBundledModels>[0]);
 	return {
 		providerId: "vllm",
+		cacheProviderId: `vllm:${Bun.hash(baseUrl).toString(36)}`,
 		fetchDynamicModels: () =>
 			fetchOpenAICompatibleModels({
 				api: "openai-completions",
@@ -2300,6 +2578,7 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 					};
 				},
 				fetch: config?.fetch,
+				signal: AbortSignal.timeout(VLLM_DISCOVERY_TIMEOUT_MS),
 			}),
 	};
 }
@@ -2496,16 +2775,16 @@ function copilotTierCost(
  */
 function createCopilotLongContextVariant(
 	base: ModelSpec<Api>,
-	fullContextWindow: number,
-	maxTokens: number,
+	fullContextWindow: number | null,
+	maxTokens: number | null,
 	longContext: CopilotTokenPriceTier | undefined,
 ): ModelSpec<Api> | undefined {
 	const longContextMax = longContext?.contextMax;
-	if (longContextMax === undefined || longContextMax <= 0) {
+	if (longContextMax === undefined || longContextMax <= 0 || fullContextWindow === null || maxTokens === null) {
 		return undefined;
 	}
 	const variantWindow = Math.min(fullContextWindow, longContextMax + maxTokens);
-	if (variantWindow <= base.contextWindow) {
+	if (base.contextWindow === null || variantWindow <= base.contextWindow) {
 		return undefined;
 	}
 	const longCost = copilotTierCost(longContext);
@@ -2593,7 +2872,10 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						const tokenPrices = extractCopilotTokenPrices(entry);
 						const defaultContextMax = tokenPrices.defaultTier?.contextMax;
 						const defaultTierWindow =
-							defaultContextMax !== undefined && defaultContextMax > 0
+							defaultContextMax !== undefined &&
+							defaultContextMax > 0 &&
+							contextWindow !== null &&
+							maxTokens !== null
 								? Math.min(contextWindow, defaultContextMax + maxTokens)
 								: contextWindow;
 						const base: ModelSpec<Api> = reference
@@ -2735,8 +3017,6 @@ export function anthropicModelManagerOptions(
 // Models.dev provider descriptors for generate-models.ts
 // ---------------------------------------------------------------------------
 
-export { UNK_CONTEXT_WINDOW, UNK_MAX_TOKENS } from "./discovery-constants";
-
 /** Describes how to map models.dev API data for a single provider. */
 export interface ModelsDevProviderDescriptor {
 	/** Key in the models.dev API response JSON (e.g., "anthropic", "amazon-bedrock") */
@@ -2816,8 +3096,9 @@ export function mapModelsDevToModels(
 					cacheRead: toNumber(m.cost?.cache_read) ?? 0,
 					cacheWrite: toNumber(m.cost?.cache_write) ?? 0,
 				},
-				contextWindow: toPositiveNumber(m.limit?.context, desc.defaultContextWindow ?? UNK_CONTEXT_WINDOW),
-				maxTokens: toPositiveNumber(m.limit?.output, desc.defaultMaxTokens ?? UNK_MAX_TOKENS),
+				contextWindow: toPositiveNumber(m.limit?.context, desc.defaultContextWindow ?? null),
+				maxTokens: toPositiveNumber(m.limit?.output, desc.defaultMaxTokens ?? null),
+				...(m.tool_call === false ? { supportsTools: false } : {}),
 				...(desc.compat && { compat: desc.compat }),
 				...(desc.headers && { headers: { ...desc.headers } }),
 			};
@@ -3093,7 +3374,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	// --- Cerebras ---
 	openAiCompletionsDescriptor("cerebras", "cerebras", "https://api.cerebras.ai/v1"),
 	// --- Together ---
-	openAiCompletionsDescriptor("together", "together", "https://api.together.xyz/v1"),
+	openAiCompletionsDescriptor("togetherai", "together", "https://api.together.xyz/v1"),
 	// --- NVIDIA ---
 	openAiCompletionsDescriptor("nvidia", "nvidia", "https://integrate.api.nvidia.com/v1", {
 		defaultContextWindow: 131072,
@@ -3131,6 +3412,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDescriptor[] = [
 	// --- zAI ---
 	anthropicMessagesDescriptor("zai-coding-plan", "zai", "https://api.z.ai/api/anthropic"),
+	// --- Umans AI Coding Plan ---
+	anthropicMessagesDescriptor("umans-ai-coding-plan", "umans", UMANS_BASE_URL),
 	// --- Xiaomi ---
 	openAiCompletionsDescriptor("xiaomi", "xiaomi", "https://api.xiaomimimo.com/v1", {
 		defaultContextWindow: 262144,
@@ -3173,7 +3456,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 	),
 	// --- Zhipu Coding Plan ---
 	openAiCompletionsDescriptor(
-		"zhipu-coding-plan",
+		"zhipuai-coding-plan",
 		"zhipu-coding-plan",
 		"https://open.bigmodel.cn/api/coding/paas/v4",
 		{
@@ -3200,6 +3483,18 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderD
 ];
 
 const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDescriptor[] = [
+	// --- Azure OpenAI ---
+	// OpenAI-family models hosted on Azure, served via the Responses API. baseUrl
+	// is empty: the deployment host is per-resource and resolved at runtime from
+	// AZURE_OPENAI_BASE_URL / AZURE_OPENAI_RESOURCE_NAME (see resolveAzureConfig).
+	simpleModelsDevDescriptor("azure", "azure", "azure-openai-responses", "", {
+		filterModel: (modelId, m) => {
+			if (m.tool_call !== true) return false;
+			// OpenAI-family only (not Foundry/DeepSeek/Claude/Llama/Mistral/Phi, which
+			// Azure serves via non-Responses APIs under a per-model provider override).
+			return /^(gpt-|o1|o3|o4|codex|chatgpt)/.test(modelId);
+		},
+	}),
 	// --- Cloudflare AI Gateway ---
 	anthropicMessagesDescriptor(
 		"cloudflare-ai-gateway",
@@ -3256,6 +3551,41 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	// --- MiniMax (Anthropic) ---
 	anthropicMessagesDescriptor("minimax", "minimax", "https://api.minimax.io/anthropic"),
 	anthropicMessagesDescriptor("minimax-cn", "minimax-cn", "https://api.minimaxi.com/anthropic"),
+	// --- Hugging Face ---
+	openAiCompletionsDescriptor("huggingface", "huggingface", "https://router.huggingface.co/v1"),
+	// --- Kilo Gateway ---
+	openAiCompletionsDescriptor("kilo", "kilo", "https://api.kilo.ai/api/gateway"),
+	// --- Moonshot AI ---
+	openAiCompletionsDescriptor("moonshotai", "moonshot", "https://api.moonshot.ai/v1"),
+	// --- NanoGPT ---
+	openAiCompletionsDescriptor("nano-gpt", "nanogpt", "https://nano-gpt.com/api/v1"),
+	// --- Synthetic ---
+	openAiCompletionsDescriptor("synthetic", "synthetic", "https://api.synthetic.new/openai/v1"),
+	// --- Venice AI ---
+	openAiCompletionsDescriptor("venice", "venice", "https://api.venice.ai/api/v1", {
+		transformModel: model => {
+			const maxTokens = clampKimiK27CodeMaxTokens(model.id, model.maxTokens);
+			return maxTokens === model.maxTokens ? model : { ...model, maxTokens };
+		},
+	}),
+	// --- Ollama Cloud ---
+	simpleModelsDevDescriptor("ollama-cloud", "ollama-cloud", "ollama-chat", "https://ollama.com"),
+	// --- Xiaomi Token Plan ---
+	openAiCompletionsDescriptor(
+		"xiaomi-token-plan-ams",
+		"xiaomi-token-plan-ams",
+		"https://token-plan-ams.xiaomimimo.com/v1",
+	),
+	openAiCompletionsDescriptor(
+		"xiaomi-token-plan-cn",
+		"xiaomi-token-plan-cn",
+		"https://token-plan-cn.xiaomimimo.com/v1",
+	),
+	openAiCompletionsDescriptor(
+		"xiaomi-token-plan-sgp",
+		"xiaomi-token-plan-sgp",
+		"https://token-plan-sgp.xiaomimimo.com/v1",
+	),
 	// --- Qwen Portal ---
 	openAiCompletionsDescriptor("qwen-portal", "qwen-portal", "https://portal.qwen.ai/v1", {
 		defaultContextWindow: 128000,

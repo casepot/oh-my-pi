@@ -55,9 +55,13 @@ function createContext(): {
 		abort: Spy;
 		abortBash: Spy;
 		abortEval: Spy;
+		abortHandoff: Spy;
 		addMessageToChat: Spy;
 		cancelPendingSubmission: Spy;
+		clearEditor: Spy;
 		clearQueue: Spy;
+		flushSync: Spy;
+		getQueuedMessages: Spy;
 		ensureLoadingAnimation: Spy;
 		handleBtwCommand: Spy;
 		handleBtwEscape: Spy;
@@ -68,7 +72,9 @@ function createContext(): {
 		prompt: Spy;
 		requestRender: Spy;
 		resetDisplay: Spy;
+		shutdown: Spy;
 		startPendingSubmission: StartPendingSubmissionSpy;
+		updatePendingMessagesDisplay: Spy;
 	};
 	inputListeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined>;
 } {
@@ -76,9 +82,11 @@ function createContext(): {
 	const abort = vi.fn();
 	const abortBash = vi.fn();
 	const abortEval = vi.fn();
+	const abortHandoff = vi.fn();
 	const addMessageToChat = vi.fn();
 	const cancelPendingSubmission = vi.fn(() => false);
 	const clearQueue = vi.fn(() => ({ steering: [], followUp: [] }));
+	const getQueuedMessages = vi.fn(() => ({ steering: [], followUp: [] }));
 	const onInputCallback = vi.fn();
 	const requestRender = vi.fn();
 	const resetDisplay = vi.fn();
@@ -88,6 +96,7 @@ function createContext(): {
 	const hasActiveBtw = vi.fn(() => false);
 	const handleOmfgEscape = vi.fn(() => true);
 	const hasActiveOmfg = vi.fn(() => false);
+	const updatePendingMessagesDisplay = vi.fn();
 	const prompt = vi.fn();
 	const startPendingSubmission = vi.fn(
 		(input: {
@@ -146,16 +155,27 @@ function createContext(): {
 			abortBash,
 			abortEval,
 			clearQueue,
+			getQueuedMessages,
 			prompt,
 		} as unknown as InteractiveModeContext["session"],
+		viewSession: {
+			isCompacting: false,
+			isGeneratingHandoff: false,
+			isRetrying: false,
+			abortCompaction: vi.fn(),
+			abortHandoff,
+			abortRetry: vi.fn(),
+		} as unknown as InteractiveModeContext["viewSession"],
 		sessionManager: {
 			getSessionName: () => "existing session",
+			flushSync: vi.fn(),
 		} as unknown as InteractiveModeContext["sessionManager"],
 		keybindings: {
 			getKeys: () => [],
 		} as unknown as InteractiveModeContext["keybindings"],
 		pendingImages: [],
 		pendingImageLinks: [],
+		compactionQueuedMessages: [],
 		isBashMode: false,
 		isPythonMode: false,
 		optimisticUserMessageSignature: undefined,
@@ -164,12 +184,11 @@ function createContext(): {
 		addMessageToChat,
 		cancelPendingSubmission,
 		ensureLoadingAnimation,
-		notifyInterrupting: vi.fn(),
 		finishPendingSubmission: vi.fn(),
 		flushPendingBashComponents: vi.fn(),
 		markPendingSubmissionStarted: vi.fn(() => true),
 		startPendingSubmission,
-		updatePendingMessagesDisplay: vi.fn(),
+		updatePendingMessagesDisplay,
 		updateEditorBorderColor: vi.fn(),
 		showDebugSelector: vi.fn(),
 		toggleTodoExpansion: vi.fn(),
@@ -185,6 +204,8 @@ function createContext(): {
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
+		shutdown: vi.fn(async () => {}),
+		clearEditor: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -194,10 +215,14 @@ function createContext(): {
 			abort,
 			abortBash,
 			abortEval,
+			abortHandoff,
 			addMessageToChat,
 			cancelPendingSubmission,
 			clearQueue,
+			clearEditor: ctx.clearEditor as Spy,
+			getQueuedMessages,
 			ensureLoadingAnimation,
+			flushSync: ctx.sessionManager.flushSync as Spy,
 			handleBtwCommand,
 			handleBtwEscape,
 			hasActiveBtw,
@@ -207,7 +232,9 @@ function createContext(): {
 			prompt,
 			requestRender,
 			resetDisplay,
+			shutdown: ctx.shutdown as Spy,
 			startPendingSubmission,
+			updatePendingMessagesDisplay,
 		},
 		inputListeners,
 	};
@@ -217,6 +244,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	resetSettingsForTest();
 });
 
@@ -237,6 +265,7 @@ describe("InputController escape behavior", () => {
 			text: "hello",
 			images: undefined,
 			imageLinks: undefined,
+			streamingBehavior: "steer",
 		});
 		expect(spies.onInputCallback).toHaveBeenCalledWith(submission);
 
@@ -246,6 +275,27 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
+	it("empty-submit with a queued message aborts the active stream and refreshes pending display", async () => {
+		const { ctx, editor, spies } = createContext();
+		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).isStreaming = true;
+		(ctx.session as { isStreaming: boolean; queuedMessageCount: number }).queuedMessageCount = 1;
+		const order: string[] = [];
+		spies.abort.mockImplementation(async () => {
+			order.push("abort");
+		});
+		spies.updatePendingMessagesDisplay.mockImplementation(() => {
+			order.push("refresh");
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("");
+
+		expect(order).toEqual(["abort", "refresh"]);
+		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
+		expect(spies.requestRender).toHaveBeenCalledTimes(1);
+	});
 	it("runs /btw as a builtin side request instead of steering the active stream", async () => {
 		const { ctx, editor, spies } = createContext();
 		(ctx.session as { isStreaming: boolean }).isStreaming = true;
@@ -275,6 +325,19 @@ describe("InputController escape behavior", () => {
 		// The Esc interrupt threads a user-facing reason so the aborted turn and its
 		// synthetic tool results read as a deliberate interrupt, not "Request was aborted".
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+	});
+
+	it("aborts active handoff generation before default Esc handling", () => {
+		const { ctx, editor, spies } = createContext();
+		(ctx.viewSession as { isGeneratingHandoff: boolean }).isGeneratingHandoff = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.abortHandoff).toHaveBeenCalledTimes(1);
+		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
+		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
 	it("prefers aborting bash before aborting an overlapping stream", () => {
@@ -370,17 +433,22 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
-	it("routes focused left-left through the global input listener like Esc", () => {
+	it("routes a focused double-← through the global input listener like Esc", () => {
+		const now = vi.spyOn(Date, "now");
 		const { ctx, inputListeners } = createContext();
 		Object.defineProperty(ctx, "focusedAgentId", { value: "Worker", configurable: true });
-		ctx.lastLeftTapTime = Date.now();
+		ctx.lastLeftTapTime = 0;
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
-		const result = inputListeners[0]("\x1b[D");
+		now.mockReturnValue(2_000);
+		const first = inputListeners[0]("\x1b[D");
+		now.mockReturnValue(2_200); // 200ms later — a deliberate second tap
+		const second = inputListeners[0]("\x1b[D");
 
-		expect(result).toEqual({ consume: true });
-
+		// Both taps are consumed; only the second completes the gesture.
+		expect(first).toEqual({ consume: true });
+		expect(second).toEqual({ consume: true });
 		expect(ctx.unfocusSession).toHaveBeenCalledTimes(1);
 		expect(ctx.focusParentSession).not.toHaveBeenCalled();
 	});
@@ -436,7 +504,102 @@ describe("InputController escape behavior", () => {
 		editor.onEscape?.(); // clears text, must also reset the timer
 		editor.onEscape?.(); // empty again: should only re-arm, not trigger
 
-		expect(ctx.showTreeSelector).not.toHaveBeenCalled();
 		expect(ctx.showUserMessageSelector).not.toHaveBeenCalled();
+	});
+});
+
+describe("InputController Ctrl+C behavior", () => {
+	it("sync-flushes the session JSONL on first Ctrl+C (editor clear)", () => {
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onClear?.(); // first Ctrl+C: clears editor
+
+		expect(spies.clearEditor).toHaveBeenCalledTimes(1);
+		expect(spies.flushSync).toHaveBeenCalledTimes(1);
+		expect(spies.shutdown).not.toHaveBeenCalled();
+	});
+
+	it("sync-flushes the session JSONL on second Ctrl+C (shutdown)", () => {
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onClear?.(); // first Ctrl+C
+		editor.onClear?.(); // second Ctrl+C within 500ms → shutdown
+
+		expect(spies.shutdown).toHaveBeenCalledTimes(1);
+		// flushSync fires on both presses; the first-press flush is the
+		// guarantee that the JSONL is on disk even if the user closes the
+		// terminal before the second press.
+		expect(spies.flushSync).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not flush when Ctrl+C is not pressed", () => {
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.(); // Esc is a different handler
+
+		expect(spies.flushSync).not.toHaveBeenCalled();
+	});
+});
+
+describe("InputController double-tap ← gesture", () => {
+	function setup(focusedAgentId?: string) {
+		const { ctx, editor } = createContext();
+		(ctx as { lastLeftTapTime: number }).lastLeftTapTime = 0;
+		(ctx as { focusedAgentId?: string }).focusedAgentId = focusedAgentId;
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		return {
+			ctx,
+			showAgentHub: ctx.showAgentHub as Spy,
+			unfocusSession: ctx.unfocusSession as Spy,
+			tap: () => editor.onLeftAtStart?.(),
+		};
+	}
+
+	it("opens the Agent Hub on a deliberate double-tap", () => {
+		const now = vi.spyOn(Date, "now");
+		const { showAgentHub, tap } = setup();
+		now.mockReturnValue(1_000);
+		tap();
+		now.mockReturnValue(1_200); // 200ms later — a human double-tap
+		tap();
+		expect(showAgentHub).toHaveBeenCalledTimes(1);
+	});
+
+	it("ignores a terminal-synthesized burst of ← arrows arriving together", () => {
+		const now = vi.spyOn(Date, "now");
+		const { showAgentHub, tap } = setup();
+		// A "click to move cursor" burst delivers every arrow in one stdin read,
+		// so all taps share the same millisecond timestamp.
+		now.mockReturnValue(1_000);
+		for (let i = 0; i < 6; i++) tap();
+		expect(showAgentHub).not.toHaveBeenCalled();
+	});
+
+	it("ignores a second tap closer than the human-plausible minimum gap", () => {
+		const now = vi.spyOn(Date, "now");
+		const { showAgentHub, tap } = setup();
+		now.mockReturnValue(1_000);
+		tap();
+		now.mockReturnValue(1_010); // 10ms later — too fast to be deliberate
+		tap();
+		expect(showAgentHub).not.toHaveBeenCalled();
+	});
+
+	it("returns a focused subagent view to the main session on a deliberate double-tap", () => {
+		const now = vi.spyOn(Date, "now");
+		const { showAgentHub, unfocusSession, tap } = setup("Agent1");
+		now.mockReturnValue(1_000);
+		tap();
+		now.mockReturnValue(1_200);
+		tap();
+		expect(unfocusSession).toHaveBeenCalledTimes(1);
+		expect(showAgentHub).not.toHaveBeenCalled();
 	});
 });

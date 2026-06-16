@@ -60,8 +60,9 @@ Each frame is a single JSON object followed by `\n`. There is no envelope beyond
 6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
-10. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
+9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
+10. Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
+11. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
 ### Streams
 
@@ -88,6 +89,8 @@ Important edge behavior from runtime:
 - Unknown command responses are emitted with `id: undefined` (even if the request had an `id`).
 - Parse/handler exceptions in the input loop emit `command: "parse"` with `id: undefined`.
 - `prompt` and `abort_and_prompt` return immediate success, then may emit a later error response with the **same** id if async prompt scheduling fails.
+- `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
+- `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
 
 ## Command Schema (canonical)
 
@@ -164,6 +167,186 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "get_login_providers" }`
 - `{ id?, type: "login", providerId: string }`
+
+## Response Schema
+
+All command results use `RpcResponse`:
+
+- Success: `{ id?, type: "response", command: <command>, success: true, data?: ... }`
+- Failure: `{ id?, type: "response", command: string, success: false, error: string }`
+
+Data payloads are command-specific and defined in `rpc-types.ts`.
+
+### `prompt` payload
+
+`prompt` is acknowledged after the command is accepted, not after a model turn finishes:
+
+```json
+{
+  "id": "req_1",
+  "type": "response",
+  "command": "prompt",
+  "success": true,
+  "data": { "agentInvoked": false }
+}
+```
+
+`data.agentInvoked: false` is a completion signal for local-only prompts, including slash commands that produce output without starting an agent turn. `data.agentInvoked: true` means the prompt produced agent lifecycle events; those events can be emitted before or after the prompt response depending on the command path. Older runtimes may omit `data`; hosts should then rely on `agent_end`, custom message completion, or `prompt_result`.
+
+`prompt_result` is emitted when a prompt was accepted immediately but later resolves as local-only:
+
+```json
+{ "type": "prompt_result", "id": "req_1", "agentInvoked": false }
+```
+
+Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
+
+### `get_state` payload
+
+```json
+{
+  "model": { "provider": "...", "id": "..." },
+  "thinkingLevel": "off|minimal|low|medium|high|xhigh",
+  "isStreaming": false,
+  "isCompacting": false,
+  "steeringMode": "all|one-at-a-time",
+  "followUpMode": "all|one-at-a-time",
+  "interruptMode": "immediate|wait",
+  "sessionFile": "...",
+  "sessionId": "...",
+  "sessionName": "...",
+  "autoCompactionEnabled": true,
+  "messageCount": 0,
+  "queuedMessageCount": 0,
+  "todoPhases": [
+    {
+      "id": "phase-1",
+      "name": "Todos",
+      "tasks": [
+        {
+          "id": "task-1",
+          "content": "Map the tool surface",
+          "status": "in_progress"
+        }
+      ]
+    }
+  ],
+  "systemPrompt": ["..."],
+  "dumpTools": [
+    {
+      "name": "read",
+      "description": "Read files and URLs",
+      "parameters": {}
+    }
+  ],
+  "contextUsage": {
+    "tokens": 1100,
+    "contextWindow": 200000,
+    "percent": 0.55
+  }
+}
+```
+
+### `set_todos` payload
+
+Replaces the in-memory todo state for the current session and returns the normalized phase list:
+
+```json
+{
+  "id": "req_2",
+  "type": "set_todos",
+  "phases": [
+    {
+      "id": "phase-1",
+      "name": "Evaluation",
+      "tasks": [
+        {
+          "id": "task-1",
+          "content": "Map the read tool surface",
+          "status": "in_progress"
+        },
+        {
+          "id": "task-2",
+          "content": "Exercise edit operations",
+          "status": "pending"
+        }
+      ]
+    }
+  ]
+}
+```
+
+This is useful for hosts that want to pre-seed a plan before the first prompt.
+
+### `set_host_tools` payload
+
+Replaces the current set of host-owned tools that the RPC server may call back
+into over stdio:
+
+```json
+{
+  "id": "req_3",
+  "type": "set_host_tools",
+  "tools": [
+    {
+      "name": "echo_host",
+      "label": "Echo Host",
+      "description": "Echo a value from the embedding host",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
+```
+
+The response payload is:
+
+```json
+{
+  "toolNames": ["echo_host"]
+}
+```
+
+These tools are added to the active session tool registry before the next model
+call. Re-sending `set_host_tools` replaces the previous host-owned set.
+
+### `set_host_uri_schemes` payload
+
+Replaces the current set of host-owned URL schemes the RPC server should
+dispatch reads/writes through:
+
+```json
+{
+  "id": "req_4",
+  "type": "set_host_uri_schemes",
+  "schemes": [
+    {
+      "scheme": "db",
+      "description": "Virtual db row files",
+      "writable": true,
+      "immutable": false
+    }
+  ]
+}
+```
+
+The response payload is:
+
+```json
+{
+  "schemes": ["db"]
+}
+```
+
+Schemes are case-insensitive on the wire and normalized to lowercase before
+the response is sent. Re-sending `set_host_uri_schemes` replaces the entire
+previous set — schemes missing from the new list are unregistered.
 
 ## Frame metadata
 
@@ -491,6 +674,79 @@ Lane state changes emit:
 
 Hosts should surface `blocksIfFired`, required-before-parent, branch/worktree/session refs, latest reports, and close outcome as audit/control state. They must not parse child prose for blockers; blocker state comes from structured `lane_report` handling in the parent session.
 
+## Event Stream Schema
+
+RPC mode forwards `AgentSessionEvent` objects from `AgentSession.subscribe(...)`.
+
+Common event types:
+
+- `agent_start`, `agent_end`
+- `turn_start`, `turn_end`
+- `message_start`, `message_update`, `message_end`
+- `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
+- `auto_compaction_start`, `auto_compaction_end`
+- `auto_retry_start`, `auto_retry_end`
+- `ttsr_triggered`
+- `todo_reminder`
+- `todo_auto_clear`
+
+Extension runner errors are emitted separately as:
+
+```json
+{
+  "type": "extension_error",
+  "extensionPath": "...",
+  "event": "...",
+  "error": "..."
+}
+```
+
+`message_update` includes streaming deltas in `assistantMessageEvent` (text/thinking/toolcall deltas).
+
+## Prompt/Queue Concurrency and Ordering
+
+This is the most important operational behavior.
+
+### Immediate ack vs completion
+
+`prompt` and `abort_and_prompt` are **acknowledged immediately**:
+
+```json
+{ "id": "req_1", "type": "response", "command": "prompt", "success": true }
+```
+
+That means:
+
+- command acceptance != run completion
+- agent turns complete via `agent_end`
+- local-only prompts complete via `data.agentInvoked: false` on the response or via a later `prompt_result`
+
+### While streaming
+
+`AgentSession.prompt()` requires `streamingBehavior` during active streaming:
+
+- `"steer"` => queued steering message (interrupt path)
+- `"followUp"` => queued follow-up message (post-turn path)
+
+If omitted during streaming, prompt fails.
+
+### Queue defaults
+
+From `packages/agent/src/agent.ts` defaults:
+
+- `steeringMode`: `"one-at-a-time"`
+- `followUpMode`: `"one-at-a-time"`
+- `interruptMode`: `"immediate"`
+
+### Mode semantics
+
+- `set_steering_mode` / `set_follow_up_mode`
+  - `"one-at-a-time"`: dequeue one queued message per turn
+  - `"all"`: dequeue entire queue at once
+- `set_interrupt_mode`
+  - `"immediate"`: tool execution checks steering between tool calls; pending steering can abort remaining tool calls in the turn
+  - `"wait"`: defer steering until turn completion
+
 ## Host tools
 
 Registration commands:
@@ -586,6 +842,13 @@ Responses:
 ```
 
 Event-only frames do not create pending UI state. Timeout, abort, close, and explicit cancel clean pending state.
+
+Runtime note:
+
+- Automatic session title generation is disabled in RPC mode, and `setTitle` UI
+  requests are also suppressed by default because most hosts do not have a
+  meaningful terminal-title surface. Set `PI_RPC_EMIT_TITLE=1` to opt back in to
+  the UI event only.
 
 ## Clients
 

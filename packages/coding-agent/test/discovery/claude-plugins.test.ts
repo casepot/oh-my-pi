@@ -10,6 +10,7 @@ import {
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { loadSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { loadSlashCommands } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import type { MCPServer } from "@oh-my-pi/pi-coding-agent/capability/mcp";
@@ -529,6 +530,42 @@ describe("listClaudePluginRoots", () => {
 
 		expect(found).toBeDefined();
 		expect(found?.path).toContain(path.join(".claude", "skills", "manifest-skill", "SKILL.md"));
+	});
+	test("keeps plugin skills out of slash commands while loading them as skills", async () => {
+		const projectDir = path.join(tempDir, "workspace");
+		const pluginsDir = path.join(projectDir, ".omp", "plugins");
+		const pluginPath = path.join(tempDir, "plugins", "understand-anything");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(path.join(pluginPath, "skills", "understand"), { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"understand-anything@understand-anything": [
+					{
+						scope: "user",
+						installPath: pluginPath,
+						version: "2.7.7",
+						installedAt: "2026-06-12T00:00:00Z",
+						lastUpdated: "2026-06-12T00:00:00Z",
+					},
+				],
+			},
+		};
+
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+		await fs.writeFile(
+			path.join(pluginPath, "skills", "understand", "SKILL.md"),
+			"---\nname: understand\ndescription: Build an understanding graph\n---\nAnalyze the project.\n",
+		);
+
+		const commands = await loadSlashCommands({ cwd: projectDir });
+		const skills = await loadCapability<Skill>("skills", { cwd: projectDir });
+
+		expect(commands.find(command => command.name === "understand")).toBeUndefined();
+		expect(skills.all.find(skill => skill.name === "understand")?.frontmatter?.description).toBe(
+			"Build an understanding graph",
+		);
 	});
 
 	test("reads slash commands directory from plugin manifest slash-commands field", async () => {

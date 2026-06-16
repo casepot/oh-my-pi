@@ -115,6 +115,7 @@ async function loadImpl<T>(
 		? new Set<string>()
 		: new Set<string>(options.disabledExtensions ?? settings?.get("disabledExtensions") ?? []);
 	const includeUserSources = options.includeUserSources ?? settings?.get("discovery.enableUserSources") === true;
+	const includeUserSourceProviders = new Set(options.includeUserSourceProviders ?? []);
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -167,7 +168,7 @@ async function loadImpl<T>(
 				continue;
 			}
 
-			if (source.level === "user" && !includeUserSources) {
+			if (source.level === "user" && !includeUserSources && !includeUserSourceProviders.has(source.provider)) {
 				continue;
 			}
 			source.providerName = provider.displayName;

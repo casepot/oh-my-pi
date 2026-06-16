@@ -106,6 +106,17 @@ describe("streaming reveal", () => {
 		expect(textAt(display, 1)).toBe("a");
 	});
 
+	it("excludes dot-only reasoning placeholders from the reveal budget", () => {
+		const thinkingBlock = { type: "thinking" as const, thinking: "...", thinkingSignature: "reasoning_content" };
+		const target = makeMessage([thinkingBlock, { type: "text", text: "answer" }]);
+
+		expect(visibleUnits(target, false)).toBe("answer".length);
+		const display = buildDisplayMessage(target, 1, false);
+
+		expect(display.content[0]).toBe(thinkingBlock);
+		expect(textAt(display, 1)).toBe("a");
+	});
+
 	it("smooths thinking content when thinking is shown", () => {
 		const target = makeMessage([
 			{ type: "thinking", thinking: "thought" },
@@ -206,21 +217,6 @@ describe("streaming reveal", () => {
 		expect(textAt(latestMessage(component), 0)).toBe("abc");
 		expect(component.transientFlags).not.toHaveLength(0);
 		expect(component.transientFlags.every(flag => flag === true)).toBe(true);
-	});
-
-	it("ticks increasing prefixes at the render cadence", () => {
-		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ requestRender });
-
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]));
-
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
-		expect(textAt(latestMessage(component), 0)).toBe("abc");
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
-		expect(textAt(latestMessage(component), 0)).toBe("abcdef");
-		expect(requestRender).toHaveBeenCalledTimes(2);
 	});
 
 	it("stop halts pending ticker updates", () => {

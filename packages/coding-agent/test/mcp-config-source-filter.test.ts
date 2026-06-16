@@ -3,12 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadAllMCPConfigs } from "@oh-my-pi/pi-coding-agent/mcp/config";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { getAgentDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
 describe("MCP config source filtering", () => {
 	let tempDir: string;
 	let projectDir: string;
 	let homeDir: string;
+	let originalAgentDir: string;
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-mcp-source-filter-${Snowflake.next()}`);
@@ -16,11 +17,14 @@ describe("MCP config source filtering", () => {
 		homeDir = path.join(tempDir, "home");
 		fs.mkdirSync(path.join(projectDir, ".omp"), { recursive: true });
 		fs.mkdirSync(path.join(homeDir, ".omp", "agent"), { recursive: true });
+		originalAgentDir = getAgentDir();
+		setAgentDir(path.join(homeDir, ".omp", "agent"));
 		vi.spyOn(os, "homedir").mockReturnValue(homeDir);
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		setAgentDir(originalAgentDir);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 

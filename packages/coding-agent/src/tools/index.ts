@@ -6,7 +6,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { FetchImpl, ToolChoice } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, Model, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type {
@@ -48,10 +48,11 @@ import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
-import type { UsageStatistics } from "../session/session-manager";
+import type { UsageStatistics } from "../session/session-entries";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
+import { canSpawnAtDepth } from "../task/types";
 import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
 import type {
 	DiscoverableTool,
@@ -66,6 +67,7 @@ import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
+import type { BuiltinToolName } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import type { ConflictHistory } from "./conflict-detect";
 import { DebugTool } from "./debug";
@@ -76,6 +78,8 @@ import { GithubTool } from "./gh";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool, isIrcEnabled } from "./irc";
 import { JobTool } from "./job";
+import { LearnTool } from "./learn";
+import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
@@ -115,6 +119,8 @@ export * from "./image-gen";
 export * from "./inspect-image";
 export * from "./irc";
 export * from "./job";
+export * from "./learn";
+export * from "./manage-skill";
 export * from "./memory-edit";
 export * from "./memory-recall";
 export * from "./memory-reflect";
@@ -177,6 +183,13 @@ export interface ToolSession {
 	cwd: string;
 	/** Whether UI is available */
 	hasUI: boolean;
+	/**
+	 * Suppress the spawn specialization/coordination advisory appended to `task`
+	 * results. Set by internal/programmatic callers (e.g. the commit agent's
+	 * file-analysis fan-out) whose results are consumed by code — not by a model
+	 * orchestrating further spawns — so the nudge would only be noise.
+	 */
+	suppressSpawnAdvisory?: boolean;
 	/** Optional fetch implementation injected into the URL read pipeline (tests, proxies). Defaults to global fetch. */
 	fetch?: FetchImpl;
 	/** Skip Python kernel availability check and warmup */
@@ -250,6 +263,8 @@ export interface ToolSession {
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */
 	getActiveModelString?: () => string | undefined;
+	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
+	getActiveModel?: () => Model | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
@@ -457,7 +472,7 @@ export function filterInitialToolsForDiscoveryAll(
  * Public callable factory map. External callers may invoke `BUILTIN_TOOLS.read(session)` or
  * `BUILTIN_TOOLS[name](session)` to construct a tool directly.
  */
-export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
+export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
 	bash: s => new BashTool(s),
 	edit: s => new EditTool(s),
@@ -487,6 +502,8 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	retain: MemoryRetainTool.createIf,
 	recall: MemoryRecallTool.createIf,
 	reflect: MemoryReflectTool.createIf,
+	learn: LearnTool.createIf,
+	manage_skill: ManageSkillTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
@@ -498,7 +515,7 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	background_lane: s => new BackgroundLaneTool(s),
 };
 
-export type ToolName = keyof typeof BUILTIN_TOOLS;
+export type ToolName = BuiltinToolName;
 
 const GOAL_CONTROL_ALLOWED_TOOLS: Record<string, true> = { goal: true, background_lane: true, yield: true };
 const kGoalRunModeGuard: unique symbol = Symbol("GoalRunModeGuard");
@@ -625,6 +642,21 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				if (!requestedTools.includes(name)) requestedTools.push(name);
 			}
 		}
+		// Auto-learn tools are gated by `autolearn.enabled` but, like the memory
+		// tools above, must also be force-included into an explicit requestedTools
+		// list so a restricted top-level session whose controller/guidance is
+		// active still exposes the tools the nudge points at. Gated to top-level
+		// (taskDepth 0): the controller only runs there, so a subagent's explicit
+		// tool whitelist must never be silently widened with write-capable tools.
+		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
+			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
+			if (
+				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
+				!requestedTools.includes("learn")
+			) {
+				requestedTools.push("learn");
+			}
+		}
 	}
 	// Resolve effective tool discovery mode.
 	// tools.discoveryMode controls the new modes; mcp.discoveryMode remains a back-compat alias for "mcp-only".
@@ -659,10 +691,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
+		if (name === "manage_skill") return session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0;
+		if (name === "learn") {
+			return (
+				session.settings.get("autolearn.enabled") &&
+				(session.taskDepth ?? 0) === 0 &&
+				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+			);
+		}
 		if (name === "task") {
-			const maxDepth = session.settings.get("task.maxRecursionDepth") ?? 2;
-			const currentDepth = session.taskDepth ?? 0;
-			return maxDepth < 0 || currentDepth < maxDepth;
+			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}
 		return true;
 	};

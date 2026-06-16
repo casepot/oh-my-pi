@@ -72,6 +72,8 @@ export interface LoadOptions {
 	includeDisabled?: boolean;
 	/** Include user-level capability sources. Default: false unless explicitly enabled. */
 	includeUserSources?: boolean;
+	/** Include user-level sources only for these provider IDs even when includeUserSources is false. */
+	includeUserSourceProviders?: readonly string[];
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
 }

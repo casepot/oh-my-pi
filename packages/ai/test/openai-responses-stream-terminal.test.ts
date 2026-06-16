@@ -9,9 +9,9 @@
 //    accumulation buffer, mirroring the function_call branch.
 import { describe, expect, test } from "bun:test";
 import { processResponsesStream } from "@oh-my-pi/pi-ai/providers/openai-responses-shared";
+import type { ResponseStreamEvent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { ResponseStreamEvent } from "openai/resources/responses/responses";
 
 function makeModel(): Model<"openai-responses"> {
 	return buildModel({
@@ -332,6 +332,28 @@ describe("processResponsesStream: lost output_item.added recovery", () => {
 				makeModel(),
 			),
 		).rejects.toThrow("incomplete: content_filter");
+	});
+
+	test("handles nested error object in error events", async () => {
+		const output = makeOutput();
+		const stream = { push: () => {}, end: () => {} } as never;
+
+		await expect(
+			processResponsesStream(
+				makeStream([
+					{
+						type: "error",
+						error: {
+							code: "context_length_exceeded",
+							message: "Your input exceeds the context window limit",
+						},
+					},
+				]),
+				output,
+				stream,
+				makeModel(),
+			),
+		).rejects.toThrow("Error Code context_length_exceeded: Your input exceeds the context window limit");
 	});
 
 	test("preserves premiumRequests across usage population", async () => {

@@ -42,17 +42,18 @@ tool.<name>(args) → unknown
 llm(prompt, model?="default", system?=None, schema?=None) → str | dict
     Oneshot, stateless LLM call (no history, no tools). `model` picks a tier: "smol" (fast), "default" (this session's model), "slow" (most capable). Pass `system` for a system prompt. Pass a JSON-Schema `schema` to force structured output and get the parsed object back; otherwise returns the completion text.
 completion(prompt, model?="default", system?=None, schema?=None) → str | dict
-    Alias for `llm`.
-{{#if spawns}}
-agent(prompt, agent_type?="task", model?=None, context?=None, label?=None, schema?=None) → str | dict
-    Run a subagent and return its final output. Defaults to the bundled "task" agent; pass `agent_type`/`agentType` for another discovered agent. Pass a JSON-Schema `schema` to force structured output and get the parsed object back.
+    Oneshot stateless completion (no history, no tools). `model` tier: "smol" (fast) | "default" (session model) | "slow" (most capable). JSON-Schema `schema` forces structured output, returns parsed object.
+{{#if spawns}}agent(prompt, agent_type?="task", model?=None, label?=None, schema?=None, return_handle?=False) → str | dict
+    Run a subagent, return its final output. `agent_type`/`agentType` picks another discovered agent; `schema` as in completion(). Share background via `local://` files referenced in the prompt. `return_handle`/`returnHandle` → a DAG node dict { text, output, handle: "agent://<id>", id, agent } (parsed object under `data` when `schema` set) so a downstream stage references the transcript by handle instead of re-inlining it.
+{{#if js}}    JS: options are ONE trailing object — agent(prompt, { agentType, schema, returnHandle }).
+{{/if}}
+{{/if}}
 parallel(thunks) → list
     Run thunks through a bounded pool (as wide as a `task` batch — don't pre-shrink), preserving input order. Barrier: returns when all finish; a throwing thunk propagates after siblings settle.
 parallel_settled(thunks) → list
     Same scheduling/order as `parallel()`, but returns per-child `{status:"fulfilled", value}` or `{status:"rejected", reason, error_type}` records so one failure cannot erase successful siblings.
 pipeline(items, ...stages) → list
     Map items through one-arg stages left-to-right, barrier between stages; stage 1 gets the item, later stages the previous result. Same pool width as parallel().
-{{/if}}
 log(message) → None
     Progress line above the status tree.
 phase(title) → None
@@ -61,12 +62,13 @@ budget → per-turn token budget
     {{#if py}}`budget.total` (ceiling or None), `budget.spent()`, `budget.remaining()` (math.inf when no ceiling), `budget.hard` (bool).{{/if}}{{#if js}}`await budget.total()` (ceiling or null), `await budget.spent()`, `await budget.remaining()` (Infinity when no ceiling), `await budget.hard()`.{{/if}} Ceiling comes from a `+Nk` directive (advisory) or `+Nk!`/Goal Mode{{#if spawns}} (hard — `agent()` refuses to spawn past it){{/if}}; otherwise None/null, spend still tracked across the turn.
 ```
 </prelude>
-
-<example>
-{
-  "cells": [
-    { "language": "py", "title": "imports", "timeout": 10, "code": "import json\nfrom pathlib import Path" },
-    { "language": "py", "title": "load config", "code": "data = json.loads(read('package.json'))\ndisplay(data)" }
-  ]
-}
-</example>
+{{#if spawns}}
+<dag>
+Build a dependency graph by piping handles through the stage helpers — ephemeral, in-session, acyclic waves:
+- **Name nodes.** Capture each `agent(…, {{#if py}}return_handle=True{{/if}}{{#if js}}{ returnHandle: true }{{/if}})` result; it carries `handle` (`agent://<id>`) + `output`.
+- **Wire edges by reference.** Embed an upstream node's `handle` or `output` in the dependent stage's prompt so a large transcript flows by reference, never re-inlined. For bulk artifacts, `write("local://<name>.md", …)` and pass the URI.
+- **`pipeline(items, *stages)` = staged waves** with a barrier between stages (every item clears stage N before any enters stage N+1) — the linear spine of a DAG. **`parallel(thunks)` = one wave** of independent nodes.
+- **Isolate failure.** A raising node re-raises the lowest-index error and aborts its wave; wrap each risky node in try/except so a failed node degrades only its dependent subtree while independent branches still finish.
+- **Acyclic only.** A node never waits on its own descendant; cycles are an authoring bug, not a supported pattern.
+</dag>
+{{/if}}

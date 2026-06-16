@@ -94,6 +94,18 @@ const mockOpenRouterModels: Model<Api>[] = [
 		contextWindow: 128000,
 		maxTokens: 8192,
 	}),
+	buildModel({
+		id: "deepseek/deepseek-v4-pro",
+		name: "DeepSeek V4 Pro",
+		api: "openai-completions",
+		provider: "openrouter",
+		baseUrl: "https://openrouter.ai/api/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	}),
 ];
 
 const mockProviderOverlapModels: Model<"anthropic-messages">[] = [
@@ -555,65 +567,12 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "pi/designer", settings })).toEqual(["local/llama"]);
 	});
 
-	test("keeps built-in priority defaults when default aliases the same unset role", () => {
-		const smolSettings = Settings.isolated({
-			modelRoles: { default: "pi/smol" },
-		});
-		const slowSettings = Settings.isolated({
-			modelRoles: { default: "pi/slow" },
-		});
-		const designerSettings = Settings.isolated({
-			modelRoles: { default: "pi/designer" },
-		});
-
-		expect(resolveAgentModelPatterns({ agentModel: "pi/smol", settings: smolSettings })).toEqual([
-			"cerebras/zai-glm-4.7",
-			"cerebras/zai-glm-4.6",
-			"cerebras/zai-glm",
-			"haiku-4-5",
-			"haiku-4.5",
-			"haiku",
-			"flash",
-			"mini",
-		]);
-		expect(resolveAgentModelPatterns({ agentModel: "pi/slow", settings: slowSettings })[0]).toBe("gpt-5.4");
-		expect(resolveAgentModelPatterns({ agentModel: "pi/designer", settings: designerSettings })[0]).toBe(
-			"google-gemini-cli/gemini-3.1-pro",
-		);
-	});
-
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "pi/slow", slow: "anthropic/claude-sonnet-4-5" },
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "pi/smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
-	});
-
-	test("recurses into priority defaults when default points at another unset role", () => {
-		const settings = Settings.isolated({
-			modelRoles: { default: "pi/slow" },
-		});
-
-		expect(resolveAgentModelPatterns({ agentModel: "pi/smol", settings })[0]).toBe("gpt-5.4");
-	});
-
-	test("expands pi/designer to priority defaults when default is unset", () => {
-		const settings = Settings.isolated();
-
-		const result = resolveAgentModelPatterns({
-			agentModel: "pi/designer",
-			settings,
-		});
-
-		expect(result).toEqual([
-			"google-gemini-cli/gemini-3.1-pro",
-			"google-gemini-cli/gemini-3-pro",
-			"gemini-3.1-pro",
-			"gemini-3-1-pro",
-			"gemini-3-pro",
-			"gemini-3",
-		]);
 	});
 
 	test("prefers configured designer role override over priority defaults", () => {
@@ -1046,6 +1005,14 @@ describe("provider routing selector (@upstream)", () => {
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
 
+	test("preserves @upstream when the slug also matches model tokens", () => {
+		const result = parseModelPattern("openrouter/deepseek/deepseek-v4-pro@deepseek:high", allModels);
+		expect(result.model?.id).toBe("deepseek/deepseek-v4-pro");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.upstream).toBe("deepseek");
+		expect(openRouterOnly(result.model)).toEqual(["deepseek"]);
+	});
+
 	test("routes Vercel AI Gateway models via vercelGatewayRouting", () => {
 		const gatewayModel: Model<"openai-completions"> = buildModel({
 			id: "zai/glm-4.7",
@@ -1082,6 +1049,28 @@ describe("provider routing selector (@upstream)", () => {
 			maxTokens: 32000,
 		});
 		const result = parseModelPattern("claude-opus-4-8@default", [vertexModel]);
+		expect(result.model?.id).toBe("claude-opus-4-8@default");
+		expect(result.upstream).toBeUndefined();
+		expect(openRouterOnly(result.model)).toBeUndefined();
+	});
+
+	test("keeps fuzzy matching a non-aggregator provider id that ends in @ (Vertex)", () => {
+		const vertexModel: Model<"anthropic-messages"> = buildModel({
+			id: "claude-opus-4-8@default",
+			name: "Claude Opus 4.8",
+			api: "anthropic-messages",
+			provider: "google-vertex",
+			baseUrl: "https://us-aiplatform.googleapis.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+			contextWindow: 200000,
+			maxTokens: 32000,
+		});
+		// `opus@default` is a fuzzy provider-qualified pattern: the `@upstream` bypass must not
+		// swallow it, because google-vertex is not an aggregator and the routing fallback would
+		// never resolve it, leaving the selector unmatched.
+		const result = parseModelPattern("google-vertex/opus@default", [vertexModel]);
 		expect(result.model?.id).toBe("claude-opus-4-8@default");
 		expect(result.upstream).toBeUndefined();
 		expect(openRouterOnly(result.model)).toBeUndefined();

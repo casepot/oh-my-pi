@@ -13,7 +13,7 @@ import type {
 import type { AssistantMessage, AssistantMessageEvent, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import * as z from "zod/v4";
+import { z } from "zod/v4";
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
 // Simple identity converter for tests - just passes through standard messages
@@ -842,6 +842,149 @@ describe("agentLoop with AgentMessage", () => {
 			m => m.role === "user" && typeof m.content === "string" && m.content === "interrupt",
 		);
 		expect(sawInterruptInContext).toBe(true);
+	});
+
+	it("drains queued steering by aborting an interruptible tool mid-wait", async () => {
+		const toolSchema = z.object({});
+		let steerReady = false;
+		let drained = false;
+		let observedAbort = false;
+		let resolvedByTimeout = false;
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted (mimics a job poll)",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				steerReady = true;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				if (signal?.aborted) {
+					resolve();
+				} else {
+					const timer = setTimeout(() => {
+						resolvedByTimeout = true;
+						resolve();
+					}, 2000);
+					signal?.addEventListener(
+						"abort",
+						() => {
+							clearTimeout(timer);
+							resolve();
+						},
+						{ once: true },
+					);
+				}
+				await promise;
+				observedAbort = signal?.aborted === true;
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages: () => steerReady && !drained,
+			getSteeringMessages: async () => {
+				if (steerReady && !drained) {
+					drained = true;
+					return [createUserMessage("interrupt")];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(observedAbort).toBe(true);
+		expect(resolvedByTimeout).toBe(false);
+		expect(drained).toBe(true);
+		expect(
+			events.some(e => e.type === "message_start" && e.message.role === "user" && e.message.content === "interrupt"),
+		).toBe(true);
+	});
+
+	it("does not abort a non-interruptible tool mid-wait; steering still drains at the boundary", async () => {
+		const toolSchema = z.object({});
+		let steerReady = false;
+		let drained = false;
+		let observedAbort = false;
+		let resolvedByTimeout = false;
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks on its own window (no interruptible flag)",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, signal) {
+				steerReady = true;
+				const { promise, resolve } = Promise.withResolvers<void>();
+				if (signal?.aborted) {
+					resolve();
+				} else {
+					const timer = setTimeout(() => {
+						resolvedByTimeout = true;
+						resolve();
+					}, 300);
+					signal?.addEventListener(
+						"abort",
+						() => {
+							clearTimeout(timer);
+							resolve();
+						},
+						{ once: true },
+					);
+				}
+				await promise;
+				observedAbort = signal?.aborted === true;
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages: () => steerReady && !drained,
+			getSteeringMessages: async () => {
+				if (steerReady && !drained) {
+					drained = true;
+					return [createUserMessage("interrupt")];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		expect(observedAbort).toBe(false);
+		expect(resolvedByTimeout).toBe(true);
+		expect(drained).toBe(true);
+		expect(
+			events.some(e => e.type === "message_start" && e.message.role === "user" && e.message.content === "interrupt"),
+		).toBe(true);
 	});
 
 	it("leaves steering queued when the run is aborted while interrupted tools settle", async () => {
@@ -1857,5 +2000,126 @@ describe("agentLoopContinue with AgentMessage", () => {
 			expect(toolEnd.isError).toBe(true);
 			expect(toolEnd.result.content).toEqual([{ type: "text", text: "Tool failed with no output." }]);
 		}
+	});
+
+	it("should detect repetition loops during assistant stream and abort gracefully", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({
+			provider: "google-gemini-cli",
+			responses: [
+				{
+					content: Array.from({ length: 80 }, () => "🌊 "),
+				},
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain the stream to completion
+		}
+
+		const messages = await stream.result();
+		expect(messages.length).toBe(2);
+		expect(messages[1].role).toBe("assistant");
+
+		const assistantMsg = messages[1] as AssistantMessage;
+		expect(assistantMsg.stopReason).toBe("error");
+		expect(assistantMsg.errorMessage).toContain("Repetition loop detected");
+
+		let text = "";
+		for (const block of assistantMsg.content) {
+			if (block.type === "text") text += block.text;
+		}
+		expect(text).toBe("🌊 ");
+	});
+
+	it("detects and truncates repetition loops inside a thinking stream", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const mock = createMockModel({
+			provider: "google-gemini-cli",
+			responses: [
+				{
+					content: Array.from({ length: 80 }, (_, index) => ({
+						type: "thinking" as const,
+						thinking: "🌊 ",
+						thinkingSignature: `signature-${index}`,
+						itemId: `rs_${index}`,
+					})),
+				},
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("Hello")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain the stream to completion
+		}
+
+		const assistantMsg = (await stream.result())[1] as AssistantMessage;
+		expect(assistantMsg.stopReason).toBe("error");
+		expect(assistantMsg.errorMessage).toContain("Repetition loop detected");
+
+		// A looping thinking stream must be both detected AND collapsed to a single
+		// representative copy — not committed to the transcript in full.
+		let thinking = "";
+		for (const block of assistantMsg.content) {
+			if (block.type === "thinking") thinking += block.thinking;
+		}
+		expect(thinking).toBe("🌊 ");
+		for (const block of assistantMsg.content) {
+			if (block.type === "thinking") {
+				expect(block.thinkingSignature).toBeUndefined();
+				expect(block.itemId).toBeUndefined();
+			}
+		}
+	});
+
+	it("does not flag short requested repetitive text as a loop", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		const repeated = "🌊 ".repeat(26);
+		const mock = createMockModel({
+			provider: "google-gemini-cli",
+			responses: [{ content: [repeated] }],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("print 26 wave emoji")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain the stream to completion
+		}
+
+		const assistantMsg = (await stream.result())[1] as AssistantMessage;
+		expect(assistantMsg.stopReason).not.toBe("error");
+		let text = "";
+		for (const block of assistantMsg.content) {
+			if (block.type === "text") text += block.text;
+		}
+		expect(text).toBe(repeated);
+	});
+
+	it("does not flag legitimate repetitive numeric output as a loop", async () => {
+		const context: AgentContext = { systemPrompt: ["You are helpful."], messages: [], tools: [] };
+		// A hexdump of zero-filled memory is highly repetitive but legitimate; the
+		// detector must not classify pure digit/whitespace runs as a loop.
+		const hexdump = "00 ".repeat(80);
+		const mock = createMockModel({
+			provider: "google-gemini-cli",
+			responses: [{ content: [hexdump] }],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+
+		const stream = agentLoop([createUserMessage("dump the zero page")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain the stream to completion
+		}
+
+		const assistantMsg = (await stream.result())[1] as AssistantMessage;
+		expect(assistantMsg.stopReason).not.toBe("error");
+		let text = "";
+		for (const block of assistantMsg.content) {
+			if (block.type === "text") text += block.text;
+		}
+		expect(text).toBe(hexdump);
 	});
 });
