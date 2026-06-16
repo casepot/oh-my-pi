@@ -214,16 +214,19 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import {
+	buildGoalCompactionContext,
+	buildGoalPostCompactionContinuation,
+	consumeGoalPostCompactionContinuation,
+	type GoalPostCompactionContinuation,
+} from "../goals/compaction-continuation";
+import {
 	buildGoalContinuationPacket,
 	completionBudgetReport,
-	escapeXmlText,
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
-	type GoalContinuationPacket,
 	GoalRuntime,
 	remainingTokens,
 	renderGoalPrompt,
-	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
 } from "../goals/runtime";
 import {
@@ -279,12 +282,8 @@ import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import backgroundLaneIntakeTemplate from "../prompts/background-lanes/lane-intake.md" with { type: "text" };
 import goalCheckpointControllerPrompt from "../prompts/goals/goal-checkpoint-controller.md" with { type: "text" };
-import goalCompactionContextTemplate from "../prompts/goals/goal-compaction-context.md" with { type: "text" };
 import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
 import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
-import goalPostCompactionContinuationTemplate from "../prompts/goals/goal-post-compaction-continuation.md" with {
-	type: "text",
-};
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
@@ -1449,13 +1448,7 @@ export class AgentSession {
 	#advisorAutoResumeSuppressed = false;
 	#planModeState: PlanModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
-	#goalPostCompactionContinuation:
-		| {
-				goalId: string;
-				stateVersion: number;
-				prompt: string;
-		  }
-		| undefined;
+	#goalPostCompactionContinuation: GoalPostCompactionContinuation | undefined;
 	#goalRuntime: GoalRuntime;
 	#backgroundLaneManager: BackgroundLaneManager;
 	#goalSideAgentTail: Promise<void> = Promise.resolve();
@@ -10317,54 +10310,8 @@ export class AgentSession {
 		throw this.#buildCompactionAuthError();
 	}
 
-	#buildGoalContinuationPacketForCompaction(state: GoalModeState): GoalContinuationPacket {
-		let transition: GoalContinuationPacket["transition"] = "context-compaction";
-		let reason =
-			"Context compaction must preserve the active goal state without changing checkpoint or target authority.";
-		let guidance = "Resume the same open target after compaction.";
-		if (state.runMode === "awaiting-checkpoint-resolution") {
-			transition = "target-checkpoint";
-			reason = "Context compaction occurred while an accepted target checkpoint is awaiting controller resolution.";
-			guidance = "Prepare checkpoint guidance and require resolve_checkpoint before local implementation resumes.";
-		} else if (state.runMode === "awaiting-parent-completion") {
-			transition = "parent-completion-candidate";
-			reason = "Context compaction occurred after checkpoint resolution selected parent completion verification.";
-			guidance = 'Call goal({ op: "complete" }) next; do not resume local implementation first.';
-		} else if (state.runMode === "awaiting-verification-repair") {
-			transition = "verification-rejected";
-			reason = "Context compaction occurred while verifier blockers are awaiting repair.";
-			guidance = "Repair verifier blockers or gather direct evidence before retrying parent completion.";
-		} else if (state.runMode === "awaiting-background-lane-intake") {
-			transition = "background-lane-blocked";
-			reason = "Context compaction occurred while a structured background-lane blocker requires intake.";
-			guidance =
-				"Use background_lane list/snapshot/message/close for lane intake before ordinary implementation resumes.";
-		} else if (state.runMode === "awaiting-user-input") {
-			guidance = "Preserve the blocked state and wait for user, check, or external-control input.";
-		}
-		return buildGoalContinuationPacket(state, transition, reason, guidance);
-	}
-
-	#renderGoalPostCompactionPrompt(state: GoalModeState, continuationPacket: GoalContinuationPacket): string {
-		return prompt.render(goalPostCompactionContinuationTemplate, {
-			runMode: state.runMode,
-			objective: escapeXmlText(state.goal.objective),
-			goalContextSurface: renderGoalPromptSurface(state, state.goal),
-			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
-		});
-	}
-
 	#armGoalPostCompactionContinuation(state: GoalModeState | undefined = this.#goalModeState): void {
-		if (!state?.enabled || state.goal.status !== "active" || state.runMode === "awaiting-user-input") {
-			this.#goalPostCompactionContinuation = undefined;
-			return;
-		}
-		const continuationPacket = this.#buildGoalContinuationPacketForCompaction(state);
-		this.#goalPostCompactionContinuation = {
-			goalId: state.goal.id,
-			stateVersion: state.stateVersion,
-			prompt: this.#renderGoalPostCompactionPrompt(state, continuationPacket),
-		};
+		this.#goalPostCompactionContinuation = buildGoalPostCompactionContinuation(state);
 	}
 
 	#consumeGoalPostCompactionContinuation(state: GoalModeState):
@@ -10374,14 +10321,13 @@ export class AgentSession {
 				prompt: string;
 		  }
 		| undefined {
-		const continuation = this.#goalPostCompactionContinuation;
-		if (!continuation) return undefined;
+		const promptText = consumeGoalPostCompactionContinuation(this.#goalPostCompactionContinuation, state);
 		this.#goalPostCompactionContinuation = undefined;
-		if (continuation.goalId !== state.goal.id || continuation.stateVersion !== state.stateVersion) return undefined;
+		if (!promptText) return undefined;
 		return {
 			kind: "post-compaction",
 			customType: GOAL_POST_COMPACTION_MESSAGE_TYPE,
-			prompt: continuation.prompt,
+			prompt: promptText,
 		};
 	}
 
@@ -10391,24 +10337,7 @@ export class AgentSession {
 				preserveData: Record<string, unknown>;
 		  }
 		| undefined {
-		const state = this.#goalModeState;
-		if (!state?.goal) return undefined;
-		if (state.goal.status === "complete" || state.goal.status === "dropped") return undefined;
-		const continuationPacket = this.#buildGoalContinuationPacketForCompaction(state);
-		const serializedState = serializeGoalModeState(state);
-		const context = prompt.render(goalCompactionContextTemplate, {
-			transition: continuationPacket.transition,
-			reason: continuationPacket.reason,
-			stateSnapshot: renderGoalPromptSurface(state, state.goal),
-			continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
-		});
-		return {
-			context,
-			preserveData: {
-				goalMode: serializedState,
-				goalContinuationPacket: continuationPacket,
-			},
-		};
+		return buildGoalCompactionContext(this.#goalModeState);
 	}
 
 	async #prepareCompactionFromHooks(

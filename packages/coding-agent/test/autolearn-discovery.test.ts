@@ -48,6 +48,22 @@ describe("managed-skills discovery", () => {
 		expect(foo?.source).toBe("omp-managed:user");
 	});
 
+	it("keeps managed skills visible while default user sources stay hidden", async () => {
+		await writeSkill(managedDir, "managed-default", "A managed default-visible skill.");
+		await writeSkill(authoredDir, "managed-default", "A hidden native user collision.");
+		await writeSkill(path.join(tempHome, ".agents", "skills"), "managed-default", "A hidden agents user collision.");
+		await writeSkill(authoredDir, "native-default-hidden", "A native user skill.");
+		await writeSkill(path.join(tempHome, ".agents", "skills"), "agents-default-hidden", "An agents user skill.");
+
+		const { skills } = await loadSkills({ cwd: tempCwd });
+
+		const managedDefaults = skills.filter(s => s.name === "managed-default");
+		expect(managedDefaults).toHaveLength(1);
+		expect(managedDefaults[0]?.source).toBe("omp-managed:user");
+		expect(skills.some(s => s.name === "native-default-hidden")).toBe(false);
+		expect(skills.some(s => s.name === "agents-default-hidden")).toBe(false);
+	});
+
 	it("lets an authored skill win a name collision and drops the managed one", async () => {
 		await writeSkill(authoredDir, "bar", "Authored bar.");
 		await writeSkill(managedDir, "bar", "Managed bar.");

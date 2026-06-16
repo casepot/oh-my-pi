@@ -334,6 +334,28 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		expect(continuation.toolChoice).toBeUndefined();
 	});
 
+	it("uses goal continuation instead of generic eager reminders after auto-compaction", async () => {
+		const { session, waitForCall } = await createHarness();
+		await session.goalRuntime.createGoal({ objective: "Ship fork sync safely" });
+		stubCompaction();
+
+		await session.prompt("continue the active goal");
+		const continuationPromise = waitForCall(call =>
+			call.messageTexts.some(
+				text => text.includes("Context was compacted while goal mode was active") || text.includes(CONTINUE_MARKER),
+			),
+		);
+		emitHighUsageTurn(session);
+		const continuation = await continuationPromise;
+		const allText = continuation.messageTexts.join("\n");
+
+		expect(allText).toContain("Ship fork sync safely");
+		expect(allText).toContain('goal({op:"get"})');
+		expect(allText).not.toContain(CONTINUE_MARKER);
+		expect(allText).not.toContain("delegation is enabled");
+		expect(continuation.toolChoice).toBeUndefined();
+	});
+
 	it("does not re-inject the eager todo reminder when todos survived compaction", async () => {
 		const { session, sessionManager, waitForCall } = await createHarness({
 			"task.eager": "default",
