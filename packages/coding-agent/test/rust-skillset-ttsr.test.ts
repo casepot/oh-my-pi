@@ -29,6 +29,14 @@ interface RuleCase {
 
 const RULE_CASES: RuleCase[] = [
 	{
+		name: "rs-async-std-fs",
+		positive: "async fn load_config(path: &str) { let text = std::fs::read_to_string(path).unwrap(); }",
+		negatives: [
+			"fn load_config(path: &str) { let text = std::fs::read_to_string(path).unwrap(); }",
+			"async fn load_config(path: &str) { let text = tokio::fs::read_to_string(path).await.unwrap(); }",
+		],
+	},
+	{
 		name: "rs-async-std-mpsc",
 		positive: "use std::sync::mpsc;\n#[tokio::test]\nasync fn sends() { let (_tx, _rx) = mpsc::channel(); }",
 		negatives: [
@@ -42,12 +50,38 @@ const RULE_CASES: RuleCase[] = [
 		negatives: ['let name = Box::new(String::from("name"));', "let state = std::sync::Arc::new(state);"],
 	},
 	{
+		name: "rs-cfg-test-module",
+		positive: "fn parser() {}\nmod tests { #[test] fn parses() {} }",
+		negatives: ["#[cfg(test)]\nmod tests { #[test] fn parses() {} }", "mod parser_tests { }"],
+	},
+	{
+		name: "rs-collect-to-len",
+		positive: "let count = items.iter().filter(|item| item.ready()).collect::<Vec<_>>().len();",
+		negatives: [
+			"let count = items.iter().filter(|item| item.ready()).count();",
+			"let ready: Vec<_> = items.iter().filter(|item| item.ready()).collect();",
+		],
+	},
+	{
+		name: "rs-empty-err-handler",
+		positive: "if let Err(_) = save_record() { }",
+		negatives: [
+			'if let Err(err) = save_record() { tracing::warn!(?err, "save failed"); }',
+			"match save_record() { Ok(_) => (), Err(err) => return Err(err), }",
+		],
+	},
+	{
 		name: "rs-error-source-chain",
 		positive: "let value = read_config().map_err(|err| err.to_string())?;",
 		negatives: [
 			"let value = read_config().map_err(ConfigError::from)?;",
 			"return Err(ApiError::BadRequest(err.to_string()));",
 		],
+	},
+	{
+		name: "rs-format-literal",
+		positive: 'let label = format!("ready");',
+		negatives: ['let label = "ready";', 'let label = format!("ready {count}");'],
 	},
 	{
 		name: "rs-from-not-into",
@@ -66,6 +100,14 @@ const RULE_CASES: RuleCase[] = [
 		],
 	},
 	{
+		name: "rs-thread-sleep-in-async",
+		positive: "async fn wait() { std::thread::sleep(Duration::from_millis(10)); }",
+		negatives: [
+			"async fn wait() { tokio::time::sleep(Duration::from_millis(10)).await; }",
+			"fn wait() { std::thread::sleep(Duration::from_millis(10)); }",
+		],
+	},
+	{
 		name: "rs-tokio-async-test",
 		positive: "#[test]\nasync fn saves_record() { save().await; }",
 		negatives: [
@@ -77,6 +119,11 @@ const RULE_CASES: RuleCase[] = [
 		name: "rs-unbounded-channel",
 		positive: "let (_tx, _rx) = mpsc::unbounded_channel();",
 		negatives: ["let (_tx, _rx) = mpsc::channel(32);", "let sender: Sender<Event> = tx;"],
+	},
+	{
+		name: "rs-unsafe-safety-comment",
+		positive: "unsafe { ptr.read() }",
+		negatives: ["let value = ptr.addr();", "pub fn read() {}"],
 	},
 	{
 		name: "rs-future-prelude",
@@ -106,6 +153,19 @@ const RULE_CASES: RuleCase[] = [
 		name: "rs-parking-lot",
 		positive: "let guard = data.lock().unwrap();",
 		negatives: ["let guard = data.lock();", "let guard = data.lock().await;"],
+	},
+	{
+		name: "rs-ptr-arg-owned",
+		positive: 'fn greet(name: &String) { println!("{name}"); }',
+		negatives: [
+			'fn greet(name: &str) { println!("{name}"); }',
+			"fn push_value(values: &mut Vec<i32>) { values.push(1); }",
+		],
+	},
+	{
+		name: "rs-push-format",
+		positive: 'output.push_str(&format!("{}", item));',
+		negatives: ['write!(&mut output, "{}", item)?;', "output.push_str(item.as_str());"],
 	},
 	{
 		name: "rs-result-type",
@@ -160,7 +220,7 @@ describe("built-in Rust skillset TTSR pack", () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	test("ships only the audited first-wave Rust rule pack", () => {
+	test("ships only the audited Rust rule pack", () => {
 		expect(
 			getBuiltinSkillsetRules("rust")
 				.map(rule => rule.name)
@@ -327,7 +387,20 @@ describe("built-in Rust skillset TTSR pack", () => {
 			const rule = ruleByName(ruleCase.name);
 			expect(rule._source.level).toBe("native");
 			expect(rule._source.path).toStartWith("builtin://skillsets/rust/rules/");
-			expect(rule.scope).toEqual(["tool:edit(*.rs)", "tool:write(*.rs)"]);
+			if (ruleCase.name === "rs-cfg-test-module") {
+				expect(rule.scope).toEqual([
+					"tool:edit(src/*.rs)",
+					"tool:write(src/*.rs)",
+					"tool:edit(src/**/*.rs)",
+					"tool:write(src/**/*.rs)",
+					"tool:edit(**/src/*.rs)",
+					"tool:write(**/src/*.rs)",
+					"tool:edit(**/src/**/*.rs)",
+					"tool:write(**/src/**/*.rs)",
+				]);
+			} else {
+				expect(rule.scope).toEqual(["tool:edit(*.rs)", "tool:write(*.rs)"]);
+			}
 			for (const condition of rule.condition ?? []) expect(() => new RegExp(condition)).not.toThrow();
 
 			expect(
@@ -346,6 +419,15 @@ describe("built-in Rust skillset TTSR pack", () => {
 			expect(
 				matchNames(rule, ruleCase.positive, { source: "tool", toolName: "bash", filePaths: ["src/lib.rs"] }),
 			).toEqual([]);
+			if (ruleCase.name === "rs-cfg-test-module") {
+				expect(
+					matchNames(rule, ruleCase.positive, {
+						source: "tool",
+						toolName: "write",
+						filePaths: ["tests/integration.rs"],
+					}),
+				).toEqual([]);
+			}
 			for (const negative of ruleCase.negatives) {
 				expect(
 					matchNames(rule, negative, { source: "tool", toolName: "write", filePaths: ["src/lib.rs"] }),
