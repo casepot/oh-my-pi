@@ -1038,6 +1038,10 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 	return cloneGoal(goal);
 }
 
+function hasResolutionForCheckpoint(goal: Goal, checkpointId: string): boolean {
+	return goal.checkpointResolutions?.some(resolution => resolution.checkpointId === checkpointId) ?? false;
+}
+
 export function normalizeGoalModeState(value: unknown): GoalModeState | undefined {
 	if (!isRecord(value)) return undefined;
 	const goal = normalizeGoal(value.goal);
@@ -1049,6 +1053,13 @@ export function normalizeGoalModeState(value: unknown): GoalModeState | undefine
 		mode = "exiting";
 		reason = "completed";
 		runMode = "completed";
+	}
+	if (
+		goal.pendingCheckpointId !== undefined &&
+		runMode !== "awaiting-checkpoint-resolution" &&
+		hasResolutionForCheckpoint(goal, goal.pendingCheckpointId)
+	) {
+		goal.pendingCheckpointId = undefined;
 	}
 	return {
 		enabled: value.enabled === true,

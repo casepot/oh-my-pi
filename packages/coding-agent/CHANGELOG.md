@@ -48,6 +48,7 @@
 - Fixed goal side-agent transcript artifacts so UI-only/no-context rubric artifacts are omitted from non-verifier checkpoint and continuation agents.
 
 - Fixed goal-mode todo reminders so pending checkpoint/controller states do not auto-continue into blocked ordinary `todo` calls.
+- Fixed goal checkpoint resolution so resolved user/external-control pauses clear pending checkpoint state, do not trigger todo-reminder continuations, and keep checkpoint controllers progressing to a next target when parent work remains.
 
 - Fixed RPC frame emission to go through a centralized stdout writer with monotonic metadata and bounded transport/error handling.
 - Fixed `ttsr.enabled: false` so it prevents TTSR registration and matching instead of only being stored in settings.

@@ -48,6 +48,9 @@ It MUST say:
 - parent completion requires `goal({op:"complete"})`;
 - `parent_completion_candidate` JSON must omit `next_target`;
 - `next_target` JSON must include one valid target;
+- `Action now` MUST use `decision:"next_target"` when parent work remains and one valid next target can be named.
+- NEVER recommend `pause_for_external_control` unless the checkpoint packet or transcript names explicit user/operator/external authority that must act before `next_target`, `parent_completion_candidate`, `needs_user_input`, or `needs_broader_checks` applies.
+- Unknown target preference is not external control; choose the highest-value valid next target from deliverables, frontier, residuals, or `remaining_parent_work`.
 - release-increment projects need the next working release increment.
 
 Controller outcomes: admit/narrow/reject checkpoint claims; start the next valid target unit; request input/checks; preserve lessons; select `parent_completion_candidate` only when verifier-ready.

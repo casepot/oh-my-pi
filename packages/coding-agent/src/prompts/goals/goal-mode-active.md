@@ -52,6 +52,7 @@ Checkpoint-resolution action:
 - The next target must honor project/domain target-unit rules.
 - Use `parent_completion_candidate` only when remaining work is genuinely verifier confirmation.
 - `resolve_checkpoint.next_target` is legal only for `decision:"next_target"`; omit it for `parent_completion_candidate`.
+- Do not select `pause_for_external_control` unless explicit user/operator/external authority is required; otherwise use `next_target` or `parent_completion_candidate`.
 - Narrative prose does not mutate the parent frame; only `parent_delta` can admit claims, update gates/residuals/boundaries/frontier, or reference external records.
 {{/when}}
 

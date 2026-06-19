@@ -1803,6 +1803,9 @@ export class GoalRuntime {
 			if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
 			if (state.goal.status === "complete") throw new Error("goal is already complete");
 			if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
+			if (state.runMode === "awaiting-user-input") {
+				throw new Error("cannot complete parent goal while awaiting user input or external authority");
+			}
 			if (state.goal.pendingCheckpointId) {
 				throw new Error("cannot complete parent goal while a checkpoint is pending resolution");
 			}
@@ -2027,7 +2030,6 @@ export class GoalRuntime {
 			}
 			let nextTarget: GoalTarget | undefined;
 			let runMode: GoalRunMode = "awaiting-user-input";
-			let clearPending = false;
 			if (input.decision === "next_target") {
 				const nextTargetInput = input.nextTarget as GoalStartTargetInput;
 				if (repair?.blockers.length) {
@@ -2049,10 +2051,8 @@ export class GoalRuntime {
 				);
 				state.goal.currentTarget = nextTarget;
 				runMode = "working-target";
-				clearPending = true;
 			} else if (input.decision === "parent_completion_candidate") {
 				runMode = "awaiting-parent-completion";
-				clearPending = true;
 			}
 			const resolution: GoalCheckpointResolution = {
 				id: resolutionId,
@@ -2071,7 +2071,7 @@ export class GoalRuntime {
 			};
 			state.goal.checkpointResolutions = [...(state.goal.checkpointResolutions ?? []), resolution];
 			state.goal.lastCheckpointResolutionId = resolution.id;
-			if (clearPending) state.goal.pendingCheckpointId = undefined;
+			state.goal.pendingCheckpointId = undefined;
 			state.runMode = runMode;
 			this.#bumpState(state, { parentFrameChanged });
 			await this.#commitState(state, { persist: "goal" });

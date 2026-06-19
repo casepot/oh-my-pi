@@ -1727,7 +1727,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						? this.#goalContinuationTurnInFlight
 							? "Goal repairing verifier blockers"
 							: "Goal verifier repair pending"
-						: undefined;
+						: state?.runMode === "awaiting-user-input"
+							? "Goal awaiting user/external input"
+							: undefined;
 		const status =
 			this.goalModeEnabled || this.goalModePaused
 				? { enabled: this.goalModeEnabled, paused: this.goalModePaused, label }

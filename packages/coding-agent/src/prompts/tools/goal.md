@@ -38,7 +38,8 @@ Targets are completion units, not process phases or miniature parent goals.
 `resolve_checkpoint.decision` must be one of:
 - `next_target`: applies `parent_delta`, clears the pending checkpoint, installs `next_target`, and returns to `working-target`. `next_target` is required for this decision and rejected for every other decision.
 - `parent_completion_candidate`: applies `parent_delta`, clears the pending checkpoint, enters `awaiting-parent-completion`, and makes the next action `complete`. It does not complete the parent. Use only when every parent deliverable already has accepted current evidence and the remaining work is verifier confirmation.
-- `needs_user_input`, `needs_broader_checks`, `pause_for_external_control`, or `drop_or_replace_recommended`: records the controller reading and leaves continuation suppressed. Do not include `next_target`.
+- `needs_user_input`, `needs_broader_checks`, `pause_for_external_control`, or `drop_or_replace_recommended`: applies `parent_delta`, clears the pending checkpoint, enters `awaiting-user-input`, and suppresses auto-continuation. Use only when `next_target` and `parent_completion_candidate` are not valid now.
+- NEVER use `pause_for_external_control` merely because parent work remains, target selection is needed, or the current target just checkpointed. Use it only when explicit user/operator/external authority must take over before any valid next target or parent-completion verification can run.
 
 `parent_delta` is the only way to mutate parent-frame truth or compact deliverable-map status through this tool. It may include:
 - `admitted_claims`, `candidate_claims_added`, `rejected_claims`;

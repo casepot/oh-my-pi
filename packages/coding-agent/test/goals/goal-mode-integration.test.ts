@@ -871,6 +871,8 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(guidance?.customType).toBe(GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE);
 		expect(guidance?.prompt).toContain(goalSideAgentMock.checkpointGuidance);
 		expect(guidance?.prompt).toContain("resolve_checkpoint");
+		expect(guidance?.prompt).toContain('decision:"next_target"');
+		expect(guidance?.prompt).toContain("NEVER use `pause_for_external_control` as a generic stop");
 		const guidanceCall = goalSideAgentCalls.find(call => call.agent.name === "goal-checkpoint-guidance");
 		expect(guidanceCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
 		expect(guidanceCall?.task).toContain("<goal_state_snapshot>");
@@ -963,6 +965,60 @@ describe("InteractiveMode goal mode integration", () => {
 		} finally {
 			await restored.cleanup();
 		}
+	});
+
+	it("resolves explicit external-control pauses without leaving checkpoint pending", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target-pause", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+			forbidden_claims: ["Release is ready"],
+		});
+		const checkpoint = await goalTool.execute("checkpoint-pause", {
+			op: "checkpoint",
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			local_claims: ["Source-link install exercises smoke path"],
+			evidence: [
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "Observed smoke output",
+					current: true,
+				},
+			],
+			not_claimed: ["Release is ready"],
+			remaining_questions: ["Operator must choose a release gate."],
+		});
+		const checkpointId = checkpoint.details?.checkpoint?.id;
+		if (!checkpointId) throw new Error("expected checkpoint id");
+
+		const resolved = await goalTool.execute("resolve-pause", {
+			op: "resolve_checkpoint",
+			checkpoint_id: checkpointId,
+			decision: "pause_for_external_control",
+			parent_reading: "External operator must choose a release gate.",
+			not_propagated: ["Next target selected"],
+			remaining_parent_work: ["Choose the next release gate"],
+			broader_checks_or_inputs: ["Operator gate selection"],
+		});
+		const resolveText = JSON.stringify(resolved.content);
+
+		expect(resolved.details?.state?.runMode).toBe("awaiting-user-input");
+		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
+		expect(resolveText).toContain("Checkpoint resolution recorded: pause_for_external_control");
+		expect(resolveText).not.toContain("Pending checkpoint");
+		const getResult = await goalTool.execute("get-pause", { op: "get" });
+		expect(JSON.stringify(getResult.content)).not.toContain("Pending checkpoint");
+		const next = await goalTool.execute("start-after-pause", {
+			op: "start_target",
+			title: "Choose next release gate",
+			desired_future_claim: "Next release gate has selected evidence.",
+			closure_standard: "Current selected-gate evidence exists.",
+		});
+		expect(next.details?.state?.runMode).toBe("working-target");
 	});
 
 	it("recovers committed checkpoint and resolution artifacts from restored goal state when custom messages are missing", async () => {

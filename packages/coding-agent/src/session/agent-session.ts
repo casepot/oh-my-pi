@@ -9854,9 +9854,10 @@ export class AgentSession {
 
 		const goalState = this.#goalModeState;
 		if (
-			goalState?.enabled &&
+			goalState?.enabled === true &&
 			goalState.goal.status === "active" &&
-			goalState.runMode === "awaiting-checkpoint-resolution"
+			goalState.runMode !== "working-target" &&
+			goalState.runMode !== "awaiting-verification-repair"
 		) {
 			this.#todoReminderCount = 0;
 			this.#todoReminderAwaitingProgress = false;

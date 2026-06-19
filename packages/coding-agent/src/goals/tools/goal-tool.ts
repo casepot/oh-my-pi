@@ -701,11 +701,9 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 		if (relevant.length) text += `\nRelevant deliverables: ${relevant.join(", ")}`;
 	}
 	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
-	if (goal.pendingCheckpointId) {
+	if (goal.pendingCheckpointId && response.state?.runMode === "awaiting-checkpoint-resolution") {
 		text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
-		if (response.state?.runMode === "awaiting-checkpoint-resolution") {
-			text += `\nNext action: inspect checkpoint guidance, then call goal({op:"resolve_checkpoint", checkpoint_id:"${goal.pendingCheckpointId}"}) before ordinary tools.`;
-		}
+		text += `\nNext action: inspect checkpoint guidance, then call goal({op:"resolve_checkpoint", checkpoint_id:"${goal.pendingCheckpointId}"}) before ordinary tools.`;
 	}
 	if (goal.verificationRepair) text += `\nVerifier repair: ${goal.verificationRepair.verificationAttemptId}`;
 	if (goal.backgroundLanes?.length) {
@@ -875,7 +873,7 @@ export const goalToolRenderer = {
 		lines.push(`  ${uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`))}`);
 		if (goal.currentTarget)
 			lines.push(`  ${uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`)}`);
-		if (goal.pendingCheckpointId) {
+		if (goal.pendingCheckpointId && details?.state?.runMode === "awaiting-checkpoint-resolution") {
 			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: resolve ${goal.pendingCheckpointId}`)}`);
 			lines.push(`  ${uiTheme.fg("muted", "ordinary tools blocked until resolve_checkpoint")}`);
 		}

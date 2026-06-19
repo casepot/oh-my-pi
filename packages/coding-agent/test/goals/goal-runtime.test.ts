@@ -833,6 +833,42 @@ describe("goal runtime", () => {
 		expect(restored?.goal.parentFrame?.desiredFuture).toBe("Legacy objective stays active.");
 	});
 
+	it("clears legacy resolved pending checkpoint outside checkpoint-resolution mode", () => {
+		const restored = parseGoalModeState(
+			{
+				enabled: true,
+				mode: "active",
+				runMode: "awaiting-user-input",
+				stateVersion: 4,
+				parentFrameVersion: 0,
+				goal: {
+					...createGoal({ objective: "Legacy paused goal" }),
+					pendingCheckpointId: "checkpoint-1",
+					lastCheckpointResolutionId: "resolution-1",
+					checkpointResolutions: [
+						{
+							id: "resolution-1",
+							sequence: 1,
+							goalId: "goal-1",
+							checkpointId: "checkpoint-1",
+							decision: "pause_for_external_control",
+							parentReading: "Paused for external authority.",
+							notPropagated: [],
+							remainingParentWork: ["Choose next target"],
+							broaderChecksOrInputs: [],
+							lessonsForFuture: [],
+							createdAt: 1,
+						},
+					],
+				},
+			},
+			true,
+		);
+
+		expect(restored?.goal.pendingCheckpointId).toBeUndefined();
+		expect(restored?.goal.lastCheckpointResolutionId).toBe("resolution-1");
+	});
+
 	it("normalizes completed goals to terminal run mode", () => {
 		const restored = parseGoalModeState(
 			{
@@ -1187,8 +1223,9 @@ describe("goal runtime", () => {
 			reviewedAt: 20,
 		});
 
+		const checkpointId = committed.goal.pendingCheckpointId ?? "";
 		const resolved = await harness.runtime.recordCheckpointResolution({
-			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			checkpointId,
 			decision: "needs_user_input",
 			parentReading: "Operator must choose next gate.",
 			notPropagated: ["Next target selected"],
@@ -1197,7 +1234,75 @@ describe("goal runtime", () => {
 		});
 
 		expect(resolved.runMode).toBe("awaiting-user-input");
-		expect(resolved.goal.pendingCheckpointId).toBe(committed.goal.pendingCheckpointId);
+		expect(resolved.goal.pendingCheckpointId).toBeUndefined();
+		await expect(
+			harness.runtime.recordCheckpointResolution({
+				checkpointId,
+				decision: "needs_user_input",
+				parentReading: "Duplicate resolution should fail.",
+				notPropagated: [],
+				remainingParentWork: ["Duplicate resolution should fail."],
+			}),
+		).rejects.toThrow("cannot resolve checkpoint because no checkpoint is pending");
+		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow(
+			"cannot complete parent goal while awaiting user input or external authority",
+		);
+		const next = await harness.runtime.startTarget({
+			title: "Choose next gate",
+			desiredFutureClaim: "Next release gate has selected evidence.",
+			closureStandard: "Current selected-gate evidence exists.",
+		});
+		expect(next.runMode).toBe("working-target");
+	});
+
+	it("clears pending checkpoint for non-continuing checkpoint resolutions", async () => {
+		const decisions = ["needs_broader_checks", "pause_for_external_control", "drop_or_replace_recommended"] as const;
+		for (const decision of decisions) {
+			const harness = createHarness();
+			await harness.runtime.createGoal({ objective: `Resolve ${decision}` });
+			await harness.runtime.startTarget({
+				title: `Close ${decision}`,
+				desiredFutureClaim: "Checkpoint evidence is bounded.",
+				closureStandard: "Current checkpoint evidence is recorded.",
+			});
+			const candidate = harness.runtime.buildCheckpointCandidate({
+				status: "closed_with_evidence",
+				summary: "Bounded evidence exists.",
+				localClaims: ["Checkpoint evidence is bounded"],
+				evidence: [{ claim: "Checkpoint evidence is bounded", evidence: "Observed evidence", current: true }],
+				notClaimed: ["Parent goal is complete"],
+				remainingQuestions: ["Which controller action follows?"],
+			});
+			const committed = await harness.runtime.commitCheckpoint(candidate, {
+				status: "accepted",
+				feedback: "Closed locally.",
+				evidenceChecked: candidate.evidence,
+				blockers: [],
+				reviewedAt: 20,
+			});
+			const checkpointId = committed.goal.pendingCheckpointId ?? "";
+
+			const resolved = await harness.runtime.recordCheckpointResolution({
+				checkpointId,
+				decision,
+				parentReading: "Controller cannot continue automatically.",
+				notPropagated: ["Parent goal complete"],
+				remainingParentWork: ["Continue parent work"],
+				broaderChecksOrInputs: decision === "needs_broader_checks" ? ["Run broader checks."] : [],
+			});
+
+			expect(resolved.runMode).toBe("awaiting-user-input");
+			expect(resolved.goal.pendingCheckpointId).toBeUndefined();
+			await expect(
+				harness.runtime.recordCheckpointResolution({
+					checkpointId,
+					decision,
+					parentReading: "Duplicate resolution should fail.",
+					notPropagated: [],
+					remainingParentWork: ["Duplicate resolution should fail."],
+				}),
+			).rejects.toThrow("cannot resolve checkpoint because no checkpoint is pending");
+		}
 	});
 
 	it("blocks parent completion across pending checkpoints and verifier repair", async () => {

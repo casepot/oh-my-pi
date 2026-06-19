@@ -40,6 +40,7 @@ Working-target action:
 Checkpoint-resolution action:
 - Do not implement; inspect checkpoint guidance and call `resolve_checkpoint`.
 - Prefer `decision:"next_target"` until every parent deliverable has accepted current evidence.
+- Do not select `pause_for_external_control` unless explicit user/operator/external authority is required; otherwise use `next_target` or `parent_completion_candidate`.
 - Parent truth changes only through `resolve_checkpoint.parent_delta`, never prose.
 {{/when}}
 
