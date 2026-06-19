@@ -40,11 +40,6 @@ function buildGoalContinuationPacketForCompaction(state: GoalModeState): GoalCon
 		transition = "verification-rejected";
 		reason = "Context compaction occurred while verifier blockers are awaiting repair.";
 		guidance = "Repair verifier blockers or gather direct evidence before retrying parent completion.";
-	} else if (state.runMode === "awaiting-background-lane-intake") {
-		transition = "background-lane-blocked";
-		reason = "Context compaction occurred while a structured background-lane blocker requires intake.";
-		guidance =
-			"Use background_lane list/snapshot/message/close for lane intake before ordinary implementation resumes.";
 	} else if (state.runMode === "awaiting-user-input") {
 		guidance = "Preserve the blocked state and wait for user, check, or external-control input.";
 	}

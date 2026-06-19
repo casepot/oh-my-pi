@@ -68,10 +68,6 @@ Verifier-repair action:
 - Do not retry `complete` until blockers have fresh repair/evidence.
 {{/when}}
 
-{{#when runMode "==" "awaiting-background-lane-intake"}}
-Background-lane-intake action:
-- Disposition blocked background lanes before ordinary implementation resumes.
-{{/when}}
 
 {{#when runMode "==" "awaiting-user-input"}}
 Awaiting-input action:

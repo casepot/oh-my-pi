@@ -9,17 +9,6 @@ import type {
 import type { FetchImpl, Model, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
-import type {
-	BackgroundLaneCloseInput,
-	BackgroundLaneCloseResult,
-	BackgroundLaneMessageInput,
-	BackgroundLaneMessageResult,
-	BackgroundLaneSnapshotResult,
-	BackgroundLaneSpawnInput,
-	BackgroundLaneSpawnResult,
-} from "../background-lanes/manager";
-import type { BackgroundLaneListItem } from "../background-lanes/state";
-import { BackgroundLaneTool } from "../background-lanes/tool";
 import type { Rule } from "../capability/rule";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
@@ -97,7 +86,6 @@ import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { YieldTool } from "./yield";
 
-export * from "../background-lanes";
 export * from "../edit";
 export * from "../goals";
 export * from "../lsp";
@@ -367,15 +355,6 @@ export interface ToolSession {
 	/** Set or clear active checkpoint state. */
 	setCheckpointState?: (state: CheckpointState | null) => void;
 
-	backgroundLaneSpawn?: (input: BackgroundLaneSpawnInput, signal?: AbortSignal) => Promise<BackgroundLaneSpawnResult>;
-	backgroundLaneList?: () => BackgroundLaneListItem[];
-	backgroundLaneMessage?: (
-		input: BackgroundLaneMessageInput,
-		signal?: AbortSignal,
-	) => Promise<BackgroundLaneMessageResult>;
-	backgroundLaneSnapshot?: (laneId: string, signal?: AbortSignal) => Promise<BackgroundLaneSnapshotResult>;
-	backgroundLaneClose?: (input: BackgroundLaneCloseInput) => Promise<BackgroundLaneCloseResult>;
-
 	/** Per-session snapshot store of file contents as last shown to the model
 	 *  by `read`/`search`. Used by hashline anchor-stale recovery to
 	 *  reconstruct the version the model authored anchors against when the
@@ -512,12 +491,11 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	report_tool_issue: s => createReportToolIssueTool(s),
 	resolve: s => new ResolveTool(s),
 	goal: s => new GoalTool(s),
-	background_lane: s => new BackgroundLaneTool(s),
 };
 
 export type ToolName = BuiltinToolName;
 
-const GOAL_CONTROL_ALLOWED_TOOLS: Record<string, true> = { goal: true, background_lane: true, yield: true };
+const GOAL_CONTROL_ALLOWED_TOOLS: Record<string, true> = { goal: true, yield: true };
 const kGoalRunModeGuard: unique symbol = Symbol("GoalRunModeGuard");
 
 type GoalRunModeGuardedTool = AgentTool & { [kGoalRunModeGuard]?: true };
@@ -532,9 +510,6 @@ function goalRunModeBlockMessage(session: ToolSession, toolName: string): string
 	}
 	if (state.runMode === "awaiting-parent-completion") {
 		return 'Goal parent completion verification is pending; ordinary tool work is blocked until goal({ op: "complete" }) runs the verifier.';
-	}
-	if (state.runMode === "awaiting-background-lane-intake") {
-		return 'A background lane blocker requires intake; ordinary tool work is blocked until background_lane({ op: "list" | "snapshot" | "message" | "close", ... }) records the operator disposition or follow-up.';
 	}
 	return undefined;
 }
@@ -583,9 +558,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const goalModeActive = goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
 		requestedTools = [...requestedTools, "goal"];
-	}
-	if (goalModeActive && requestedTools && !requestedTools.includes("background_lane")) {
-		requestedTools = [...requestedTools, "background_lane"];
 	}
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
@@ -669,7 +641,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
 		if (name === "goal") return goalEnabled && goalModeActive;
-		if (name === "background_lane") return goalEnabled && goalModeActive;
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
@@ -718,7 +689,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 						.map(([name, factory]) => [name, factory] as const),
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
-					...(goalModeActive ? ([["background_lane", HIDDEN_TOOLS.background_lane]] as const) : []),
 				];
 
 	const baseResults = await Promise.all(

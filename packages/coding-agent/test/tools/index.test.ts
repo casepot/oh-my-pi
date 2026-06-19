@@ -252,7 +252,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "goal", "background_lane", "resolve"]);
+		expect(names).toEqual(["read", "goal", "resolve"]);
 	});
 
 	it("blocks ordinary tools while parent completion verification is pending", async () => {
@@ -287,9 +287,8 @@ describe("createTools", () => {
 		expect(names).toContain("search_tool_bm25");
 	});
 
-	it("HIDDEN_TOOLS contains review, goal, and background-lane tools", () => {
+	it("HIDDEN_TOOLS contains review, goal, and control tools", () => {
 		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual([
-			"background_lane",
 			"goal",
 			"report_finding",
 			"report_tool_issue",

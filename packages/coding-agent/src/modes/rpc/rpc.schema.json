@@ -86,8 +86,7 @@
         "hostTools",
         "hostUris",
         "oneShot",
-        "heartbeat",
-        "backgroundLanes"
+        "heartbeat"
       ],
       "properties": {
         "commands": {
@@ -139,9 +138,6 @@
           "type": "boolean"
         },
         "heartbeat": {
-          "type": "boolean"
-        },
-        "backgroundLanes": {
           "type": "boolean"
         }
       },
@@ -318,8 +314,7 @@
         "queuedMessageCount",
         "todoPhases",
         "hostTools",
-        "hostUriSchemes",
-        "backgroundLanes"
+        "hostUriSchemes"
       ],
       "properties": {
         "stateSeq": { "type": "integer", "minimum": 0 },
@@ -343,8 +338,7 @@
         "queuedMessageCount": { "type": "integer", "minimum": 0 },
         "todoPhases": { "type": "array" },
         "hostTools": { "type": "array" },
-        "hostUriSchemes": { "type": "array" },
-        "backgroundLanes": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        "hostUriSchemes": { "type": "array" }
       },
       "additionalProperties": true
     },
@@ -710,52 +704,6 @@
             },
             "state": {
               "$ref": "#/$defs/sessionState"
-            }
-          },
-          "additionalProperties": true
-        }
-      ]
-    },
-    "backgroundLaneUpdateFrame": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/metadata"
-        },
-        {
-          "type": "object",
-          "required": [
-            "type",
-            "schemaVersion",
-            "laneId",
-            "status",
-            "blocksIfFired",
-            "summary"
-          ],
-          "properties": {
-            "type": {
-              "const": "background_lane_update"
-            },
-            "schemaVersion": {
-              "type": "integer",
-              "minimum": 1
-            },
-            "laneId": {
-              "type": "string"
-            },
-            "status": {
-              "enum": [
-                "open",
-                "blocked",
-                "closed",
-                "spawn_failed"
-              ]
-            },
-            "blocksIfFired": {
-              "type": "boolean"
-            },
-            "summary": {
-              "type": "object",
-              "additionalProperties": true
             }
           },
           "additionalProperties": true
@@ -1191,7 +1139,6 @@
                   "extension_error",
                   "pong",
                   "task_progress",
-                  "background_lane_update",
                   "task_result",
                   "subagent_lifecycle",
                   "observable_session_update",
@@ -1247,9 +1194,6 @@
         },
         {
           "$ref": "#/$defs/pongFrame"
-        },
-        {
-          "$ref": "#/$defs/backgroundLaneUpdateFrame"
         },
         {
           "$ref": "#/$defs/taskFrame"
@@ -2089,31 +2033,6 @@
             },
             "customInstructions": {
               "type": "string"
-            }
-          },
-          "additionalProperties": true
-        },
-        {
-          "type": "object",
-          "required": [
-            "type",
-            "op"
-          ],
-          "properties": {
-            "id": {
-              "type": "string"
-            },
-            "type": {
-              "const": "background_lane"
-            },
-            "op": {
-              "enum": [
-                "spawn",
-                "list",
-                "message",
-                "snapshot",
-                "close"
-              ]
             }
           },
           "additionalProperties": true

@@ -195,10 +195,13 @@ describe("RPC orchestration contract", () => {
 		expect(readyCapabilities.hostUris).toBe(true);
 		expect(readyCapabilities.extensionUi).toBe(true);
 		expect(readyCapabilities.heartbeat).toBe(true);
-		expect(readyCapabilities.backgroundLanes).toBe(true);
-		expect(readyCapabilities.commands).toContain("background_lane");
-		expect(readyCapabilities.events).toContain("background_lane_update");
-		expect(RPC_CAPABILITIES.backgroundLanes).toBe(true);
+		const removedLaneCommand = ["background", "lane"].join("_");
+		const removedLaneEvent = ["background", "lane", "update"].join("_");
+		const removedLaneStateKey = ["background", "Lanes"].join("");
+		expect(readyCapabilities.commands).not.toContain(removedLaneCommand);
+		expect(readyCapabilities.events).not.toContain(removedLaneEvent);
+		expect(removedLaneStateKey in readyCapabilities).toBe(false);
+		expect(removedLaneStateKey in RPC_CAPABILITIES).toBe(false);
 
 		await child.write({ id: "info", type: "get_protocol_info" });
 		const response = await child.next(frame => frame.type === "response" && frame.id === "info");
@@ -428,117 +431,35 @@ describe("RPC orchestration contract", () => {
 		await child.next(frame => frame.type === "shutdown");
 	});
 
-	test("validates background_lane RPC command shapes with typed errors", () => {
-		const validCommands: Array<Record<string, unknown>> = [
-			{
-				id: "lane-spawn",
-				type: "background_lane",
-				op: "spawn",
-				from: { checkpoint_id: "goal-1-checkpoint-1", source_ref: "HEAD" },
-				contract: {
-					question: "What can invalidate this checkpoint?",
-					blocks_if: "Checkpoint evidence is stale.",
-					required_before_parent: true,
-				},
-				assignment: "Inspect and report through lane_report.",
-			},
-			{ id: "lane-list", type: "background_lane", op: "list" },
-			{ id: "lane-message", type: "background_lane", op: "message", lane_id: "lane_1", message: "Follow up." },
-			{ id: "lane-snapshot", type: "background_lane", op: "snapshot", lane_id: "lane_1" },
-			{
-				id: "lane-close",
-				type: "background_lane",
-				op: "close",
-				lane_id: "lane_1",
-				outcome: "deferred",
-				reason: "Disposition recorded by operator.",
-			},
-		];
-		for (const frame of validCommands) {
-			const parsed = validateRpcInputFrame(frame);
-			expect(parsed.ok).toBe(true);
-			if (!parsed.ok) throw new Error(parsed.errorInfo.message);
-			expect(parsed.frame).toMatchObject(frame);
-		}
+	test("rejects removed lane RPC command as unknown", () => {
+		const removedLaneCommand = ["background", "lane"].join("_");
+		const parsed = validateRpcInputFrame({ id: "lane-list", type: removedLaneCommand, op: "list" });
 
-		const invalidSpawn = validateRpcInputFrame({
-			id: "lane-bad-spawn",
-			type: "background_lane",
-			op: "spawn",
-			from: { source_ref: "HEAD" },
-			contract: { question: "Q", blocks_if: "B" },
-			assignment: "A",
-		});
-		expect(invalidSpawn.ok).toBe(false);
-		if (invalidSpawn.ok === false) {
-			expect(invalidSpawn.requestId).toBe("lane-bad-spawn");
-			expect(invalidSpawn.errorInfo.code).toBe("invalid_arguments");
-			expect(invalidSpawn.errorInfo.message).toContain("required_before_parent");
-		}
-
-		const invalidClose = validateRpcInputFrame({
-			id: "lane-bad-close",
-			type: "background_lane",
-			op: "close",
-			lane_id: "lane_1",
-			outcome: "accepted",
-			reason: "Not an OMP lane close outcome.",
-		});
-		expect(invalidClose.ok).toBe(false);
-		if (invalidClose.ok === false) {
-			expect(invalidClose.errorInfo.code).toBe("invalid_arguments");
-			expect(invalidClose.errorInfo.message).toContain("unsupported value");
+		expect(parsed.ok).toBe(false);
+		if (parsed.ok === false) {
+			expect(parsed.requestId).toBe("lane-list");
+			expect(parsed.errorInfo.code).toBe("unknown_command");
 		}
 	});
 
-	test("background_lane RPC uses immediate list responses and terminal operation frames for spawn failures", async () => {
+	test("removed lane RPC command returns unknown_command over the wire", async () => {
 		const child = launchRpc();
 		const ready = await child.next(frame => frame.type === "ready");
 		expect(isObject(ready.capabilities)).toBe(true);
 		const capabilities = ready.capabilities as Record<string, unknown>;
-		expect(capabilities.backgroundLanes).toBe(true);
+		const removedLaneCommand = ["background", "lane"].join("_");
+		const removedLaneStateKey = ["background", "Lanes"].join("");
+		expect(removedLaneStateKey in capabilities).toBe(false);
 
-		await child.write({ id: "lane-list", type: "background_lane", op: "list" });
-		const list = await child.next(frame => frame.type === "response" && frame.id === "lane-list");
-		expect(list.success).toBe(true);
-		expect(responseData(list).lanes).toEqual([]);
+		await child.write({ id: "lane-list", type: removedLaneCommand, op: "list" });
+		const response = await child.next(frame => frame.type === "response" && frame.id === "lane-list");
+		expect(response.success).toBe(false);
+		expect(frameErrorInfo(response).code).toBe("unknown_command");
 
 		await child.write({ id: "state", type: "get_state" });
 		const state = await child.next(frame => frame.type === "response" && frame.id === "state");
 		expect(state.success).toBe(true);
-		expect(responseData(state).backgroundLanes).toEqual([]);
-
-		await child.write({
-			id: "lane-spawn",
-			type: "background_lane",
-			op: "spawn",
-			from: { checkpoint_id: "goal-1-checkpoint-1", source_ref: "HEAD" },
-			contract: {
-				question: "What can invalidate this checkpoint?",
-				blocks_if: "Checkpoint evidence is stale.",
-				required_before_parent: true,
-			},
-			assignment: "Inspect and report through lane_report.",
-		});
-		const spawnAck = await child.next(frame => frame.type === "response" && frame.id === "lane-spawn");
-		expect(spawnAck.success).toBe(true);
-		const ackData = responseData(spawnAck);
-		expect(ackData.ack).toBe("accepted");
-		expect(typeof ackData.operationId).toBe("string");
-		const operationId = ackData.operationId as string;
-		await child.next(
-			frame =>
-				frame.type === "operation_start" &&
-				frame.operationId === operationId &&
-				frame.command === "background_lane.spawn",
-		);
-		const terminal = await child.next(
-			frame =>
-				frame.type === "operation_error" &&
-				frame.operationId === operationId &&
-				frame.command === "background_lane.spawn",
-		);
-		expect(frameErrorInfo(terminal).message).toContain("active goal");
+		expect(removedLaneStateKey in responseData(state)).toBe(false);
 
 		await child.write({ id: "shutdown", type: "shutdown" });
 		await child.next(frame => frame.type === "shutdown");

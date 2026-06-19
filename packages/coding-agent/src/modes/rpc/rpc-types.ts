@@ -7,7 +7,6 @@
  */
 import type { AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
-import type { BackgroundLane, BackgroundLaneCloseOutcome, BackgroundLaneListItem } from "../../background-lanes/state";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
@@ -62,7 +61,6 @@ export interface RpcCapabilities {
 	chunkedPayloads: boolean;
 	oneShot: true;
 	heartbeat: true;
-	backgroundLanes: true;
 }
 
 export interface RpcLimits {
@@ -175,55 +173,6 @@ export interface RpcLargeContentRef {
 	preview: string;
 }
 
-// ============================================================================
-export interface RpcBackgroundLaneContract {
-	question: string;
-	blocks_if: string;
-	required_before_parent: boolean;
-}
-
-export type RpcBackgroundLaneCommand =
-	| {
-			id?: string;
-			type: "background_lane";
-			op: "spawn";
-			from: { checkpoint_id?: string; source_ref: string };
-			contract: RpcBackgroundLaneContract;
-			assignment: string;
-			agent?: string;
-	  }
-	| { id?: string; type: "background_lane"; op: "list" }
-	| { id?: string; type: "background_lane"; op: "message"; lane_id: string; message: string }
-	| { id?: string; type: "background_lane"; op: "snapshot"; lane_id: string }
-	| {
-			id?: string;
-			type: "background_lane";
-			op: "close";
-			lane_id: string;
-			outcome: BackgroundLaneCloseOutcome;
-			reason: string;
-			merged_source_ref?: string;
-			operator_statement?: string;
-	  };
-
-export interface RpcBackgroundLaneUpdateSummary {
-	id: string;
-	question: string;
-	status: BackgroundLane["status"];
-	agentStatus: BackgroundLane["agent"]["status"];
-	outcome: BackgroundLane["outcome"];
-	requiredBeforeParent: boolean;
-	blocksIfFired: boolean;
-	latestReportRef?: string;
-	latestPatchRef?: string;
-	branch?: string;
-	worktreePath?: string;
-}
-
-export interface RpcBackgroundLaneListResult {
-	lanes: BackgroundLaneListItem[];
-}
-
 // RPC Commands (stdin)
 // ============================================================================
 
@@ -307,8 +256,7 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string }
-	| RpcBackgroundLaneCommand;
+	| { id?: string; type: "login"; providerId: string };
 
 export type RpcCommandType = RpcCommand["type"];
 
@@ -367,7 +315,6 @@ export interface RpcSessionState {
 	contextUsage?: ContextUsage;
 	hostTools: RpcHostToolDefinition[];
 	hostUriSchemes: RpcHostUriSchemeDefinition[];
-	backgroundLanes: BackgroundLaneListItem[];
 }
 
 export interface RpcAvailableSlashCommand {
@@ -609,15 +556,6 @@ export type RpcObservableSessionUpdateFrame = RpcFrameMetadata & {
 	type: "observable_session_update";
 	schemaVersion: 1;
 	sessions: RpcObservableSessionView[];
-};
-
-export type RpcBackgroundLaneUpdateFrame = RpcFrameMetadata & {
-	type: "background_lane_update";
-	schemaVersion: 1;
-	laneId: string;
-	status: BackgroundLane["status"];
-	blocksIfFired: boolean;
-	summary: RpcBackgroundLaneUpdateSummary;
 };
 
 export type RpcHeartbeatFrame = RpcFrameMetadata & { type: "heartbeat" };
@@ -912,7 +850,6 @@ export type RpcNotificationFrame =
 	| RpcSubagentFrame
 	| RpcObservableSessionUpdateFrame
 	| RpcHeartbeatFrame
-	| RpcBackgroundLaneUpdateFrame
 	| RpcPongFrame
 	| RpcShutdownFrame
 	| RpcExtensionUIRequestFrame

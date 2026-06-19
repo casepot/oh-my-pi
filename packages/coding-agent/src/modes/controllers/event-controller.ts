@@ -127,7 +127,6 @@ export class EventController {
 				this.ctx.ui.requestRender();
 			},
 			goal_updated: async () => {},
-			background_lane_update: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 

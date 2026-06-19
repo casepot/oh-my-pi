@@ -3,7 +3,6 @@
 ## [Unreleased]
 
 ### Added
-- Added durable background lanes for goal mode, including persistent lane ledgers, git worktrees, child RPC sessions, structured `lane_report` handling, parent-completion guards, RPC commands/update frames, and audit messages.
 
 - Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
 

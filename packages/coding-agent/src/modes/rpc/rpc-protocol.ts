@@ -99,7 +99,6 @@ const RPC_COMMANDS = Object.freeze([
 	"get_observable_sessions",
 	"get_login_providers",
 	"login",
-	"background_lane",
 ] as const);
 
 const RPC_EVENTS = Object.freeze([
@@ -144,7 +143,6 @@ const RPC_EVENTS = Object.freeze([
 	"notice",
 	"thinking_level_changed",
 	"goal_updated",
-	"background_lane_update",
 ] as const);
 
 export const RPC_CAPABILITIES: RpcCapabilities = Object.freeze({
@@ -163,7 +161,6 @@ export const RPC_CAPABILITIES: RpcCapabilities = Object.freeze({
 	chunkedPayloads: false,
 	oneShot: true,
 	heartbeat: true,
-	backgroundLanes: true,
 });
 
 export const RPC_RESET_PROFILE: RpcResetProfile = {
@@ -234,7 +231,6 @@ export function buildRpcSecurityProfile(
 			"session",
 			"messages",
 			"login",
-			"background_lanes",
 		],
 		disabledTools: [],
 		hostToolPermissionMode: hostToolBridge ? "host-owned" : "disabled",
