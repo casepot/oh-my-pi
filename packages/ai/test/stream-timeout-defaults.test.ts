@@ -11,8 +11,8 @@ import {
 /**
  * Per-provider fallback overrides on the stream-watchdog helpers.
  *
- * These are the gear that lets `google-gemini-cli` widen its first-event floor
- * beyond the 100s global default without forcing every other provider to wait
+ * These are the gear that lets providers widen their first-event floor
+ * beyond the 150s global default without forcing every other provider to wait
  * just as long. Tests pin the precedence contract callers depend on:
  * caller option > env var > per-provider fallback > base default.
  */
@@ -49,6 +49,10 @@ describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
 		expect(getStreamIdleTimeoutMs(300_000)).toBe(300_000);
 	});
 
+	it("falls back to the 150s global default when no fallback or env is provided", () => {
+		expect(getStreamIdleTimeoutMs()).toBe(150_000);
+	});
+
 	it("lets PI_STREAM_IDLE_TIMEOUT_MS override the per-provider fallback", () => {
 		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "42";
 		expect(getStreamIdleTimeoutMs(300_000)).toBe(42);
@@ -63,6 +67,10 @@ describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
 describe("getOpenAIStreamIdleTimeoutMs(fallbackMs)", () => {
 	it("returns the per-provider fallback when OpenAI env vars are unset", () => {
 		expect(getOpenAIStreamIdleTimeoutMs(600_000)).toBe(600_000);
+	});
+
+	it("falls back to the 150s global default when no fallback or env is provided", () => {
+		expect(getOpenAIStreamIdleTimeoutMs()).toBe(150_000);
 	});
 
 	it("lets PI_OPENAI_STREAM_IDLE_TIMEOUT_MS override the fallback before the generic env var", () => {
@@ -100,8 +108,8 @@ describe("getStreamFirstEventTimeoutMs(idleTimeoutMs, fallbackMs)", () => {
 		expect(getStreamFirstEventTimeoutMs(undefined, 300_000)).toBeUndefined();
 	});
 
-	it("falls back to the 100s global default when no fallback or env is provided", () => {
-		expect(getStreamFirstEventTimeoutMs()).toBe(100_000);
+	it("falls back to the 150s global default when no fallback or env is provided", () => {
+		expect(getStreamFirstEventTimeoutMs()).toBe(150_000);
 	});
 });
 

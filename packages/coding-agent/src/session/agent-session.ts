@@ -5143,6 +5143,7 @@ export class AgentSession {
 		signal: AbortSignal | undefined,
 	): Promise<void> {
 		if (signal?.aborted) return;
+		const beforeBranchLeafId = this.sessionManager.getLeafId();
 		const beforeCompactionId = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
 		logger.debug("Provider-call context maintenance triggered", {
 			contextTokens: decision.contextTokens,
@@ -5169,8 +5170,20 @@ export class AgentSession {
 		}
 
 		if (signal?.aborted) return;
+		const afterBranchLeafId = this.sessionManager.getLeafId();
 		const afterCompactionId = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
 		if (!afterCompactionId || afterCompactionId === beforeCompactionId) {
+			if (afterBranchLeafId !== beforeBranchLeafId) {
+				logger.warn("Provider-call context maintenance branch changed before compaction append; failing closed", {
+					contextTokens: decision.contextTokens,
+					contextWindow: decision.contextWindow,
+					baseLeafId: beforeBranchLeafId,
+					currentLeafId: afterBranchLeafId,
+				});
+				throw new ContextMaintenanceError(
+					`Context maintenance failed before provider call: branch changed before compaction could be appended for an estimated ${decision.contextTokens.toLocaleString()} token context.`,
+				);
+			}
 			throw new ContextMaintenanceError(
 				`Context maintenance failed before provider call: no compaction was appended for an estimated ${decision.contextTokens.toLocaleString()} token context.`,
 			);

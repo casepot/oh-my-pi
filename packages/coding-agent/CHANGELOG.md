@@ -44,6 +44,8 @@
 - Fixed compaction commits so manual, auto, and inline maintenance discard stale branch summaries, avoid duplicate branch-window compactions, and route `session_compact` hooks by the appended entry id.
 - Fixed auto-compaction scheduling so concurrent checks coalesce around active work, idle maintenance cannot abort recovery, recovery can supersede idle work, and inline provider-call maintenance keeps continuation scheduling disabled.
 - Fixed remote compaction cancellation handling with a configurable timeout so caller aborts stop maintenance, while timeout and live remote failures fall back locally with structured diagnostics.
+- Fixed provider-call context maintenance branch-race errors to report stale compaction explicitly instead of the ambiguous "no compaction was appended" fallback.
+- Increased the default remote compaction timeout to 180s so large Codex compactions get the same request budget as the remote compaction hard ceiling.
 - Fixed goal-mode compaction preserve-data merging so current live goal state wins over stale preserved state from earlier compactions.
 - Fixed goal side-agent transcript artifacts so UI-only/no-context rubric artifacts are omitted from non-verifier checkpoint and continuation agents.
 

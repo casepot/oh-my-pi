@@ -322,15 +322,19 @@ describe("AgentSession inline provider-call maintenance", () => {
 				.getEntries()
 				.some(entry => entry.type === "compaction" && entry.summary === "stale inline compacted"),
 		).toBe(false);
-		const persistedAssistantErrors = sessionManager.getEntries().filter(entry => {
-			return (
+		const persistedAssistantErrorMessages = sessionManager.getEntries().flatMap(entry => {
+			if (
 				entry.type === "message" &&
 				entry.message.role === "assistant" &&
 				entry.message.stopReason === "error" &&
 				entry.message.errorMessage?.includes("Context maintenance failed before provider call")
-			);
+			) {
+				return [entry.message.errorMessage];
+			}
+			return [];
 		});
-		expect(persistedAssistantErrors).toHaveLength(1);
+		expect(persistedAssistantErrorMessages).toHaveLength(1);
+		expect(persistedAssistantErrorMessages[0]).toContain("branch changed before compaction could be appended");
 	});
 
 	it("supersedes stale idle work before inline provider-call maintenance", async () => {

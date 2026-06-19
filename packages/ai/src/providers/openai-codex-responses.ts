@@ -3133,29 +3133,47 @@ async function openCodexSseEventStream(
 	// `wrapCodexSseStream` arms a first-event watchdog only after this fetch
 	// resolves (it wraps the SSE generator). With `timeout: false` disabling
 	// Bun's native 300s ceiling, a stalled pre-response request needs its own
-	// watchdog — combine the caller signal with a fresh
-	// `AbortSignal.timeout(firstEventTimeoutMs)` so headers must arrive
-	// within the configured budget (issue #2422).
-	const preResponseWatchdog =
-		firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0
-			? AbortSignal.timeout(firstEventTimeoutMs)
-			: undefined;
-	const fetchSignal = preResponseWatchdog
-		? signal
-			? AbortSignal.any([signal, preResponseWatchdog])
-			: preResponseWatchdog
-		: signal;
-	const response = await fetchWithRetry(url, {
-		method: "POST",
-		headers,
-		body: JSON.stringify(body),
-		signal: fetchSignal,
-		maxAttempts: CODEX_MAX_RETRIES + 1,
-		defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
-		maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
-		fetch: fetchOverride,
-		timeout: false,
-	});
+	// watchdog. Keep that watchdog cancellable and clear it as soon as headers
+	// arrive; an `AbortSignal.timeout()` passed directly to fetch also aborts
+	// the response body later, turning long valid streams into generic
+	// "operation timed out" failures.
+	let preResponseTimeout: NodeJS.Timeout | undefined;
+	let preResponseAbortController: AbortController | undefined;
+	let fetchSignal = signal;
+	if (firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0) {
+		preResponseAbortController = new AbortController();
+		preResponseTimeout = setTimeout(() => {
+			preResponseAbortController?.abort(
+				new Error("OpenAI Codex SSE stream timed out while waiting for the first event"),
+			);
+		}, firstEventTimeoutMs);
+		preResponseTimeout.unref?.();
+		fetchSignal = signal
+			? AbortSignal.any([signal, preResponseAbortController.signal])
+			: preResponseAbortController.signal;
+	}
+	let response: Response;
+	try {
+		response = await fetchWithRetry(url, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+			signal: fetchSignal,
+			maxAttempts: CODEX_MAX_RETRIES + 1,
+			defaultDelayMs: attempt => CODEX_RETRY_DELAY_MS * (attempt + 1),
+			maxDelayMs: CODEX_RATE_LIMIT_BUDGET_MS,
+			fetch: fetchOverride,
+			timeout: false,
+		});
+	} catch (error) {
+		if (!signal?.aborted && preResponseAbortController?.signal.aborted) {
+			const reason = preResponseAbortController.signal.reason;
+			throw reason instanceof Error ? reason : new Error(String(reason ?? "OpenAI Codex SSE stream timed out"));
+		}
+		throw error;
+	} finally {
+		clearTimeout(preResponseTimeout);
+	}
 	logCodexDebug("codex response", {
 		url: response.url,
 		status: response.status,

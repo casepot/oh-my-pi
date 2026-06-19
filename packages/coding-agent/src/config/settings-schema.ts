@@ -1674,7 +1674,7 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteTimeoutMs": {
 		type: "number",
-		default: 30_000,
+		default: 180_000,
 		ui: {
 			tab: "context",
 			group: "Compaction",

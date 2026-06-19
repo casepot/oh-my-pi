@@ -8,6 +8,7 @@ import {
 import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { waitForDelayOrAbort } from "./helpers";
 
 const originalAgentDir = getAgentDir();
 const originalWebSocket = global.WebSocket;
@@ -82,6 +83,58 @@ function createCompletedCodexSse(text: string): string {
 		`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text }] } })}`,
 		`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
 	].join("\n\n")}\n\n`;
+}
+
+function createSlowCompletingCodexSse(signal: AbortSignal | undefined, delayMs: number): Response {
+	const encoder = new TextEncoder();
+	const encode = (event: unknown): Uint8Array => encoder.encode(`data: ${JSON.stringify(event)}\n\n`);
+	const stream = new ReadableStream<Uint8Array>({
+		async start(controller) {
+			controller.enqueue(
+				encode({
+					type: "response.output_item.added",
+					item: { type: "message", id: "msg_slow", role: "assistant", status: "in_progress", content: [] },
+				}),
+			);
+			controller.enqueue(encode({ type: "response.content_part.added", part: { type: "output_text", text: "" } }));
+			controller.enqueue(encode({ type: "response.output_text.delta", delta: "Slow hello" }));
+			try {
+				await waitForDelayOrAbort(delayMs, signal);
+			} catch (error) {
+				controller.error(error);
+				return;
+			}
+			controller.enqueue(
+				encode({
+					type: "response.output_item.done",
+					item: {
+						type: "message",
+						id: "msg_slow",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "Slow hello" }],
+					},
+				}),
+			);
+			controller.enqueue(
+				encode({
+					type: "response.completed",
+					response: {
+						id: "resp_slow",
+						status: "completed",
+						usage: {
+							input_tokens: 5,
+							output_tokens: 3,
+							total_tokens: 8,
+							input_tokens_details: { cached_tokens: 0 },
+						},
+					},
+				}),
+			);
+			controller.close();
+		},
+	});
+	return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
 }
 
 function createStatefulCodexSse(text: string, responseId: string): string {
@@ -1266,6 +1319,56 @@ describe("openai-codex streaming", () => {
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("terminal completion event");
+	});
+
+	it("times out before SSE response headers arrive with a Codex-specific first-event error", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		let requestSignal: AbortSignal | undefined;
+		const fetchMock: FetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+			requestSignal = getRequestSignal(input, init);
+			await waitForDelayOrAbort(100, requestSignal);
+			return new Response(createCompletedCodexSse("too late"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+			streamFirstEventTimeoutMs: 20,
+			streamIdleTimeoutMs: 1_000,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("OpenAI Codex SSE stream timed out while waiting for the first event");
+		expect(requestSignal?.aborted).toBe(true);
+	});
+
+	it("does not let the pre-response watchdog abort an active SSE body", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		let requestSignal: AbortSignal | undefined;
+		const fetchMock: FetchImpl = (input: string | URL | Request, init?: RequestInit) => {
+			requestSignal = getRequestSignal(input, init);
+			return Promise.resolve(createSlowCompletingCodexSse(requestSignal, 40));
+		};
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+			streamFirstEventTimeoutMs: 20,
+			streamIdleTimeoutMs: 1_000,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Slow hello");
+		expect(requestSignal?.aborted).toBe(false);
 	});
 
 	it("stops reading SSE responses after a terminal response event", async () => {

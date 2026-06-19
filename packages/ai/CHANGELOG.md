@@ -5,6 +5,15 @@
 ### Added
 
 - Added `EventStream.pushedCount` so consumers can acknowledge all events pushed before a provider-call barrier, including events delivered directly to a waiting iterator.
+
+### Changed
+
+- Increased the default stream first-event and idle watchdogs to 150s for reasoning-heavy provider calls while preserving environment overrides and explicit disables.
+
+### Fixed
+
+- Fixed Codex SSE pre-response timeout handling so the first-event watchdog is cleared after response headers arrive instead of aborting long active response bodies later with a generic operation timeout.
+
 ## [16.0.2] - 2026-06-16
 
 ### Added

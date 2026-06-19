@@ -301,7 +301,7 @@ export interface StreamOptions {
 	 * mid-stream stalls (broker dies, half-open socket, model produces no real
 	 * progress for too long). Set to `0` to disable. Falls back to
 	 * `PI_STREAM_IDLE_TIMEOUT_MS` (alias: `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`)
-	 * and then to a 120s default.
+	 * and then to a 150s default.
 	 */
 	streamIdleTimeoutMs?: number;
 	/**

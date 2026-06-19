@@ -7,7 +7,11 @@ import {
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import { buildOpenAiNativeHistory, requestOpenAiRemoteCompaction } from "@oh-my-pi/pi-agent-core/compaction/openai";
+import {
+	buildOpenAiNativeHistory,
+	DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS,
+	requestOpenAiRemoteCompaction,
+} from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
 import type { AssistantMessage, FetchImpl, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -470,6 +474,13 @@ describe("compact remote fallback classification", () => {
 			.find(candidate => candidate.kind === "malformed");
 		expect(fields?.outputTypes).toEqual(["message"]);
 		expect(String(fields?.endpoint)).toContain("/responses/compact");
+	});
+});
+
+describe("remote compaction settings", () => {
+	test("uses the remote request hard ceiling as the default compaction timeout", () => {
+		expect(DEFAULT_COMPACTION_SETTINGS.remoteTimeoutMs).toBe(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS);
+		expect(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS).toBe(180_000);
 	});
 });
 

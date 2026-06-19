@@ -80,7 +80,7 @@ export interface RemoteCompactionRequestOptions {
 	timeoutMs?: number;
 }
 
-export const DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS = 30_000;
+export const DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS = REMOTE_COMPACTION_TIMEOUT_MS;
 
 export type RemoteCompactionFailureKind = "timeout" | "http" | "malformed" | "network";
 

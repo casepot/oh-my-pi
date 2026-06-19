@@ -64,7 +64,7 @@ describe("Settings", () => {
 		it("keeps eight inline images live by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
-			expect(settings.get("compaction.remoteTimeoutMs")).toBe(30_000);
+			expect(settings.get("compaction.remoteTimeoutMs")).toBe(180_000);
 		});
 
 		it("exposes all tool calling mode options", () => {
