@@ -673,6 +673,12 @@ function visibleGoalObjective(goal: Goal, op: GoalToolInput["op"]): string {
 	return title.length <= TRUNCATE_LENGTHS.TITLE ? title : `${title.slice(0, TRUNCATE_LENGTHS.TITLE - 1)}…`;
 }
 
+function shouldRenderPendingCheckpoint(goal: Goal, runMode: GoalModeState["runMode"] | undefined): boolean {
+	if (!goal.pendingCheckpointId) return false;
+	if (runMode === "awaiting-checkpoint-resolution") return true;
+	return !goal.checkpointResolutions?.some(resolution => resolution.checkpointId === goal.pendingCheckpointId);
+}
+
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
 	const goal = response.goal;
 	if (!goal) return "No active goal.";
@@ -701,7 +707,7 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 		if (relevant.length) text += `\nRelevant deliverables: ${relevant.join(", ")}`;
 	}
 	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
-	if (goal.pendingCheckpointId && response.state?.runMode === "awaiting-checkpoint-resolution") {
+	if (shouldRenderPendingCheckpoint(goal, response.state?.runMode)) {
 		text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
 		text += `\nNext action: inspect checkpoint guidance, then call goal({op:"resolve_checkpoint", checkpoint_id:"${goal.pendingCheckpointId}"}) before ordinary tools.`;
 	}
@@ -873,7 +879,7 @@ export const goalToolRenderer = {
 		lines.push(`  ${uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`))}`);
 		if (goal.currentTarget)
 			lines.push(`  ${uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`)}`);
-		if (goal.pendingCheckpointId && details?.state?.runMode === "awaiting-checkpoint-resolution") {
+		if (shouldRenderPendingCheckpoint(goal, details?.state?.runMode)) {
 			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: resolve ${goal.pendingCheckpointId}`)}`);
 			lines.push(`  ${uiTheme.fg("muted", "ordinary tools blocked until resolve_checkpoint")}`);
 		}

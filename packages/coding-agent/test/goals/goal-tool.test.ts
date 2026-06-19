@@ -229,6 +229,66 @@ describe("GoalTool", () => {
 		expect(rendered).not.toContain("Hidden prepared continuation prompt.");
 	});
 
+	it("renders only unresolved pending checkpoints in non-checkpoint run modes", async () => {
+		const unresolvedState = createGoalModeState({
+			runMode: "awaiting-user-input",
+			goal: createGoal({ pendingCheckpointId: "checkpoint-1" }),
+		});
+		const resolvedState = createGoalModeState({
+			runMode: "awaiting-user-input",
+			goal: createGoal({
+				pendingCheckpointId: "checkpoint-1",
+				lastCheckpointResolutionId: "resolution-1",
+				checkpointResolutions: [
+					{
+						id: "resolution-1",
+						sequence: 1,
+						goalId: "goal-1",
+						checkpointId: "checkpoint-1",
+						decision: "pause_for_external_control",
+						parentReading: "Paused for external authority.",
+						notPropagated: [],
+						remainingParentWork: ["Choose next target"],
+						broaderChecksOrInputs: [],
+						lessonsForFuture: [],
+						createdAt: 1,
+					},
+				],
+			}),
+		});
+		let currentState = unresolvedState;
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => createRuntimeHarness().runtime,
+				getGoalModeState: () => cloneState(currentState),
+			}),
+		);
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("expected dark theme");
+		const renderOptions = { expanded: false, isPartial: false };
+
+		const unresolved = await tool.execute("get-unresolved", { op: "get" });
+		const unresolvedContent = unresolved.content[0];
+		if (unresolvedContent?.type !== "text") throw new Error("expected text result");
+		expect(unresolvedContent.text).toContain("Pending checkpoint: checkpoint-1");
+		const unresolvedRendered = Bun.stripANSI(
+			goalToolRenderer.renderResult(unresolved, renderOptions, uiTheme, { op: "get" }).render(120).join("\n"),
+		);
+		expect(unresolvedRendered).toContain("checkpoint pending: resolve checkpoint-1");
+		expect(unresolvedRendered).toContain("ordinary tools blocked until resolve_checkpoint");
+
+		currentState = resolvedState;
+		const resolved = await tool.execute("get-resolved", { op: "get" });
+		const resolvedContent = resolved.content[0];
+		if (resolvedContent?.type !== "text") throw new Error("expected text result");
+		expect(resolvedContent.text).not.toContain("Pending checkpoint");
+		const resolvedRendered = Bun.stripANSI(
+			goalToolRenderer.renderResult(resolved, renderOptions, uiTheme, { op: "get" }).render(120).join("\n"),
+		);
+		expect(resolvedRendered).not.toContain("checkpoint pending");
+		expect(resolvedRendered).not.toContain("ordinary tools blocked until resolve_checkpoint");
+	});
+
 	it("uses op-specific schemas for target, checkpoint, and resolution operations", () => {
 		const tool = new GoalTool(createToolSession({ getGoalRuntime: () => createRuntimeHarness().runtime }));
 		expect(tool.description).toContain("parent goal");

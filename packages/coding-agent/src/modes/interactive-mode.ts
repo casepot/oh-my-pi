@@ -1714,22 +1714,29 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#updateGoalModeStatus(): void {
 		const state = this.session.getGoalModeState();
-		const label =
-			state?.runMode === "awaiting-checkpoint-resolution"
+		const pendingCheckpointId = state?.goal.pendingCheckpointId;
+		const checkpointStillPending =
+			pendingCheckpointId !== undefined &&
+			(state?.runMode === "awaiting-checkpoint-resolution" ||
+				!(
+					state?.goal.checkpointResolutions?.some(resolution => resolution.checkpointId === pendingCheckpointId) ??
+					false
+				));
+		const label = checkpointStillPending
+			? this.#goalContinuationTurnInFlight
+				? "Goal resolving checkpoint"
+				: `Goal checkpoint pending${pendingCheckpointId ? `: resolve ${pendingCheckpointId}` : ""}`
+			: state?.runMode === "awaiting-parent-completion"
 				? this.#goalContinuationTurnInFlight
-					? "Goal resolving checkpoint"
-					: `Goal checkpoint pending${state.goal.pendingCheckpointId ? `: resolve ${state.goal.pendingCheckpointId}` : ""}`
-				: state?.runMode === "awaiting-parent-completion"
+					? "Goal verifying parent completion"
+					: "Goal completion verification pending"
+				: state?.runMode === "awaiting-verification-repair"
 					? this.#goalContinuationTurnInFlight
-						? "Goal verifying parent completion"
-						: "Goal completion verification pending"
-					: state?.runMode === "awaiting-verification-repair"
-						? this.#goalContinuationTurnInFlight
-							? "Goal repairing verifier blockers"
-							: "Goal verifier repair pending"
-						: state?.runMode === "awaiting-user-input"
-							? "Goal awaiting user/external input"
-							: undefined;
+						? "Goal repairing verifier blockers"
+						: "Goal verifier repair pending"
+					: state?.runMode === "awaiting-user-input"
+						? "Goal awaiting user/external input"
+						: undefined;
 		const status =
 			this.goalModeEnabled || this.goalModePaused
 				? { enabled: this.goalModeEnabled, paused: this.goalModePaused, label }

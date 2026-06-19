@@ -871,7 +871,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(guidance?.customType).toBe(GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE);
 		expect(guidance?.prompt).toContain(goalSideAgentMock.checkpointGuidance);
 		expect(guidance?.prompt).toContain("resolve_checkpoint");
-		expect(guidance?.prompt).toContain('decision:"next_target"');
+		expect(guidance?.prompt).toMatch(/decision:\s*"next_target"/);
 		expect(guidance?.prompt).toContain("NEVER use `pause_for_external_control` as a generic stop");
 		const guidanceCall = goalSideAgentCalls.find(call => call.agent.name === "goal-checkpoint-guidance");
 		expect(guidanceCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
@@ -1012,6 +1012,16 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(resolveText).not.toContain("Pending checkpoint");
 		const getResult = await goalTool.execute("get-pause", { op: "get" });
 		expect(JSON.stringify(getResult.content)).not.toContain("Pending checkpoint");
+		const verifierCallsBefore = goalSideAgentCalls.filter(
+			call => call.agent.name === "goal-completion-verifier",
+		).length;
+		await expect(goalTool.execute("complete-after-pause", { op: "complete" })).rejects.toThrow(
+			"cannot complete parent goal while awaiting user input or external authority",
+		);
+		expect(goalSideAgentCalls.filter(call => call.agent.name === "goal-completion-verifier")).toHaveLength(
+			verifierCallsBefore,
+		);
+		expect(harness.session.getGoalModeState()?.goal.totalVerificationAttempts).toBe(0);
 		const next = await goalTool.execute("start-after-pause", {
 			op: "start_target",
 			title: "Choose next release gate",
