@@ -39,6 +39,9 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed autonomous goal target planning so SDK target-plan handlers route through the active session, planning can coordinate read-only `task` reviewers with `job`/`irc`, and implementation tools remain blocked until approval.
+- Fixed goal-mode audit durability so UI-only rubric artifacts recover from restored state, duplicate rubric/mode-change entries are suppressed, and active in-flight goals cannot be dropped silently.
+- Fixed startup update banners to use source/install-specific titles and prefixed source checkout lines while preserving the four-line cap.
 - Fixed autonomous goal target planning so failed/stale plan reviews cannot unlock checkpoints, paused goals stop enforcing target-planning write guards, local plan hashline paths resolve consistently, and target-plan submission requires a required primary verification signal.
 - Fixed inline provider-call context maintenance so tool-result continuations compact and rematerialize before the next request, fail closed with a persisted maintenance error when unsafe maintenance fails, avoid inline handoff/auto-continue, and reset Codex/OpenAI replay state after history rewrites.
 - Fixed provider-call and pre-prompt context maintenance estimates to use materialized provider context with a bounded same-model usage floor, ignoring aborted/error, old-model, and pre-compaction usage.
