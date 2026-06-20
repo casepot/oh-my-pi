@@ -336,6 +336,10 @@ function pushLine(lines: string[], line: string): void {
 	if (lines.length < 4) lines.push(line);
 }
 
+function formatCommitCount(count: number): string {
+	return `${count} ${count === 1 ? "commit" : "commits"}`;
+}
+
 export function buildStartupUpdateNotification(
 	status: InstallStatus,
 	currentVersion: string,
@@ -345,21 +349,22 @@ export function buildStartupUpdateNotification(
 	if (status.source) {
 		const source = status.source;
 		const branch = source.branch ?? DEFAULT_SOURCE_BRANCH;
+		const forkPrefix = `OMP fork ${branch}:`;
 		if (status.kind !== "fork-source") {
 			const sourceRepo = source.originRepo ?? "unknown source";
-			pushLine(lines, `Install source: ${sourceRepo}; expected ${FORK_REPO}`);
+			pushLine(lines, `OMP source checkout: ${sourceRepo}; expected ${FORK_REPO}`);
 		}
-		if (source.dirty) pushLine(lines, "Local changes: dirty checkout");
+		if (source.dirty) pushLine(lines, "OMP source checkout: dirty");
 		if ((source.localBehindOrigin ?? 0) > 0) {
-			pushLine(lines, `Update available: fork ${branch} +${source.localBehindOrigin} commits`);
+			pushLine(lines, `${forkPrefix} ${formatCommitCount(source.localBehindOrigin ?? 0)} available`);
 		}
 		if ((source.localAheadOrigin ?? 0) > 0) {
-			pushLine(lines, `Local branch: ahead fork by ${source.localAheadOrigin} commits`);
+			pushLine(lines, `${forkPrefix} local branch ahead by ${formatCommitCount(source.localAheadOrigin ?? 0)}`);
 		}
 		if ((source.forkBehindUpstream ?? 0) > 0) {
 			pushLine(
 				lines,
-				`Fork behind upstream by ${source.forkBehindUpstream} commits (/upstream-sync to get upstream changes)`,
+				`${forkPrefix} ${formatCommitCount(source.forkBehindUpstream ?? 0)} behind upstream (/upstream-sync to get upstream changes)`,
 			);
 		}
 	} else if (status.kind === "package" || status.kind === "binary") {
@@ -372,7 +377,7 @@ export function buildStartupUpdateNotification(
 	}
 
 	if (lines.length === 0) return undefined;
-	return { title: "Update Status", lines };
+	return { title: status.source ? "OMP Source Status" : "OMP Install Status", lines };
 }
 
 export async function checkForInstallStatus(currentVersion: string): Promise<StartupUpdateNotification | undefined> {
