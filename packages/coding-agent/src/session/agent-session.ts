@@ -364,6 +364,7 @@ import {
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
 	type GoalCheckpointResolutionMessageDetails,
+	type GoalRubricMessageDetails,
 	type GoalTargetPlanMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 	type PythonExecutionMessage,
@@ -1038,6 +1039,10 @@ function checkpointResolutionArtifactDetailsMatch(details: unknown, goalId: stri
 	return isStringRecord(resolution) && resolution.id === resolutionId;
 }
 
+function rubricArtifactDetailsMatch(details: unknown, goalId: string, rubric: string): boolean {
+	return isStringRecord(details) && details.goalId === goalId && details.rubric === rubric;
+}
+
 function targetPlanArtifactDetailsMatch(details: unknown, goalId: string, targetPlanId: string): boolean {
 	if (!isStringRecord(details) || details.goalId !== goalId) return false;
 	return details.targetPlanId === targetPlanId;
@@ -1534,6 +1539,7 @@ export class AgentSession {
 			"customType" | "content" | "display" | "details" | "attribution" | "includeInContext"
 		>
 	> = [];
+	#lastGoalModeChangeSignature: string | undefined;
 	#advisorRuntime?: AdvisorRuntime;
 	#advisorEnabled = false;
 	/** The advisor's own agent, retained so `/dump advisor` can serialize its transcript. Undefined when no advisor is active. */
@@ -2013,9 +2019,9 @@ export class AgentSession {
 			},
 			persist: (mode, state) => {
 				if (mode === "none") {
-					this.sessionManager.appendModeChange("none");
+					this.#appendGoalModeChange("none");
 				} else if (state) {
-					this.sessionManager.appendModeChange(mode, { ...serializeGoalModeState(state) });
+					this.#appendGoalModeChange(mode, { ...serializeGoalModeState(state) });
 				}
 			},
 			sendHiddenMessage: async message => {
@@ -5585,6 +5591,13 @@ export class AgentSession {
 		this.#syncGoalTargetPlanReference(state);
 	}
 
+	#appendGoalModeChange(mode: string, data?: Record<string, unknown>): void {
+		const signature = `${mode}\0${data ? JSON.stringify(data) : ""}`;
+		if (this.#lastGoalModeChangeSignature === signature) return;
+		this.#lastGoalModeChangeSignature = signature;
+		this.sessionManager.appendModeChange(mode, data);
+	}
+
 	#syncGoalTargetPlanReference(state: GoalModeState | undefined): void {
 		const reference = this.#goalTargetPlanReference;
 		if (!reference) return;
@@ -5605,6 +5618,7 @@ export class AgentSession {
 	recoverGoalArtifactsFromState(): void {
 		const goal = this.#goalModeState?.goal;
 		if (!goal) return;
+		this.#publishGoalRubricArtifact(goal);
 		for (const plan of goal.targetPlans ?? []) {
 			if (this.#hasGoalTargetPlanArtifact(goal.id, plan.id)) continue;
 			const reviews = plan.reviews ?? [];
@@ -5693,8 +5707,9 @@ export class AgentSession {
 			rubricOutput.rubric,
 			rubricOutput.deliverableMap,
 		);
-		if (rubricState) return rubricState;
-		return state;
+		const finalState = rubricState ?? state;
+		this.#publishGoalRubricArtifact(finalState.goal);
+		return finalState;
 	}
 
 	async replaceGoalWithRubric(
@@ -5724,8 +5739,9 @@ export class AgentSession {
 			rubricOutput.rubric,
 			rubricOutput.deliverableMap,
 		);
-		if (rubricState) return rubricState;
-		return state;
+		const finalState = rubricState ?? state;
+		this.#publishGoalRubricArtifact(finalState.goal);
+		return finalState;
 	}
 
 	async requestGoalCheckpoint(
@@ -6228,6 +6244,25 @@ export class AgentSession {
 		return (await this.prepareGoalContinuationDispatch(signal))?.prompt;
 	}
 
+	#publishGoalRubricArtifact(goal: Goal): void {
+		const rubric = goal.rubric?.trim();
+		if (!rubric || this.#hasGoalRubricArtifact(goal.id, rubric)) return;
+		const details: GoalRubricMessageDetails = {
+			goalId: goal.id,
+			objective: goal.objective,
+			rubric,
+			generatedAt: Date.now(),
+		};
+		this.#appendGoalArtifactMessage({
+			customType: GOAL_RUBRIC_MESSAGE_TYPE,
+			content: rubric,
+			display: true,
+			details,
+			attribution: "agent",
+			includeInContext: false,
+		});
+	}
+
 	async #publishGoalVerificationFeedbackArtifact(input: {
 		goal: Goal;
 		attempt: number;
@@ -6338,6 +6373,22 @@ export class AgentSession {
 		for (const message of messages) {
 			this.#appendGoalArtifactMessage(message);
 		}
+	}
+
+	#hasGoalRubricArtifact(goalId: string, rubric: string): boolean {
+		if (
+			this.#pendingGoalArtifactMessages.some(
+				message =>
+					message.customType === GOAL_RUBRIC_MESSAGE_TYPE &&
+					rubricArtifactDetailsMatch(message.details, goalId, rubric),
+			)
+		) {
+			return true;
+		}
+		return this.sessionManager.getEntries().some(entry => {
+			if (entry.type !== "custom_message" || entry.customType !== GOAL_RUBRIC_MESSAGE_TYPE) return false;
+			return rubricArtifactDetailsMatch(entry.details, goalId, rubric);
+		});
 	}
 
 	#hasGoalCheckpointArtifact(goalId: string, checkpointId: string): boolean {

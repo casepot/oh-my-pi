@@ -584,21 +584,33 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(state?.goal.rubric).toContain("Strict test rubric");
 		expect(state?.goal.deliverableMap).toEqual([{ id: "D1", summary: "Ship release behavior.", status: "pending" }]);
 		expect(state?.stateVersion).toBe(2);
-		const stateVersions = harness.session.sessionManager
-			.getEntries()
-			.flatMap(entry =>
-				entry.type === "mode_change" && entry.mode === "goal" && typeof entry.data?.stateVersion === "number"
-					? [entry.data.stateVersion]
-					: [],
-			);
+		const entries = harness.session.sessionManager.getEntries();
+		const stateVersions = entries.flatMap(entry =>
+			entry.type === "mode_change" && entry.mode === "goal" && typeof entry.data?.stateVersion === "number"
+				? [entry.data.stateVersion]
+				: [],
+		);
+		const modeChangeSignatures = entries.flatMap(entry =>
+			entry.type === "mode_change" ? [`${entry.mode}\0${JSON.stringify(entry.data ?? null)}`] : [],
+		);
 		expect(stateVersions).toEqual([...stateVersions].sort((a, b) => a - b));
 		expect(stateVersions.at(-1)).toBe(state?.stateVersion);
+		for (let index = 1; index < modeChangeSignatures.length; index++) {
+			expect(modeChangeSignatures[index]).not.toBe(modeChangeSignatures[index - 1]);
+		}
 		expect(showStatus).toHaveBeenCalledWith("Generating goal rubric…");
 		expect(showStatus).toHaveBeenCalledWith("Goal rubric generated.");
-		const artifact = harness.session.sessionManager
-			.getEntries()
-			.find(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
-		expect(artifact).toBeUndefined();
+		const rubricEntries = entries.filter(
+			entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE,
+		);
+		expect(rubricEntries).toHaveLength(1);
+		const artifact = rubricEntries[0];
+		if (artifact?.type !== "custom_message") throw new Error("expected rubric artifact");
+		expect(artifact.includeInContext).toBe(false);
+		expect(artifact.details).toMatchObject({
+			goalId: state?.goal.id,
+			rubric: "Strict test rubric with labeled score levels.",
+		});
 		const renderedChat = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
 		expect(renderedChat).toContain("[goal-rubric]");
 		expect(renderedChat).toContain("ctrl+o to expand");
@@ -626,7 +638,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const rubricEntries = harness.session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
-		expect(rubricEntries.length).toBe(beforeRubricCount);
+		expect(rubricEntries.length).toBe(beforeRubricCount + 1);
 		expect(state?.goal.rubric).toContain("Strict test rubric");
 		expect(state?.goal.deliverableMap?.[0]?.id).toBe("D1");
 		const renderedChat = Bun.stripANSI(harness.mode.chatContainer.render(120).join("\n"));
@@ -870,7 +882,10 @@ describe("InteractiveMode goal mode integration", () => {
 		const feedbackEntries = entries.filter(
 			entry => entry.type === "custom_message" && entry.customType === GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 		);
-		expect(rubricEntries.length).toBe(0);
+		expect(rubricEntries).toHaveLength(1);
+		const latestRubricEntry = rubricEntries[0];
+		if (latestRubricEntry?.type !== "custom_message") throw new Error("expected rubric artifact");
+		expect(latestRubricEntry.includeInContext).toBe(false);
 		expect(feedbackEntries.length).toBeGreaterThan(0);
 		const latestFeedbackEntry = feedbackEntries[feedbackEntries.length - 1];
 		if (latestFeedbackEntry?.type !== "custom_message") throw new Error("expected verification feedback artifact");
@@ -912,9 +927,8 @@ describe("InteractiveMode goal mode integration", () => {
 		const afterSubcommandEntries = harness.session.sessionManager
 			.getEntries()
 			.filter(entry => entry.type === "custom_message");
-		expect(afterSubcommandEntries.length).toBe(beforeSubcommandCount + 1);
-		const addedSubcommandEntries = afterSubcommandEntries.slice(beforeSubcommandCount);
-		const rubricEntry = addedSubcommandEntries.find(
+		expect(afterSubcommandEntries.length).toBe(beforeSubcommandCount);
+		const rubricEntry = afterSubcommandEntries.find(
 			entry => entry.type === "custom_message" && entry.customType === GOAL_RUBRIC_MESSAGE_TYPE,
 		);
 		expect(rubricEntry).toBeDefined();
@@ -1211,17 +1225,22 @@ describe("InteractiveMode goal mode integration", () => {
 			restored.session.recoverGoalArtifactsFromState();
 			restored.session.recoverGoalArtifactsFromState();
 			const customEntries = reopenedManager.getEntries().filter(entry => entry.type === "custom_message");
+			const rubricEntries = customEntries.filter(entry => entry.customType === GOAL_RUBRIC_MESSAGE_TYPE);
 			const targetPlanEntries = customEntries.filter(entry => entry.customType === GOAL_TARGET_PLAN_MESSAGE_TYPE);
 			const checkpointEntries = customEntries.filter(entry => entry.customType === GOAL_CHECKPOINT_MESSAGE_TYPE);
 			const resolutionEntries = customEntries.filter(
 				entry => entry.customType === GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 			);
+			expect(rubricEntries).toHaveLength(1);
 			expect(targetPlanEntries).toHaveLength(1);
 			expect(checkpointEntries).toHaveLength(1);
 			expect(resolutionEntries).toHaveLength(1);
+			const rubricEntry = rubricEntries[0];
+			if (rubricEntry?.type !== "custom_message") throw new Error("expected rubric artifact");
 			const targetPlanDetails = targetPlanEntries[0]?.details as GoalTargetPlanMessageDetails | undefined;
 			const checkpointDetails = checkpointEntries[0]?.details as GoalCheckpointMessageDetails | undefined;
 			const resolutionDetails = resolutionEntries[0]?.details as GoalCheckpointResolutionMessageDetails | undefined;
+			expect(rubricEntry.includeInContext).toBe(false);
 			expect(targetPlanDetails?.status).toBe("approved");
 			expect(targetPlanDetails?.targetPlanId).toBe(restoredState.goal.targetPlans?.[0]?.id);
 			expect(checkpointDetails?.checkpoint.id).toBe(checkpointId);
@@ -1230,6 +1249,7 @@ describe("InteractiveMode goal mode integration", () => {
 			expect(resolutionDetails?.parentGoalActive).toBe(true);
 			restored.mode.rebuildChatFromMessages();
 			const rendered = Bun.stripANSI(restored.mode.chatContainer.render(120).join("\n"));
+			expect(rendered).toContain("[goal-rubric]");
 			expect(rendered).toContain("[goal-checkpoint]");
 			expect(rendered).toContain("[goal-checkpoint-resolution]");
 			expect(rendered).toContain("Target closed; parent goal still active");

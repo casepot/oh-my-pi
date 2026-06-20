@@ -44,13 +44,11 @@ export class GoalRubricMessageComponent extends Box {
 			return;
 		}
 
-		const objective = previewLine(details?.objective);
-		const prefix = objective ? `Rubric for ${objective}` : "Goal rubric";
-		this.addChild(new Text(theme.fg("customMessageText", `${prefix} (ctrl+o to expand)`), 0, 0));
-		const rubricPreview = previewLine(details?.rubric);
-		if (rubricPreview) {
-			this.addChild(new Text(theme.fg("customMessageText", rubricPreview), 0, 1));
-		}
+		const objective = previewLine(details?.objective) || "(unknown objective)";
+		const rubricPreview = previewLine(details?.rubric) || "(no rubric provided)";
+		this.addChild(new Text(theme.fg("customMessageText", `Objective: ${objective}`), 0, 0));
+		this.addChild(new Text(theme.fg("customMessageText", `Rubric: ${rubricPreview}`), 0, 1));
+		this.addChild(new Text(theme.fg("customMessageText", "(ctrl+o to expand)"), 0, 2));
 	}
 
 	#expandedMarkdown(details: GoalRubricMessageDetails | undefined): string {
