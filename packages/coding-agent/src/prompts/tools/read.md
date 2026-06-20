@@ -70,6 +70,7 @@ For `.sqlite`, `.sqlite3`, `.db`, `.db3`:
 # Internal URIs
 
 All `path` URI schemes resolve transparently and take the same line selectors. `artifact://<id>` recovers full output a previous bash/eval/tool result spilled or truncated. `history://<agentId>` is an agent's transcript as concise markdown; bare `history://` lists agents.
+- Skill reference paths are explicit: `references/foo.md` in `skill://demo` means `skill://demo/references/foo.md`. References are not auto-loaded; use exact paths listed in `SKILL.md`; do not glob/list `skill://` directories.
 
 <critical>
 - You MUST use `read` for every file, directory, archive, and URL inspection. `cat`, `head`, `tail`, `less`, `more`, `ls`, `tar`, `unzip`, `curl`, `wget` are FORBIDDEN bash calls, however short or convenient.

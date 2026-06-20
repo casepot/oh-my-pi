@@ -60,6 +60,7 @@ describe("system prompt skillsets", () => {
 		expect(rendered).toContain("rust: detected from Cargo.toml");
 		expect(rendered).toContain("Skills: rust-skills");
 		expect(rendered).toContain("Read `skill://<name>` before using an activated skill");
+		expect(rendered).toContain("`references/foo.md` → `skill://<name>/references/foo.md`");
 		expect(rendered).toContain("Use rust-skills for ownership");
 		expect(rendered).not.toContain("# Own borrow over clone");
 	});

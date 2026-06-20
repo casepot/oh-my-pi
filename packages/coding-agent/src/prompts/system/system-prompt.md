@@ -57,6 +57,7 @@ With most FS/bash-like tools, static references to them will automatically resol
 {{#each skills}}
 - {{name}}: {{description}}
 {{/each}}
+Skill references are explicit files: `references/foo.md` → `skill://<name>/references/foo.md`; references are not auto-loaded; use exact paths.
 {{/if}}
 
 {{#if alwaysApplyRules.length}}
