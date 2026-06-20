@@ -765,6 +765,31 @@ describe("InteractiveMode goal mode integration", () => {
 			}),
 		).not.toThrow("no active parent");
 	});
+
+	it("rejects parent completion while a target plan is still drafting", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target-draft", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+		});
+		const verifierCallsBefore = goalSideAgentCalls.filter(
+			call => call.agent.name === "goal-completion-verifier",
+		).length;
+
+		await expect(goalTool.execute("complete-during-plan", { op: "complete" })).rejects.toThrow(
+			"cannot complete parent goal while target planning is pending",
+		);
+
+		const state = harness.session.getGoalModeState();
+		expect(state?.runMode).toBe("planning-target");
+		expect(state?.goal.currentTargetPlan?.status).toBe("drafting");
+		expect(goalSideAgentCalls.filter(call => call.agent.name === "goal-completion-verifier")).toHaveLength(
+			verifierCallsBefore,
+		);
+	});
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
 		harness.mode.planModeEnabled = true;
@@ -1097,11 +1122,12 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 
 		expect(resolved.details?.state?.runMode).toBe("planning-target");
-		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
-		expect(resolved.details?.state?.goal.currentTarget?.title).toBe("Prove tarball smoke");
-		expect(resolved.details?.state?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
-		expect(resolved.details?.state?.goal.deliverableMap?.[0]?.status).toBe("partial");
-		expect(resolved.details?.state?.goal.currentTarget?.parentDeliverableIds).toEqual(["D1"]);
+		const stateAfterResolution = harness.session.getGoalModeState();
+		expect(stateAfterResolution?.goal.pendingCheckpointId).toBeUndefined();
+		expect(stateAfterResolution?.goal.currentTarget?.title).toBe("Prove tarball smoke");
+		expect(stateAfterResolution?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
+		expect(stateAfterResolution?.goal.deliverableMap?.[0]?.status).toBe("partial");
+		expect(stateAfterResolution?.goal.currentTarget?.parentDeliverableIds).toEqual(["D1"]);
 		const resolutionEntry = harness.session.sessionManager
 			.getEntries()
 			.find(
@@ -1178,7 +1204,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const resolveText = JSON.stringify(resolved.content);
 
 		expect(resolved.details?.state?.runMode).toBe("awaiting-user-input");
-		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
+		expect(harness.session.getGoalModeState()?.goal.pendingCheckpointId).toBeUndefined();
 		expect(resolveText).toContain("Checkpoint resolution recorded: pause_for_external_control");
 		expect(resolveText).not.toContain("Pending checkpoint");
 		const getResult = await goalTool.execute("get-pause", { op: "get" });
@@ -1499,7 +1525,7 @@ describe("InteractiveMode goal mode integration", () => {
 			},
 		});
 		expect(resolved.details?.state?.runMode).toBe("planning-target");
-		expect(resolved.details?.state?.goal.currentTarget?.title).toBe("Prove tarball installer smoke");
+		expect(harness.session.getGoalModeState()?.goal.currentTarget?.title).toBe("Prove tarball installer smoke");
 		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		expect(harness.session.getGoalModeState()?.runMode).toBe("working-target");
 

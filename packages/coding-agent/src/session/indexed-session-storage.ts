@@ -111,9 +111,23 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	writeTextSync(path: string, content: string): void {
+		this.writeChunksSync(path, [content]);
+	}
+
+	writeChunksSync(path: string, chunks: Iterable<string>): void {
+		const previous = this.#index.get(path);
+		const parts: string[] = [];
+		let size = 0;
+		for (const chunk of chunks) {
+			parts.push(chunk);
+			size += byteLength(chunk);
+		}
+		const content = parts.join("");
 		const mtimeMs = this.#allocMtimeMs();
-		this.#setIndex(path, byteLength(content), mtimeMs);
-		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs), { trackDrain: true });
+		this.#setIndex(path, size, mtimeMs);
+		this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs), { trackDrain: true }).catch(() => {
+			this.#restoreIndex(path, previous);
+		});
 	}
 
 	statSync(path: string): SessionStorageStat {
@@ -161,20 +175,31 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async writeText(path: string, content: string): Promise<void> {
+		await this.writeChunksAtomic(path, [content]);
+	}
+
+	writeTextAtomic(path: string, content: string): Promise<void> {
+		return this.writeChunksAtomic(path, [content]);
+	}
+
+	async writeChunksAtomic(path: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void> {
 		await this.#awaitPath(path);
+		const parts: string[] = [];
+		let size = 0;
+		for await (const chunk of chunks) {
+			parts.push(chunk);
+			size += byteLength(chunk);
+		}
+		const content = parts.join("");
 		const previous = this.#index.get(path);
 		const mtimeMs = this.#allocMtimeMs();
-		this.#setIndex(path, byteLength(content), mtimeMs);
+		this.#setIndex(path, size, mtimeMs);
 		try {
 			await this.#enqueuePath(path, () => this.#backend.writeFull(path, content, mtimeMs), { trackDrain: false });
 		} catch (err) {
 			this.#restoreIndex(path, previous);
 			throw toError(err);
 		}
-	}
-
-	writeTextAtomic(path: string, content: string): Promise<void> {
-		return this.writeText(path, content);
 	}
 
 	async rename(src: string, dst: string): Promise<void> {

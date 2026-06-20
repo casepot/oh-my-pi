@@ -16,12 +16,18 @@ class FsCodeError extends Error {
 }
 
 // The atomic-write + EPERM `.bak` move-aside/rollback dance lives in
-// FileSessionStorage.writeTextAtomic, so these tests must drive a real
+// FileSessionStorage.writeChunksAtomic, so these tests must drive a real
 // file-backed storage (with a temp dir) and override `rename` to simulate the
 // Windows EPERM-on-replace failure.
 class RenameEpermOnceStorage extends FileSessionStorage {
 	failNextSessionReplace = false;
 	backupCleanupPath: string | undefined;
+	chunkedAtomicRewrites = 0;
+
+	override async writeChunksAtomic(path: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void> {
+		this.chunkedAtomicRewrites++;
+		await super.writeChunksAtomic(path, chunks);
+	}
 
 	async rename(source: string, target: string): Promise<void> {
 		if (
@@ -65,6 +71,7 @@ describe("SessionManager rewrite EPERM replacement fallback", () => {
 		storage.failNextSessionReplace = true;
 		await expect(session.setSessionName("renamed session", "user")).resolves.toBe(true);
 
+		expect(storage.chunkedAtomicRewrites).toBeGreaterThan(0);
 		const rewritten = await storage.readText(sessionFile);
 		expect(rewritten).toContain('"title":"renamed session"');
 		const backupPath = storage.backupCleanupPath;

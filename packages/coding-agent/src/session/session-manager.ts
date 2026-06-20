@@ -47,7 +47,7 @@ import {
 
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
 import { loadEntriesFromFile, resolveBlobRefsInEntries } from "./session-loader";
-import { generateId, migrateToCurrentVersion } from "./session-migrations";
+import { compactLegacyGoalPersistence, generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
 	readTerminalBreadcrumbEntry,
@@ -469,10 +469,9 @@ export class SessionManager {
 		return `${JSON.stringify(prepareEntryForPersistence(entry, this.#blobs))}\n`;
 	}
 
-	#fileBody(): string {
-		let body = this.#lineFor(this.#header);
-		for (const entry of this.#entries) body += this.#lineFor(entry);
-		return body;
+	*#fileLines(): IterableIterator<string> {
+		yield this.#lineFor(this.#header);
+		for (const entry of this.#entries) yield this.#lineFor(entry);
 	}
 
 	#historyContainsAssistantMessage(): boolean {
@@ -492,11 +491,10 @@ export class SessionManager {
 		if (!this.#persist || !this.#sessionFile) return;
 
 		try {
-			const body = this.#fileBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
-			this.#storage.writeTextSync(this.#sessionFile, body);
+			this.#storage.writeChunksSync(this.#sessionFile, this.#fileLines());
 			this.#fileIsCurrent = true;
 			this.#rewriteRequired = false;
 		} catch (err) {
@@ -518,7 +516,7 @@ export class SessionManager {
 				await this.#closeWriterHandle();
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
-				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody());
+				await this.#storage.writeChunksAtomic(sessionFile, this.#fileLines());
 				this.#fileIsCurrent = true;
 				this.#rewriteRequired = false;
 			},
@@ -728,10 +726,14 @@ export class SessionManager {
 		this.#clearDiskError();
 
 		const resolvedSessionFile = path.resolve(sessionFile);
+		const fileEntries = await loadEntriesFromFile(resolvedSessionFile, this.#storage);
+		await this.#adoptSessionFileEntries(resolvedSessionFile, fileEntries);
+	}
+
+	async #adoptSessionFileEntries(resolvedSessionFile: string, fileEntries: FileEntry[]): Promise<void> {
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		const fileEntries = await loadEntriesFromFile(resolvedSessionFile, this.#storage);
 		if (fileEntries.length === 0) {
 			// Explicit but empty/missing path (e.g. --session flag): start fresh but
 			// keep the requested path and materialize the header immediately.
@@ -743,6 +745,7 @@ export class SessionManager {
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
+		const compacted = compactLegacyGoalPersistence(fileEntries);
 		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
@@ -759,10 +762,11 @@ export class SessionManager {
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
 		this.#fileIsCurrent = true;
-		this.#rewriteRequired = migrated;
+		this.#rewriteRequired = migrated || compacted;
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
+		this.#adoptedArtifactManager = null;
 
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
 	}
@@ -950,6 +954,11 @@ export class SessionManager {
 	flushSync(): void {
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#diskFailure) throw this.#diskFailure;
+		if (this.#fileIsCurrent && !this.#rewriteRequired) {
+			const writer = this.#writer;
+			if (writer?.getError()) throw writer.getError();
+			return;
+		}
 		this.#rewriteSynchronously();
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
@@ -1593,12 +1602,13 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options?: { initialCwd?: string },
 	): Promise<SessionManager> {
-		const loaded = await loadEntriesFromFile(filePath, storage);
+		const resolvedFilePath = path.resolve(filePath);
+		const loaded = await loadEntriesFromFile(resolvedFilePath, storage);
 		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const cwd = header?.cwd ?? options?.initialCwd ?? getProjectDir();
-		const dir = sessionDir ?? path.dirname(path.resolve(filePath));
+		const dir = sessionDir ?? path.dirname(resolvedFilePath);
 		const manager = new SessionManager(cwd, dir, true, storage);
-		await manager.setSessionFile(filePath);
+		await manager.#adoptSessionFileEntries(resolvedFilePath, loaded);
 		return manager;
 	}
 

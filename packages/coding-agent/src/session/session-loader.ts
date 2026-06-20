@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, isEnoent, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
 import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
+import { repairLegacyGoalSessionFileBeforeLoad } from "./legacy-goal-session-repair";
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
@@ -12,11 +13,26 @@ export function parseSessionEntries(content: string): FileEntry[] {
 	return parseJsonlLenient<FileEntry>(content);
 }
 
+interface LoadEntriesOptions {
+	repairLegacyGoalPersistence?: boolean;
+}
+
 /** Exported for testing */
 export async function loadEntriesFromFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
+	options: LoadEntriesOptions = {},
 ): Promise<FileEntry[]> {
+	if (options.repairLegacyGoalPersistence !== false) {
+		try {
+			await repairLegacyGoalSessionFileBeforeLoad(filePath, storage);
+		} catch (err) {
+			logger.warn("Failed to repair legacy goal session persistence", {
+				sessionFile: filePath,
+				error: toError(err).message,
+			});
+		}
+	}
 	let content: string;
 	try {
 		content = await storage.readText(filePath);
@@ -97,7 +113,9 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: 
  * session lock — safe to call against a file another session is writing.
  */
 export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
-	const entries = await loadEntriesFromFile(filePath);
+	const entries = await loadEntriesFromFile(filePath, new FileSessionStorage(), {
+		repairLegacyGoalPersistence: false,
+	});
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
 	await resolveBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));

@@ -31,6 +31,7 @@ export interface SessionStorage {
 	ensureDirSync(dir: string): void;
 	existsSync(path: string): boolean;
 	writeTextSync(path: string, content: string): void;
+	writeChunksSync(path: string, chunks: Iterable<string>): void;
 	statSync(path: string): SessionStorageStat;
 	listFilesSync(dir: string, pattern: string): string[];
 
@@ -40,6 +41,7 @@ export interface SessionStorage {
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string): Promise<void>;
+	writeChunksAtomic(path: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
@@ -54,6 +56,18 @@ const writerRegistry = new FinalizationRegistry<number>(fd => {
 		// Ignore - fd may already be closed or invalid
 	}
 });
+
+function writeUtf8ChunkSync(fd: number, chunk: string): void {
+	const buf = Buffer.from(chunk, "utf-8");
+	let offset = 0;
+	while (offset < buf.length) {
+		const written = fs.writeSync(fd, buf, offset, buf.length - offset);
+		if (written === 0) {
+			throw new Error("Short write");
+		}
+		offset += written;
+	}
+}
 
 class FileSessionStorageWriter implements SessionStorageWriter {
 	#fd: number;
@@ -86,15 +100,7 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 		if (this.#closed) throw new Error("Writer closed");
 		if (this.#error) throw this.#error;
 		try {
-			const buf = Buffer.from(line, "utf-8");
-			let offset = 0;
-			while (offset < buf.length) {
-				const written = fs.writeSync(this.#fd, buf, offset, buf.length - offset);
-				if (written === 0) {
-					throw new Error("Short write");
-				}
-				offset += written;
-			}
+			writeUtf8ChunkSync(this.#fd, line);
 		} catch (err) {
 			throw this.#recordError(err);
 		}
@@ -137,10 +143,27 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	writeTextSync(fpath: string, content: string): void {
-		this.ensureDirSync(path.dirname(fpath));
-		fs.writeFileSync(fpath, content);
+		this.writeChunksSync(fpath, [content]);
 	}
 
+	writeChunksSync(fpath: string, chunks: Iterable<string>): void {
+		this.ensureDirSync(path.dirname(fpath));
+		const fd = fs.openSync(fpath, "w");
+		let writeError: unknown;
+		try {
+			for (const chunk of chunks) {
+				writeUtf8ChunkSync(fd, chunk);
+			}
+		} catch (err) {
+			writeError = err;
+		}
+		try {
+			fs.closeSync(fd);
+		} catch (err) {
+			if (!writeError) throw err;
+		}
+		if (writeError) throw writeError;
+	}
 	statSync(path: string): SessionStorageStat {
 		const stats = fs.statSync(path);
 		return { size: stats.size, mtimeMs: stats.mtimeMs, mtime: stats.mtime };
@@ -180,11 +203,31 @@ export class FileSessionStorage implements SessionStorage {
 	}
 
 	async writeTextAtomic(fpath: string, content: string): Promise<void> {
+		await this.writeChunksAtomic(fpath, [content]);
+	}
+
+	async writeChunksAtomic(fpath: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void> {
 		const dir = path.resolve(fpath, "..");
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
 		await fs.promises.mkdir(dir, { recursive: true });
 		try {
-			await fs.promises.writeFile(tempPath, content);
+			const fd = fs.openSync(tempPath, "w");
+			let writeError: unknown;
+			let closeError: unknown;
+			try {
+				for await (const chunk of chunks) {
+					writeUtf8ChunkSync(fd, chunk);
+				}
+			} catch (err) {
+				writeError = err;
+			}
+			try {
+				fs.closeSync(fd);
+			} catch (err) {
+				closeError = err;
+			}
+			if (writeError) throw writeError;
+			if (closeError) throw closeError;
 			try {
 				await this.rename(tempPath, fpath);
 				return;
@@ -501,9 +544,18 @@ export class MemorySessionStorage implements SessionStorage {
 	}
 
 	writeTextSync(path: string, content: string): void {
-		this.#files.set(path, createMemoryFileEntry(content, Date.now()));
+		this.writeChunksSync(path, [content]);
 	}
 
+	writeChunksSync(path: string, chunks: Iterable<string>): void {
+		const mtimeMs = Date.now();
+		const entry = createMemoryFileEntry("", mtimeMs);
+		this.#files.set(path, entry);
+		for (const chunk of chunks) {
+			appendMemoryChunk(entry, chunk);
+		}
+		entry.mtimeMs = mtimeMs;
+	}
 	/**
 	 * Internal O(1) append used by {@link MemorySessionStorageWriter}. Lazily
 	 * creates the entry. External callers should go through `openWriter()`
@@ -564,8 +616,17 @@ export class MemorySessionStorage implements SessionStorage {
 	}
 
 	writeTextAtomic(path: string, content: string): Promise<void> {
-		this.writeTextSync(path, content);
-		return Promise.resolve();
+		return this.writeChunksAtomic(path, [content]);
+	}
+
+	async writeChunksAtomic(path: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void> {
+		const mtimeMs = Date.now();
+		const entry = createMemoryFileEntry("", mtimeMs);
+		this.#files.set(path, entry);
+		for await (const chunk of chunks) {
+			appendMemoryChunk(entry, chunk);
+		}
+		entry.mtimeMs = mtimeMs;
 	}
 
 	rename(path: string, nextPath: string): Promise<void> {

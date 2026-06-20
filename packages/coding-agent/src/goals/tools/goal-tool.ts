@@ -41,8 +41,11 @@ import type {
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
 	GoalToolDetails,
+	GoalToolGoalSummary,
+	GoalToolStateSummary,
 } from "../state";
 import { normalizeParentFrame } from "../state";
+import { buildGoalToolDetails, type GoalToolDetailSource } from "../tool-details";
 
 const deliverableStatusSchema = z.enum(["pending", "partial", "satisfied", "blocked", "stale"]);
 
@@ -568,7 +571,7 @@ interface GoalSessionSupport {
 	requestGoalTargetPlanFailure?(input: GoalTargetPlanFailureInput, signal?: AbortSignal): Promise<GoalToolResponse>;
 }
 
-export interface GoalToolResponse {
+export interface GoalToolResponse extends GoalToolDetailSource {
 	goal: Goal | null;
 	state?: GoalModeState | null;
 	remainingTokens: number | null;
@@ -935,21 +938,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			response = { ...response, completionVerification };
 		return {
 			content: [{ type: "text", text: renderGoalToolText(response, params.op) }],
-			details: {
-				op: params.op,
-				goal: response.goal,
-				state: response.state ?? null,
-				remainingTokens: response.remainingTokens,
-				completionBudgetReport:
-					response.completionVerification?.status === "rejected" ? null : response.completionBudgetReport,
-				completionVerification: response.completionVerification,
-				checkpoint: response.checkpoint,
-				checkpointReview: response.checkpointReview,
-				checkpointResolution: response.checkpointResolution,
-				targetPlan: response.targetPlan,
-				targetPlanReviews: response.targetPlanReviews,
-				targetPlanApproval: response.targetPlanApproval,
-			},
+			details: buildGoalToolDetails(params.op, response),
 		};
 	}
 }
@@ -964,11 +953,13 @@ function visibleGoalObjective(goal: Goal, op: GoalToolInput["op"]): string {
 	return title.length <= TRUNCATE_LENGTHS.TITLE ? title : `${title.slice(0, TRUNCATE_LENGTHS.TITLE - 1)}…`;
 }
 
-function shouldRenderPendingCheckpoint(goal: Goal, runMode: GoalModeState["runMode"] | undefined): boolean {
-	if (!goal.pendingCheckpointId) return false;
-	if (goal.status === "paused") return false;
-	if (runMode === "awaiting-checkpoint-resolution") return true;
-	return !goal.checkpointResolutions?.some(resolution => resolution.checkpointId === goal.pendingCheckpointId);
+function shouldRenderPendingCheckpoint(
+	goal: GoalToolGoalSummary,
+	state: GoalToolStateSummary | null | undefined,
+): boolean {
+	if (!goal.pendingCheckpointId || goal.status === "paused") return false;
+	if (state?.runMode === "awaiting-checkpoint-resolution") return true;
+	return goal.pendingCheckpointRequiresResolution;
 }
 
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
@@ -1013,7 +1004,12 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\nAllowed verification layer values for verification_signals[].layer and verification_aperture.omitted_layers[].layer: ${VERIFICATION_LAYER_VALUES.join(", ")}.`;
 		}
 	}
-	if (shouldRenderPendingCheckpoint(goal, response.state?.runMode)) {
+	if (
+		goal.status !== "paused" &&
+		goal.pendingCheckpointId &&
+		(response.state?.runMode === "awaiting-checkpoint-resolution" ||
+			!goal.checkpointResolutions?.some(resolution => resolution.checkpointId === goal.pendingCheckpointId))
+	) {
 		text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
 		text += `\nNext action: inspect checkpoint guidance, then call goal({op:"resolve_checkpoint", checkpoint_id:"${goal.pendingCheckpointId}"}) before ordinary tools.`;
 	}
@@ -1197,7 +1193,7 @@ export const goalToolRenderer = {
 		lines.push(`  ${uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`))}`);
 		if (goal.currentTarget)
 			lines.push(`  ${uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`)}`);
-		if (shouldRenderPendingCheckpoint(goal, details?.state?.runMode)) {
+		if (shouldRenderPendingCheckpoint(goal, details?.state)) {
 			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: resolve ${goal.pendingCheckpointId}`)}`);
 			lines.push(`  ${uiTheme.fg("muted", "ordinary tools blocked until resolve_checkpoint")}`);
 		}

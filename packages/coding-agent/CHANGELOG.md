@@ -43,6 +43,9 @@
 
 ### Fixed
 - Fixed skill guidance to show `references/foo.md` files as explicit `skill://<name>/references/foo.md` reads instead of implying references load automatically.
+- Fixed session persistence OOMs by streaming rewrites, compacting goal tool details, and repairing legacy full goal-mode snapshots before resume.
+- Fixed goal-mode lifecycle so parent completion is rejected before verifier dispatch while target planning is still pending.
+- Fixed session persistence edge cases so indexed storage rewrites preserve durable content on backend failure and read-only session loads do not rewrite live legacy goal files.
 - Fixed autonomous goal target planning so SDK target-plan handlers route through the active session, planning can coordinate read-only `task` reviewers with `job`/`irc`, and implementation tools remain blocked until approval.
 - Fixed goal-mode lifecycle handling so internal aborts do not pause active goals, paused checkpoint-resolution states do not block ordinary tools, and paused checkpoint errors point to `goal({op:"resume"})`.
 - Fixed operator diagnostics so `report_tool_issue` only confirms persisted reports, browser open failures include classified recovery guidance, and live job polls show the next poll/cancel action.

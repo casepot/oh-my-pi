@@ -306,7 +306,13 @@ describe("GoalTool", () => {
 		expect(runtime.createGoal).toHaveBeenCalledWith({ objective: "Create route", tokenBudget: 10 });
 		expect(created.details).toMatchObject({
 			op: "create",
-			goal: createGoalState.goal,
+			goal: {
+				id: createGoalState.goal.id,
+				objective: createGoalState.goal.objective,
+				status: createGoalState.goal.status,
+				tokensUsed: createGoalState.goal.tokensUsed,
+				tokenBudget: createGoalState.goal.tokenBudget,
+			},
 			remainingTokens: 10,
 			completionBudgetReport: null,
 		});
@@ -315,7 +321,13 @@ describe("GoalTool", () => {
 		expect(getGoalModeState).toHaveBeenCalledTimes(1);
 		expect(fetched.details).toMatchObject({
 			op: "get",
-			goal: getGoalState.goal,
+			goal: {
+				id: getGoalState.goal.id,
+				objective: getGoalState.goal.objective,
+				status: getGoalState.goal.status,
+				tokensUsed: getGoalState.goal.tokensUsed,
+				tokenBudget: getGoalState.goal.tokenBudget,
+			},
 			remainingTokens: 6,
 			completionBudgetReport: null,
 		});
@@ -325,7 +337,13 @@ describe("GoalTool", () => {
 		expect(runtime.completeGoalFromTool).toHaveBeenCalledTimes(1);
 		expect(completed.details).toMatchObject({
 			op: "complete",
-			goal: completedGoal,
+			goal: {
+				id: completedGoal.id,
+				objective: completedGoal.objective,
+				status: completedGoal.status,
+				tokensUsed: completedGoal.tokensUsed,
+				tokenBudget: completedGoal.tokenBudget,
+			},
 			remainingTokens: 3,
 			completionBudgetReport: completionBudgetReport(completedGoal),
 		});
@@ -965,8 +983,9 @@ describe("GoalTool", () => {
 		expect(checkpointText).toContain("resolve_checkpoint");
 
 		const getCheckpoint = await tool.execute("get-checkpoint", { op: "get" });
-		expect(getCheckpoint.details?.state?.goal.pendingCheckpointId).toBe(checkpoint.details?.checkpoint?.id);
-		expect(getCheckpoint.details?.state?.goal.checkpoints?.[0]?.targetSnapshot.status).toBe("closed");
+		const stateAfterCheckpoint = harness.getState();
+		expect(stateAfterCheckpoint?.goal.pendingCheckpointId).toBe(checkpoint.details?.checkpoint?.id);
+		expect(stateAfterCheckpoint?.goal.checkpoints?.[0]?.targetSnapshot.status).toBe("closed");
 		const getText = getCheckpoint.content[0]?.type === "text" ? getCheckpoint.content[0].text : "";
 		expect(getText).toContain(`Pending checkpoint: ${checkpoint.details?.checkpoint?.id}`);
 		expect(getText).toContain("Next action: inspect checkpoint guidance");
@@ -1003,8 +1022,111 @@ describe("GoalTool", () => {
 
 		expect(resolved.details?.checkpointResolution?.decision).toBe("next_target");
 		expect(resolved.details?.state?.runMode).toBe("planning-target");
-		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
-		expect(resolved.details?.state?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
+		const stateAfterResolution = harness.getState();
+		expect(stateAfterResolution?.goal.pendingCheckpointId).toBeUndefined();
+		expect(stateAfterResolution?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
+	});
+
+	it("returns compact goal tool details without full checkpoint state", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({
+			objective: "Compact persisted goal details",
+			tokenBudget: 50,
+			parentFrame: {
+				kind: "claim-gated",
+				desiredFuture: "Parent objective proven",
+				baselineRefs: [],
+				acceptedClaims: [],
+				candidateClaims: [],
+				rejectedOrStaleClaims: [],
+				boundaries: [],
+				residuals: [],
+				gates: [],
+				frontier: [],
+				staleIf: [],
+				externalRefs: [],
+			},
+		});
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+				requestGoalCheckpoint: async input => {
+					const candidate = harness.runtime.buildCheckpointCandidate(input);
+					const review = {
+						status: "accepted" as const,
+						feedback: "Checkpoint is locally closed and bounded.",
+						evidenceChecked: candidate.evidence,
+						blockers: [],
+						reviewedAt: 10,
+					};
+					const state = await harness.runtime.commitCheckpoint(candidate, review);
+					return buildGoalToolResponse(state.goal, {
+						state,
+						checkpoint: state.goal.checkpoints?.at(-1),
+						checkpointReview: review,
+					});
+				},
+				requestGoalCheckpointResolution: async input => {
+					const state = await harness.runtime.recordCheckpointResolution(input);
+					return buildGoalToolResponse(state.goal, {
+						state,
+						checkpointResolution: state.goal.checkpointResolutions?.at(-1),
+					});
+				},
+			}),
+		);
+
+		await tool.execute("target", {
+			op: "start_target",
+			title: "Close compact target",
+			desired_future_claim: "Compact target has direct evidence.",
+			closure_standard: "Checkpoint is accepted.",
+		});
+		await approveCurrentTargetPlan(harness);
+		const checkpoint = await tool.execute("checkpoint", {
+			op: "checkpoint",
+			status: "closed_with_evidence",
+			summary: "Compact target closed.",
+			local_claims: ["Compact target has direct evidence"],
+			evidence: [{ claim: "Compact target has direct evidence", evidence: "Observed checkpoint", current: true }],
+			not_claimed: ["Parent objective proven"],
+			remaining_questions: ["Which compact path is next?"],
+		});
+		const checkpointId = checkpoint.details?.checkpoint?.id;
+		if (!checkpointId) throw new Error("expected checkpoint id");
+
+		const resolved = await tool.execute("resolve", {
+			op: "resolve_checkpoint",
+			checkpoint_id: checkpointId ?? "",
+			decision: "next_target",
+			parent_reading: "Checkpoint narrows the parent but leaves another target.",
+			not_propagated: ["Parent objective proven"],
+			remaining_parent_work: ["Audit compact resume"],
+			next_target: {
+				title: "Audit compact resume",
+				desired_future_claim: "Resume surfaces compact details.",
+				closure_standard: "Details omit full goal state.",
+			},
+		});
+		const fullState = harness.getState();
+		expect(fullState?.goal.parentFrame).toBeDefined();
+		expect(fullState?.goal.checkpoints?.[0]?.targetSnapshot).toBeDefined();
+		expect(fullState?.goal.checkpointResolutions?.length).toBe(1);
+
+		const detailsJson = JSON.stringify(resolved.details);
+		expect(detailsJson).not.toContain("targetSnapshot");
+		expect(detailsJson).not.toContain('"parentFrame":');
+		expect(detailsJson).not.toContain("checkpoints");
+		expect(detailsJson).not.toContain("checkpointResolutions");
+		expect(detailsJson).not.toContain('"state":{"goal"');
+		expect(detailsJson).toContain(checkpointId);
+		expect(detailsJson).toContain("next_target");
+		expect(detailsJson).toContain("planning-target");
+		expect(detailsJson).toContain("Compact persisted goal details");
+		expect(detailsJson).toContain('"tokensUsed":0');
+		expect(detailsJson).toContain('"tokenBudget":50');
+		expect(detailsJson).toContain("Audit compact resume");
 	});
 
 	it("rejects create when a goal already exists", async () => {

@@ -2038,7 +2038,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.session.setActiveToolsByName(previousTools);
 	}
 
-	async handleGoalTargetPlanningStateAfterTool(state: GoalModeState | null | undefined): Promise<void> {
+	async handleGoalTargetPlanningStateAfterTool(
+		state: Pick<GoalModeState, "runMode"> | null | undefined,
+	): Promise<void> {
 		if (state?.runMode !== "planning-target") {
 			await this.#exitGoalTargetPlanningTools();
 		}

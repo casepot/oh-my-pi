@@ -5985,6 +5985,9 @@ export class AgentSession {
 		if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
 		if (state.goal.status === "complete") throw new Error("goal is already complete");
 		if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
+		if (state.runMode === "planning-target") {
+			throw new Error("cannot complete parent goal while target planning is pending");
+		}
 		if (state.runMode === "awaiting-user-input") {
 			throw new Error("cannot complete parent goal while awaiting user input or external authority");
 		}

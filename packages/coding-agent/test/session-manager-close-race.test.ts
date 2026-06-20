@@ -82,6 +82,9 @@ class CloseHoldingStorage implements SessionStorage {
 	writeTextSync(p: string, content: string): void {
 		this.#inner.writeTextSync(p, content);
 	}
+	writeChunksSync(p: string, chunks: Iterable<string>): void {
+		this.#inner.writeChunksSync(p, chunks);
+	}
 	statSync(p: string) {
 		return this.#inner.statSync(p);
 	}
@@ -102,6 +105,9 @@ class CloseHoldingStorage implements SessionStorage {
 	}
 	writeTextAtomic(p: string, content: string): Promise<void> {
 		return this.#inner.writeTextAtomic(p, content);
+	}
+	writeChunksAtomic(p: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void> {
+		return this.#inner.writeChunksAtomic(p, chunks);
 	}
 	rename(p: string, nextPath: string): Promise<void> {
 		return this.#inner.rename(p, nextPath);

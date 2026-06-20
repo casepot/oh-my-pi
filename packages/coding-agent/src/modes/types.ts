@@ -359,7 +359,7 @@ export interface InteractiveModeContext {
 	pauseLoop(): void;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
 	openPlanReview(): Promise<void>;
-	handleGoalTargetPlanningStateAfterTool(state: GoalModeState | null | undefined): Promise<void>;
+	handleGoalTargetPlanningStateAfterTool(state: Pick<GoalModeState, "runMode"> | null | undefined): Promise<void>;
 	handleGoalTargetPlanApproved(details: GoalTargetPlanApprovedDetails): Promise<void>;
 
 	// Hook UI methods

@@ -562,6 +562,48 @@ export interface GoalTargetPlanApprovedDetails {
 	title: string;
 }
 
+export interface GoalToolTargetSummary {
+	id: string;
+	title: string;
+	status: GoalTarget["status"];
+}
+
+export interface GoalToolGoalSummary {
+	id: string;
+	objective: string;
+	status: GoalStatus;
+	tokenBudget?: number;
+	tokensUsed: number;
+	timeUsedSeconds: number;
+	currentTarget?: GoalToolTargetSummary;
+	pendingCheckpointId?: string;
+	pendingCheckpointRequiresResolution: boolean;
+}
+
+export interface GoalToolStateSummary {
+	enabled: boolean;
+	runMode: GoalRunMode;
+	stateVersion: number;
+	parentFrameVersion: number;
+	goalId: string;
+}
+
+export interface GoalToolCheckpointSummary {
+	id: string;
+	sequence: number;
+	targetId: string;
+	summary: string;
+	notClaimed: string[];
+	remainingQuestions: string[];
+}
+
+export interface GoalToolCheckpointResolutionSummary {
+	id: string;
+	checkpointId: string;
+	decision: GoalCheckpointResolutionDecision;
+	nextTarget?: GoalToolTargetSummary;
+}
+
 export interface GoalToolDetails {
 	op:
 		| "create"
@@ -574,16 +616,14 @@ export interface GoalToolDetails {
 		| "resolve_checkpoint"
 		| "submit_target_plan"
 		| "fail_target_plan";
-	goal?: Goal | null;
-	state?: GoalModeState | null;
+	goal?: GoalToolGoalSummary | null;
+	state?: GoalToolStateSummary | null;
 	remainingTokens?: number | null;
 	completionBudgetReport?: string | null;
 	completionVerification?: GoalCompletionVerificationDetails;
-	checkpoint?: GoalCheckpointPacket;
-	checkpointReview?: GoalCheckpointReview;
-	checkpointResolution?: GoalCheckpointResolution;
-	targetPlan?: GoalTargetPlanRecord;
-	targetPlanReviews?: GoalTargetPlanReview[];
+	checkpoint?: GoalToolCheckpointSummary;
+	checkpointReview?: Pick<GoalCheckpointReview, "status" | "feedback">;
+	checkpointResolution?: GoalToolCheckpointResolutionSummary;
 	targetPlanApproval?: GoalTargetPlanApprovedDetails;
 }
 
