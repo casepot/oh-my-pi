@@ -518,6 +518,104 @@ describe("buildSessionContext", () => {
 			expect(restored?.goal.updatedAt).toBe(30);
 		});
 
+		it("ignores usage deltas before the latest marker", () => {
+			const firstState = goalModeState("usage-goal", {
+				stateVersion: 3,
+				goal: { tokensUsed: 2, timeUsedSeconds: 3, updatedAt: 10 },
+			});
+			const firstDeltaState = goalModeState("usage-goal", {
+				stateVersion: 3,
+				goal: { tokensUsed: 99, timeUsedSeconds: 99, updatedAt: 99 },
+			});
+			const latestState = goalModeState("usage-goal", {
+				stateVersion: 4,
+				goal: { tokensUsed: 5, timeUsedSeconds: 6, updatedAt: 20 },
+			});
+			const entries: SessionEntry[] = [
+				goalSnapshot("snapshot-first", null, firstState),
+				goalMode("mode-first", "snapshot-first", "goal", {
+					goalId: firstState.goal.id,
+					stateVersion: firstState.stateVersion,
+					snapshotEntryId: "snapshot-first",
+				}),
+				goalUsageDelta("usage-delta-first", "mode-first", firstDeltaState, 97, 96),
+				goalSnapshot("snapshot-latest", "usage-delta-first", latestState),
+				goalMode("mode-latest", "snapshot-latest", "goal", {
+					goalId: latestState.goal.id,
+					stateVersion: latestState.stateVersion,
+					snapshotEntryId: "snapshot-latest",
+				}),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(restored?.stateVersion).toBe(4);
+			expect(restored?.goal.tokensUsed).toBe(5);
+			expect(restored?.goal.timeUsedSeconds).toBe(6);
+			expect(restored?.goal.updatedAt).toBe(20);
+		});
+
+		it("ignores usage deltas for another goal id", () => {
+			const snapshotState = goalModeState("usage-goal", {
+				stateVersion: 4,
+				goal: { tokensUsed: 2, timeUsedSeconds: 3, updatedAt: 10 },
+			});
+			const otherDeltaState = goalModeState("other-goal", {
+				stateVersion: 1,
+				goal: { tokensUsed: 99, timeUsedSeconds: 99, updatedAt: 99 },
+			});
+			const entries: SessionEntry[] = [
+				goalSnapshot("snapshot-usage", null, snapshotState),
+				goalMode("mode-usage", "snapshot-usage", "goal", {
+					goalId: snapshotState.goal.id,
+					stateVersion: snapshotState.stateVersion,
+					snapshotEntryId: "snapshot-usage",
+				}),
+				goalUsageDelta("usage-delta-other", "mode-usage", otherDeltaState, 97, 96),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(restored?.goal.id).toBe("usage-goal");
+			expect(restored?.goal.tokensUsed).toBe(2);
+			expect(restored?.goal.timeUsedSeconds).toBe(3);
+			expect(restored?.goal.updatedAt).toBe(10);
+		});
+
+		it("uses the last matching post-marker usage delta as the absolute total", () => {
+			const snapshotState = goalModeState("usage-goal", {
+				stateVersion: 4,
+				goal: { tokensUsed: 2, timeUsedSeconds: 3, updatedAt: 10 },
+			});
+			const firstDeltaState = goalModeState("usage-goal", {
+				stateVersion: 4,
+				goal: { tokensUsed: 9, timeUsedSeconds: 11, updatedAt: 30 },
+			});
+			const lastDeltaState = goalModeState("usage-goal", {
+				stateVersion: 4,
+				goal: { tokensUsed: 12, timeUsedSeconds: 13, updatedAt: 40 },
+			});
+			const entries: SessionEntry[] = [
+				goalSnapshot("snapshot-usage", null, snapshotState),
+				goalMode("mode-usage", "snapshot-usage", "goal", {
+					goalId: snapshotState.goal.id,
+					stateVersion: snapshotState.stateVersion,
+					snapshotEntryId: "snapshot-usage",
+				}),
+				goalUsageDelta("usage-delta-first", "mode-usage", firstDeltaState, 7, 8),
+				goalUsageDelta("usage-delta-last", "usage-delta-first", lastDeltaState, 3, 2),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(restored?.goal.tokensUsed).toBe(12);
+			expect(restored?.goal.timeUsedSeconds).toBe(13);
+			expect(restored?.goal.updatedAt).toBe(40);
+		});
+
 		it("restores paused compact markers as disabled paused goals", () => {
 			const state = goalModeState("paused-goal", { stateVersion: 6 });
 			const entries: SessionEntry[] = [

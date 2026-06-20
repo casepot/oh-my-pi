@@ -101,8 +101,10 @@ export interface GoalTargetPlanMessageDetails {
 	targetId: string;
 	targetPlanId: string;
 	planFilePath: string;
+	revision: number;
 	status: GoalTargetPlanRecord["status"];
 	reviews: GoalTargetPlanReview[];
+	failure?: GoalTargetPlanRecord["failure"];
 	recordedAt: number;
 }
 

@@ -24,6 +24,7 @@
 
 - Changed goal-mode session persistence to store full state in `goal_state_snapshot` entries, compact mode markers, and accounting-only `goal_usage_delta` entries.
 - Changed goal target-plan submissions to render exact identity/skeleton guidance from `goal({op:"get"})` and validate graph references before review.
+- Changed goal target-planning prompts to require product-meaningful target apertures, decision-complete execution specs, and read-only planner simulations instead of fixed heavy planning sections.
 
 - Changed goal-mode rubrics to stay verifier-private in main-agent prompts and side-agent context while exposing compact deliverable maps with target deliverable IDs.
 
@@ -42,6 +43,8 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed goal-mode failed target-plan recovery so user/external input can reopen planning for the same active target instead of dead-ending behind resume/start_target guards.
+- Fixed goal-mode operator smoothness so usage totals render after usage deltas and target-plan/checkpoint panes expose actionable status and IDs.
 - Fixed skill guidance to show `references/foo.md` files as explicit `skill://<name>/references/foo.md` reads instead of implying references load automatically.
 - Fixed session persistence OOMs by streaming rewrites, compacting goal tool details, and repairing legacy full goal-mode snapshots before resume.
 - Fixed goal-mode lifecycle so parent completion is rejected before verifier dispatch while target planning is still pending.

@@ -701,6 +701,63 @@ describe("goal runtime", () => {
 		expect(snapshot.length).toBeLessThan(6_000);
 	});
 
+	it("surfaces target aperture guidance without the full rubric", () => {
+		const goal = createGoal({
+			objective: "Ship target-planning guidance",
+			rubric: [
+				"# Completion rubric",
+				"D1: Full rubric deliverable detail should stay out of compact context.",
+				"## Target aperture guidance",
+				"- First target: make the CLI approval payload directly executable.",
+				"- Same-signal work: prompt wording, submit skeleton, and target-plan review contract.",
+				"## Verification",
+				"FULL RUBRIC DETAIL SHOULD STAY OUT OF TARGET APERTURE GUIDANCE",
+			].join("\n"),
+		});
+		const state = createGoalModeState({ goal, runMode: "planning-target" });
+
+		const surface = buildGoalContextSurface(state, goal);
+		expect(surface.target_aperture_guidance?.guidance).toContain("make the CLI approval payload directly executable");
+
+		const surfaceText = renderGoalPromptSurface(state, goal);
+		expect(surfaceText).toContain("Same-signal work: prompt wording");
+		expect(surfaceText).not.toContain("FULL RUBRIC DETAIL SHOULD STAY OUT");
+		expect(surfaceText).not.toContain("Full rubric deliverable detail should stay out");
+	});
+
+	it("surfaces failed target-plan recovery instructions in prompts", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Recover a failed target plan" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove failed-plan recovery",
+			desiredFutureClaim: "Failed target-plan recovery is visible.",
+			closureStandard: "Prompt surface names the recovery operation.",
+		});
+		const target = planning.goal.currentTarget;
+		const plan = planning.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected planning target");
+
+		const failed = await harness.runtime.failCurrentTargetPlan({
+			targetId: target.id,
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reason: "needs-user-input",
+			message: "Operator must choose the quest branch.",
+			blockers: ["Missing quest branch decision."],
+			suggestedQuestions: ["Which quest branch should be planned?"],
+		});
+
+		const surface = renderGoalPromptSurface(failed, failed.goal);
+		expect(surface).toContain('"recoveryAction": "reopen_target_plan"');
+		expect(surface).toContain(plan.id);
+		expect(surface).toContain('"reopen_target_plan_after_user_or_external_input"');
+		const continuationPrompt = renderGoalPrompt("continuation", failed.goal, failed);
+		expect(continuationPrompt).toContain("reopen_target_plan");
+		expect(continuationPrompt).toContain("NEVER call");
+		expect(continuationPrompt).toContain("resume");
+		expect(continuationPrompt).toContain("start_target");
+	});
+
 	it("renders checkpoint prompt surface without full audit checkpoint packets", async () => {
 		const harness = createHarness();
 		const initialState = await harness.runtime.createGoal({
@@ -1275,6 +1332,207 @@ describe("goal runtime", () => {
 				remainingQuestions: [],
 			}),
 		).toThrow("target plan is approved");
+	});
+
+	it("reopens failed target plans after user input without replacing the active target", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
+		let state = await harness.runtime.startTarget({
+			title: "Complete Warden's Spark",
+			desiredFutureClaim: "Warden's Spark can be completed with the chosen equipment.",
+			closureStandard: "Current evidence proves the quest completes with the chosen equipment.",
+		});
+
+		for (let index = 0; index < 3; index += 1) {
+			const plan = state.goal.currentTargetPlan;
+			if (!plan) throw new Error("expected target plan");
+			state = await harness.runtime.rejectCurrentTargetPlan({
+				targetPlanId: plan.id,
+				revision: plan.revision,
+				reviews: [rejectedTargetPlanReview("execution-readiness")],
+				message: "target plan reviewer rejected the submission",
+				stage: "review",
+			});
+		}
+
+		const targetId = state.goal.currentTarget?.id;
+		const failedPlan = state.goal.currentTargetPlan;
+		if (!targetId || !failedPlan) throw new Error("expected failed target plan");
+		expect(state.runMode).toBe("awaiting-user-input");
+		expect(state.goal.currentTarget?.status).toBe("active");
+		expect(failedPlan.status).toBe("failed");
+		expect(failedPlan.revision).toBe(3);
+		expect(failedPlan.failure?.reason).toBe("review-rejection-cap");
+
+		const resumed = await harness.runtime.resumeGoal();
+		expect(resumed.runMode).toBe("awaiting-user-input");
+		expect(resumed.goal.currentTargetPlan?.status).toBe("failed");
+		await expect(
+			harness.runtime.startTarget({
+				title: "Start a replacement target",
+				desiredFutureClaim: "Replacement target is active.",
+				closureStandard: "Replacement target has evidence.",
+			}),
+		).rejects.toThrow("another target is already active");
+
+		const reopened = await harness.runtime.reopenFailedTargetPlan({
+			targetId,
+			targetPlanId: failedPlan.id,
+			revision: failedPlan.revision,
+			reason: "user-input",
+			guidance: " Complete Warden's Spark after equipping Ember Charm. ",
+		});
+		const reopenedTarget = reopened.goal.currentTarget;
+		const reopenedPlan = reopened.goal.currentTargetPlan;
+		if (!reopenedTarget || !reopenedPlan) throw new Error("expected reopened target plan");
+
+		expect(reopened.runMode).toBe("planning-target");
+		expect(reopenedTarget.id).toBe(targetId);
+		expect(reopenedTarget.status).toBe("active");
+		expect(reopenedTarget.planId).toBe(reopenedPlan.id);
+		expect(reopenedPlan.id).not.toBe(failedPlan.id);
+		expect(reopenedPlan.planFilePath).not.toBe(failedPlan.planFilePath);
+		expect(reopenedPlan.planFilePath.endsWith("-plan-reopen-1.md")).toBe(true);
+		expect(reopenedPlan.status).toBe("drafting");
+		expect(reopenedPlan.revision).toBe(1);
+		expect(reopenedPlan.recoveredFromFailure?.sourceTargetPlanId).toBe(failedPlan.id);
+		expect(reopenedPlan.recoveredFromFailure?.sourceRevision).toBe(failedPlan.revision);
+		expect(reopenedPlan.recoveredFromFailure?.reason).toBe("user-input");
+		expect(reopenedPlan.recoveredFromFailure?.guidance).toBe("Complete Warden's Spark after equipping Ember Charm.");
+		expect(reopened.goal.targetPlans?.find(plan => plan.id === failedPlan.id)?.status).toBe("failed");
+		expect(reopenedPlan.failure).toBeUndefined();
+		expect(reopenedPlan.failedAt).toBeUndefined();
+		expect(reopenedPlan.approvedAt).toBeUndefined();
+		expect(reopenedPlan.verificationAperture).toBeUndefined();
+		expect(reopenedPlan.verificationSignals).toBeUndefined();
+		expect(reopenedPlan.concernChecks).toBeUndefined();
+		expect(reopenedPlan.scopeCalibration).toBeUndefined();
+		expect(reopenedPlan.branchEvidence).toBeUndefined();
+		expect(reopenedPlan.excludedWorkReview).toBeUndefined();
+		expect(reopenedPlan.reviews).toEqual([]);
+
+		const newSubmission = buildTargetPlanApprovalInput(reopened);
+		expect(() =>
+			harness.runtime.validateCurrentTargetPlanSubmission({
+				...newSubmission,
+				targetPlanId: failedPlan.id,
+				revision: failedPlan.revision,
+			}),
+		).toThrow(`target_plan_id must equal currentTargetPlan.id (${reopenedPlan.id}); got ${failedPlan.id}`);
+		expect(() => harness.runtime.validateCurrentTargetPlanSubmission(newSubmission)).not.toThrow();
+
+		const rejected = await harness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: reopenedPlan.id,
+			revision: reopenedPlan.revision,
+			reviews: [rejectedTargetPlanReview("execution-readiness")],
+			message: "target plan reviewer rejected the reopened submission",
+			stage: "review",
+		});
+		expect(rejected.runMode).toBe("planning-target");
+		expect(rejected.goal.currentTargetPlan?.status).toBe("revision-required");
+		expect(rejected.goal.currentTargetPlan?.revision).toBe(2);
+	});
+
+	it("rejects stale failed-plan reopen requests", async () => {
+		const wrongModeHarness = createHarness();
+		await wrongModeHarness.runtime.createGoal({ objective: "Reject wrong run mode" });
+		const planning = await wrongModeHarness.runtime.startTarget({
+			title: "Plan still drafting",
+			desiredFutureClaim: "Drafting plan cannot be reopened.",
+			closureStandard: "Drafting plan remains pending.",
+		});
+		const planningTarget = planning.goal.currentTarget;
+		const planningPlan = planning.goal.currentTargetPlan;
+		if (!planningTarget || !planningPlan) throw new Error("expected planning target");
+		await expect(
+			wrongModeHarness.runtime.reopenFailedTargetPlan({
+				targetId: planningTarget.id,
+				targetPlanId: planningPlan.id,
+				revision: planningPlan.revision,
+				reason: "user-input",
+				guidance: "Operator answered.",
+			}),
+		).rejects.toThrow("cannot reopen target plan unless goal is awaiting user input");
+
+		const failedHarness = createHarness();
+		await failedHarness.runtime.createGoal({ objective: "Reject stale failed-plan identity" });
+		const failedPlanning = await failedHarness.runtime.startTarget({
+			title: "Plan failed",
+			desiredFutureClaim: "Failed plan awaits user input.",
+			closureStandard: "Failed plan can reopen with matching identity.",
+		});
+		const failedTarget = failedPlanning.goal.currentTarget;
+		const failedDraft = failedPlanning.goal.currentTargetPlan;
+		if (!failedTarget || !failedDraft) throw new Error("expected failed target setup");
+		const failed = await failedHarness.runtime.failCurrentTargetPlan({
+			targetId: failedTarget.id,
+			targetPlanId: failedDraft.id,
+			revision: failedDraft.revision,
+			reason: "needs-user-input",
+			message: "Operator decision required.",
+			blockers: ["Missing operator decision."],
+			suggestedQuestions: ["Which branch?"],
+		});
+		const failedPlan = failed.goal.currentTargetPlan;
+		if (!failedPlan) throw new Error("expected failed plan");
+		await expect(
+			failedHarness.runtime.reopenFailedTargetPlan({
+				targetId: failedTarget.id,
+				targetPlanId: failedPlan.id,
+				revision: failedPlan.revision + 1,
+				reason: "user-input",
+				guidance: "Operator answered.",
+			}),
+		).rejects.toThrow(
+			`revision must equal currentTargetPlan.revision (${failedPlan.revision}); got ${failedPlan.revision + 1}`,
+		);
+		await expect(
+			failedHarness.runtime.reopenFailedTargetPlan({
+				targetId: failedTarget.id,
+				targetPlanId: "wrong-plan",
+				revision: failedPlan.revision,
+				reason: "user-input",
+				guidance: "Operator answered.",
+			}),
+		).rejects.toThrow(`target_plan_id must equal currentTargetPlan.id (${failedPlan.id}); got wrong-plan`);
+		await expect(
+			failedHarness.runtime.reopenFailedTargetPlan({
+				targetId: failedTarget.id,
+				targetPlanId: failedPlan.id,
+				revision: failedPlan.revision,
+				reason: "user-input",
+				guidance: "  ",
+			}),
+		).rejects.toThrow("reopen_target_plan guidance must be non-empty");
+
+		const staleHarness = createHarness();
+		await staleHarness.runtime.createGoal({ objective: "Reject non-failed plan" });
+		const stalePlanning = await staleHarness.runtime.startTarget({
+			title: "Plan went stale",
+			desiredFutureClaim: "Stale plan waits for input.",
+			closureStandard: "Stale plan is not failed.",
+		});
+		const stalePlan = stalePlanning.goal.currentTargetPlan;
+		if (!stalePlan) throw new Error("expected stale plan setup");
+		const stale = await staleHarness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: stalePlan.id,
+			revision: stalePlan.revision,
+			reviews: [rejectedTargetPlanReview("execution-readiness")],
+			message: "target plan review result is stale because goal state changed",
+			stage: "stale",
+		});
+		const staleTarget = stale.goal.currentTarget;
+		const currentStalePlan = stale.goal.currentTargetPlan;
+		if (!staleTarget || !currentStalePlan) throw new Error("expected stale target plan");
+		await expect(
+			staleHarness.runtime.reopenFailedTargetPlan({
+				targetId: staleTarget.id,
+				targetPlanId: currentStalePlan.id,
+				revision: currentStalePlan.revision,
+				reason: "user-input",
+				guidance: "Operator answered.",
+			}),
+		).rejects.toThrow("current target plan is not failed");
 	});
 
 	it("does not let stale target-plan reviews discard a newer revision", async () => {

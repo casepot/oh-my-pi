@@ -46,7 +46,7 @@ export class GoalCheckpointMessageComponent extends Box {
 		const statusText =
 			details?.review?.status === "rejected"
 				? "Checkpoint rejected; target remains active"
-				: "Target closed; parent goal still active";
+				: "Checkpoint boundary recorded; parent goal still active";
 		this.addChild(
 			new Text(theme.fg("customMessageText", `${statusText} (${target || "checkpoint"}, ctrl+o to expand)`), 0, 0),
 		);
@@ -64,11 +64,12 @@ export class GoalCheckpointMessageComponent extends Box {
 		const heading =
 			details?.review?.status === "rejected"
 				? "**Checkpoint rejected; target remains active**"
-				: "**Target closed; parent goal still active**";
+				: "**Checkpoint boundary recorded; parent goal still active**";
 		return [
 			heading,
 			`**Target**\n\n${replaceTabs(checkpoint.targetSnapshot.title)}`,
 			`**Summary**\n\n${replaceTabs(checkpoint.summary)}`,
+			"**Controller boundary**\n\nOrdinary tools remain blocked until a checkpoint resolution records next_target, parent_completion_candidate, or pause_for_external_control.",
 			`**Evidence**\n\n${replaceTabs(evidence || "(none)")}`,
 			`**Not claimed**\n\n${replaceTabs(nonClaims || "(none)")}`,
 			`**Remaining questions**\n\n${replaceTabs(questions || "(none)")}`,

@@ -17,7 +17,8 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - `get`: inspect current goal state: parent frame, run mode, target history, current target, checkpoints, resolutions, verifier repair, and remaining budget.
 - `resume`: reactivate a paused parent goal without changing its run mode.
 - `start_target`: start a bounded current target. Requires `title`, `desired_future_claim`, and `closure_standard`. Optional: `expected_parent_contribution`, `parent_deliverable_ids`, `baseline_refs`, `gate_refs`, `evidence_expectation`, `non_goals`, `forbidden_claims`, `stale_if`, `linked_verifier_blocker_ids`.
-- `submit_target_plan` / `fail_target_plan`: during `planning-target`, submit an approved dry-run plan or record why planning cannot continue.
+- `submit_target_plan` / `fail_target_plan`: during `planning-target`, submit an approved plan with passing read-only `dry_run` simulation or record why planning cannot continue.
+- `reopen_target_plan`: after user/broader-check/external input resolves a failed current target plan, reopen planning for the same active target with a fresh target-plan id/revision. Requires `target_id`, `target_plan_id`, `revision`, `reason`, and `guidance`.
 - `checkpoint`: submit target-closure evidence for review. Requires `status:"closed_with_evidence"`, `summary`, non-empty `local_claims`, non-empty `evidence`, non-empty `not_claimed`, and non-empty `remaining_questions`. Optional: `checks_run`, `artifacts_touched`, `risks_or_caveats`, `stale_if`, `suggested_controller_questions`, `retrospective_target` for legacy sessions only.
 - `resolve_checkpoint`: record the controller decision for the pending accepted checkpoint. Requires `checkpoint_id`, `decision`, `parent_reading`, `not_propagated`, and `remaining_parent_work`. Optional: `parent_delta`, `broader_checks_or_inputs`, `lessons_for_future`, and `next_target` for `decision:"next_target"`.
 - `complete`: attempt verified parent completion. Use only when there is no pending checkpoint and no unrepaired verifier blocker.
@@ -25,18 +26,22 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 </operations>
 
 <target-aperture>
-Targets are completion units, not process phases or miniature parent goals.
+Targets are product-meaningful completion units, not process phases or miniature parent goals.
 - Project/domain target rules override generic splitting. If they define a minimum target unit, `start_target` MUST use that unit.
-- NEVER start targets for internal process phases such as planning, implementation contact, evidence review, record writing, closure, recomposition, or reviewer passes.
-- A target is too broad when its `closure_standard` would satisfy nearly all parent completion criteria.
+- NEVER start targets for internal process phases such as planning, implementation, evidence review, record writing, closure, recomposition, or reviewer passes.
+- Absent project-specific rules, start the smallest desired-future claim whose primary verification signal becomes truthful.
+- Same primary signal stays together: callers, contracts, state, errors, tests, docs/operator changes.
+- Split independent primary signals, authority boundaries, blast radii, or unrelated deliverables.
+- Too narrow: plumbing/parser/schema-only work that omits same-signal integration.
+- Too broad: diffuse bundles, parent-sized umbrellas, or closure standards that satisfy nearly all parent completion criteria.
 - Include `parent_deliverable_ids` when the compact deliverable map shows which parent deliverables this target contributes to.
-- Include `non_goals` and `forbidden_claims` that prevent target closure from laundering parent completion.
-- Absent project-specific target rules, split by evidence boundary, subsystem, or deliverable; if the parent objective is already one atomic deliverable, one target may cover it.
+- Include `non_goals` and `forbidden_claims` only when they prevent target closure from laundering parent completion or unrelated work.
 - At checkpoint resolution, prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. Use `parent_completion_candidate` only when remaining work is genuinely parent verification, not unresolved implementation, evidence collection, review convergence, or domain closeout.
 </target-aperture>
 
 <target-planning>
-`planning-target` blocks implementation. Use read/discovery tools, read-only `task` reviewers, `job` supervision, and `irc` coordination when available. Write/edit only the active target plan file, then `submit_target_plan` or `fail_target_plan`.
+`planning-target` blocks implementation. Use read/discovery tools, read-only `task` reviewers when they materially reduce uncertainty, `job` supervision, and `irc` coordination when available. Write/edit only the active target plan file. `dry_run` is read-only planner simulation, not executed verification. Then call `submit_target_plan` or `fail_target_plan`.
+- Failed target-plan recovery uses `reopen_target_plan`, not `resume` or `start_target`; the reopened plan gets a new identity from `goal({op:"get"})`.
 </target-planning>
 
 <checkpoint-resolution>

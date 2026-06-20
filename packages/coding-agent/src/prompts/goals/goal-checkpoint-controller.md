@@ -1,5 +1,3 @@
-<!-- Hidden checkpoint controller steer. role=user, suppressed from visible transcript. -->
-
 <goal_checkpoint_controller>
 Checkpoint guidance below is the handoff for a fresh controller turn.
 
@@ -9,7 +7,7 @@ Checkpoint guidance below is the handoff for a fresh controller turn.
 - NEVER use `pause_for_external_control` as a generic stop after accepted checkpoint guidance.
 - Use guidance to admit/narrow/reject target claims.
 - Parent-frame changes require `parent_delta`.
-- Start only a valid project/domain target unit.
+- Start only a valid project/domain product-meaningful target unit.
 - Do not resume implementation before checkpoint resolution.
 - Do not infer parent completion from target closure.
 </goal_checkpoint_controller>

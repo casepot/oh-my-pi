@@ -7,14 +7,16 @@ import type {
 	GoalModeState,
 	GoalTarget,
 	GoalTargetPlanApprovedDetails,
+	GoalTargetPlanRecord,
+	GoalTargetPlanReview,
 	GoalToolCheckpointResolutionSummary,
 	GoalToolCheckpointSummary,
 	GoalToolDetails,
 	GoalToolGoalSummary,
 	GoalToolStateSummary,
+	GoalToolTargetPlanSummary,
 	GoalToolTargetSummary,
 } from "./state";
-
 export interface GoalToolDetailSource {
 	goal: Goal | null;
 	state?: GoalModeState | null;
@@ -25,6 +27,8 @@ export interface GoalToolDetailSource {
 	checkpointReview?: GoalCheckpointReview;
 	checkpointResolution?: GoalCheckpointResolution;
 	targetPlanApproval?: GoalTargetPlanApprovedDetails;
+	targetPlan?: GoalTargetPlanRecord;
+	targetPlanReviews?: GoalTargetPlanReview[];
 }
 
 export function summarizeTarget(target: GoalTarget | undefined): GoalToolTargetSummary | undefined {
@@ -102,6 +106,45 @@ export function summarizeCheckpointResolution(
 	};
 }
 
+export function summarizeTargetPlan(
+	plan: GoalTargetPlanRecord | undefined,
+	reviews: GoalTargetPlanReview[] = plan?.reviews ?? [],
+): GoalToolTargetPlanSummary | undefined {
+	if (!plan) return undefined;
+	return {
+		id: plan.id,
+		targetPlanId: plan.id,
+		targetId: plan.targetId,
+		planFilePath: plan.planFilePath,
+		status: plan.status,
+		revision: plan.revision,
+		reviews: reviews.map(review => ({
+			lens: review.lens,
+			status: review.status,
+			feedback: review.feedback,
+			findingCount: review.findings.length,
+			blockingFindingCount: review.findings.filter(finding => finding.severity === "blocking").length,
+		})),
+		failure: plan.failure
+			? {
+					stage: plan.failure.stage,
+					reason: plan.failure.reason,
+					message: plan.failure.message,
+					blockers: [...plan.failure.blockers],
+				}
+			: undefined,
+		recoveredFromFailure: plan.recoveredFromFailure
+			? {
+					sourceTargetPlanId: plan.recoveredFromFailure.sourceTargetPlanId,
+					sourceRevision: plan.recoveredFromFailure.sourceRevision,
+					reason: plan.recoveredFromFailure.reason,
+					guidance: plan.recoveredFromFailure.guidance,
+					blockers: [...plan.recoveredFromFailure.blockers],
+				}
+			: undefined,
+	};
+}
+
 export function buildGoalToolDetails(op: GoalToolDetails["op"], source: GoalToolDetailSource): GoalToolDetails {
 	return {
 		op,
@@ -115,5 +158,6 @@ export function buildGoalToolDetails(op: GoalToolDetails["op"], source: GoalTool
 		checkpointReview: summarizeCheckpointReview(source.checkpointReview),
 		checkpointResolution: summarizeCheckpointResolution(source.checkpointResolution),
 		targetPlanApproval: source.targetPlanApproval,
+		targetPlan: summarizeTargetPlan(source.targetPlan, source.targetPlanReviews),
 	};
 }

@@ -21,6 +21,7 @@ import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { GoalCheckpointMessageComponent } from "../../modes/components/goal-checkpoint-message";
 import { GoalCheckpointResolutionMessageComponent } from "../../modes/components/goal-checkpoint-resolution-message";
 import { GoalRubricMessageComponent } from "../../modes/components/goal-rubric-message";
+import { GoalTargetPlanMessageComponent } from "../../modes/components/goal-target-plan-message";
 import { GoalVerificationFeedbackMessageComponent } from "../../modes/components/goal-verification-feedback-message";
 import {
 	type LateDiagnosticsFile,
@@ -45,10 +46,12 @@ import {
 	GOAL_CHECKPOINT_MESSAGE_TYPE,
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
+	GOAL_TARGET_PLAN_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
 	type GoalCheckpointResolutionMessageDetails,
 	type GoalRubricMessageDetails,
+	type GoalTargetPlanMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 	isSilentAbort,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
@@ -233,6 +236,15 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(new Spacer(1));
 						const component = new GoalCheckpointResolutionMessageComponent(
 							message as CustomMessage<GoalCheckpointResolutionMessageDetails>,
+						);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === GOAL_TARGET_PLAN_MESSAGE_TYPE) {
+						this.ctx.chatContainer.addChild(new Spacer(1));
+						const component = new GoalTargetPlanMessageComponent(
+							message as CustomMessage<GoalTargetPlanMessageDetails>,
 						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);

@@ -79,7 +79,7 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 		? "Plan mode is active. Do not call eval `agent()` or the task tool from this notice."
 		: targetPlanningMode
 			? canUseTaskTool
-				? `Goal target planning is active. eval agent() is unavailable; use the task tool for read-only workflowz subagents. Allowed task spawns now: ${allowedAgentSummary}.`
+				? `Goal target planning is active. eval agent() is unavailable; use the task tool for read-only planning subagents. Allowed task spawns now: ${allowedAgentSummary}.`
 				: "Goal target planning is active. eval agent() is unavailable and task subagents are not currently available from this notice."
 			: recursionExhausted
 				? `eval agent() recursion depth is exhausted (task.maxRecursionDepth is exhausted at depth ${depth}/${maxDepth}). Do not call eval \`agent()\` or the task tool from this notice.`

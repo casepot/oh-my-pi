@@ -7,6 +7,7 @@ import {
 	type GoalSubmitTargetPlanInput,
 	type GoalTargetPlanApprovalInput,
 	type GoalTargetPlanFailureInput,
+	type GoalUsagePersistenceEvent,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type {
 	Goal,
@@ -73,20 +74,29 @@ function createToolSession(overrides: Partial<ToolSession>): ToolSession {
 
 function createRuntimeHarness(initialState?: TestGoalModeStateInput) {
 	let state = initialState ? cloneState(createGoalModeState(initialState)) : undefined;
+	let currentUsage = createUsage();
+	const usagePersists: GoalUsagePersistenceEvent[] = [];
 	const runtime = new GoalRuntime({
 		getState: () => cloneState(state),
 		setState: next => {
 			state = cloneState(next);
 		},
-		getCurrentUsage: () => createUsage(),
+		getCurrentUsage: () => currentUsage,
 		emit: async () => {},
 		persist: (_mode, _state) => {},
+		persistUsage: event => {
+			usagePersists.push({ ...event });
+		},
 		sendHiddenMessage: async _message => {},
 		now: () => 0,
 	});
 	return {
 		runtime,
 		getState: () => cloneState(state),
+		setUsage: (usage: GoalTokenUsage) => {
+			currentUsage = usage;
+		},
+		usagePersists,
 	};
 }
 
@@ -288,6 +298,7 @@ describe("GoalTool", () => {
 		const runtime = {
 			createGoal: vi.fn(async () => createGoalState),
 			completeGoalFromTool: vi.fn(async () => completedGoal),
+			flushUsage: vi.fn(async () => {}),
 		};
 		const getGoalModeState = vi.fn(() => getGoalState);
 		const tool = new GoalTool(
@@ -353,6 +364,39 @@ describe("GoalTool", () => {
 		});
 	});
 
+	it("flushes usage before rendering get results", async () => {
+		const harness = createRuntimeHarness();
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		await harness.runtime.createGoal({ objective: "Account live usage", tokenBudget: 100 });
+		harness.setUsage(createUsage({ input: 12, output: 3 }));
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const result = await tool.execute("get-live-usage", { op: "get" });
+
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Tokens: 15 used / 100 budget");
+		expect(result.details?.goal?.tokensUsed).toBe(15);
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("expected dark theme");
+		const rendered = Bun.stripANSI(
+			goalToolRenderer
+				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { op: "get" })
+				.render(120)
+				.join("\n"),
+		);
+		expect(rendered).toContain("15 / 100 tokens (85 left)");
+		expect(harness.usagePersists).toHaveLength(1);
+		expect(harness.usagePersists[0]).toMatchObject({ tokenDelta: 15, tokensUsed: 15 });
+
+		await harness.runtime.onGoalToolCompleted();
+		expect(harness.usagePersists).toHaveLength(1);
+	});
+
 	it("surfaces verifier rejection without completing the goal", async () => {
 		const activeGoal = createGoal({
 			objective: "Needs proof",
@@ -373,6 +417,7 @@ describe("GoalTool", () => {
 					({
 						createGoal: vi.fn(),
 						completeGoalFromTool: vi.fn(),
+						flushUsage: vi.fn(async () => {}),
 					}) as unknown as GoalRuntime,
 				getGoalModeState: () =>
 					createGoalModeState({
@@ -568,6 +613,27 @@ describe("GoalTool", () => {
 		).toBe(true);
 		expect(
 			tool.parameters.safeParse({
+				op: "reopen_target_plan",
+				target_id: "target-1",
+				target_plan_id: "target-1-plan",
+				revision: 3,
+				reason: "user-input",
+				guidance: "Use the user's quest decision.",
+			}).success,
+		).toBe(true);
+		expect(
+			tool.parameters.safeParse({
+				op: "reopen_target_plan",
+				target_id: "target-1",
+				target_plan_id: "target-1-plan",
+				revision: 3,
+				reason: "user-input",
+				guidance: "Use the user's quest decision.",
+				extra: "not allowed",
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
 				op: "start_target",
 				title: "Prove smoke",
 				desired_future_claim: "Smoke path is exercised.",
@@ -703,6 +769,56 @@ describe("GoalTool", () => {
 		expect(text).toContain('"op": "submit_target_plan"');
 		expect(text).toContain('"verification_aperture"');
 		expect(text).toContain("unit, integration, e2e, manual, product, release-gate");
+	});
+
+	it("renders and executes failed target-plan recovery", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove smoke",
+			desiredFutureClaim: "Smoke path is exercised.",
+			closureStandard: "Current smoke output exists.",
+		});
+		const target = planning.goal.currentTarget;
+		const plan = planning.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const failed = await harness.runtime.failCurrentTargetPlan({
+			targetId: target.id,
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reason: "needs-user-input",
+			message: "Operator must choose the quest branch.",
+			blockers: ["Missing quest branch decision."],
+			suggestedQuestions: ["Which quest branch should be planned?"],
+		});
+		const failedPlan = failed.goal.currentTargetPlan;
+		if (!failedPlan) throw new Error("expected failed target plan");
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const getResult = await tool.execute("get-failed-plan", { op: "get" });
+		const getText = getResult.content[0]?.type === "text" ? getResult.content[0].text : "";
+		expect(getText).toContain("reopen_target_plan");
+		expect(getText).toContain("Do not call resume or start_target");
+
+		const reopened = await tool.execute("reopen-plan", {
+			op: "reopen_target_plan",
+			target_id: target.id,
+			target_plan_id: failedPlan.id,
+			revision: failedPlan.revision,
+			reason: "user-input",
+			guidance: "Use the user's quest decision.",
+		});
+		const reopenedText = reopened.content[0]?.type === "text" ? reopened.content[0].text : "";
+		expect(reopened.details?.state?.runMode).toBe("planning-target");
+		expect(reopened.details?.targetPlan?.status).toBe("drafting");
+		expect(reopened.details?.targetPlan?.revision).toBe(1);
+		expect(reopenedText).toContain("Target plan reopened");
+		expect(reopenedText).toContain('"op": "submit_target_plan"');
 	});
 
 	it("routes target-plan submit and failure operations to session handlers", async () => {
@@ -842,6 +958,61 @@ describe("GoalTool", () => {
 		}
 	});
 
+	it("returns concise recovery text for invalid target-plan schema enums", async () => {
+		const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => createRuntimeHarness().runtime,
+				requestGoalTargetPlanApproval,
+			}),
+		);
+		const base = {
+			targetId: "target-1",
+			targetPlanId: "target-plan-1",
+			planFilePath: "local://goal-goal-1-target-1-plan.md",
+			revision: 1,
+		};
+		const layerParams = buildSubmitTargetPlanParams(base);
+		layerParams.verification_signals = [
+			...layerParams.verification_signals,
+			{ ...layerParams.verification_signals[0]!, id: "signal-supporting-1", role: "supporting" },
+			{ ...layerParams.verification_signals[0]!, id: "signal-supporting-2", role: "supporting" },
+			{ ...layerParams.verification_signals[0]!, id: "signal-supporting-3", role: "supporting" },
+		];
+		(layerParams.verification_signals[3] as { layer: string }).layer = "browser";
+		await expect(tool.execute("invalid-signal-layer", layerParams)).rejects.toThrow(
+			'submit_target_plan invalid at verification_signals/3/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
+		);
+
+		const omittedParams = buildSubmitTargetPlanParams(base);
+		(omittedParams.verification_aperture.omitted_layers[0] as { layer: string }).layer = "browser";
+		await expect(tool.execute("invalid-omitted-layer", omittedParams)).rejects.toThrow(
+			'submit_target_plan invalid at verification_aperture/omitted_layers/0/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
+		);
+		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+	});
+
+	it("returns concise recovery text for invalid target-plan non-enum fields", async () => {
+		const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => createRuntimeHarness().runtime,
+				requestGoalTargetPlanApproval,
+			}),
+		);
+		const params = buildSubmitTargetPlanParams({
+			targetId: "target-1",
+			targetPlanId: "target-plan-1",
+			planFilePath: "local://goal-goal-1-target-1-plan.md",
+			revision: 1,
+		});
+		(params as { revision: number }).revision = 0;
+
+		await expect(tool.execute("invalid-revision", params)).rejects.toThrow("submit_target_plan invalid at revision:");
+		await expect(tool.execute("invalid-revision-repeat", params)).rejects.toThrow('Call goal({op:"get"})');
+		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+	});
+
 	it("renders failed target-plan submissions as awaiting user input", async () => {
 		const failedPlan: GoalTargetPlanRecord = {
 			id: "target-plan-1",
@@ -885,8 +1056,209 @@ describe("GoalTool", () => {
 
 		const text = result.content.find(part => part.type === "text")?.text ?? "";
 		expect(text).toContain("Target plan failed");
-		expect(text).toContain("awaiting user input");
+		expect(text).toContain("awaiting user/external input");
 		expect(text).not.toContain("Run mode remains planning-target");
+	});
+
+	it("renders rejected target-plan results with actionable identity", async () => {
+		const review: GoalTargetPlanReview = {
+			id: "review-aperture",
+			lens: "aperture",
+			status: "rejected",
+			feedback: "Plan bundles unrelated release-gate work.",
+			apertureClassification: "too-broad",
+			revisionDecision: "split-required",
+			findings: [
+				{
+					id: "finding-1",
+					severity: "blocking",
+					problem: "Release gate proof belongs in a separate target.",
+					requiredRevision: "Split release-gate proof out.",
+				},
+			],
+			reviewedAt: 2,
+		};
+		const rejectedPlan: GoalTargetPlanRecord = {
+			id: "target-plan-1",
+			goalId: "goal-1",
+			targetId: "target-1",
+			targetSequence: 1,
+			planFilePath: "local://goal-goal-1-target-1-plan.md",
+			status: "revision-required",
+			revision: 2,
+			stateVersionAtStart: 1,
+			parentFrameVersionAtStart: 0,
+			createdAt: 1,
+			updatedAt: 2,
+			verificationAperture: {
+				productIntention: "Exercise the smoke path.",
+				primarySignalId: "signal-primary",
+				blastRadius: "local",
+				confidenceTarget: "high",
+				layerRationale: "Unit proof is sufficient for this target.",
+				residualUncertainty: ["Release gate remains separate."],
+				omittedLayers: [],
+			},
+			verificationSignals: [
+				{
+					id: "signal-primary",
+					role: "primary",
+					layer: "unit",
+					concernIds: ["concern-behavior"],
+					claim: "Smoke path is exercised.",
+					observation: "Focused unit assertion.",
+					method: "Run focused test.",
+					expectedOutcome: "The smoke assertion passes.",
+					required: true,
+					confidenceIfSatisfied: "high",
+					staleIf: [],
+				},
+			],
+			concernChecks: [
+				{
+					id: "concern-behavior",
+					kind: "behavior",
+					whyIndependent: "Behavior can regress independently.",
+					coveredBySignalIds: ["signal-primary"],
+				},
+			],
+			reviews: [review],
+		};
+		const goal = createGoal({
+			currentTarget: {
+				id: "target-1",
+				sequence: 1,
+				status: "active",
+				title: "Prove smoke path",
+				desiredFutureClaim: "Smoke path is exercised.",
+				closureStandard: "Focused unit evidence exists.",
+				baselineRefs: [],
+				gateRefs: [],
+				evidenceExpectation: [],
+				nonGoals: [],
+				forbiddenClaims: [],
+				staleIf: [],
+				createdAt: 1,
+				createdBy: "operator",
+				planId: "target-plan-1",
+			},
+			currentTargetPlan: rejectedPlan,
+		});
+		const state = createGoalModeState({ goal, runMode: "planning-target" });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => createRuntimeHarness().runtime,
+				getGoalModeState: () => state,
+				requestGoalTargetPlanApproval: async () =>
+					buildGoalToolResponse(goal, { state, targetPlan: rejectedPlan, targetPlanReviews: [review] }),
+			}),
+		);
+
+		const result = await tool.execute(
+			"submit-rejected",
+			buildSubmitTargetPlanParams({
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: "local://goal-goal-1-target-1-plan.md",
+				revision: 2,
+			}),
+		);
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("expected dark theme");
+		const rendered = Bun.stripANSI(
+			goalToolRenderer
+				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { op: "submit_target_plan" })
+				.render(140)
+				.join("\n"),
+		);
+		expect(rendered).toContain("target plan rejected");
+		expect(rendered).toContain("target_id: target-1");
+		expect(rendered).toContain("target_plan_id: target-plan-1");
+		expect(rendered).toContain("plan_file_path: local://goal-goal-1-target-1-plan.md");
+		expect(rendered).toContain("target plan: revision-required r2");
+		expect(rendered).toContain("aperture: Plan bundles unrelated release-gate work.");
+		const detailsJson = JSON.stringify(result.details);
+		expect(detailsJson).toContain("targetPlan");
+		expect(detailsJson).toContain("targetPlanId");
+		expect(detailsJson).toContain("planFilePath");
+		expect(detailsJson).toContain("aperture");
+		expect(detailsJson).toContain("rejected");
+		expect(detailsJson).toContain("blockingFindingCount");
+		expect(detailsJson).not.toContain("verificationSignals");
+		expect(detailsJson).not.toContain("verificationAperture");
+		expect(detailsJson).not.toContain("concernChecks");
+		expect(detailsJson).not.toContain("Goal target plan");
+	});
+
+	it("renders approved target-plan results as execution unlocked", async () => {
+		const approvedPlan: GoalTargetPlanRecord = {
+			id: "target-plan-approved",
+			goalId: "goal-1",
+			targetId: "target-approved",
+			targetSequence: 1,
+			planFilePath: "local://goal-goal-1-target-approved-plan.md",
+			status: "approved",
+			revision: 1,
+			stateVersionAtStart: 1,
+			parentFrameVersionAtStart: 0,
+			createdAt: 1,
+			updatedAt: 2,
+			approvedAt: 2,
+			reviews: [acceptedTargetPlanReview("aperture"), acceptedTargetPlanReview("execution-readiness")],
+		};
+		const goal = createGoal({
+			currentTarget: {
+				id: "target-approved",
+				sequence: 1,
+				status: "active",
+				title: "Execute approved plan",
+				desiredFutureClaim: "Approved work can start.",
+				closureStandard: "Execution is unlocked.",
+				baselineRefs: [],
+				gateRefs: [],
+				evidenceExpectation: [],
+				nonGoals: [],
+				forbiddenClaims: [],
+				staleIf: [],
+				createdAt: 1,
+				createdBy: "operator",
+				planId: "target-plan-approved",
+			},
+			currentTargetPlan: approvedPlan,
+		});
+		const state = createGoalModeState({ goal, runMode: "working-target" });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => createRuntimeHarness().runtime,
+				getGoalModeState: () => state,
+				requestGoalTargetPlanApproval: async () =>
+					buildGoalToolResponse(goal, {
+						state,
+						targetPlan: approvedPlan,
+						targetPlanReviews: approvedPlan.reviews,
+					}),
+			}),
+		);
+
+		const result = await tool.execute(
+			"submit-approved",
+			buildSubmitTargetPlanParams({
+				targetId: "target-approved",
+				targetPlanId: "target-plan-approved",
+				planFilePath: "local://goal-goal-1-target-approved-plan.md",
+				revision: 1,
+			}),
+		);
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("expected dark theme");
+		const rendered = Bun.stripANSI(
+			goalToolRenderer
+				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { op: "submit_target_plan" })
+				.render(140)
+				.join("\n"),
+		);
+		expect(rendered).toContain("target plan approved");
+		expect(rendered).toContain("execution unlocked for current target");
 	});
 
 	it("rejects checkpoint when the session review handler is unavailable", async () => {
@@ -981,6 +1353,18 @@ describe("GoalTool", () => {
 		expect(checkpointText).toContain("Parent goal remains active");
 		expect(checkpointText).toContain("Ordinary tools are blocked");
 		expect(checkpointText).toContain("resolve_checkpoint");
+		const uiTheme = await getThemeByName("dark");
+		if (!uiTheme) throw new Error("expected dark theme");
+		const checkpointRendered = Bun.stripANSI(
+			goalToolRenderer
+				.renderResult(checkpoint, { expanded: false, isPartial: false }, uiTheme, { op: "checkpoint" })
+				.render(140)
+				.join("\n"),
+		);
+		expect(checkpointRendered).toContain("BOUNDARY");
+		expect(checkpointRendered).toContain(
+			`goal({op:"resolve_checkpoint", checkpoint_id:"${checkpoint.details?.checkpoint?.id}"})`,
+		);
 
 		const getCheckpoint = await tool.execute("get-checkpoint", { op: "get" });
 		const stateAfterCheckpoint = harness.getState();

@@ -19,6 +19,7 @@ import {
 	type GoalStartTargetInput,
 	type GoalSubmitTargetPlanInput,
 	type GoalTargetPlanFailureInput,
+	type GoalTargetPlanReopenInput,
 	remainingTokens,
 	renderTargetPlanSubmitSkeleton,
 	validateTargetPlanSubmissionGraph,
@@ -539,6 +540,17 @@ const failTargetPlanSchema = z
 	})
 	.strict();
 
+const reopenTargetPlanSchema = z
+	.object({
+		op: z.literal("reopen_target_plan"),
+		target_id: z.string(),
+		target_plan_id: z.string(),
+		revision: z.number().int().min(1),
+		reason: z.enum(["user-input", "broader-checks", "external-authority"]),
+		guidance: z.string().min(1),
+	})
+	.strict();
+
 const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	createSchema,
 	getSchema,
@@ -550,9 +562,11 @@ const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	resolveCheckpointSchema,
 	submitTargetPlanSchema,
 	failTargetPlanSchema,
+	reopenTargetPlanSchema,
 ]);
 
 const goalSchema = goalDiscriminatedSchema;
+const goalOperationSchema = z.looseObject({ op: z.string() });
 
 export type GoalToolInput = z.infer<typeof goalSchema>;
 
@@ -844,6 +858,36 @@ function mapSubmitTargetPlanInput(params: z.infer<typeof submitTargetPlanSchema>
 	};
 }
 
+function parseSubmitTargetPlanToolInput(params: GoalToolInput): GoalSubmitTargetPlanInput {
+	const parsed = submitTargetPlanSchema.safeParse(params);
+	if (parsed.success) return mapSubmitTargetPlanInput(parsed.data);
+	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error));
+}
+
+function formatSubmitTargetPlanSchemaError(error: z.ZodError): string {
+	const issue = error.issues[0];
+	if (!issue) {
+		return 'submit_target_plan arguments are invalid. Call goal({op:"get"}) and reuse the target-plan submit identity.';
+	}
+	const path = issue.path.map(segment => String(segment)).join("/") || "(root)";
+	if (path.endsWith("/layer") || /^verification_aperture\/omitted_layers\/\d+\/layer$/.test(path)) {
+		return `submit_target_plan invalid at ${path}: allowed values are ${VERIFICATION_LAYER_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	}
+	if (path.endsWith("/role")) {
+		return `submit_target_plan invalid at ${path}: allowed values are ${SIGNAL_ROLE_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	}
+	if (path.endsWith("/confidence_target")) {
+		return `submit_target_plan invalid at ${path}: allowed values are ${SIGNAL_CONFIDENCE_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	}
+	if (path.endsWith("/blast_radius")) {
+		return `submit_target_plan invalid at ${path}: allowed values are ${BLAST_RADIUS_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	}
+	if (path.endsWith("/kind")) {
+		return `submit_target_plan invalid at ${path}: allowed values are ${CONCERN_KIND_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	}
+	return `submit_target_plan invalid at ${path}: ${issue.message}. Call goal({op:"get"}) and reuse the target-plan submit identity.`;
+}
+
 function mapFailTargetPlanInput(params: z.infer<typeof failTargetPlanSchema>): GoalTargetPlanFailureInput {
 	return {
 		targetId: params.target_id,
@@ -853,6 +897,16 @@ function mapFailTargetPlanInput(params: z.infer<typeof failTargetPlanSchema>): G
 		message: params.message,
 		blockers: params.blockers,
 		suggestedQuestions: params.suggested_questions,
+	};
+}
+
+function mapReopenTargetPlanInput(params: z.infer<typeof reopenTargetPlanSchema>): GoalTargetPlanReopenInput {
+	return {
+		targetId: params.target_id,
+		targetPlanId: params.target_plan_id,
+		revision: params.revision,
+		reason: params.reason,
+		guidance: params.guidance,
 	};
 }
 
@@ -872,13 +926,20 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 
 	async execute(
 		_toolCallId: string,
-		params: GoalToolInput,
+		args: GoalToolInput,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<GoalToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GoalToolDetails>> {
 		const runtime = this.#session.getGoalRuntime?.();
 		if (!runtime) throw new ToolError("Goal mode is not active.");
+
+		const operation = goalOperationSchema.safeParse(args);
+		const params =
+			operation.success && operation.data.op === "submit_target_plan"
+				? (args as GoalToolInput)
+				: goalSchema.parse(args);
+		await runtime.flushUsage("suppressed");
 
 		const goalSession: ToolSession & GoalSessionSupport = this.#session;
 		let response: GoalToolResponse;
@@ -917,7 +978,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			if (!goalSession.requestGoalTargetPlanApproval) {
 				throw new ToolError("submit_target_plan requires an AgentSession target-plan review handler");
 			}
-			const input = mapSubmitTargetPlanInput(submitTargetPlanSchema.parse(params));
+			const input = parseSubmitTargetPlanToolInput(params);
 			validateTargetPlanSubmissionGraph(input);
 			response = await goalSession.requestGoalTargetPlanApproval(input, signal);
 		} else if (params.op === "fail_target_plan") {
@@ -928,6 +989,11 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				mapFailTargetPlanInput(failTargetPlanSchema.parse(params)),
 				signal,
 			);
+		} else if (params.op === "reopen_target_plan") {
+			const state = await runtime.reopenFailedTargetPlan(
+				mapReopenTargetPlanInput(reopenTargetPlanSchema.parse(params)),
+			);
+			response = buildGoalToolResponse(state.goal, { state, targetPlan: state.goal.currentTargetPlan });
 		} else {
 			response = goalSession.requestGoalCompletion
 				? await goalSession.requestGoalCompletion(signal)
@@ -1003,6 +1069,15 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\nNext action: write the plan at plan_file_path, then call goal with this submit_target_plan skeleton:\n${renderTargetPlanSubmitSkeleton(identity, { includeOp: true })}`;
 			text += `\nAllowed verification layer values for verification_signals[].layer and verification_aperture.omitted_layers[].layer: ${VERIFICATION_LAYER_VALUES.join(", ")}.`;
 		}
+		if (
+			goal.currentTargetPlan.status === "failed" &&
+			response.state?.runMode === "awaiting-user-input" &&
+			goal.currentTarget?.status === "active" &&
+			goal.currentTargetPlan.targetId === goal.currentTarget.id
+		) {
+			text += `\nNext action after user/external input: call goal({op:"reopen_target_plan", target_id:"${goal.currentTarget.id}", target_plan_id:"${goal.currentTargetPlan.id}", revision:${goal.currentTargetPlan.revision}, reason:"user-input", guidance:"<decision or authority>"}).`;
+			text += "\nDo not call resume or start_target for failed target-plan recovery.";
+		}
 	}
 	if (
 		goal.status !== "paused" &&
@@ -1034,7 +1109,8 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 		if (response.targetPlan.status === "approved") {
 			text += "\n\nTarget plan approved. Goal mode remains active; execution may begin for the current target.";
 		} else if (response.targetPlan.status === "failed" || response.state?.runMode === "awaiting-user-input") {
-			text += "\n\nTarget plan failed. Goal mode is awaiting user input before target execution can continue.";
+			text +=
+				"\n\nTarget plan failed. Goal mode is awaiting user/external input; when input resolves the blockers, call reopen_target_plan for the same active target.";
 		} else {
 			text += "\n\nTarget plan rejected. Run mode remains planning-target; revise the plan using reviewer feedback.";
 			const feedback = response.targetPlanReviews
@@ -1043,6 +1119,10 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 				.join("\n");
 			if (feedback) text += `\n\nReviewer feedback:\n${feedback}`;
 		}
+	}
+	if (op === "reopen_target_plan" && response.targetPlan) {
+		text +=
+			"\n\nTarget plan reopened. Goal mode is planning-target for the same active target. Write only the new plan_file_path, then submit_target_plan.";
 	}
 	if (op === "drop") {
 		text += "\n\nGoal dropped. Formal goal mode is off; no checkpoint or parent completion was recorded.";
@@ -1083,6 +1163,8 @@ function describeOp(op: string | undefined): string {
 			return "submit target plan";
 		case "fail_target_plan":
 			return "fail target plan";
+		case "reopen_target_plan":
+			return "reopen target plan";
 		default:
 			return op ?? "?";
 	}
@@ -1160,20 +1242,42 @@ export const goalToolRenderer = {
 		const verification = details?.completionVerification;
 		const verificationRejected = verification?.status === "rejected";
 		const checkpointRejected = details?.checkpointReview?.status === "rejected";
+		const targetPlan = details?.targetPlan;
+		const targetPlanBadge =
+			op === "reopen_target_plan" && targetPlan?.status === "drafting"
+				? ({ label: "target plan reopened", color: "success" } as const)
+				: op === "submit_target_plan" && targetPlan?.status === "revision-required"
+					? ({ label: "target plan rejected", color: "warning" } as const)
+					: targetPlan?.status === "failed"
+						? ({ label: "target plan failed", color: "error" } as const)
+						: targetPlan?.status === "approved"
+							? ({ label: "target plan approved", color: "success" } as const)
+							: undefined;
 		const lines: string[] = [];
 		lines.push(
 			renderStatusLine(
 				{
-					icon: verificationRejected || checkpointRejected ? "warning" : "success",
+					icon:
+						targetPlanBadge?.color === "error"
+							? "error"
+							: verificationRejected || checkpointRejected || targetPlanBadge?.color === "warning"
+								? "warning"
+								: "success",
 					title: "Goal",
 					description,
 					badge: {
-						label: verificationRejected
-							? "verification rejected"
-							: checkpointRejected
-								? "checkpoint rejected"
-								: goal.status,
-						color: verificationRejected || checkpointRejected ? "warning" : goalBadgeColor(goal.status),
+						label: targetPlanBadge?.label
+							? targetPlanBadge.label
+							: verificationRejected
+								? "verification rejected"
+								: checkpointRejected
+									? "checkpoint rejected"
+									: goal.status,
+						color: targetPlanBadge?.color
+							? targetPlanBadge.color
+							: verificationRejected || checkpointRejected
+								? "warning"
+								: goalBadgeColor(goal.status),
 					},
 					meta: verificationRejected
 						? [
@@ -1193,6 +1297,18 @@ export const goalToolRenderer = {
 		lines.push(`  ${uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`))}`);
 		if (goal.currentTarget)
 			lines.push(`  ${uiTheme.fg("muted", `target: ${humanPreview(goal.currentTarget.title)}`)}`);
+		if (targetPlan) {
+			lines.push(`  ${uiTheme.fg("muted", `target plan: ${targetPlan.status} r${targetPlan.revision}`)}`);
+			lines.push(`  ${uiTheme.fg("muted", `target_id: ${targetPlan.targetId}`)}`);
+			lines.push(`  ${uiTheme.fg("muted", `target_plan_id: ${targetPlan.id}`)}`);
+			lines.push(`  ${uiTheme.fg("muted", `plan_file_path: ${targetPlan.planFilePath}`)}`);
+			for (const review of targetPlan.reviews.filter(review => review.status !== "accepted").slice(0, 2)) {
+				lines.push(`  ${uiTheme.fg("warning", humanPreview(`${review.lens}: ${review.feedback}`))}`);
+			}
+			if (targetPlan.status === "approved") {
+				lines.push(`  ${uiTheme.fg("success", "execution unlocked for current target")}`);
+			}
+		}
 		if (shouldRenderPendingCheckpoint(goal, details?.state)) {
 			lines.push(`  ${uiTheme.fg("warning", `checkpoint pending: resolve ${goal.pendingCheckpointId}`)}`);
 			lines.push(`  ${uiTheme.fg("muted", "ordinary tools blocked until resolve_checkpoint")}`);
@@ -1209,7 +1325,12 @@ export const goalToolRenderer = {
 			lines.push(`  ${uiTheme.fg("dim", `${formatDuration(goal.timeUsedSeconds * 1000)} elapsed`)}`);
 		if (details?.checkpoint && !checkpointRejected) {
 			lines.push(`  ${uiTheme.fg("muted", "Target closed; parent goal still active")}`);
-			lines.push(`  ${uiTheme.fg("muted", "Next: resolve_checkpoint after checkpoint guidance")}`);
+			lines.push(
+				`  ${uiTheme.fg("muted", "BOUNDARY: ordinary tools blocked until resolve_checkpoint records controller decision")}`,
+			);
+			lines.push(
+				`  ${uiTheme.fg("muted", `goal({op:"resolve_checkpoint", checkpoint_id:"${details.checkpoint.id}"})`)}`,
+			);
 		}
 		if (details?.checkpointResolution)
 			lines.push(`  ${uiTheme.fg("muted", `checkpoint resolution: ${details.checkpointResolution.decision}`)}`);

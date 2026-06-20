@@ -41,15 +41,17 @@ export class GoalCheckpointResolutionMessageComponent extends Box {
 			);
 			return;
 		}
-		const decision = details?.resolution.decision ?? "controller decision";
+		const decision = details?.resolution.decision;
+		const firstLine =
+			decision === "next_target"
+				? "Checkpoint resolved: next_target"
+				: decision === "parent_completion_candidate"
+					? "Checkpoint resolved: parent_completion_candidate; parent completion verification required"
+					: decision === "pause_for_external_control"
+						? "Checkpoint resolved: paused for external control"
+						: `Checkpoint resolved: ${decision ?? "controller decision"}`;
 		const next = previewLine(details?.resolution.nextTarget?.title);
-		this.addChild(
-			new Text(
-				theme.fg("customMessageText", `Next target / controller decision: ${decision} (ctrl+o to expand)`),
-				0,
-				0,
-			),
-		);
+		this.addChild(new Text(theme.fg("customMessageText", `${firstLine} (ctrl+o to expand)`), 0, 0));
 		if (next) this.addChild(new Text(theme.fg("customMessageText", next), 0, 1));
 	}
 

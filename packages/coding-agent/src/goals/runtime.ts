@@ -28,6 +28,7 @@ import type {
 	GoalTargetPlanExcludedWorkReview,
 	GoalTargetPlanFailureReason,
 	GoalTargetPlanRecord,
+	GoalTargetPlanReopenReason,
 	GoalTargetPlanReview,
 	GoalTokenUsage,
 	GoalVerificationAperture,
@@ -289,6 +290,14 @@ export interface GoalTargetPlanFailureInput {
 	message: string;
 	blockers: string[];
 	suggestedQuestions: string[];
+}
+
+export interface GoalTargetPlanReopenInput {
+	targetId: string;
+	targetPlanId: string;
+	revision: number;
+	reason: GoalTargetPlanReopenReason;
+	guidance: string;
 }
 export interface GoalCheckpointResolutionInput {
 	checkpointId: string;
@@ -688,6 +697,7 @@ export interface GoalContextSurface {
 	policy: GoalPromptObject;
 	deliverables?: GoalPromptObject;
 	parent_truth?: GoalPromptObject;
+	target_aperture_guidance?: GoalPromptObject;
 	current_target?: GoalPromptObject;
 	target_plan?: GoalPromptObject;
 	checkpoint?: GoalPromptObject;
@@ -872,8 +882,47 @@ function compactTargetPlanForPrompt(plan: GoalTargetPlanRecord | undefined): Goa
 		revision: plan.revision,
 		planFilePath: plan.planFilePath,
 		failure: plan.failure,
-		requiredAction: "draft_review_submit_target_plan",
+		recoveredFromFailure: plan.recoveredFromFailure,
+		requiredAction:
+			plan.status === "failed"
+				? "reopen_target_plan_after_user_or_external_input"
+				: "draft_review_submit_target_plan",
 	};
+}
+
+const TARGET_APERTURE_GUIDANCE_MAX_LENGTH = 1_600;
+
+function truncateTargetApertureGuidance(guidance: string): string {
+	if (guidance.length <= TARGET_APERTURE_GUIDANCE_MAX_LENGTH) return guidance;
+	return `${guidance.slice(0, TARGET_APERTURE_GUIDANCE_MAX_LENGTH - 1)}…`;
+}
+
+function extractTargetApertureGuidance(rubric: string | undefined): GoalPromptObject | undefined {
+	if (!rubric?.trim()) return undefined;
+	const lines = rubric.split("\n");
+	const collected: string[] = [];
+	let inSection = false;
+
+	for (const rawLine of lines) {
+		const line = rawLine.trimEnd();
+		const trimmed = line.trim();
+		if (!inSection) {
+			const headingMatch = /^#{1,6}\s*Target aperture guidance\b[:\s—-]*(.*)$/i.exec(trimmed);
+			const labelMatch = /^(?:[-*+]\s*)?Target aperture guidance\b[:\s—-]*(.*)$/i.exec(trimmed);
+			const match = headingMatch ?? labelMatch;
+			if (!match) continue;
+			inSection = true;
+			const remainder = match[1]?.trim();
+			if (remainder) collected.push(remainder);
+			continue;
+		}
+		if (/^#{1,6}\s+\S/.test(trimmed)) break;
+		collected.push(line);
+	}
+
+	const guidance = collected.join("\n").trim();
+	if (!guidance) return undefined;
+	return { source: "goal_rubric", guidance: truncateTargetApertureGuidance(guidance) };
 }
 
 function compactCheckpointForPrompt(checkpoint: GoalCheckpointPacket | undefined): GoalPromptObject | undefined {
@@ -978,6 +1027,12 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 	const currentTarget = goal.currentTarget;
 	const checkpoint = latestCheckpoint(goal);
 	const resolution = latestResolution(goal);
+	const failedCurrentPlan =
+		currentTarget?.status === "active" &&
+		goal.currentTargetPlan?.status === "failed" &&
+		goal.currentTargetPlan.targetId === currentTarget.id
+			? goal.currentTargetPlan
+			: undefined;
 	const surface: GoalContextSurface = {
 		goal: {
 			id: goal.id,
@@ -991,6 +1046,7 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 		},
 		policy: policyForRunMode(runMode),
 		deliverables: compactDeliverablesForPrompt(goal.deliverableMap, currentTarget),
+		target_aperture_guidance: extractTargetApertureGuidance(goal.rubric),
 		parent_truth: compactParentTruthForPrompt(goal.parentFrame, resolution, goal.deliverableMap, currentTarget),
 		latest_resolution: compactResolutionForPrompt(resolution, currentTarget),
 		refs: {
@@ -1018,11 +1074,23 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 			? compactTargetForPrompt(currentTarget)
 			: undefined;
 	} else if (runMode === "awaiting-user-input") {
+		if (failedCurrentPlan) {
+			surface.current_target = compactTargetForPrompt(currentTarget);
+			surface.target_plan = compactTargetPlanForPrompt(failedCurrentPlan);
+		}
 		surface.blocked_state = {
 			requiredAction: "await_user_input_or_external_authority",
 			latestResolutionId: resolution?.id,
 			broaderChecksOrInputs: resolution?.broaderChecksOrInputs,
 			remainingParentWork: resolution?.remainingParentWork,
+			recoveryAction: failedCurrentPlan ? "reopen_target_plan" : undefined,
+			recoveryIdentity: failedCurrentPlan
+				? {
+						targetId: failedCurrentPlan.targetId,
+						targetPlanId: failedCurrentPlan.id,
+						revision: failedCurrentPlan.revision,
+					}
+				: undefined,
 		};
 	}
 	return surface;
@@ -1109,7 +1177,7 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 		case "planning-target":
 			return [
 				"Draft/revise the current target plan",
-				"Use read-only workflowz/task discovery and review",
+				"Use read-only task discovery and review",
 				"Write only the fixed target plan file",
 				'Call goal({op:"submit_target_plan", ...}) or goal({op:"fail_target_plan", ...})',
 			];
@@ -1122,7 +1190,10 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 		case "awaiting-verification-repair":
 			return ['Call goal({op:"start_target", linked_verifier_blocker_ids:[...]}) or gather repair evidence'];
 		case "awaiting-user-input":
-			return ["Wait for user input, broader checks, or external authority"];
+			return [
+				"Wait for user input, broader checks, or external authority",
+				'If user/external input resolves a failed target plan, call goal({op:"reopen_target_plan", ...})',
+			];
 		default:
 			return [
 				"Continue current target",
@@ -1151,7 +1222,7 @@ function disallowedActsForRunMode(runMode: GoalRunMode): string[] {
 		case "awaiting-verification-repair":
 			return ["Retry complete without fresh repair/evidence", "Choose unrelated work"];
 		case "awaiting-user-input":
-			return ["Auto-continue ordinary work"];
+			return ["Auto-continue ordinary work", "Call resume/start_target to recover a failed target plan"];
 		default:
 			return ["Checkpoint partial/fatigue/budget work", "Treat target closure as parent completion"];
 	}
@@ -1262,6 +1333,27 @@ function nextTargetSequence(goal: Goal): number {
 	const current = goal.currentTarget?.sequence ?? 0;
 	const history = goal.targets?.reduce((max, target) => Math.max(max, target.sequence), 0) ?? 0;
 	return Math.max(current, history) + 1;
+}
+function failedTargetPlanRecoveryBlockers(plan: GoalTargetPlanRecord): string[] {
+	if (plan.failure?.blockers.length) return [...plan.failure.blockers];
+	return plan.reviews.flatMap(review =>
+		review.findings
+			.filter(finding => finding.severity === "blocking" || finding.severity === "important")
+			.map(finding => `${review.lens}:${finding.id}: ${finding.requiredRevision}`),
+	);
+}
+
+function nextReopenedTargetPlanAttempt(goal: Goal, target: GoalTarget): number {
+	const prefix = `${target.id}-plan-reopen-`;
+	let maxAttempt = 0;
+	for (const plan of goal.targetPlans ?? []) {
+		if (!plan.id.startsWith(prefix)) continue;
+		const suffix = plan.id.slice(prefix.length);
+		if (!/^[1-9]\d*$/.test(suffix)) continue;
+		const attempt = Number.parseInt(suffix, 10);
+		if (attempt > maxAttempt) maxAttempt = attempt;
+	}
+	return maxAttempt + 1;
 }
 
 function nextCheckpointSequence(goal: Goal): number {
@@ -2660,6 +2752,67 @@ export class GoalRuntime {
 			}
 			const stored = this.#upsertTargetPlan(state, nextPlan);
 			if (state.goal.currentTarget) state.goal.currentTarget.planId = stored.id;
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+	async reopenFailedTargetPlan(input: GoalTargetPlanReopenInput): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot reopen target plan because no active parent goal exists");
+			if (state.runMode !== "awaiting-user-input")
+				throw new Error("cannot reopen target plan unless goal is awaiting user input");
+			if (state.goal.pendingCheckpointId || (state.runMode as string) === "awaiting-checkpoint-resolution")
+				throw new Error("cannot reopen target plan while a checkpoint is pending resolution");
+			if (state.goal.verificationRepair)
+				throw new Error("cannot reopen target plan while verifier repair is pending");
+			const target = state.goal.currentTarget;
+			if (target?.status !== "active") throw new Error("cannot reopen target plan without an active target");
+			const plan = state.goal.currentTargetPlan;
+			if (!plan || plan.targetId !== target.id) throw new Error("current target plan is stale");
+			if (input.targetId !== target.id)
+				throw new Error(`target_id must equal currentTarget.id (${target.id}); got ${input.targetId}`);
+			if (input.targetPlanId !== plan.id)
+				throw new Error(`target_plan_id must equal currentTargetPlan.id (${plan.id}); got ${input.targetPlanId}`);
+			if (input.revision !== plan.revision)
+				throw new Error(`revision must equal currentTargetPlan.revision (${plan.revision}); got ${input.revision}`);
+			if (target.planId && target.planId !== plan.id) throw new Error("current target plan is stale");
+			if (plan.status !== "failed") throw new Error("current target plan is not failed");
+			const guidance = input.guidance.trim();
+			if (!guidance) throw new Error("reopen_target_plan guidance must be non-empty");
+			const attempt = nextReopenedTargetPlanAttempt(state.goal, target);
+			const planId = `${target.id}-plan-reopen-${attempt}`;
+			const planFilePath = `local://goal-${sanitizeGoalPlanSlug(state.goal.id)}-target-${target.sequence}-plan-reopen-${attempt}.md`;
+			const now = this.#now();
+			const reopenedPlan: GoalTargetPlanRecord = {
+				id: planId,
+				goalId: state.goal.id,
+				targetId: target.id,
+				targetSequence: target.sequence,
+				planFilePath,
+				status: "drafting",
+				revision: 1,
+				stateVersionAtStart: state.stateVersion,
+				parentFrameVersionAtStart: target.parentFrameVersion ?? state.parentFrameVersion,
+				createdAt: now,
+				updatedAt: now,
+				recoveredFromFailure: {
+					sourceTargetPlanId: plan.id,
+					sourceRevision: plan.revision,
+					reason: input.reason,
+					guidance,
+					blockers: failedTargetPlanRecoveryBlockers(plan),
+					at: now,
+				},
+				reviews: [],
+			};
+			this.#upsertTargetPlan(state, reopenedPlan);
+			const reopenedTarget = { ...target, planId: reopenedPlan.id };
+			state.goal.currentTarget = reopenedTarget;
+			state.goal.targets = upsertById(state.goal.targets ?? [], [reopenedTarget]);
+			state.runMode = "planning-target";
 			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
 			return state;

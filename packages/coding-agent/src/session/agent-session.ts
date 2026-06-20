@@ -5668,8 +5668,10 @@ export class AgentSession {
 				targetId: plan.targetId,
 				targetPlanId: plan.id,
 				planFilePath: plan.planFilePath,
+				revision: plan.revision,
 				status: plan.status,
 				reviews,
+				failure: plan.failure,
 				recordedAt: plan.approvedAt ?? plan.failedAt ?? plan.updatedAt,
 			};
 			this.#appendGoalArtifactMessage({
@@ -6373,8 +6375,10 @@ export class AgentSession {
 			targetId: plan.targetId,
 			targetPlanId: plan.id,
 			planFilePath: plan.planFilePath,
+			revision: plan.revision,
 			status: plan.status,
 			reviews,
+			failure: plan.failure,
 			recordedAt: Date.now(),
 		};
 		await this.#sendGoalArtifactMessage<GoalTargetPlanMessageDetails>({
@@ -6526,12 +6530,17 @@ export class AgentSession {
 		const heading =
 			review?.status === "rejected"
 				? "## Checkpoint rejected; target remains active"
-				: "## Target closed; parent goal still active";
+				: "## Checkpoint boundary recorded; parent goal still active";
 		const sections = [
 			heading,
 			`## Target\n\n${checkpoint.targetSnapshot.title}`,
 			`## Summary\n\n${checkpoint.summary}`,
 		];
+		if (review?.status !== "rejected") {
+			sections.push(
+				"## Controller boundary\n\nOrdinary tools remain blocked until a checkpoint resolution records next_target, parent_completion_candidate, or pause_for_external_control.",
+			);
+		}
 		if (checkpoint.evidence.length > 0) {
 			sections.push(
 				`## Evidence\n\n${checkpoint.evidence.map(item => `- ${item.claim}: ${item.evidence} (current: ${item.current})`).join("\n")}`,
@@ -6561,7 +6570,13 @@ export class AgentSession {
 		const sections = [
 			"## Goal target plan",
 			`## Target\n\n${targetTitle ?? plan.targetId}`,
-			`## Plan path\n\n${plan.planFilePath}`,
+			[
+				"## Target identity",
+				`target_id: ${plan.targetId}`,
+				`target_plan_id: ${plan.id}`,
+				`plan_file_path: ${plan.planFilePath}`,
+				`revision: ${plan.revision}`,
+			].join("\n\n"),
 			`## Status\n\n${plan.status}`,
 		];
 		const aperture = reviews.find(review => review.lens === "aperture")?.apertureClassification;
@@ -6576,6 +6591,17 @@ export class AgentSession {
 					.map(finding => `- ${review.lens}/${finding.id}: ${finding.problem}`),
 			);
 			if (blockers.length > 0) sections.push(`## Blocking findings\n\n${blockers.join("\n")}`);
+		}
+		if (plan.failure) {
+			sections.push(
+				[
+					"## Failure details",
+					`stage: ${plan.failure.stage}`,
+					`reason: ${plan.failure.reason}`,
+					`message: ${plan.failure.message}`,
+					`blockers:\n${plan.failure.blockers.map(blocker => `- ${blocker}`).join("\n") || "(none)"}`,
+				].join("\n\n"),
+			);
 		}
 		return sections.join("\n\n");
 	}
@@ -6851,7 +6877,7 @@ export class AgentSession {
 			goalContextSurface: renderGoalPromptSurface(state, state.goal),
 			currentTargetPlan: JSON.stringify(state.goal.currentTargetPlan ?? null, null, 2),
 			targetPlanSubmitIdentity: JSON.stringify(identity ?? null, null, 2),
-			targetPlanSubmitSkeleton: renderTargetPlanSubmitSkeleton(identity),
+			targetPlanSubmitSkeleton: renderTargetPlanSubmitSkeleton(identity, { includeOp: true }),
 			taskAvailable: this.getToolByName("task") !== undefined,
 			jobAvailable: this.getToolByName("job") !== undefined,
 			ircAvailable: this.getToolByName("irc") !== undefined,

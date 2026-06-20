@@ -1,5 +1,3 @@
-<!-- Hidden goal post-compaction re-grounding steer. role=user, suppressed from visible transcript. -->
-
 Context was compacted while goal mode was active. Treat the controller surface below as authoritative over stale transcript prose.
 
 <objective>
@@ -22,6 +20,9 @@ Post-compaction policy:
 
 {{#when runMode "==" "working-target"}}
 - Continue the same current target; do not choose a new target because compaction occurred.
+{{/when}}
+{{#when runMode "==" "planning-target"}}
+- Continue the current target plan; write only `currentTargetPlan.planFilePath` and keep it decision-complete.
 {{/when}}
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}
 - Wait for checkpoint guidance, then call `resolve_checkpoint` before ordinary tools.

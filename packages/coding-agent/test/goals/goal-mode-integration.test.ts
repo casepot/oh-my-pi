@@ -790,6 +790,54 @@ describe("InteractiveMode goal mode integration", () => {
 			verifierCallsBefore,
 		);
 	});
+
+	it("keeps failed target-plan recovery manual until reopen_target_plan", async () => {
+		await harness.mode.handleGoalModeCommand("Improve quest reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target-failed-plan", {
+			op: "start_target",
+			title: "Complete Warden's Spark",
+			desired_future_claim: "Warden's Spark completes with the chosen equipment.",
+			closure_standard: "Current evidence proves the equipment choice completes the quest.",
+		});
+		const failedSetup = harness.session.getGoalModeState();
+		const target = failedSetup?.goal.currentTarget;
+		const plan = failedSetup?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected target plan");
+
+		await goalTool.execute("fail-plan", {
+			op: "fail_target_plan",
+			target_id: target.id,
+			target_plan_id: plan.id,
+			revision: plan.revision,
+			reason: "needs-user-input",
+			message: "Operator must choose whether equipping Ember Charm completes the quest.",
+			blockers: ["Missing equipment decision."],
+			suggested_questions: ["Does equipping Ember Charm complete Warden's Spark?"],
+		});
+		expect(harness.session.getGoalModeState()?.runMode).toBe("awaiting-user-input");
+		expect(await harness.session.prepareGoalContinuationDispatch()).toBeUndefined();
+
+		await goalTool.execute("reopen-plan", {
+			op: "reopen_target_plan",
+			target_id: target.id,
+			target_plan_id: plan.id,
+			revision: plan.revision,
+			reason: "user-input",
+			guidance: "Operator chose equip-completes quest.",
+		});
+
+		const reopenedState = harness.session.getGoalModeState();
+		const reopenedPlan = reopenedState?.goal.currentTargetPlan;
+		expect(reopenedState?.runMode).toBe("planning-target");
+		expect(reopenedPlan?.id).not.toBe(plan.id);
+		const dispatch = await harness.session.prepareGoalContinuationDispatch();
+		expect(dispatch?.kind).toBe("target-planning");
+		expect(dispatch?.customType).toBe("goal-target-planning");
+		expect(dispatch?.prompt).toContain("Operator chose equip-completes quest.");
+		expect(dispatch?.prompt).toContain("recoveredFromFailure");
+		expect(dispatch?.prompt).toContain(reopenedPlan?.id ?? "missing-reopened-plan");
+	});
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
 		harness.mode.planModeEnabled = true;
@@ -1328,6 +1376,7 @@ describe("InteractiveMode goal mode integration", () => {
 			expect(rubricEntry.includeInContext).toBe(false);
 			expect(targetPlanDetails?.status).toBe("approved");
 			expect(targetPlanDetails?.targetPlanId).toBe(restoredState.goal.targetPlans?.[0]?.id);
+			expect(targetPlanDetails?.revision).toBe(restoredState.goal.targetPlans?.[0]?.revision);
 			expect(checkpointDetails?.checkpoint.id).toBe(checkpointId);
 			expect(checkpointDetails?.parentGoalActive).toBe(true);
 			expect(resolutionDetails?.resolution.id).toBe(resolutionId);
@@ -1335,9 +1384,14 @@ describe("InteractiveMode goal mode integration", () => {
 			restored.mode.rebuildChatFromMessages();
 			const rendered = Bun.stripANSI(restored.mode.chatContainer.render(120).join("\n"));
 			expect(rendered).toContain("[goal-rubric]");
+			expect(rendered).toContain("[goal-target-plan]");
 			expect(rendered).toContain("[goal-checkpoint]");
 			expect(rendered).toContain("[goal-checkpoint-resolution]");
-			expect(rendered).toContain("Target closed; parent goal still active");
+			expect(rendered).toContain("Target plan approved");
+			expect(rendered).toContain(targetPlanDetails?.targetPlanId ?? "missing-target-plan-id");
+			expect(rendered).toContain(targetPlanDetails?.planFilePath ?? "missing-plan-file-path");
+			expect(rendered).toContain("Checkpoint boundary recorded; parent goal still active");
+			expect(rendered).toContain("Checkpoint resolved: needs_broader_checks");
 			expect(JSON.stringify(resolutionEntries[0]?.content)).toContain("Checkpoint resolution");
 		} finally {
 			await restored.cleanup();

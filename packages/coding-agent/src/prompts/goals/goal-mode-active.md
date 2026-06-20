@@ -37,9 +37,12 @@ Run-mode contract:
 Working-target action:
 - Continue the current target. If none exists, start one before substantial implementation.
 - Project/domain target rules override generic splitting. If they define a minimum unit, use that unit.
-- NEVER start targets for internal process phases: planning, implementation contact, evidence review, record writing, closure, recomposition, reviewer passes.
-- Otherwise choose the smallest independently verifiable desired-future claim that advances the parent goal.
-- A target is too broad when its closure standard would satisfy nearly all parent completion criteria; split by evidence boundary, subsystem, or deliverable unless the parent goal is atomic.
+- NEVER start targets for internal process phases: planning, implementation, evidence review, record writing, closure, recomposition, reviewer passes.
+- Otherwise choose the smallest product-meaningful/domain-minimum desired-future claim whose primary verification signal becomes truthful.
+- Same primary signal stays together: callers, contracts, state, errors, tests, docs/operator changes.
+- Split when work crosses independent primary signals, authority boundaries, blast radii, or unrelated deliverables.
+- Too narrow: plumbing/parser/schema-only work that omits same-signal integration.
+- Too broad: diffuse bundles, parent-sized umbrellas, or closure standards that satisfy nearly all parent completion criteria.
 - Checkpoint only after the full target closure standard is satisfied with current evidence.
 - NEVER checkpoint fatigue, low budget, arbitrary phase boundaries, or partial work.
 - Checkpoints need evidence, checks run, touched artifacts, remaining questions, and explicit `not_claimed`.
@@ -50,10 +53,10 @@ Target-planning action:
 - First call `goal({op:"get"})`.
 - Do not implement, checkpoint, complete, or mutate non-plan files.
 - Write only the exact `currentTargetPlan.planFilePath`.
-- Produce a right-sized execution plan with verification signal aperture.
-- Spawn read-only `task` planning reviewers; supervise with `job` and coordinate with `irc` when available.
-- Submit only after dry-run and adversarial planner review pass.
-- Use `fail_target_plan` when no valid plan exists without user/external authority.
+- Produce a decision-complete execution spec for the current product-meaningful target.
+- Use read-only `task` planning reviewers only when independent lenses materially reduce uncertainty; supervise with `job` and coordinate with `irc` when available.
+- Submit only after read-only planner simulation and adversarial review pass.
+- Use `fail_target_plan` when the current target cannot yield a valid plan without user/external authority, task availability, or right-sizing repair.
 {{/when}}
 
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}
@@ -83,7 +86,10 @@ Verifier-repair action:
 
 {{#when runMode "==" "awaiting-user-input"}}
 Awaiting-input action:
-- Wait for user input, broader checks, or external authority.
+- Wait when no new user/broader-check/external input is present.
+- If current input resolves `target_plan.requiredAction == "reopen_target_plan_after_user_or_external_input"`, call `goal({op:"reopen_target_plan", ...})` using `blocked_state.recoveryIdentity`.
+- Put the concrete user/external decision in `guidance`; use `reason:"user-input"` for direct user answers.
+- NEVER call `resume` or `start_target` to recover a failed target plan.
 {{/when}}
 
 Parent/target invariants:

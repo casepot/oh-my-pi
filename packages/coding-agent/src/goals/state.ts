@@ -323,6 +323,17 @@ export interface GoalTargetPlanReview {
 	sideAgentTokensUsed?: number;
 }
 
+export type GoalTargetPlanReopenReason = "user-input" | "broader-checks" | "external-authority";
+
+export interface GoalTargetPlanRecovery {
+	sourceTargetPlanId: string;
+	sourceRevision: number;
+	reason: GoalTargetPlanReopenReason;
+	guidance: string;
+	blockers: string[];
+	at: number;
+}
+
 export interface GoalTargetPlanFailure {
 	stage: "draft" | "review" | "approval" | "stale";
 	reason: GoalTargetPlanFailureReason;
@@ -347,6 +358,7 @@ export interface GoalTargetPlanRecord {
 	approvedAt?: number;
 	failedAt?: number;
 	failure?: GoalTargetPlanFailure;
+	recoveredFromFailure?: GoalTargetPlanRecovery;
 	verificationAperture?: GoalVerificationAperture;
 	verificationSignals?: GoalVerificationSignal[];
 	concernChecks?: GoalConcernCheck[];
@@ -562,6 +574,29 @@ export interface GoalTargetPlanApprovedDetails {
 	title: string;
 }
 
+export interface GoalToolTargetPlanReviewSummary {
+	lens: GoalTargetPlanReviewLens;
+	status: GoalTargetPlanReviewStatus;
+	feedback: string;
+	findingCount: number;
+	blockingFindingCount: number;
+}
+
+export interface GoalToolTargetPlanSummary {
+	id: string;
+	targetPlanId: string;
+	targetId: string;
+	planFilePath: string;
+	status: GoalTargetPlanStatus;
+	revision: number;
+	reviews: GoalToolTargetPlanReviewSummary[];
+	failure?: Pick<GoalTargetPlanFailure, "stage" | "reason" | "message" | "blockers">;
+	recoveredFromFailure?: Pick<
+		GoalTargetPlanRecovery,
+		"sourceTargetPlanId" | "sourceRevision" | "reason" | "guidance" | "blockers"
+	>;
+}
+
 export interface GoalToolTargetSummary {
 	id: string;
 	title: string;
@@ -615,7 +650,8 @@ export interface GoalToolDetails {
 		| "checkpoint"
 		| "resolve_checkpoint"
 		| "submit_target_plan"
-		| "fail_target_plan";
+		| "fail_target_plan"
+		| "reopen_target_plan";
 	goal?: GoalToolGoalSummary | null;
 	state?: GoalToolStateSummary | null;
 	remainingTokens?: number | null;
@@ -625,6 +661,7 @@ export interface GoalToolDetails {
 	checkpointReview?: Pick<GoalCheckpointReview, "status" | "feedback">;
 	checkpointResolution?: GoalToolCheckpointResolutionSummary;
 	targetPlanApproval?: GoalTargetPlanApprovedDetails;
+	targetPlan?: GoalToolTargetPlanSummary;
 }
 
 export type GoalRuntimeEvent =
@@ -1123,6 +1160,14 @@ function cloneTargetPlanFailure(failure: GoalTargetPlanFailure | undefined): Goa
 	};
 }
 
+function cloneTargetPlanRecovery(recovery: GoalTargetPlanRecovery | undefined): GoalTargetPlanRecovery | undefined {
+	if (!recovery) return undefined;
+	return {
+		...recovery,
+		blockers: [...recovery.blockers],
+	};
+}
+
 function cloneTargetPlanReview(review: GoalTargetPlanReview): GoalTargetPlanReview {
 	return {
 		...review,
@@ -1136,6 +1181,7 @@ export function cloneTargetPlan(plan: GoalTargetPlanRecord | undefined): GoalTar
 	return {
 		...plan,
 		failure: cloneTargetPlanFailure(plan.failure),
+		recoveredFromFailure: cloneTargetPlanRecovery(plan.recoveredFromFailure),
 		verificationAperture: cloneVerificationAperture(plan.verificationAperture),
 		verificationSignals: cloneVerificationSignals(plan.verificationSignals),
 		concernChecks: cloneConcernChecks(plan.concernChecks),

@@ -1,5 +1,3 @@
-<!-- Hidden goal continuation steer. role=user, suppressed from visible transcript. -->
-
 Continue according to the active goal controller surface.
 
 <objective>
@@ -32,8 +30,17 @@ Working-target action:
 - Continue the current target. If none exists, start one before substantial work.
 - Project/domain target rules override generic splitting; use their minimum target unit when present.
 - NEVER start targets for internal process phases: planning, evidence review, closure, recomposition, reviewer passes.
-- Choose the smallest independently verifiable desired-future claim that advances the parent goal.
+- Choose the smallest product-meaningful/domain-minimum desired-future claim whose primary verification signal becomes truthful.
+- Same primary signal stays together; split independent signals, authority boundaries, blast radii, or unrelated deliverables.
 - Checkpoint only after full target closure evidence.
+{{/when}}
+
+{{#when runMode "==" "planning-target"}}
+Target-planning action:
+- First call `goal({op:"get"})`.
+- Produce a decision-complete execution spec for the current product-meaningful target.
+- Write only `currentTargetPlan.planFilePath`; do not implement.
+- Submit only after read-only planner simulation and review pass.
 {{/when}}
 
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}
@@ -59,7 +66,10 @@ Verifier-repair action:
 
 {{#when runMode "==" "awaiting-user-input"}}
 Awaiting-input action:
-- Wait for user input, broader checks, or external authority.
+- Wait when no new user/broader-check/external input is present.
+- If current input resolves `target_plan.requiredAction == "reopen_target_plan_after_user_or_external_input"`, call `goal({op:"reopen_target_plan", ...})` using `blocked_state.recoveryIdentity`.
+- Put the concrete user/external decision in `guidance`; use `reason:"user-input"` for direct user answers.
+- NEVER call `resume` or `start_target` to recover a failed target plan.
 {{/when}}
 
 Parent invariant:

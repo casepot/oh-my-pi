@@ -17,7 +17,7 @@ Read transcript/repo context only when it materially improves the rubric. The ru
 - Assign short stable deliverable IDs (`D1`, `D2`, …). Verifier/continuation output will reference them.
 
 - Make deliverable boundaries decomposition-friendly: when the objective spans multiple subsystems, evidence classes, or user-visible outcomes, express those as separate deliverables rather than one umbrella item.
-- Include a short `Target aperture guidance` section: right-sized first target, minimum evidence unit, why-not-smaller/larger. Warn against serial micro-targets that do not reduce parent uncertainty.
+- Include a short `Target aperture guidance` section: first/right-sized target, minimum product-signal evidence unit, same-signal work that must stay bundled, why-not-smaller/larger. Warn against serial micro-targets that do not reduce parent uncertainty.
 
 Return:
 - `rubric`: one concise but stringent verifier-only rubric.
