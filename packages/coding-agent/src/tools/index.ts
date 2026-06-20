@@ -23,6 +23,9 @@ import type {
 	GoalModeState,
 	GoalParentFrame,
 	GoalRuntime,
+	GoalSubmitTargetPlanInput,
+	GoalTargetPlanApprovedDetails,
+	GoalTargetPlanFailureInput,
 } from "../goals";
 import { GoalTool, type GoalToolResponse } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -284,6 +287,8 @@ export interface ToolSession {
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
 	getPlanReferencePath?: () => string;
+	/** Approved goal target plan reference for target-execution context handoff. */
+	getGoalTargetPlanReference?: () => GoalTargetPlanApprovedDetails | undefined;
 	/** Goal mode state (if active or paused) */
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
@@ -307,6 +312,16 @@ export interface ToolSession {
 	) => Promise<GoalToolResponse>;
 	/** Request completion of the active goal after external verification. */
 	requestGoalCompletion?: (signal?: AbortSignal) => Promise<GoalToolResponse>;
+	/** Request target-plan review/approval before executing the current target. */
+	requestGoalTargetPlanApproval?: (
+		input: GoalSubmitTargetPlanInput,
+		signal?: AbortSignal,
+	) => Promise<GoalToolResponse>;
+	/** Record target-plan planning failure before target execution starts. */
+	requestGoalTargetPlanFailure?: (
+		input: GoalTargetPlanFailureInput,
+		signal?: AbortSignal,
+	) => Promise<GoalToolResponse>;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */
@@ -496,6 +511,17 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 export type ToolName = BuiltinToolName;
 
 const GOAL_CONTROL_ALLOWED_TOOLS: Record<string, true> = { goal: true, yield: true };
+const GOAL_TARGET_PLANNING_ALLOWED_TOOLS: Record<string, true> = {
+	read: true,
+	find: true,
+	search: true,
+	lsp: true,
+	web_search: true,
+	task: true,
+	write: true,
+	edit: true,
+	resolve: true,
+};
 const kGoalRunModeGuard: unique symbol = Symbol("GoalRunModeGuard");
 
 type GoalRunModeGuardedTool = AgentTool & { [kGoalRunModeGuard]?: true };
@@ -504,6 +530,12 @@ function goalRunModeBlockMessage(session: ToolSession, toolName: string): string
 	if (GOAL_CONTROL_ALLOWED_TOOLS[toolName]) return undefined;
 	const state = session.getGoalModeState?.();
 	if (state?.enabled !== true || state.goal.status !== "active") return undefined;
+	if (state.runMode === "planning-target") {
+		if (GOAL_TARGET_PLANNING_ALLOWED_TOOLS[toolName]) return undefined;
+		const planFilePath = state.goal.currentTargetPlan?.planFilePath;
+		const planHint = planFilePath ? ` Write/edit only the active target plan file: ${planFilePath}.` : "";
+		return `Goal target planning is active; only read/search/find/lsp/web_search/task/goal/write/edit/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
+	}
 	if (state.runMode === "awaiting-checkpoint-resolution" && state.goal.pendingCheckpointId !== undefined) {
 		const checkpointId = state.goal.pendingCheckpointId;
 		return `Goal checkpoint is pending resolution (${checkpointId}); ordinary tool work is blocked until goal({ op: "resolve_checkpoint", checkpoint_id: "${checkpointId}", ... }) records the controller decision.`;

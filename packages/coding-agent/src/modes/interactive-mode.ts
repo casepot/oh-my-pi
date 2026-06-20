@@ -69,6 +69,7 @@ import {
 	type Goal,
 	type GoalCompletionVerifierStructuredOutput,
 	type GoalModeState,
+	type GoalTargetPlanApprovedDetails,
 	parseGoalModeState,
 } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
@@ -329,6 +330,7 @@ const PLAN_KEEP_CONTEXT_DISABLE_THRESHOLD_PERCENT = 95;
 function isGoalContinuationSubmissionType(customType: string | undefined): boolean {
 	return (
 		customType === "goal-continuation" ||
+		customType === "goal-target-planning" ||
 		customType === GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE ||
 		customType === GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE ||
 		customType === GOAL_POST_COMPACTION_MESSAGE_TYPE ||
@@ -525,6 +527,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #changelogMarkdown: string | undefined;
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
+	#goalTargetPlanningPreviousTools: string[] | undefined;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
@@ -1141,6 +1144,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			latestState.runMode !== runMode
 		) {
 			return;
+		}
+		if (dispatch.kind === "target-planning") {
+			await this.#enterGoalTargetPlanningTools();
 		}
 		if (!this.onInputCallback) return;
 		this.#goalContinuationTurnInFlight = true;
@@ -1786,6 +1792,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				await this.#exitGoalMode({ reason: "dropped", silent: true });
 				return;
 			}
+			await this.handleGoalTargetPlanningStateAfterTool(event.state);
 			this.goalModeEnabled = event.state?.enabled === true;
 			this.goalModePaused = event.state?.enabled !== true && event.state?.goal?.status === "paused";
 			if (event.state?.goal) {
@@ -1857,6 +1864,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #clearTransientModeState(): Promise<void> {
+		await this.#exitGoalTargetPlanningTools();
 		if (this.planModeEnabled || this.planModePaused) {
 			if (this.#planModePreviousTools !== undefined) {
 				await this.session.setActiveToolsByName(this.#planModePreviousTools);
@@ -2008,6 +2016,53 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
+	async #enterGoalTargetPlanningTools(): Promise<void> {
+		if (this.#goalTargetPlanningPreviousTools !== undefined) return;
+		const previousTools = this.session.getActiveToolNames();
+		const availablePlanningTools = ["task", "write", "edit", "goal"].filter(
+			toolName => this.session.getToolByName(toolName) !== undefined,
+		);
+		this.#goalTargetPlanningPreviousTools = previousTools;
+		await this.session.setActiveToolsByName([...new Set([...previousTools, ...availablePlanningTools])]);
+	}
+
+	async #exitGoalTargetPlanningTools(): Promise<void> {
+		const previousTools = this.#goalTargetPlanningPreviousTools;
+		if (previousTools === undefined) return;
+		this.#goalTargetPlanningPreviousTools = undefined;
+		await this.session.setActiveToolsByName(previousTools);
+	}
+
+	async handleGoalTargetPlanningStateAfterTool(state: GoalModeState | null | undefined): Promise<void> {
+		if (state?.runMode !== "planning-target") {
+			await this.#exitGoalTargetPlanningTools();
+		}
+	}
+
+	async handleGoalTargetPlanApproved(details: GoalTargetPlanApprovedDetails): Promise<void> {
+		const planContent = await this.#readPlanFile(details.planFilePath);
+		if (!planContent) {
+			this.showError(`Target plan file not found at ${details.planFilePath}`);
+			return;
+		}
+		this.session.setGoalTargetPlanReference(details);
+		const targetPlanPrompt = this.session.renderGoalTargetPlanApprovedPrompt({
+			planContent,
+			planFilePath: details.planFilePath,
+			contextPreserved: true,
+		});
+		if (this.session.isStreaming) {
+			await this.session.abort();
+		}
+		this.session.markGoalTargetPlanReferenceSent();
+		try {
+			await this.session.prompt(targetPlanPrompt, { synthetic: true });
+		} catch (error) {
+			this.session.setGoalTargetPlanReference(details);
+			throw error;
+		}
+	}
+
 	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ThinkingLevel }): Promise<void> {
 		if (modelsAreEqual(this.session.model, prev.model)) {
 			// Same model — only thinking level may differ. Avoid setModelTemporary()
@@ -2125,6 +2180,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		paused?: boolean;
 		reason?: "completed" | "paused" | "dropped";
 	}): Promise<void> {
+		await this.#exitGoalTargetPlanningTools();
 		const previousTools = this.#goalModePreviousTools;
 		if (this.goalModeEnabled && previousTools) {
 			await this.session.setActiveToolsByName(previousTools);

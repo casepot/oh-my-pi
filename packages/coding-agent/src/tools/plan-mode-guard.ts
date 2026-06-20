@@ -112,20 +112,52 @@ export function resolvePlanPath(session: ToolSession, targetPath: string): strin
 	return resolveToCwd(normalized, session.cwd);
 }
 
-/**
- * Plan mode keeps the working tree read-only while letting the agent draft its
- * plan. Writes and edits to the `local://` artifact sandbox are allowed (that is
- * where the plan and any scratch notes live); anything that would touch the
- * working tree — or rename/delete a file — is rejected.
- */
-export function enforcePlanModeWrite(
+function normalizePlanningTargetPath(targetPath: string): string {
+	return normalizeLocalScheme(unwrapHashlineHeaderPath(targetPath));
+}
+
+function comparableResolvedPath(session: ToolSession, targetPath: string): string | null {
+	try {
+		const resolved = resolvePlanPath(session, targetPath);
+		if (!path.isAbsolute(resolved)) return null;
+		const absolute = path.resolve(resolved);
+		try {
+			return fs.realpathSync.native(absolute);
+		} catch {
+			try {
+				const realParent = fs.realpathSync.native(path.dirname(absolute));
+				return path.join(realParent, path.basename(absolute));
+			} catch {
+				return absolute;
+			}
+		}
+	} catch {
+		return null;
+	}
+}
+
+function targetMatchesAllowedPlanPath(session: ToolSession, targetPath: string, allowedPlanPath: string): boolean {
+	if (normalizePlanningTargetPath(targetPath) === normalizeLocalScheme(allowedPlanPath)) return true;
+	const targetResolved = comparableResolvedPath(session, targetPath);
+	if (!targetResolved) return false;
+	const allowedResolved = comparableResolvedPath(session, allowedPlanPath);
+	return allowedResolved !== null && targetResolved === allowedResolved;
+}
+
+export function isGoalTargetPlanningActive(session: ToolSession): boolean {
+	const goalState = session.getGoalModeState?.();
+	return goalState?.enabled === true && goalState.goal.status === "active" && goalState.runMode === "planning-target";
+}
+
+export function isReadOnlyPlanningActive(session: ToolSession): boolean {
+	return session.getPlanModeState?.()?.enabled === true || isGoalTargetPlanningActive(session);
+}
+
+function enforcePlanModeLocalWrite(
 	session: ToolSession,
 	targetPath: string,
 	options?: { move?: string; op?: "create" | "update" | "delete" },
 ): void {
-	const state = session.getPlanModeState?.();
-	if (!state?.enabled) return;
-
 	if (options?.move) {
 		throw new ToolError("Plan mode: renaming files is not allowed.");
 	}
@@ -139,4 +171,55 @@ export function enforcePlanModeWrite(
 	throw new ToolError(
 		"Plan mode: the working tree is read-only. Write your plan to a local://<slug>-plan.md file instead.",
 	);
+}
+
+function targetPlanGuardMessage(allowedPlanPath: string): string {
+	return `Goal target planning: writes are limited to the active target plan file: ${allowedPlanPath}.`;
+}
+
+export function enforceReadOnlyPlanningWrite(
+	session: ToolSession,
+	targetPath: string,
+	options?: { move?: string; op?: "create" | "update" | "delete" },
+): void {
+	const planModeState = session.getPlanModeState?.();
+	if (planModeState?.enabled) {
+		enforcePlanModeLocalWrite(session, targetPath, options);
+		return;
+	}
+
+	const goalState = session.getGoalModeState?.();
+	if (!isGoalTargetPlanningActive(session) || !goalState) return;
+
+	const allowedPlanPath = goalState.goal.currentTargetPlan?.planFilePath;
+	if (!allowedPlanPath) {
+		throw new ToolError("Goal target planning: no active target plan file is registered.");
+	}
+
+	if (options?.move) {
+		throw new ToolError(`${targetPlanGuardMessage(allowedPlanPath)} Renaming files is not allowed.`);
+	}
+
+	if (options?.op === "delete") {
+		throw new ToolError(`${targetPlanGuardMessage(allowedPlanPath)} Deleting files is not allowed.`);
+	}
+
+	if (targetMatchesAllowedPlanPath(session, targetPath, allowedPlanPath)) return;
+
+	throw new ToolError(targetPlanGuardMessage(allowedPlanPath));
+}
+
+/**
+ * Plan mode keeps the working tree read-only while letting the agent draft its
+ * plan. Writes and edits to the `local://` artifact sandbox are allowed (that is
+ * where the plan and any scratch notes live); anything that would touch the
+ * working tree — or rename/delete a file — is rejected. Goal target planning
+ * reuses the same call sites but only allows the active target-plan file.
+ */
+export function enforcePlanModeWrite(
+	session: ToolSession,
+	targetPath: string,
+	options?: { move?: string; op?: "create" | "update" | "delete" },
+): void {
+	enforceReadOnlyPlanningWrite(session, targetPath, options);
 }

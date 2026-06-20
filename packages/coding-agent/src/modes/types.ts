@@ -14,6 +14,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
+import type { GoalModeState, GoalTargetPlanApprovedDetails } from "../goals/state";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
@@ -358,6 +359,8 @@ export interface InteractiveModeContext {
 	pauseLoop(): void;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
 	openPlanReview(): Promise<void>;
+	handleGoalTargetPlanningStateAfterTool(state: GoalModeState | null | undefined): Promise<void>;
+	handleGoalTargetPlanApproved(details: GoalTargetPlanApprovedDetails): Promise<void>;
 
 	// Hook UI methods
 	initHooksAndCustomTools(): Promise<void>;

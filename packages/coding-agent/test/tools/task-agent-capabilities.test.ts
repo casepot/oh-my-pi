@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { isReadOnlyAgent, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
+import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 function createSession(overrides: Partial<Record<string, unknown>> = {}): ToolSession {
 	return {
@@ -14,6 +19,59 @@ function createSession(overrides: Partial<Record<string, unknown>> = {}): ToolSe
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 	} as unknown as ToolSession;
+}
+
+function createResult(options: ExecutorOptions): SingleResult {
+	return {
+		index: options.index,
+		id: options.id,
+		agent: options.agent.name,
+		agentSource: options.agent.source,
+		task: options.task,
+		assignment: options.assignment,
+		description: options.description,
+		exitCode: 0,
+		output: "ok",
+		stderr: "",
+		truncated: false,
+		durationMs: 1,
+		tokens: 0,
+		requests: 0,
+	};
+}
+
+function createGoalPlanningState(): GoalModeState {
+	return {
+		enabled: true,
+		mode: "active",
+		runMode: "planning-target",
+		stateVersion: 3,
+		parentFrameVersion: 0,
+		goal: {
+			id: "goal-1",
+			objective: "Ship target planning",
+			status: "active",
+			tokenBudget: undefined,
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: 0,
+			updatedAt: 0,
+			currentTargetPlan: {
+				id: "target-plan-1",
+				goalId: "goal-1",
+				targetId: "target-1",
+				targetSequence: 1,
+				planFilePath: "local://goal-goal-1-target-1-plan.md",
+				status: "drafting",
+				revision: 1,
+				stateVersionAtStart: 3,
+				parentFrameVersionAtStart: 0,
+				createdAt: 0,
+				updatedAt: 0,
+				reviews: [],
+			},
+		},
+	};
 }
 
 function agentByName(agents: AgentDefinition[], name: string): AgentDefinition {
@@ -75,5 +133,86 @@ describe("task agent capability descriptions", () => {
 		expect(description).toContain(
 			"NEVER offload reasoning, analysis, design, or decision-making to `quick_task` or `explore`",
 		);
+	});
+
+	it("forces subagents into read-only planning mode during goal target planning", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "Task agent",
+					systemPrompt: "Modify the codebase.",
+					source: "bundled",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => createResult(options));
+		const session = {
+			...createSession({ "async.enabled": false }),
+			getGoalModeState: () => createGoalPlanningState(),
+			getGoalTargetPlanReference: () => ({
+				goalId: "goal-1",
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: "local://goal-goal-1-target-1-plan.md",
+				title: "goal-goal-1-target-1",
+			}),
+		} as ToolSession;
+		const tool = await TaskTool.create(session);
+
+		await tool.execute("task-call", { agent: "task", assignment: "Inspect the target plan." });
+
+		const options = runSpy.mock.calls[0]?.[0];
+		expect(options?.agent.systemPrompt).toContain("Plan mode active");
+		expect(options?.agent.tools).toEqual(["read", "search", "find", "lsp", "web_search"]);
+		expect(options?.agent.spawns).toBeUndefined();
+		expect(options?.planReference).toBeUndefined();
+		expect(options?.targetPlanReference).toBeUndefined();
+	});
+
+	it("passes approved target plan references to execution subagents", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "Task agent",
+					systemPrompt: "Modify the codebase.",
+					source: "bundled",
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => createResult(options));
+		const tempDir = TempDir.createSync("@pi-task-target-plan-");
+		try {
+			const planFilePath = "local://goal-goal-1-target-1-plan.md";
+			const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => tempDir.path(),
+				getSessionId: () => "session-1",
+			});
+			await Bun.write(resolvedPlanPath, "# Approved target plan\n\nExecute these steps.");
+			const session = {
+				...createSession({ "async.enabled": false }),
+				getArtifactsDir: () => tempDir.path(),
+				getSessionId: () => "session-1",
+				getGoalTargetPlanReference: () => ({
+					goalId: "goal-1",
+					targetId: "target-1",
+					targetPlanId: "target-plan-1",
+					planFilePath,
+					title: "goal-goal-1-target-1",
+				}),
+			} as ToolSession;
+			const tool = await TaskTool.create(session);
+
+			await tool.execute("task-call", { agent: "task", assignment: "Execute the target plan." });
+
+			const options = runSpy.mock.calls[0]?.[0];
+			expect(options?.targetPlanReference?.path).toBe(planFilePath);
+			expect(options?.targetPlanReference?.content).toContain("Approved target plan");
+		} finally {
+			tempDir.removeSync();
+		}
 	});
 });

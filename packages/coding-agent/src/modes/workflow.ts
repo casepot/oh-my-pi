@@ -22,6 +22,7 @@ export interface WorkflowNoticeCapabilities {
 	evalAvailable: boolean;
 	taskToolAvailable: boolean;
 	planMode: boolean;
+	targetPlanningMode?: boolean;
 	sessionSpawns?: string;
 	taskDepth?: number;
 	taskMaxRecursionDepth?: number;
@@ -53,9 +54,11 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 	const depth = capabilities.taskDepth ?? 0;
 	const maxDepth = capabilities.taskMaxRecursionDepth ?? 2;
 	const recursionExhausted = maxDepth >= 0 && depth >= maxDepth;
+	const targetPlanningMode = capabilities.targetPlanningMode === true;
 	const canUseEvalAgents =
 		capabilities.evalAvailable &&
 		!capabilities.planMode &&
+		!targetPlanningMode &&
 		!recursionExhausted &&
 		(wildcardSpawns || concreteSpawns.length > 0);
 	const canUseTaskTool =
@@ -63,6 +66,7 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 		!capabilities.planMode &&
 		!recursionExhausted &&
 		(wildcardSpawns || concreteSpawns.length > 0);
+	const evalNoticeAvailable = capabilities.evalAvailable && !targetPlanningMode;
 	const preferredAgentType = wildcardSpawns ? (disabledAgents.has("task") ? "" : "task") : (concreteSpawns[0] ?? "");
 	const allowedAgentSummary = wildcardSpawns
 		? disabledAgents.size > 0
@@ -73,11 +77,15 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 			: "none";
 	const spawnPolicy = capabilities.planMode
 		? "Plan mode is active. Do not call eval `agent()` or the task tool from this notice."
-		: recursionExhausted
-			? `eval agent() recursion depth is exhausted (task.maxRecursionDepth is exhausted at depth ${depth}/${maxDepth}). Do not call eval \`agent()\` or the task tool from this notice.`
-			: canUseEvalAgents || canUseTaskTool
-				? `Allowed subagent spawns now: ${allowedAgentSummary}.`
-				: "Allowed subagent spawns now: none. Do not call eval `agent()` or the task tool from this notice.";
+		: targetPlanningMode
+			? canUseTaskTool
+				? `Goal target planning is active. eval agent() is unavailable; use the task tool for read-only workflowz subagents. Allowed task spawns now: ${allowedAgentSummary}.`
+				: "Goal target planning is active. eval agent() is unavailable and task subagents are not currently available from this notice."
+			: recursionExhausted
+				? `eval agent() recursion depth is exhausted (task.maxRecursionDepth is exhausted at depth ${depth}/${maxDepth}). Do not call eval \`agent()\` or the task tool from this notice.`
+				: canUseEvalAgents || canUseTaskTool
+					? `Allowed subagent spawns now: ${allowedAgentSummary}.`
+					: "Allowed subagent spawns now: none. Do not call eval `agent()` or the task tool from this notice.";
 	const agentExample = canUseEvalAgents
 		? preferredAgentType && preferredAgentType !== "task"
 			? `agent("…", agent_type="${preferredAgentType}")`
@@ -88,7 +96,7 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 		.render(workflowNotice, {
 			canUseEvalAgents,
 			canUseTaskTool,
-			evalAvailable: capabilities.evalAvailable,
+			evalAvailable: evalNoticeAvailable,
 			taskToolAvailable: capabilities.taskToolAvailable,
 			spawnPolicy,
 			preferredAgentType,

@@ -271,6 +271,11 @@ export interface ExecutorOptions {
 	 * the session did not start with a plan (or while plan mode is still active).
 	 */
 	planReference?: { path: string; content: string };
+	/**
+	 * Approved goal target plan, handed off separately from the overall plan so
+	 * subagents keep target scope distinct from parent-goal scope.
+	 */
+	targetPlanReference?: { path: string; content: string };
 	description?: string;
 	/** Specialist role/expertise for this spawn; drives the system-prompt preamble, display name, and telemetry identity. */
 	role?: string;
@@ -2077,6 +2082,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						context: options.context?.trim() ?? "",
 						planReference: options.planReference?.content ?? "",
 						planReferencePath: options.planReference?.path ?? "",
+						targetPlanReference: options.targetPlanReference?.content ?? "",
+						targetPlanReferencePath: options.targetPlanReference?.path ?? "",
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						contextFile: contextFileForPrompt,

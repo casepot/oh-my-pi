@@ -4,6 +4,8 @@ import {
 	escapeXmlText,
 	GoalRuntime,
 	type GoalRuntimeHost,
+	type GoalStartTargetInput,
+	type GoalTargetPlanApprovalInput,
 	goalTokenDelta,
 	renderGoalPrompt,
 	renderGoalPromptSurface,
@@ -15,6 +17,7 @@ import type {
 	GoalModeState,
 	GoalParentFrame,
 	GoalRuntimeEvent,
+	GoalTargetPlanReview,
 	GoalTokenUsage,
 } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { cloneGoalModeState, parseGoalModeState, serializeGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
@@ -149,6 +152,129 @@ function createHarness(initial: { state?: TestGoalModeStateInput; usage?: GoalTo
 		persists,
 		hiddenMessages,
 	};
+}
+
+function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
+	return {
+		id: `review-${lens}`,
+		lens,
+		status: "accepted",
+		feedback: `${lens} accepted the target plan.`,
+		apertureClassification: lens === "aperture" ? "right-sized" : undefined,
+		revisionDecision: "keep",
+		scores:
+			lens === "aperture"
+				? {
+						productSignal: 4,
+						relatedWorkBundling: 4,
+						concernCohesion: 4,
+						verificationAperture: 4,
+						blastRadiusCoverage: 4,
+						parentUncertaintyReduction: 4,
+						antiGaming: 4,
+					}
+				: undefined,
+		findings: [],
+		reviewedAt: 1,
+	};
+}
+
+function rejectedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
+	return {
+		...acceptedTargetPlanReview(lens),
+		status: "rejected",
+		feedback: `${lens} rejected the target plan.`,
+		findings: [
+			{
+				id: "RIGHT_SIZE_BLOCKER",
+				severity: "blocking",
+				problem: "Target plan is not right-sized.",
+				requiredRevision: "Revise the target aperture.",
+			},
+		],
+	};
+}
+
+function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanApprovalInput {
+	const target = state.goal.currentTarget;
+	const plan = state.goal.currentTargetPlan;
+	if (!target || !plan) throw new Error("expected current target plan");
+	return {
+		targetId: target.id,
+		targetPlanId: plan.id,
+		planFilePath: plan.planFilePath,
+		revision: plan.revision,
+		verificationAperture: {
+			productIntention: "Prove the target behavior with direct evidence.",
+			primarySignalId: "signal-primary",
+			blastRadius: "local",
+			confidenceTarget: "high",
+			layerRationale: "The target is local and directly observable.",
+			residualUncertainty: ["Parent completion remains outside this target."],
+			omittedLayers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
+		},
+		verificationSignals: [
+			{
+				id: "signal-primary",
+				role: "primary",
+				layer: "integration",
+				concernIds: ["concern-behavior"],
+				claim: "Target behavior is verified.",
+				observation: "Focused evidence is observed.",
+				method: "Run the focused check.",
+				expectedOutcome: "The focused check passes.",
+				required: true,
+				confidenceIfSatisfied: "high",
+				staleIf: ["Relevant code changes."],
+			},
+		],
+		concernChecks: [
+			{
+				id: "concern-behavior",
+				kind: "behavior",
+				whyIndependent: "Behavior can fail independently of parent completion.",
+				coveredBySignalIds: ["signal-primary"],
+			},
+		],
+		scopeCalibration: {
+			rightSizingBasis: "product-signal",
+			whyNotSmaller: ["Smaller work would not produce an observable signal."],
+			whyNotLarger: ["Larger work would claim parent-level completion."],
+			includedRelatedWork: [
+				{ item: "Focused target work", reason: "Needed for primary signal.", signalIds: ["signal-primary"] },
+			],
+			deferredRelatedWork: [
+				{
+					item: "Parent completion verification",
+					reason: "different-primary-signal",
+					followUpHint: "Checkpoint first.",
+				},
+			],
+		},
+		branchEvidence: [
+			{ branch: "happy path", required: true, plannedSignalIds: ["signal-primary"], rationale: "Primary signal." },
+		],
+		excludedWorkReview: [
+			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
+		],
+		workflowReviewRounds: [
+			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
+		],
+		dryRun: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
+		reviews: [acceptedTargetPlanReview("aperture"), acceptedTargetPlanReview("execution-readiness")],
+	};
+}
+
+async function approveTargetPlan(harness: { runtime: GoalRuntime }, state: GoalModeState): Promise<GoalModeState> {
+	return await harness.runtime.approveCurrentTargetPlan(buildTargetPlanApprovalInput(state));
+}
+
+async function startApprovedTarget(
+	harness: { runtime: GoalRuntime },
+	input: GoalStartTargetInput,
+): Promise<GoalModeState> {
+	const planningState = await harness.runtime.startTarget(input);
+	return await approveTargetPlan(harness, planningState);
 }
 
 describe("goal runtime", () => {
@@ -466,7 +592,7 @@ describe("goal runtime", () => {
 		await harness.runtime.setGoalRubric(initialState.goal.id, "Verifier-only rubric", [
 			{ id: "D1", summary: "Compact deliverable.", status: "pending", nextRelevantTarget: "Close compact target" },
 		]);
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Close compact target",
 			desiredFutureClaim: "Target claim",
 			closureStandard: "Evidence and review close the target",
@@ -514,7 +640,7 @@ describe("goal runtime", () => {
 		await harness.runtime.setGoalRubric(initialState.goal.id, "Verifier-only rubric", [
 			{ id: "D1", summary: "Compact deliverable.", status: "pending", nextRelevantTarget: "Close compact target" },
 		]);
-		const workingState = await harness.runtime.startTarget({
+		const workingState = await startApprovedTarget(harness, {
 			title: "Close compact target",
 			desiredFutureClaim: "Target claim",
 			closureStandard: "Evidence and review close the target",
@@ -624,7 +750,7 @@ describe("goal runtime", () => {
 				nextRelevantTarget: "Continue partial documentation proof.",
 			},
 		]);
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link install exercises smoke path.",
 			closureStandard: "Smoke output is observed.",
@@ -900,10 +1026,158 @@ describe("goal runtime", () => {
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(1);
 	});
 
+	it("starts targets in planning mode and blocks execution before plan approval", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+
+		const planning = await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+
+		expect(planning.runMode).toBe("planning-target");
+		expect(planning.goal.currentTarget?.status).toBe("active");
+		expect(planning.goal.currentTargetPlan?.status).toBe("drafting");
+		expect(planning.goal.currentTargetPlan?.planFilePath).toBe(`local://goal-${planning.goal.id}-target-1-plan.md`);
+		expect(() =>
+			harness.runtime.buildCheckpointCandidate({
+				status: "closed_with_evidence",
+				summary: "Smoke evidence recorded.",
+				localClaims: ["Smoke exercises worker startup"],
+				evidence: [{ claim: "Smoke exercises worker startup", evidence: "Observed smoke output", current: true }],
+				notClaimed: ["Parent goal complete"],
+				remainingQuestions: [],
+			}),
+		).toThrow("target planning is pending");
+		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow("target planning is pending");
+		expect(renderGoalPrompt("continuation", planning.goal, planning)).toContain(
+			"Draft/revise the current target plan",
+		);
+		expect(renderGoalPrompt("continuation", planning.goal, planning)).toContain("submit_target_plan");
+	});
+
+	it("approves right-sized target plans and carries verification signals onto the target", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+		const approval = buildTargetPlanApprovalInput(planning);
+		await expect(
+			harness.runtime.approveCurrentTargetPlan({
+				...approval,
+				reviews: approval.reviews.map(review =>
+					review.lens === "aperture" ? { ...review, apertureClassification: "too-narrow" } : review,
+				),
+			}),
+		).rejects.toThrow("right-sized");
+
+		const approved = await harness.runtime.approveCurrentTargetPlan(approval);
+
+		expect(approved.runMode).toBe("working-target");
+		expect(approved.goal.currentTargetPlan?.status).toBe("approved");
+		expect(approved.goal.currentTarget?.planId).toBe(approved.goal.currentTargetPlan?.id);
+		expect(approved.goal.currentTarget?.verificationSignals?.[0]?.id).toBe("signal-primary");
+	});
+
+	it("rejects target plans whose primary signal is not required", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+		const approval = buildTargetPlanApprovalInput(planning);
+
+		await expect(
+			harness.runtime.approveCurrentTargetPlan({
+				...approval,
+				verificationSignals: approval.verificationSignals.map(signal => ({ ...signal, required: false })),
+			}),
+		).rejects.toThrow("primary signal must be required");
+		await expect(
+			harness.runtime.approveCurrentTargetPlan({
+				...approval,
+				verificationAperture: { ...approval.verificationAperture, primarySignalId: "missing-signal" },
+			}),
+		).rejects.toThrow("primary signal must reference");
+	});
+
+	it("blocks checkpointing after a target plan fails before approval", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+		const target = planning.goal.currentTarget;
+		const plan = planning.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected planning target");
+
+		const failed = await harness.runtime.failCurrentTargetPlan({
+			targetId: target.id,
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reason: "needs-user-input",
+			message: "Operator must choose the right target aperture.",
+			blockers: ["Missing target aperture decision."],
+			suggestedQuestions: ["Which target aperture should be planned?"],
+		});
+
+		expect(failed.runMode).toBe("awaiting-user-input");
+		expect(() =>
+			harness.runtime.buildCheckpointCandidate({
+				status: "closed_with_evidence",
+				summary: "Smoke evidence recorded.",
+				localClaims: ["Smoke exercises worker startup"],
+				evidence: [{ claim: "Smoke exercises worker startup", evidence: "Observed smoke output", current: true }],
+				notClaimed: ["Parent goal complete"],
+				remainingQuestions: [],
+			}),
+		).toThrow("target plan is approved");
+	});
+
+	it("does not let stale target-plan reviews discard a newer revision", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+		const plan = planning.goal.currentTargetPlan;
+		if (!plan) throw new Error("expected target plan");
+
+		const revised = await harness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reviews: [rejectedTargetPlanReview("aperture")],
+			message: "target plan reviewer rejected the submission",
+			stage: "review",
+		});
+		const stale = await harness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reviews: [rejectedTargetPlanReview("execution-readiness")],
+			message: "target plan review result is stale because goal state changed",
+			stage: "stale",
+		});
+
+		expect(revised.goal.currentTargetPlan?.revision).toBe(plan.revision + 1);
+		expect(stale.runMode).toBe("planning-target");
+		expect(stale.goal.currentTargetPlan?.status).toBe("revision-required");
+		expect(stale.goal.currentTargetPlan?.revision).toBe(plan.revision + 1);
+	});
+
 	it("starts a target and commits an accepted checkpoint without completing the parent goal", async () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });
-		const targeted = await harness.runtime.startTarget({
+		const targeted = await startApprovedTarget(harness, {
 			title: "Prove installer smoke fails on worker startup breakage",
 			desiredFutureClaim: "Installer smoke exercises worker startup.",
 			closureStandard: "Focused smoke evidence exists.",
@@ -946,7 +1220,7 @@ describe("goal runtime", () => {
 	it("rejects checkpoint candidates without positive current evidence", async () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove installer smoke",
 			desiredFutureClaim: "Installer smoke exercises worker startup.",
 			closureStandard: "Focused smoke evidence exists.",
@@ -967,7 +1241,7 @@ describe("goal runtime", () => {
 	it("rejected checkpoints keep the current target active and focus repair", async () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove installer smoke",
 			desiredFutureClaim: "Installer smoke exercises worker startup.",
 			closureStandard: "Focused smoke evidence exists.",
@@ -1024,7 +1298,7 @@ describe("goal runtime", () => {
 			{ id: "D1", summary: "Source-link smoke.", status: "pending" },
 			{ id: "D2", summary: "Tarball smoke.", status: "pending" },
 		]);
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link install exercises smoke path.",
 			closureStandard: "Smoke output is observed.",
@@ -1107,7 +1381,7 @@ describe("goal runtime", () => {
 			},
 		});
 
-		expect(resolved.runMode).toBe("working-target");
+		expect(resolved.runMode).toBe("planning-target");
 		expect(resolved.goal.pendingCheckpointId).toBeUndefined();
 		expect(resolved.parentFrameVersion).toBe(committed.parentFrameVersion + 1);
 		expect(resolved.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
@@ -1128,7 +1402,7 @@ describe("goal runtime", () => {
 			{ id: "D1", summary: "Source-link smoke.", status: "pending" },
 			{ id: "D2", summary: "Tarball smoke.", status: "pending" },
 		]);
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link smoke evidence exists.",
 			closureStandard: "Current smoke output is observed.",
@@ -1196,7 +1470,7 @@ describe("goal runtime", () => {
 	it("resolving a checkpoint to user input keeps continuation suppressed", async () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link install exercises smoke path.",
 			closureStandard: "Smoke output is observed.",
@@ -1247,7 +1521,7 @@ describe("goal runtime", () => {
 		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow(
 			"cannot complete parent goal while awaiting user input or external authority",
 		);
-		const next = await harness.runtime.startTarget({
+		const next = await startApprovedTarget(harness, {
 			title: "Choose next gate",
 			desiredFutureClaim: "Next release gate has selected evidence.",
 			closureStandard: "Current selected-gate evidence exists.",
@@ -1260,7 +1534,7 @@ describe("goal runtime", () => {
 		for (const decision of decisions) {
 			const harness = createHarness();
 			await harness.runtime.createGoal({ objective: `Resolve ${decision}` });
-			await harness.runtime.startTarget({
+			await startApprovedTarget(harness, {
 				title: `Close ${decision}`,
 				desiredFutureClaim: "Checkpoint evidence is bounded.",
 				closureStandard: "Current checkpoint evidence is recorded.",
@@ -1308,7 +1582,7 @@ describe("goal runtime", () => {
 	it("blocks parent completion across pending checkpoints and verifier repair", async () => {
 		const harness = createHarness();
 		const created = await harness.runtime.createGoal({ objective: "Improve release reliability" });
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link install exercises smoke path.",
 			closureStandard: "Smoke output is observed.",
@@ -1386,7 +1660,7 @@ describe("goal runtime", () => {
 				linkedVerifierBlockerIds: ["old-tarball-evidence"],
 			}),
 		).rejects.toThrow("stale verifier blocker ids");
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Repair tarball evidence",
 			desiredFutureClaim: "Tarball install evidence is current.",
 			closureStandard: "A current tarball install smoke result is recorded.",
@@ -1442,7 +1716,7 @@ describe("goal runtime", () => {
 		const repairAttemptId = harness.getState()?.goal.verificationRepair?.verificationAttemptId;
 		if (!repairAttemptId) throw new Error("expected repair attempt id");
 
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Repair source evidence",
 			desiredFutureClaim: "Source install evidence is current.",
 			closureStandard: "A current source install smoke result is recorded.",
@@ -1504,7 +1778,7 @@ describe("goal runtime", () => {
 		await harness.runtime.recordExternalUsage(createUsage({ input: 1 }), 1_000);
 		expect(harness.runtime.canCommitSideAgentResult(initialExpectation)).toBe(true);
 
-		await harness.runtime.startTarget({
+		await startApprovedTarget(harness, {
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link install exercises smoke path.",
 			closureStandard: "Smoke output is observed.",

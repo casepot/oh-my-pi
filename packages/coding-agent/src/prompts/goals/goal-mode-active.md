@@ -45,6 +45,16 @@ Working-target action:
 - Checkpoints need evidence, checks run, touched artifacts, remaining questions, and explicit `not_claimed`.
 {{/when}}
 
+{{#when runMode "==" "planning-target"}}
+Target-planning action:
+- First call `goal({op:"get"})`.
+- Do not implement, checkpoint, complete, or mutate non-plan files.
+- Write only the exact `currentTargetPlan.planFilePath`.
+- Produce a right-sized execution plan with verification signal aperture.
+- Submit only after dry-run and adversarial planner review pass.
+- Use `fail_target_plan` when no valid plan exists without user/external authority.
+{{/when}}
+
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}
 Checkpoint-resolution action:
 - Do not implement. Inspect checkpoint guidance, then call `resolve_checkpoint` before ordinary tools.

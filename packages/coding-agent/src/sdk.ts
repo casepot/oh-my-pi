@@ -1515,6 +1515,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getActiveModel: () => agent?.state.model ?? model,
 			getPlanModeState: () => session?.getPlanModeState(),
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
+			getGoalTargetPlanReference: () => session?.getGoalTargetPlanReference(),
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
 			createGoalWithRubric: (input, signal) => {

@@ -12,6 +12,7 @@ import {
 	serializeGoalModeState,
 } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -22,9 +23,11 @@ import {
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_POST_COMPACTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
+	GOAL_TARGET_PLAN_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
 	type GoalCheckpointResolutionMessageDetails,
+	type GoalTargetPlanMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -183,6 +186,32 @@ function installGoalSideAgentMock(): void {
 						: goalSideAgentMock.continuationFocus,
 			});
 		}
+		if (options.agent.name === "goal-target-aperture-reviewer") {
+			return createSideAgentResult(options, {
+				status: "accepted",
+				feedback: "Target aperture is right-sized.",
+				apertureClassification: "right-sized",
+				revisionDecision: "keep",
+				scores: {
+					productSignal: 4,
+					relatedWorkBundling: 4,
+					concernCohesion: 4,
+					verificationAperture: 4,
+					blastRadiusCoverage: 4,
+					parentUncertaintyReduction: 4,
+					antiGaming: 4,
+				},
+				findings: [],
+			});
+		}
+		if (options.agent.name === "goal-target-execution-reviewer") {
+			return createSideAgentResult(options, {
+				status: "accepted",
+				feedback: "Execution plan is complete.",
+				findings: [],
+				missingExecutionDetails: [],
+			});
+		}
 		if (options.agent.name === "goal-checkpoint-guidance") {
 			return createSideAgentResult(options, {
 				continuationMessage: goalSideAgentMock.checkpointGuidance,
@@ -266,6 +295,9 @@ async function createGoalHarness(
 		requestGoalCheckpointResolution: (input, signal) => session.requestGoalCheckpointResolution(input, signal),
 		replaceGoalWithRubric: (input, signal) => session.replaceGoalWithRubric(input, signal),
 		requestGoalCompletion: signal => session.requestGoalCompletion(signal),
+		requestGoalTargetPlanApproval: (input, signal) => session.requestGoalTargetPlanApproval(input, signal),
+		requestGoalTargetPlanFailure: (input, signal) => session.requestGoalTargetPlanFailure(input, signal),
+		getGoalTargetPlanReference: () => session.getGoalTargetPlanReference(),
 	});
 	toolRegistry.set("goal", new GoalTool(toolSession) as unknown as Tool);
 
@@ -295,6 +327,92 @@ async function activeGoalTool(harness: GoalHarness): Promise<Tool> {
 	);
 	if (!goalTool) throw new Error("Expected goal tool to be active");
 	return goalTool;
+}
+
+async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: Tool): Promise<void> {
+	const state = harness.session.getGoalModeState();
+	const target = state?.goal.currentTarget;
+	const plan = state?.goal.currentTargetPlan;
+	if (!state?.enabled || !target || !plan) throw new Error("expected active target plan");
+	const resolvedPlanPath = resolveLocalUrlToPath(plan.planFilePath, {
+		getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+		getSessionId: () => harness.session.sessionManager.getSessionId(),
+	});
+	await Bun.write(
+		resolvedPlanPath,
+		[
+			"# Target plan",
+			"",
+			"## Verification Signal Aperture",
+			"",
+			"- Primary signal: focused target evidence.",
+			"- Parent completion remains outside this target.",
+		].join("\n"),
+	);
+	await goalTool.execute(`submit-${plan.id}`, {
+		op: "submit_target_plan",
+		target_id: target.id,
+		target_plan_id: plan.id,
+		plan_file_path: plan.planFilePath,
+		revision: plan.revision,
+		verification_aperture: {
+			product_intention: "Prove the target behavior with direct evidence.",
+			primary_signal_id: "signal-primary",
+			blast_radius: "local",
+			confidence_target: "high",
+			layer_rationale: "The target is local and directly observable.",
+			residual_uncertainty: ["Parent completion remains outside this target."],
+			omitted_layers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
+		},
+		verification_signals: [
+			{
+				id: "signal-primary",
+				role: "primary",
+				layer: "integration",
+				concern_ids: ["concern-behavior"],
+				claim: "Target behavior is verified.",
+				observation: "Focused evidence is observed.",
+				method: "Run the focused check.",
+				expected_outcome: "The focused check passes.",
+				required: true,
+				confidence_if_satisfied: "high",
+				stale_if: ["Relevant code changes."],
+			},
+		],
+		concern_checks: [
+			{
+				id: "concern-behavior",
+				kind: "behavior",
+				why_independent: "Behavior can fail independently of parent completion.",
+				covered_by_signal_ids: ["signal-primary"],
+			},
+		],
+		scope_calibration: {
+			right_sizing_basis: "product-signal",
+			why_not_smaller: ["Smaller work would not produce an observable signal."],
+			why_not_larger: ["Larger work would claim parent-level completion."],
+			included_related_work: [
+				{ item: "Focused target work", reason: "Needed for primary signal.", signal_ids: ["signal-primary"] },
+			],
+			deferred_related_work: [
+				{
+					item: "Parent completion verification",
+					reason: "different-primary-signal",
+					follow_up_hint: "Checkpoint first.",
+				},
+			],
+		},
+		branch_evidence: [
+			{ branch: "happy path", required: true, planned_signal_ids: ["signal-primary"], rationale: "Primary signal." },
+		],
+		excluded_work_review: [
+			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
+		],
+		workflow_review_rounds: [
+			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
+		],
+		dry_run: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
+	});
 }
 
 function appendCompactableHistory(harness: GoalHarness): void {
@@ -825,6 +943,7 @@ describe("InteractiveMode goal mode integration", () => {
 			forbidden_claims: ["Release is ready"],
 			parent_deliverable_ids: ["D1"],
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const checkpoint = await goalTool.execute("checkpoint", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -926,7 +1045,7 @@ describe("InteractiveMode goal mode integration", () => {
 			},
 		});
 
-		expect(resolved.details?.state?.runMode).toBe("working-target");
+		expect(resolved.details?.state?.runMode).toBe("planning-target");
 		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
 		expect(resolved.details?.state?.goal.currentTarget?.title).toBe("Prove tarball smoke");
 		expect(resolved.details?.state?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
@@ -977,6 +1096,7 @@ describe("InteractiveMode goal mode integration", () => {
 			closure_standard: "Current smoke output exists.",
 			forbidden_claims: ["Release is ready"],
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const checkpoint = await goalTool.execute("checkpoint-pause", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -1028,7 +1148,7 @@ describe("InteractiveMode goal mode integration", () => {
 			desired_future_claim: "Next release gate has selected evidence.",
 			closure_standard: "Current selected-gate evidence exists.",
 		});
-		expect(next.details?.state?.runMode).toBe("working-target");
+		expect(next.details?.state?.runMode).toBe("planning-target");
 	});
 
 	it("recovers committed checkpoint and resolution artifacts from restored goal state when custom messages are missing", async () => {
@@ -1040,6 +1160,7 @@ describe("InteractiveMode goal mode integration", () => {
 			desired_future_claim: "Committed checkpoint artifacts are recoverable.",
 			closure_standard: "Restored state can rebuild checkpoint and resolution artifacts.",
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const checkpoint = await goalTool.execute("checkpoint-recovery", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -1090,14 +1211,19 @@ describe("InteractiveMode goal mode integration", () => {
 			restored.session.recoverGoalArtifactsFromState();
 			restored.session.recoverGoalArtifactsFromState();
 			const customEntries = reopenedManager.getEntries().filter(entry => entry.type === "custom_message");
+			const targetPlanEntries = customEntries.filter(entry => entry.customType === GOAL_TARGET_PLAN_MESSAGE_TYPE);
 			const checkpointEntries = customEntries.filter(entry => entry.customType === GOAL_CHECKPOINT_MESSAGE_TYPE);
 			const resolutionEntries = customEntries.filter(
 				entry => entry.customType === GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 			);
+			expect(targetPlanEntries).toHaveLength(1);
 			expect(checkpointEntries).toHaveLength(1);
 			expect(resolutionEntries).toHaveLength(1);
+			const targetPlanDetails = targetPlanEntries[0]?.details as GoalTargetPlanMessageDetails | undefined;
 			const checkpointDetails = checkpointEntries[0]?.details as GoalCheckpointMessageDetails | undefined;
 			const resolutionDetails = resolutionEntries[0]?.details as GoalCheckpointResolutionMessageDetails | undefined;
+			expect(targetPlanDetails?.status).toBe("approved");
+			expect(targetPlanDetails?.targetPlanId).toBe(restoredState.goal.targetPlans?.[0]?.id);
 			expect(checkpointDetails?.checkpoint.id).toBe(checkpointId);
 			expect(checkpointDetails?.parentGoalActive).toBe(true);
 			expect(resolutionDetails?.resolution.id).toBe(resolutionId);
@@ -1122,6 +1248,7 @@ describe("InteractiveMode goal mode integration", () => {
 			desired_future_claim: "Menu checkpoint has current evidence.",
 			closure_standard: "Current evidence exists.",
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		await goalTool.execute("checkpoint-menu", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -1206,6 +1333,7 @@ describe("InteractiveMode goal mode integration", () => {
 			forbidden_claims: ["Release is ready", "CI is green", "Tarball install path is verified"],
 			stale_if: ["installer script changes"],
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const checkpoint = await goalTool.execute("checkpoint-gateway", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -1291,8 +1419,10 @@ describe("InteractiveMode goal mode integration", () => {
 				stale_if: ["tarball installer script changes"],
 			},
 		});
-		expect(resolved.details?.state?.runMode).toBe("working-target");
+		expect(resolved.details?.state?.runMode).toBe("planning-target");
 		expect(resolved.details?.state?.goal.currentTarget?.title).toBe("Prove tarball installer smoke");
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+		expect(harness.session.getGoalModeState()?.runMode).toBe("working-target");
 
 		appendCompactableHistory(harness);
 		const compacted = await harness.session.compact();
@@ -1343,6 +1473,7 @@ describe("InteractiveMode goal mode integration", () => {
 			linked_verifier_blocker_ids: ["B1"],
 			forbidden_claims: ["Release is ready without verifier acceptance"],
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const repairCheckpoint = await goalTool.execute("repair-checkpoint", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -1388,6 +1519,7 @@ describe("InteractiveMode goal mode integration", () => {
 			closure_standard: "Current smoke output exists before handoff.",
 			forbidden_claims: ["Release is ready"],
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const checkpoint = await goalTool.execute("checkpoint-handoff", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -1458,6 +1590,7 @@ describe("InteractiveMode goal mode integration", () => {
 			desired_future_claim: "Source-link install exercises smoke path.",
 			closure_standard: "Current smoke output exists.",
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 
 		const checkpoint = await goalTool.execute("checkpoint", {
 			op: "checkpoint",
@@ -1562,6 +1695,7 @@ describe("InteractiveMode goal mode integration", () => {
 			closure_standard: "Current evidence is recorded for blocker B1.",
 			linked_verifier_blocker_ids: ["B1"],
 		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const checkpoint = await goalTool.execute("repair-checkpoint-repeat", {
 			op: "checkpoint",
 			status: "closed_with_evidence",

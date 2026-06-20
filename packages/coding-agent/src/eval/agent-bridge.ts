@@ -15,6 +15,7 @@ import * as taskExecutor from "../task/executor";
 import { AgentOutputManager } from "../task/output-manager";
 import type { AgentDefinition, AgentProgress, SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
+import { isGoalTargetPlanningActive } from "../tools/plan-mode-guard";
 import { ToolError } from "../tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -103,7 +104,10 @@ function assertAgentEnabled(session: ToolSession, agentName: string, agents: Age
 	);
 }
 
-function assertNotPlanMode(session: ToolSession): void {
+function assertAgentBridgePlanningAllowed(session: ToolSession): void {
+	if (isGoalTargetPlanningActive(session)) {
+		throw new ToolError("agent() is unavailable during target planning.");
+	}
 	if (session.getPlanModeState?.()?.enabled) {
 		throw new ToolError("agent() is unavailable in plan mode.");
 	}
@@ -192,7 +196,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 	const agentName = parsed.agentType ?? DEFAULT_AGENT_TYPE;
 	const structured = Object.hasOwn(parsed, "schema");
 
-	assertNotPlanMode(options.session);
+	assertAgentBridgePlanningAllowed(options.session);
 	assertDepthAllowed(options.session);
 	assertSpawnAllowed(options.session, agentName);
 

@@ -34,6 +34,8 @@ import type {
 	GoalCheckpointResolution,
 	GoalCheckpointReview,
 	GoalCompletionVerifierStructuredOutput,
+	GoalTargetPlanRecord,
+	GoalTargetPlanReview,
 } from "../goals/state";
 import type { OutputMeta } from "../tools/output-meta";
 
@@ -46,6 +48,7 @@ export const GOAL_CHECKPOINT_MESSAGE_TYPE = "goal-checkpoint";
 export const GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE = "goal-checkpoint-resolution";
 export const GOAL_CHECKPOINT_GUIDANCE_MESSAGE_TYPE = "goal-checkpoint-guidance";
 export const GOAL_POST_COMPACTION_MESSAGE_TYPE = "goal-post-compaction";
+export const GOAL_TARGET_PLAN_MESSAGE_TYPE = "goal_target_plan";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
 
@@ -90,6 +93,16 @@ export interface GoalCheckpointResolutionMessageDetails {
 	objective: string;
 	resolution: GoalCheckpointResolution;
 	parentGoalActive: boolean;
+	recordedAt: number;
+}
+
+export interface GoalTargetPlanMessageDetails {
+	goalId: string;
+	targetId: string;
+	targetPlanId: string;
+	planFilePath: string;
+	status: GoalTargetPlanRecord["status"];
+	reviews: GoalTargetPlanReview[];
 	recordedAt: number;
 }
 

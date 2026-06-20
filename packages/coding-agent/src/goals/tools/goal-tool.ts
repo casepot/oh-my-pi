@@ -16,6 +16,8 @@ import {
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
 	type GoalStartTargetInput,
+	type GoalSubmitTargetPlanInput,
+	type GoalTargetPlanFailureInput,
 	remainingTokens,
 } from "../runtime";
 import type {
@@ -32,6 +34,9 @@ import type {
 	GoalRefKind,
 	GoalResidualClassification,
 	GoalStatus,
+	GoalTargetPlanApprovedDetails,
+	GoalTargetPlanRecord,
+	GoalTargetPlanReview,
 	GoalToolDetails,
 } from "../state";
 import { normalizeParentFrame } from "../state";
@@ -168,6 +173,151 @@ const evidenceSchema = z
 		claim: z.string(),
 		evidence: z.string(),
 		current: z.boolean(),
+	})
+	.strict();
+
+const verificationLayerSchema = z.enum(["unit", "integration", "e2e", "manual", "product", "release-gate"]);
+const signalRoleSchema = z.enum(["primary", "supporting", "guardrail"]);
+const signalConfidenceSchema = z.enum(["low", "medium", "high"]);
+const blastRadiusSchema = z.enum(["local", "module", "workflow", "multi-subsystem", "external-or-irreversible"]);
+const concernKindSchema = z.enum([
+	"behavior",
+	"contract",
+	"state-persistence",
+	"error-handling",
+	"security",
+	"performance",
+	"migration",
+	"ux-manual",
+	"docs-or-operator",
+]);
+const excludedWorkClassificationSchema = z.enum([
+	"valid-boundary",
+	"parent-non-claim",
+	"essential-related-work",
+	"stale-or-unsupported",
+]);
+
+const verificationApertureSchema = z
+	.object({
+		product_intention: z.string(),
+		primary_signal_id: z.string(),
+		blast_radius: blastRadiusSchema,
+		confidence_target: signalConfidenceSchema,
+		layer_rationale: z.string(),
+		residual_uncertainty: z.array(z.string()),
+		omitted_layers: z.array(
+			z
+				.object({
+					layer: verificationLayerSchema,
+					reason: z.string(),
+				})
+				.strict(),
+		),
+	})
+	.strict();
+
+const verificationSignalSchema = z
+	.object({
+		id: z.string(),
+		role: signalRoleSchema,
+		layer: verificationLayerSchema,
+		concern_ids: z.array(z.string()),
+		claim: z.string(),
+		observation: z.string(),
+		method: z.string(),
+		expected_outcome: z.string(),
+		required: z.boolean(),
+		confidence_if_satisfied: signalConfidenceSchema,
+		stale_if: z.array(z.string()),
+	})
+	.strict();
+
+const concernCheckSchema = z
+	.object({
+		id: z.string(),
+		kind: concernKindSchema,
+		why_independent: z.string(),
+		covered_by_signal_ids: z.array(z.string()),
+	})
+	.strict();
+
+const scopeCalibrationSchema = z
+	.object({
+		right_sizing_basis: z.enum([
+			"product-signal",
+			"minimum-domain-unit",
+			"verifier-repair",
+			"external-authority-slice",
+		]),
+		why_not_smaller: z.array(z.string()),
+		why_not_larger: z.array(z.string()),
+		included_related_work: z.array(
+			z
+				.object({
+					item: z.string(),
+					reason: z.string(),
+					signal_ids: z.array(z.string()),
+				})
+				.strict(),
+		),
+		deferred_related_work: z.array(
+			z
+				.object({
+					item: z.string(),
+					reason: z.enum([
+						"different-primary-signal",
+						"different-authority",
+						"different-blast-radius",
+						"blocked-external",
+						"non-goal",
+					]),
+					follow_up_hint: z.string().optional(),
+				})
+				.strict(),
+		),
+	})
+	.strict();
+
+const branchEvidenceSchema = z
+	.object({
+		branch: z.string(),
+		required: z.boolean(),
+		planned_signal_ids: z.array(z.string()),
+		rationale: z.string(),
+	})
+	.strict();
+
+const excludedWorkReviewSchema = z
+	.object({
+		item: z.string(),
+		classification: excludedWorkClassificationSchema,
+		rationale: z.string(),
+	})
+	.strict();
+
+const workflowReviewRoundSchema = z
+	.object({
+		lens: z.string(),
+		verdict: z.enum(["accepted", "revision-required"]),
+		summary: z.string(),
+		blockers: z.array(z.string()),
+		revised: z.boolean(),
+	})
+	.strict();
+
+const targetPlanDryRunSchema = z
+	.object({
+		status: z.enum(["passed", "failed"]),
+		checks: z.array(
+			z
+				.object({
+					id: z.string(),
+					passed: z.boolean(),
+					rationale: z.string(),
+				})
+				.strict(),
+		),
 	})
 	.strict();
 
@@ -322,6 +472,60 @@ const resolveCheckpointSchema = z
 		},
 	);
 
+const submitTargetPlanSchema = z
+	.object({
+		op: z.literal("submit_target_plan"),
+		target_id: z.string(),
+		target_plan_id: z.string(),
+		plan_file_path: z.string(),
+		revision: z.number().int().min(1),
+		verification_aperture: verificationApertureSchema,
+		verification_signals: z.array(verificationSignalSchema).min(1),
+		concern_checks: z.array(concernCheckSchema).min(1),
+		scope_calibration: scopeCalibrationSchema,
+		branch_evidence: z.array(branchEvidenceSchema).min(1),
+		excluded_work_review: z.array(excludedWorkReviewSchema),
+		workflow_review_rounds: z.array(workflowReviewRoundSchema).min(1),
+		dry_run: targetPlanDryRunSchema,
+	})
+	.strict()
+	.refine(value => value.verification_signals.some(signal => signal.required), {
+		message: "target plan requires at least one required verification signal",
+		path: ["verification_signals"],
+	})
+	.refine(
+		value =>
+			value.verification_signals.some(
+				signal => signal.id === value.verification_aperture.primary_signal_id && signal.required,
+			),
+		{
+			message: "verification_aperture.primary_signal_id must name a required verification signal",
+			path: ["verification_aperture", "primary_signal_id"],
+		},
+	)
+	.refine(value => value.dry_run.status === "passed" && value.dry_run.checks.every(check => check.passed), {
+		message: "target plan dry_run must pass before submission",
+		path: ["dry_run"],
+	});
+
+const failTargetPlanSchema = z
+	.object({
+		op: z.literal("fail_target_plan"),
+		target_id: z.string(),
+		target_plan_id: z.string(),
+		revision: z.number().int().min(1),
+		reason: z.enum([
+			"needs-user-input",
+			"task-unavailable",
+			"external-authority",
+			"unable-to-find-right-sized-target",
+		]),
+		message: z.string(),
+		blockers: z.array(z.string()),
+		suggested_questions: z.array(z.string()),
+	})
+	.strict();
+
 const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	createSchema,
 	getSchema,
@@ -331,6 +535,8 @@ const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	startTargetSchema,
 	checkpointSchema,
 	resolveCheckpointSchema,
+	submitTargetPlanSchema,
+	failTargetPlanSchema,
 ]);
 
 const goalSchema = goalDiscriminatedSchema;
@@ -348,6 +554,8 @@ interface GoalSessionSupport {
 		input: GoalCheckpointResolutionInput,
 		signal?: AbortSignal,
 	): Promise<GoalToolResponse>;
+	requestGoalTargetPlanApproval?(input: GoalSubmitTargetPlanInput, signal?: AbortSignal): Promise<GoalToolResponse>;
+	requestGoalTargetPlanFailure?(input: GoalTargetPlanFailureInput, signal?: AbortSignal): Promise<GoalToolResponse>;
 }
 
 export interface GoalToolResponse {
@@ -359,6 +567,9 @@ export interface GoalToolResponse {
 	checkpoint?: GoalCheckpointPacket;
 	checkpointReview?: GoalCheckpointReview;
 	checkpointResolution?: GoalCheckpointResolution;
+	targetPlan?: GoalTargetPlanRecord;
+	targetPlanReviews?: GoalTargetPlanReview[];
+	targetPlanApproval?: GoalTargetPlanApprovedDetails;
 }
 
 export function buildGoalToolResponse(
@@ -370,6 +581,9 @@ export function buildGoalToolResponse(
 		checkpoint?: GoalCheckpointPacket;
 		checkpointReview?: GoalCheckpointReview;
 		checkpointResolution?: GoalCheckpointResolution;
+		targetPlan?: GoalTargetPlanRecord;
+		targetPlanReviews?: GoalTargetPlanReview[];
+		targetPlanApproval?: GoalTargetPlanApprovedDetails;
 	},
 ): GoalToolResponse {
 	const resolvedGoal = goal ?? null;
@@ -389,6 +603,9 @@ export function buildGoalToolResponse(
 		checkpoint: options?.checkpoint,
 		checkpointReview: options?.checkpointReview,
 		checkpointResolution: options?.checkpointResolution,
+		targetPlan: options?.targetPlan,
+		targetPlanReviews: options?.targetPlanReviews,
+		targetPlanApproval: options?.targetPlanApproval,
 	};
 }
 
@@ -546,6 +763,86 @@ function mapResolutionInput(params: z.infer<typeof resolveCheckpointSchema>): Go
 	};
 }
 
+function mapSubmitTargetPlanInput(params: z.infer<typeof submitTargetPlanSchema>): GoalSubmitTargetPlanInput {
+	return {
+		targetId: params.target_id,
+		targetPlanId: params.target_plan_id,
+		planFilePath: params.plan_file_path,
+		revision: params.revision,
+		verificationAperture: {
+			productIntention: params.verification_aperture.product_intention,
+			primarySignalId: params.verification_aperture.primary_signal_id,
+			blastRadius: params.verification_aperture.blast_radius,
+			confidenceTarget: params.verification_aperture.confidence_target,
+			layerRationale: params.verification_aperture.layer_rationale,
+			residualUncertainty: params.verification_aperture.residual_uncertainty,
+			omittedLayers: params.verification_aperture.omitted_layers.map(layer => ({ ...layer })),
+		},
+		verificationSignals: params.verification_signals.map(signal => ({
+			id: signal.id,
+			role: signal.role,
+			layer: signal.layer,
+			concernIds: signal.concern_ids,
+			claim: signal.claim,
+			observation: signal.observation,
+			method: signal.method,
+			expectedOutcome: signal.expected_outcome,
+			required: signal.required,
+			confidenceIfSatisfied: signal.confidence_if_satisfied,
+			staleIf: signal.stale_if,
+		})),
+		concernChecks: params.concern_checks.map(check => ({
+			id: check.id,
+			kind: check.kind,
+			whyIndependent: check.why_independent,
+			coveredBySignalIds: check.covered_by_signal_ids,
+		})),
+		scopeCalibration: {
+			rightSizingBasis: params.scope_calibration.right_sizing_basis,
+			whyNotSmaller: params.scope_calibration.why_not_smaller,
+			whyNotLarger: params.scope_calibration.why_not_larger,
+			includedRelatedWork: params.scope_calibration.included_related_work.map(item => ({
+				item: item.item,
+				reason: item.reason,
+				signalIds: item.signal_ids,
+			})),
+			deferredRelatedWork: params.scope_calibration.deferred_related_work.map(item => ({
+				item: item.item,
+				reason: item.reason,
+				followUpHint: item.follow_up_hint,
+			})),
+		},
+		branchEvidence: params.branch_evidence.map(branch => ({
+			branch: branch.branch,
+			required: branch.required,
+			plannedSignalIds: branch.planned_signal_ids,
+			rationale: branch.rationale,
+		})),
+		excludedWorkReview: params.excluded_work_review.map(item => ({
+			item: item.item,
+			classification: item.classification,
+			rationale: item.rationale,
+		})),
+		workflowReviewRounds: params.workflow_review_rounds.map(round => ({ ...round })),
+		dryRun: {
+			status: params.dry_run.status,
+			checks: params.dry_run.checks.map(check => ({ ...check })),
+		},
+	};
+}
+
+function mapFailTargetPlanInput(params: z.infer<typeof failTargetPlanSchema>): GoalTargetPlanFailureInput {
+	return {
+		targetId: params.target_id,
+		targetPlanId: params.target_plan_id,
+		revision: params.revision,
+		reason: params.reason,
+		message: params.message,
+		blockers: params.blockers,
+		suggestedQuestions: params.suggested_questions,
+	};
+}
+
 export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	readonly concurrency = "exclusive";
 	readonly name = "goal";
@@ -603,6 +900,22 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				: (() => {
 						throw new ToolError("resolve_checkpoint requires an AgentSession checkpoint resolution handler");
 					})();
+		} else if (params.op === "submit_target_plan") {
+			if (!goalSession.requestGoalTargetPlanApproval) {
+				throw new ToolError("submit_target_plan requires an AgentSession target-plan review handler");
+			}
+			response = await goalSession.requestGoalTargetPlanApproval(
+				mapSubmitTargetPlanInput(submitTargetPlanSchema.parse(params)),
+				signal,
+			);
+		} else if (params.op === "fail_target_plan") {
+			if (!goalSession.requestGoalTargetPlanFailure) {
+				throw new ToolError("fail_target_plan requires an AgentSession target-plan failure handler");
+			}
+			response = await goalSession.requestGoalTargetPlanFailure(
+				mapFailTargetPlanInput(failTargetPlanSchema.parse(params)),
+				signal,
+			);
 		} else {
 			response = goalSession.requestGoalCompletion
 				? await goalSession.requestGoalCompletion(signal)
@@ -624,6 +937,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				checkpoint: response.checkpoint,
 				checkpointReview: response.checkpointReview,
 				checkpointResolution: response.checkpointResolution,
+				targetPlan: response.targetPlan,
+				targetPlanReviews: response.targetPlanReviews,
+				targetPlanApproval: response.targetPlanApproval,
 			},
 		};
 	}
@@ -673,6 +989,9 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 		if (relevant.length) text += `\nRelevant deliverables: ${relevant.join(", ")}`;
 	}
 	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
+	if (goal.currentTargetPlan) {
+		text += `\nTarget plan: ${goal.currentTargetPlan.status} ${goal.currentTargetPlan.planFilePath}`;
+	}
 	if (shouldRenderPendingCheckpoint(goal, response.state?.runMode)) {
 		text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;
 		text += `\nNext action: inspect checkpoint guidance, then call goal({op:"resolve_checkpoint", checkpoint_id:"${goal.pendingCheckpointId}"}) before ordinary tools.`;
@@ -692,6 +1011,20 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\nNext target: ${response.checkpointResolution.nextTarget.title}`;
 		} else if (response.checkpointResolution.decision === "parent_completion_candidate") {
 			text += `\nNext action: call goal({op:"complete"}) for parent completion verification.`;
+		}
+	}
+	if (op === "submit_target_plan" && response.targetPlan) {
+		if (response.targetPlan.status === "approved") {
+			text += "\n\nTarget plan approved. Goal mode remains active; execution may begin for the current target.";
+		} else if (response.targetPlan.status === "failed" || response.state?.runMode === "awaiting-user-input") {
+			text += "\n\nTarget plan failed. Goal mode is awaiting user input before target execution can continue.";
+		} else {
+			text += "\n\nTarget plan rejected. Run mode remains planning-target; revise the plan using reviewer feedback.";
+			const feedback = response.targetPlanReviews
+				?.map(review => `${review.lens}: ${review.feedback}`)
+				.filter(item => item.trim().length > 0)
+				.join("\n");
+			if (feedback) text += `\n\nReviewer feedback:\n${feedback}`;
 		}
 	}
 	if (response.completionVerification?.status === "rejected") {
@@ -726,6 +1059,10 @@ function describeOp(op: string | undefined): string {
 			return "checkpoint target";
 		case "resolve_checkpoint":
 			return "resolve checkpoint";
+		case "submit_target_plan":
+			return "submit target plan";
+		case "fail_target_plan":
+			return "fail target plan";
 		default:
 			return op ?? "?";
 	}

@@ -208,9 +208,14 @@ import {
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
 	GoalRuntime,
+	type GoalSubmitTargetPlanInput,
+	type GoalTargetPlanApprovalInput,
+	type GoalTargetPlanFailureInput,
 	remainingTokens,
 	renderGoalPrompt,
+	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
+	sanitizeGoalPlanSlug,
 } from "../goals/runtime";
 import {
 	type GoalCheckpointGuidanceOutput,
@@ -218,16 +223,22 @@ import {
 	type GoalCompletionVerifierOutput,
 	type GoalContinuationCompactorOutput,
 	type GoalRubricOutput,
+	type GoalTargetApertureReviewerOutput,
+	type GoalTargetExecutionReviewerOutput,
 	goalCheckpointGuidanceAgent,
 	goalCheckpointReviewerAgent,
 	goalCompletionVerifierAgent,
 	goalContinuationCompactorAgent,
 	goalRubricAgent,
+	goalTargetApertureReviewerAgent,
+	goalTargetExecutionReviewerAgent,
 	renderGoalCheckpointGuidanceAssignment,
 	renderGoalCheckpointReviewerAssignment,
 	renderGoalCompletionVerifierAssignment,
 	renderGoalContinuationCompactorAssignment,
 	renderGoalRubricAssignment,
+	renderGoalTargetApertureReviewerAssignment,
+	renderGoalTargetExecutionReviewerAssignment,
 	renderPreparedGoalContinuation,
 } from "../goals/side-agents";
 import type {
@@ -243,6 +254,9 @@ import type {
 	GoalParentFrame,
 	GoalRef,
 	GoalRefKind,
+	GoalTargetPlanApprovedDetails,
+	GoalTargetPlanRecord,
+	GoalTargetPlanReview,
 	GoalTokenUsage,
 	GoalVerificationDeliverableResult,
 	GoalVerificationEvidenceItem,
@@ -266,6 +280,9 @@ import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "tex
 import goalCheckpointControllerPrompt from "../prompts/goals/goal-checkpoint-controller.md" with { type: "text" };
 import goalCompletionMaxAttemptsFeedback from "../prompts/goals/goal-completion-max-attempts.md" with { type: "text" };
 import goalCompletionStaleFeedback from "../prompts/goals/goal-completion-stale.md" with { type: "text" };
+import goalTargetPlanApprovedPrompt from "../prompts/goals/goal-target-plan-approved.md" with { type: "text" };
+import goalTargetPlanReferencePrompt from "../prompts/goals/goal-target-plan-reference.md" with { type: "text" };
+import goalTargetPlanningPrompt from "../prompts/goals/goal-target-planning.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
@@ -343,9 +360,11 @@ import {
 	GOAL_CHECKPOINT_RESOLUTION_MESSAGE_TYPE,
 	GOAL_POST_COMPACTION_MESSAGE_TYPE,
 	GOAL_RUBRIC_MESSAGE_TYPE,
+	GOAL_TARGET_PLAN_MESSAGE_TYPE,
 	GOAL_VERIFICATION_FEEDBACK_MESSAGE_TYPE,
 	type GoalCheckpointMessageDetails,
 	type GoalCheckpointResolutionMessageDetails,
+	type GoalTargetPlanMessageDetails,
 	type GoalVerificationFeedbackMessageDetails,
 	type PythonExecutionMessage,
 	readQueueChipText,
@@ -1019,6 +1038,11 @@ function checkpointResolutionArtifactDetailsMatch(details: unknown, goalId: stri
 	return isStringRecord(resolution) && resolution.id === resolutionId;
 }
 
+function targetPlanArtifactDetailsMatch(details: unknown, goalId: string, targetPlanId: string): boolean {
+	if (!isStringRecord(details) || details.goalId !== goalId) return false;
+	return details.targetPlanId === targetPlanId;
+}
+
 function parseStructuredSideAgentOutput(output: string): unknown {
 	const parsed: unknown = JSON.parse(output);
 	if (isStringRecord(parsed) && "data" in parsed) {
@@ -1198,6 +1222,93 @@ function parseGoalCheckpointReviewerOutput(value: unknown): GoalCheckpointReview
 		evidenceChecked: parseGoalVerificationEvidenceItems(value.evidenceChecked),
 		blockers: parseGoalVerificationGaps(value.blockers),
 		continuationFocus: parseGoalContinuationFocus(value.continuationFocus),
+	};
+}
+
+function parseTargetPlanReviewFinding(value: unknown): GoalTargetPlanReview["findings"][number] | undefined {
+	if (!isStringRecord(value)) return undefined;
+	if (
+		typeof value.id !== "string" ||
+		typeof value.problem !== "string" ||
+		typeof value.requiredRevision !== "string"
+	) {
+		return undefined;
+	}
+	if (value.severity !== "blocking" && value.severity !== "important" && value.severity !== "polish") {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		severity: value.severity,
+		problem: value.problem,
+		requiredRevision: value.requiredRevision,
+		supportingEvidence: typeof value.supportingEvidence === "string" ? value.supportingEvidence : undefined,
+	};
+}
+
+function parseTargetPlanReviewFindings(value: unknown): GoalTargetPlanReview["findings"] {
+	return Array.isArray(value) ? value.flatMap(item => parseTargetPlanReviewFinding(item) ?? []) : [];
+}
+
+function parseTargetPlanReviewScores(value: unknown): GoalTargetPlanReview["scores"] | undefined {
+	if (!isStringRecord(value)) return undefined;
+	const score = {
+		productSignal: value.productSignal,
+		relatedWorkBundling: value.relatedWorkBundling,
+		concernCohesion: value.concernCohesion,
+		verificationAperture: value.verificationAperture,
+		blastRadiusCoverage: value.blastRadiusCoverage,
+		parentUncertaintyReduction: value.parentUncertaintyReduction,
+		antiGaming: value.antiGaming,
+	};
+	if (Object.values(score).some(item => typeof item !== "number" || !Number.isFinite(item))) return undefined;
+	return score as GoalTargetPlanReview["scores"];
+}
+
+function parseGoalTargetApertureReviewerOutput(value: unknown): GoalTargetApertureReviewerOutput | undefined {
+	if (!isStringRecord(value)) return undefined;
+	if (value.status !== "accepted" && value.status !== "rejected") return undefined;
+	if (typeof value.feedback !== "string") return undefined;
+	if (
+		value.apertureClassification !== "right-sized" &&
+		value.apertureClassification !== "too-narrow" &&
+		value.apertureClassification !== "too-broad" &&
+		value.apertureClassification !== "stale" &&
+		value.apertureClassification !== "unclear"
+	) {
+		return undefined;
+	}
+	if (
+		value.revisionDecision !== "keep" &&
+		value.revisionDecision !== "merge-required" &&
+		value.revisionDecision !== "split-required" &&
+		value.revisionDecision !== "rescope-required" &&
+		value.revisionDecision !== "refresh-intention" &&
+		value.revisionDecision !== "needs-user-input"
+	) {
+		return undefined;
+	}
+	const scores = parseTargetPlanReviewScores(value.scores);
+	if (!scores) return undefined;
+	return {
+		status: value.status,
+		feedback: value.feedback,
+		apertureClassification: value.apertureClassification,
+		revisionDecision: value.revisionDecision,
+		scores,
+		findings: parseTargetPlanReviewFindings(value.findings),
+	};
+}
+
+function parseGoalTargetExecutionReviewerOutput(value: unknown): GoalTargetExecutionReviewerOutput | undefined {
+	if (!isStringRecord(value)) return undefined;
+	if (value.status !== "accepted" && value.status !== "rejected") return undefined;
+	if (typeof value.feedback !== "string") return undefined;
+	return {
+		status: value.status,
+		feedback: value.feedback,
+		findings: parseTargetPlanReviewFindings(value.findings),
+		missingExecutionDetails: stringArray(value.missingExecutionDetails),
 	};
 }
 
@@ -1433,6 +1544,7 @@ export class AgentSession {
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
+	#goalTargetPlanReference: (GoalTargetPlanApprovedDetails & { sent: boolean }) | undefined;
 	#clientBridge: ClientBridge | undefined;
 	#allowAcpAgentInitiatedTurns = false;
 	/** Per-session memory of allow_always / reject_always decisions for gated tools. */
@@ -2961,6 +3073,9 @@ export class AgentSession {
 				const dispatch = await this.prepareGoalContinuationDispatch();
 				if (!dispatch) return;
 				promptText = dispatch.prompt;
+				if (dispatch.kind === "target-planning") {
+					await this.#ensureGoalTargetPlanningToolsActive();
+				}
 			} else {
 				// Compaction summarizes away the first-message eager preludes, so re-assert the
 				// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
@@ -2991,6 +3106,16 @@ export class AgentSession {
 			},
 			{ generation },
 		);
+	}
+
+	async #ensureGoalTargetPlanningToolsActive(): Promise<void> {
+		const planningTools = ["task", "write", "edit", "goal"].filter(
+			toolName => this.getToolByName(toolName) !== undefined,
+		);
+		const activeTools = this.getActiveToolNames();
+		const activeToolSet = new Set(activeTools);
+		if (planningTools.every(toolName => activeToolSet.has(toolName))) return;
+		await this.setActiveToolsByName([...new Set([...activeTools, ...planningTools])]);
 	}
 
 	async #cancelPostPromptTasks(): Promise<void> {
@@ -5457,11 +5582,49 @@ export class AgentSession {
 
 	setGoalModeState(state: GoalModeState | undefined): void {
 		this.#goalModeState = state;
+		this.#syncGoalTargetPlanReference(state);
+	}
+
+	#syncGoalTargetPlanReference(state: GoalModeState | undefined): void {
+		const reference = this.#goalTargetPlanReference;
+		if (!reference) return;
+		const goal = state?.goal;
+		if (
+			!state?.enabled ||
+			goal?.status !== "active" ||
+			goal.id !== reference.goalId ||
+			goal.currentTarget?.id !== reference.targetId ||
+			goal.currentTarget.status !== "active" ||
+			goal.currentTargetPlan?.id !== reference.targetPlanId ||
+			goal.currentTargetPlan.status !== "approved"
+		) {
+			this.#goalTargetPlanReference = undefined;
+		}
 	}
 
 	recoverGoalArtifactsFromState(): void {
 		const goal = this.#goalModeState?.goal;
 		if (!goal) return;
+		for (const plan of goal.targetPlans ?? []) {
+			if (this.#hasGoalTargetPlanArtifact(goal.id, plan.id)) continue;
+			const reviews = plan.reviews ?? [];
+			const details: GoalTargetPlanMessageDetails = {
+				goalId: goal.id,
+				targetId: plan.targetId,
+				targetPlanId: plan.id,
+				planFilePath: plan.planFilePath,
+				status: plan.status,
+				reviews,
+				recordedAt: plan.approvedAt ?? plan.failedAt ?? plan.updatedAt,
+			};
+			this.#appendGoalArtifactMessage({
+				customType: GOAL_TARGET_PLAN_MESSAGE_TYPE,
+				content: this.#renderGoalTargetPlanContent(goal, plan, reviews),
+				display: true,
+				details,
+				attribution: "agent",
+			});
+		}
 		for (const checkpoint of goal.checkpoints ?? []) {
 			if (this.#hasGoalCheckpointArtifact(goal.id, checkpoint.id)) continue;
 			const details: GoalCheckpointMessageDetails = {
@@ -5595,6 +5758,139 @@ export class AgentSession {
 			completionBudgetReport: null,
 			checkpoint,
 			checkpointReview: review,
+		};
+	}
+
+	async requestGoalTargetPlanFailure(
+		input: GoalTargetPlanFailureInput,
+		_signal?: AbortSignal,
+	): Promise<{
+		goal: Goal | null;
+		state?: GoalModeState | null;
+		remainingTokens: number | null;
+		completionBudgetReport: string | null;
+		targetPlan?: GoalTargetPlanRecord;
+		targetPlanReviews?: GoalTargetPlanReview[];
+	}> {
+		const state = await this.#goalRuntime.failCurrentTargetPlan(input);
+		const plan = state.goal.currentTargetPlan;
+		if (plan) await this.#publishGoalTargetPlanArtifact(state.goal, plan, []);
+		return {
+			goal: state.goal,
+			state,
+			remainingTokens: remainingTokens(state.goal),
+			completionBudgetReport: null,
+			targetPlan: plan,
+			targetPlanReviews: [],
+		};
+	}
+
+	async requestGoalTargetPlanApproval(
+		input: GoalSubmitTargetPlanInput,
+		signal?: AbortSignal,
+	): Promise<{
+		goal: Goal | null;
+		state?: GoalModeState | null;
+		remainingTokens: number | null;
+		completionBudgetReport: string | null;
+		targetPlan?: GoalTargetPlanRecord;
+		targetPlanReviews?: GoalTargetPlanReview[];
+		targetPlanApproval?: GoalTargetPlanApprovedDetails;
+	}> {
+		const state = this.#goalModeState;
+		if (!state?.enabled || state.goal.status !== "active") {
+			throw new ToolError("cannot submit target plan because no active goal exists");
+		}
+		if (state.runMode !== "planning-target") {
+			throw new ToolError("target plan submission is only allowed while runMode is planning-target");
+		}
+		const currentPlan = this.#goalRuntime.validateCurrentTargetPlanSubmission(input);
+		const resolvedPlanPath = resolveLocalUrlToPath(
+			normalizeLocalScheme(currentPlan.planFilePath),
+			this.#localProtocolOptions(),
+		);
+		let planContent: string;
+		try {
+			planContent = await Bun.file(resolvedPlanPath).text();
+		} catch (error) {
+			if (isEnoent(error)) throw new ToolError("target plan file is missing or empty");
+			throw error;
+		}
+		if (!planContent.trim()) throw new ToolError("target plan file is missing or empty");
+		const expected = this.#goalRuntime.captureTargetPlanExpectation();
+		const reviews = await this.#reviewGoalTargetPlan(input, currentPlan, signal);
+		if (!this.#goalRuntime.canCommitTargetPlanResult(expected)) {
+			await this.#goalRuntime.rejectCurrentTargetPlan({
+				targetPlanId: input.targetPlanId,
+				revision: input.revision,
+				reviews,
+				message: "target plan review result is stale because goal state changed",
+				stage: "stale",
+			});
+			throw new ToolError("target plan review result is stale because goal state changed");
+		}
+		if (reviews.some(review => review.status !== "accepted")) {
+			const rejected = await this.#goalRuntime.rejectCurrentTargetPlan({
+				targetPlanId: input.targetPlanId,
+				reviews,
+				message: "target plan reviewer rejected the submission",
+				stage: "review",
+			});
+			const rejectedPlan = rejected.goal.currentTargetPlan;
+			if (rejectedPlan) await this.#publishGoalTargetPlanArtifact(rejected.goal, rejectedPlan, reviews);
+			return {
+				goal: rejected.goal,
+				state: rejected,
+				remainingTokens: remainingTokens(rejected.goal),
+				completionBudgetReport: null,
+				targetPlan: rejectedPlan,
+				targetPlanReviews: reviews,
+			};
+		}
+		let approvedState: GoalModeState;
+		const approvalInput: GoalTargetPlanApprovalInput = { ...input, reviews };
+		try {
+			approvedState = await this.#goalRuntime.approveCurrentTargetPlan(approvalInput);
+		} catch (error) {
+			const gateReview = this.#failedGoalTargetPlanReview("aperture", error);
+			const allReviews = [...reviews, gateReview];
+			const rejected = await this.#goalRuntime.rejectCurrentTargetPlan({
+				targetPlanId: input.targetPlanId,
+				reviews: allReviews,
+				message: gateReview.feedback,
+				stage: "approval",
+			});
+			const rejectedPlan = rejected.goal.currentTargetPlan;
+			if (rejectedPlan) await this.#publishGoalTargetPlanArtifact(rejected.goal, rejectedPlan, allReviews);
+			return {
+				goal: rejected.goal,
+				state: rejected,
+				remainingTokens: remainingTokens(rejected.goal),
+				completionBudgetReport: null,
+				targetPlan: rejectedPlan,
+				targetPlanReviews: allReviews,
+			};
+		}
+		const approvedPlan = approvedState.goal.currentTargetPlan;
+		const targetPlanApproval: GoalTargetPlanApprovedDetails | undefined = approvedPlan
+			? {
+					goalId: approvedPlan.goalId,
+					targetId: approvedPlan.targetId,
+					targetPlanId: approvedPlan.id,
+					planFilePath: approvedPlan.planFilePath,
+					title: `goal-${sanitizeGoalPlanSlug(approvedPlan.goalId)}-target-${approvedPlan.targetSequence}`,
+				}
+			: undefined;
+		if (targetPlanApproval) this.setGoalTargetPlanReference(targetPlanApproval);
+		if (approvedPlan) await this.#publishGoalTargetPlanArtifact(approvedState.goal, approvedPlan, reviews);
+		return {
+			goal: approvedState.goal,
+			state: approvedState,
+			remainingTokens: remainingTokens(approvedState.goal),
+			completionBudgetReport: null,
+			targetPlan: approvedPlan,
+			targetPlanReviews: reviews,
+			targetPlanApproval,
 		};
 	}
 
@@ -5758,6 +6054,7 @@ export class AgentSession {
 					},
 				};
 			}
+
 			const recordedAttempt = recorded.lastVerificationAttempt ?? attempt;
 			const recordedTotalAttempts = recorded.totalVerificationAttempts ?? totalAttempt;
 			await this.#publishGoalVerificationFeedbackArtifact({
@@ -5857,6 +6154,7 @@ export class AgentSession {
 					| "checkpoint-resolution"
 					| "parent-completion"
 					| "verification-repair"
+					| "target-planning"
 					| "post-compaction";
 				customType: string;
 				prompt: string;
@@ -5867,9 +6165,15 @@ export class AgentSession {
 		if (!state?.enabled || state.goal.status !== "active") return undefined;
 		if (state.runMode === "awaiting-user-input") return undefined;
 		const goalId = state.goal.id;
+		const stateVersion = state.stateVersion;
+		if (state.runMode === "planning-target") {
+			const promptText = this.#prepareGoalTargetPlanningPrompt(state, signal);
+			const latest = this.#goalModeState;
+			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
+			return { kind: "target-planning", customType: "goal-target-planning", prompt: promptText };
+		}
 		const postCompaction = this.#consumeGoalPostCompactionContinuation(state);
 		if (postCompaction) return postCompaction;
-		const stateVersion = state.stateVersion;
 		if (state.runMode === "awaiting-checkpoint-resolution") {
 			const promptText = await this.#prepareGoalCheckpointGuidancePrompt(state, signal);
 			const latest = this.#goalModeState;
@@ -5979,6 +6283,29 @@ export class AgentSession {
 		});
 	}
 
+	async #publishGoalTargetPlanArtifact(
+		goal: Goal,
+		plan: GoalTargetPlanRecord,
+		reviews: GoalTargetPlanReview[],
+	): Promise<void> {
+		const details: GoalTargetPlanMessageDetails = {
+			goalId: goal.id,
+			targetId: plan.targetId,
+			targetPlanId: plan.id,
+			planFilePath: plan.planFilePath,
+			status: plan.status,
+			reviews,
+			recordedAt: Date.now(),
+		};
+		await this.#sendGoalArtifactMessage<GoalTargetPlanMessageDetails>({
+			customType: GOAL_TARGET_PLAN_MESSAGE_TYPE,
+			content: this.#renderGoalTargetPlanContent(goal, plan, reviews),
+			display: true,
+			details,
+			attribution: "agent",
+		});
+	}
+
 	async #publishGoalCheckpointResolutionArtifact(goal: Goal, resolution: GoalCheckpointResolution): Promise<void> {
 		const details: GoalCheckpointResolutionMessageDetails = {
 			goalId: goal.id,
@@ -6047,6 +6374,22 @@ export class AgentSession {
 		});
 	}
 
+	#hasGoalTargetPlanArtifact(goalId: string, targetPlanId: string): boolean {
+		if (
+			this.#pendingGoalArtifactMessages.some(
+				message =>
+					message.customType === GOAL_TARGET_PLAN_MESSAGE_TYPE &&
+					targetPlanArtifactDetailsMatch(message.details, goalId, targetPlanId),
+			)
+		) {
+			return true;
+		}
+		return this.sessionManager.getEntries().some(entry => {
+			if (entry.type !== "custom_message" || entry.customType !== GOAL_TARGET_PLAN_MESSAGE_TYPE) return false;
+			return targetPlanArtifactDetailsMatch(entry.details, goalId, targetPlanId);
+		});
+	}
+
 	#appendGoalArtifactMessage(
 		message: Pick<
 			CustomMessage<unknown>,
@@ -6110,6 +6453,33 @@ export class AgentSession {
 			sections.push(`## Checkpoint review\n\n${review.feedback}`);
 		} else {
 			sections.push("## Checkpoint review\n\nReview details were not present in restored goal state.");
+		}
+		return sections.join("\n\n");
+	}
+
+	#renderGoalTargetPlanContent(goal: Goal, plan: GoalTargetPlanRecord, reviews: GoalTargetPlanReview[]): string {
+		const targetTitle =
+			goal.currentTarget?.id === plan.targetId
+				? goal.currentTarget.title
+				: goal.targets?.find(target => target.id === plan.targetId)?.title;
+		const sections = [
+			"## Goal target plan",
+			`## Target\n\n${targetTitle ?? plan.targetId}`,
+			`## Plan path\n\n${plan.planFilePath}`,
+			`## Status\n\n${plan.status}`,
+		];
+		const aperture = reviews.find(review => review.lens === "aperture")?.apertureClassification;
+		if (aperture) sections.push(`## Aperture classification\n\n${aperture}`);
+		if (reviews.length > 0) {
+			sections.push(
+				`## Reviewer statuses\n\n${reviews.map(review => `- ${review.lens}: ${review.status}`).join("\n")}`,
+			);
+			const blockers = reviews.flatMap(review =>
+				review.findings
+					.filter(finding => finding.severity === "blocking")
+					.map(finding => `- ${review.lens}/${finding.id}: ${finding.problem}`),
+			);
+			if (blockers.length > 0) sections.push(`## Blocking findings\n\n${blockers.join("\n")}`);
 		}
 		return sections.join("\n\n");
 	}
@@ -6189,6 +6559,135 @@ export class AgentSession {
 		});
 	}
 
+	#failedGoalTargetPlanReview(lens: GoalTargetPlanReview["lens"], error: unknown): GoalTargetPlanReview {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			id: `target-plan-${lens}-review-failed-${Date.now()}`,
+			lens,
+			status: "failed",
+			feedback: message,
+			findings: [
+				{
+					id: "TARGET_PLAN_REVIEWER_FAILED",
+					severity: "blocking",
+					problem: message,
+					requiredRevision: "Re-run target-plan review after fixing reviewer failure.",
+				},
+			],
+			reviewedAt: Date.now(),
+		};
+	}
+
+	async #reviewGoalTargetPlan(
+		input: GoalSubmitTargetPlanInput,
+		plan: GoalTargetPlanRecord,
+		signal?: AbortSignal,
+	): Promise<GoalTargetPlanReview[]> {
+		return await this.#withSerializedGoalSideAgent(async () => {
+			const state = this.#goalModeState;
+			if (!state?.goal) throw new Error("cannot review target plan because no goal is active");
+			const contextFile = await this.#writeGoalTranscriptFile("target-plan-review", state.goal.id, {
+				includeRubric: true,
+			});
+			const goalStateFile = await this.#writeGoalStateSnapshotFile("target-plan-review", state, {
+				includeRubric: true,
+			});
+			const artifactsDir = path.dirname(goalStateFile);
+			const safeGoalId = state.goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
+			const submissionFile = path.join(artifactsDir, `${Date.now()}-${safeGoalId}-target-plan-submission.json`);
+			await Bun.write(submissionFile, `${JSON.stringify(input, null, 2)}\n`);
+			const goalStateSnapshot = renderGoalStateSnapshot(state, state.goal);
+			const planFile = resolveLocalUrlToPath(normalizeLocalScheme(plan.planFilePath), this.#localProtocolOptions());
+			return await Promise.all([
+				this.#runGoalTargetApertureReview({
+					contextFile,
+					goalStateFile,
+					goalStateSnapshot,
+					planFile,
+					submissionFile,
+					signal,
+				}),
+				this.#runGoalTargetExecutionReview({
+					contextFile,
+					goalStateFile,
+					goalStateSnapshot,
+					planFile,
+					submissionFile,
+					signal,
+				}),
+			]);
+		});
+	}
+
+	async #runGoalTargetApertureReview(input: {
+		contextFile: string;
+		goalStateFile: string;
+		goalStateSnapshot: string;
+		planFile: string;
+		submissionFile: string;
+		signal?: AbortSignal;
+	}): Promise<GoalTargetPlanReview> {
+		try {
+			const output = await this.#runGoalSideAgent({
+				agent: goalTargetApertureReviewerAgent,
+				assignment: renderGoalTargetApertureReviewerAssignment(input),
+				description: "Goal target aperture review",
+				contextFile: input.contextFile,
+				parse: parseGoalTargetApertureReviewerOutput,
+				signal: input.signal,
+			});
+			return {
+				id: `target-plan-aperture-review-${Date.now()}`,
+				lens: "aperture",
+				status: output.status,
+				feedback: output.feedback,
+				apertureClassification: output.apertureClassification,
+				revisionDecision: output.revisionDecision,
+				scores: output.scores,
+				findings: output.findings,
+				reviewedAt: Date.now(),
+			};
+		} catch (error) {
+			return this.#failedGoalTargetPlanReview("aperture", error);
+		}
+	}
+
+	async #runGoalTargetExecutionReview(input: {
+		contextFile: string;
+		goalStateFile: string;
+		goalStateSnapshot: string;
+		planFile: string;
+		submissionFile: string;
+		signal?: AbortSignal;
+	}): Promise<GoalTargetPlanReview> {
+		try {
+			const output = await this.#runGoalSideAgent({
+				agent: goalTargetExecutionReviewerAgent,
+				assignment: renderGoalTargetExecutionReviewerAssignment(input),
+				description: "Goal target execution-plan review",
+				contextFile: input.contextFile,
+				parse: parseGoalTargetExecutionReviewerOutput,
+				signal: input.signal,
+			});
+			const missingFindings = output.missingExecutionDetails.map((detail, index) => ({
+				id: `MISSING_EXECUTION_DETAIL_${index + 1}`,
+				severity: "important" as const,
+				problem: detail,
+				requiredRevision: "Specify this execution detail in the target plan.",
+			}));
+			return {
+				id: `target-plan-execution-review-${Date.now()}`,
+				lens: "execution-readiness",
+				status: output.status,
+				feedback: output.feedback,
+				findings: [...output.findings, ...missingFindings],
+				reviewedAt: Date.now(),
+			};
+		} catch (error) {
+			return this.#failedGoalTargetPlanReview("execution-readiness", error);
+		}
+	}
+
 	async #prepareGoalCheckpointGuidancePrompt(state: GoalModeState, signal?: AbortSignal): Promise<string> {
 		const checkpoint = state.goal.pendingCheckpointId
 			? state.goal.checkpoints?.find(packet => packet.id === state.goal.pendingCheckpointId)
@@ -6247,6 +6746,16 @@ export class AgentSession {
 				JSON.stringify(packet, null, 2),
 				"</goal_continuation_packet>",
 			].join("\n"),
+		});
+	}
+
+	#prepareGoalTargetPlanningPrompt(state: GoalModeState, _signal?: AbortSignal): string {
+		return prompt.render(goalTargetPlanningPrompt, {
+			goalContextSurface: renderGoalPromptSurface(state, state.goal),
+			currentTargetPlan: JSON.stringify(state.goal.currentTargetPlan ?? null, null, 2),
+			taskAvailable: this.getToolByName("task") !== undefined,
+			writeAvailable: this.getToolByName("write") !== undefined,
+			editAvailable: this.getToolByName("edit") !== undefined,
 		});
 	}
 
@@ -6466,6 +6975,37 @@ export class AgentSession {
 		return this.#planReferencePath;
 	}
 
+	setGoalTargetPlanReference(details: GoalTargetPlanApprovedDetails): void {
+		this.#goalTargetPlanReference = { ...details, sent: false };
+	}
+
+	getGoalTargetPlanReference(): GoalTargetPlanApprovedDetails | undefined {
+		const reference = this.#goalTargetPlanReference;
+		if (!reference) return undefined;
+		const { sent: _sent, ...details } = reference;
+		return details;
+	}
+
+	markGoalTargetPlanReferenceSent(): void {
+		if (this.#goalTargetPlanReference) this.#goalTargetPlanReference.sent = true;
+	}
+
+	clearGoalTargetPlanReference(): void {
+		this.#goalTargetPlanReference = undefined;
+	}
+
+	renderGoalTargetPlanApprovedPrompt(input: {
+		planContent: string;
+		planFilePath: string;
+		contextPreserved?: boolean;
+	}): string {
+		return prompt.render(goalTargetPlanApprovedPrompt, {
+			planContent: input.planContent,
+			planFilePath: input.planFilePath,
+			contextPreserved: input.contextPreserved === true,
+		});
+	}
+
 	get clientBridge(): ClientBridge | undefined {
 		return this.#clientBridge;
 	}
@@ -6605,6 +7145,43 @@ export class AgentSession {
 		};
 	}
 
+	async #buildGoalTargetPlanReferenceMessage(): Promise<CustomMessage | null> {
+		const reference = this.#goalTargetPlanReference;
+		if (!reference || reference.sent) return null;
+		const state = this.#goalModeState;
+		if (!state?.enabled || state.goal.status !== "active") return null;
+		if (state.goal.currentTarget?.id !== reference.targetId) return null;
+		if (state.goal.currentTargetPlan?.id !== reference.targetPlanId) return null;
+		if (state.goal.currentTargetPlan.status !== "approved") return null;
+
+		const resolvedPlanPath = resolveLocalUrlToPath(
+			normalizeLocalScheme(reference.planFilePath),
+			this.#localProtocolOptions(),
+		);
+		let planContent: string;
+		try {
+			planContent = await Bun.file(resolvedPlanPath).text();
+		} catch (error) {
+			if (isEnoent(error)) return null;
+			throw error;
+		}
+		if (!planContent.trim()) return null;
+
+		const content = prompt.render(goalTargetPlanReferencePrompt, {
+			planFilePath: reference.planFilePath,
+			planContent,
+		});
+		reference.sent = true;
+		return {
+			role: "custom",
+			customType: "goal-target-plan-reference",
+			content,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
 		const state = this.#planModeState;
 		if (!state?.enabled) return null;
@@ -6727,6 +7304,7 @@ export class AgentSession {
 					evalAvailable: activeToolNames.has("eval"),
 					taskToolAvailable: activeToolNames.has("task"),
 					planMode: this.#planModeState?.enabled === true,
+					targetPlanningMode: this.#goalModeState?.runMode === "planning-target",
 					sessionSpawns: this.#sessionSpawns ?? undefined,
 					taskDepth: this.#taskDepth,
 					taskMaxRecursionDepth: this.settings.get("task.maxRecursionDepth") ?? 2,
@@ -6973,6 +7551,10 @@ export class AgentSession {
 			const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
 			if (planReferenceMessage) {
 				messages.push(planReferenceMessage);
+			}
+			const goalTargetPlanReferenceMessage = await this.#buildGoalTargetPlanReferenceMessage();
+			if (goalTargetPlanReferenceMessage) {
+				messages.push(goalTargetPlanReferenceMessage);
 			}
 			const planModeMessage = await this.#buildPlanModeMessage();
 			if (planModeMessage) {
@@ -7770,6 +8352,7 @@ export class AgentSession {
 		this.#todoReminderAwaitingProgress = false;
 		this.#planReferenceSent = false;
 		this.#planReferencePath = "local://PLAN.md";
+		this.#goalTargetPlanReference = undefined;
 		this.#advisorRuntime?.reset();
 		this.#reconnectToAgent();
 
@@ -8369,7 +8952,8 @@ export class AgentSession {
 	 */
 	#withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
 		const planMatcher = createPlanReadMatcher(() => this.#planReferencePath);
-		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
+		const targetPlanMatcher = createPlanReadMatcher(() => this.#goalTargetPlanReference?.planFilePath ?? "");
+		return { ...config, protectedTools: [...config.protectedTools, planMatcher, targetPlanMatcher] };
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {

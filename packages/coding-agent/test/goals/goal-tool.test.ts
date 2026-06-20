@@ -1,10 +1,27 @@
 import { describe, expect, it, vi } from "bun:test";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
-import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
-import type { Goal, GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
+import {
+	completionBudgetReport,
+	GoalRuntime,
+	type GoalSubmitTargetPlanInput,
+	type GoalTargetPlanApprovalInput,
+	type GoalTargetPlanFailureInput,
+} from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import type {
+	Goal,
+	GoalModeState,
+	GoalTargetPlanRecord,
+	GoalTargetPlanReview,
+	GoalTokenUsage,
+} from "@oh-my-pi/pi-coding-agent/goals/state";
 import { cloneGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
-import { buildGoalToolResponse, GoalTool, goalToolRenderer } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import {
+	buildGoalToolResponse,
+	GoalTool,
+	type GoalToolInput,
+	goalToolRenderer,
+} from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -70,6 +87,182 @@ function createRuntimeHarness(initialState?: TestGoalModeStateInput) {
 	return {
 		runtime,
 		getState: () => cloneState(state),
+	};
+}
+
+function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
+	return {
+		id: `review-${lens}`,
+		lens,
+		status: "accepted",
+		feedback: `${lens} accepted the target plan.`,
+		apertureClassification: lens === "aperture" ? "right-sized" : undefined,
+		revisionDecision: "keep",
+		scores:
+			lens === "aperture"
+				? {
+						productSignal: 4,
+						relatedWorkBundling: 4,
+						concernCohesion: 4,
+						verificationAperture: 4,
+						blastRadiusCoverage: 4,
+						parentUncertaintyReduction: 4,
+						antiGaming: 4,
+					}
+				: undefined,
+		findings: [],
+		reviewedAt: 1,
+	};
+}
+
+function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanApprovalInput {
+	const target = state.goal.currentTarget;
+	const plan = state.goal.currentTargetPlan;
+	if (!target || !plan) throw new Error("expected current target plan");
+	return {
+		targetId: target.id,
+		targetPlanId: plan.id,
+		planFilePath: plan.planFilePath,
+		revision: plan.revision,
+		verificationAperture: {
+			productIntention: "Prove the target behavior with direct evidence.",
+			primarySignalId: "signal-primary",
+			blastRadius: "local",
+			confidenceTarget: "high",
+			layerRationale: "The target is local and directly observable.",
+			residualUncertainty: ["Parent completion remains outside this target."],
+			omittedLayers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
+		},
+		verificationSignals: [
+			{
+				id: "signal-primary",
+				role: "primary",
+				layer: "integration",
+				concernIds: ["concern-behavior"],
+				claim: "Target behavior is verified.",
+				observation: "Focused evidence is observed.",
+				method: "Run the focused check.",
+				expectedOutcome: "The focused check passes.",
+				required: true,
+				confidenceIfSatisfied: "high",
+				staleIf: ["Relevant code changes."],
+			},
+		],
+		concernChecks: [
+			{
+				id: "concern-behavior",
+				kind: "behavior",
+				whyIndependent: "Behavior can fail independently of parent completion.",
+				coveredBySignalIds: ["signal-primary"],
+			},
+		],
+		scopeCalibration: {
+			rightSizingBasis: "product-signal",
+			whyNotSmaller: ["Smaller work would not produce an observable signal."],
+			whyNotLarger: ["Larger work would claim parent-level completion."],
+			includedRelatedWork: [
+				{ item: "Focused target work", reason: "Needed for primary signal.", signalIds: ["signal-primary"] },
+			],
+			deferredRelatedWork: [
+				{
+					item: "Parent completion verification",
+					reason: "different-primary-signal",
+					followUpHint: "Checkpoint first.",
+				},
+			],
+		},
+		branchEvidence: [
+			{ branch: "happy path", required: true, plannedSignalIds: ["signal-primary"], rationale: "Primary signal." },
+		],
+		excludedWorkReview: [
+			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
+		],
+		workflowReviewRounds: [
+			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
+		],
+		dryRun: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
+		reviews: [acceptedTargetPlanReview("aperture"), acceptedTargetPlanReview("execution-readiness")],
+	};
+}
+
+async function approveCurrentTargetPlan(harness: {
+	runtime: GoalRuntime;
+	getState: () => GoalModeState | undefined;
+}): Promise<void> {
+	const state = harness.getState();
+	if (!state) throw new Error("expected goal state");
+	await harness.runtime.approveCurrentTargetPlan(buildTargetPlanApprovalInput(state));
+}
+
+function buildSubmitTargetPlanParams(source: {
+	targetId: string;
+	targetPlanId: string;
+	planFilePath: string;
+	revision: number;
+}): Extract<GoalToolInput, { op: "submit_target_plan" }> {
+	return {
+		op: "submit_target_plan",
+		target_id: source.targetId,
+		target_plan_id: source.targetPlanId,
+		plan_file_path: source.planFilePath,
+		revision: source.revision,
+		verification_aperture: {
+			product_intention: "Prove the target behavior with direct evidence.",
+			primary_signal_id: "signal-primary",
+			blast_radius: "local",
+			confidence_target: "high",
+			layer_rationale: "The target is local and directly observable.",
+			residual_uncertainty: ["Parent completion remains outside this target."],
+			omitted_layers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
+		},
+		verification_signals: [
+			{
+				id: "signal-primary",
+				role: "primary",
+				layer: "integration",
+				concern_ids: ["concern-behavior"],
+				claim: "Target behavior is verified.",
+				observation: "Focused evidence is observed.",
+				method: "Run the focused check.",
+				expected_outcome: "The focused check passes.",
+				required: true,
+				confidence_if_satisfied: "high",
+				stale_if: ["Relevant code changes."],
+			},
+		],
+		concern_checks: [
+			{
+				id: "concern-behavior",
+				kind: "behavior",
+				why_independent: "Behavior can fail independently of parent completion.",
+				covered_by_signal_ids: ["signal-primary"],
+			},
+		],
+		scope_calibration: {
+			right_sizing_basis: "product-signal",
+			why_not_smaller: ["Smaller work would not produce an observable signal."],
+			why_not_larger: ["Larger work would claim parent-level completion."],
+			included_related_work: [
+				{ item: "Focused target work", reason: "Needed for primary signal.", signal_ids: ["signal-primary"] },
+			],
+			deferred_related_work: [
+				{
+					item: "Parent completion verification",
+					reason: "different-primary-signal",
+					follow_up_hint: "Checkpoint first.",
+				},
+			],
+		},
+		branch_evidence: [
+			{ branch: "happy path", required: true, planned_signal_ids: ["signal-primary"], rationale: "Primary signal." },
+		],
+		excluded_work_review: [
+			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
+		],
+		workflow_review_rounds: [
+			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
+		],
+		dry_run: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
 	};
 }
 
@@ -305,6 +498,40 @@ describe("GoalTool", () => {
 				closure_standard: "Current smoke output exists.",
 			}).success,
 		).toBe(true);
+		const validTargetPlanSubmission = buildSubmitTargetPlanParams({
+			targetId: "target-1",
+			targetPlanId: "target-plan-1",
+			planFilePath: "local://goal-goal-1-target-1-plan.md",
+			revision: 1,
+		});
+		expect(tool.parameters.safeParse(validTargetPlanSubmission).success).toBe(true);
+		expect(
+			tool.parameters.safeParse({
+				...validTargetPlanSubmission,
+				verification_signals: validTargetPlanSubmission.verification_signals.map(signal => ({
+					...signal,
+					required: false,
+				})),
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
+				...validTargetPlanSubmission,
+				dry_run: { status: "failed", checks: [{ id: "dry-run", passed: false, rationale: "Plan is incomplete." }] },
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
+				op: "fail_target_plan",
+				target_id: "target-1",
+				target_plan_id: "target-plan-1",
+				revision: 1,
+				reason: "needs-user-input",
+				message: "Cannot choose the right target without operator input.",
+				blockers: ["Missing operator choice."],
+				suggested_questions: ["Which gate should be targeted first?"],
+			}).success,
+		).toBe(true);
 		expect(
 			tool.parameters.safeParse({
 				op: "start_target",
@@ -414,6 +641,109 @@ describe("GoalTool", () => {
 		).toBe(false);
 	});
 
+	it("routes target-plan submit and failure operations to session handlers", async () => {
+		let submittedInput: GoalSubmitTargetPlanInput | undefined;
+		let failedInput: GoalTargetPlanFailureInput | undefined;
+		const harness = createRuntimeHarness();
+		const goal = createGoal();
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+				requestGoalTargetPlanApproval: async input => {
+					submittedInput = input;
+					return buildGoalToolResponse(goal, {
+						targetPlanApproval: {
+							goalId: goal.id,
+							targetId: input.targetId,
+							targetPlanId: input.targetPlanId,
+							planFilePath: input.planFilePath,
+							title: "goal-goal-1-target-1",
+						},
+					});
+				},
+				requestGoalTargetPlanFailure: async input => {
+					failedInput = input;
+					return buildGoalToolResponse(goal);
+				},
+			}),
+		);
+
+		const submitted = await tool.execute(
+			"submit-plan",
+			buildSubmitTargetPlanParams({
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: "local://goal-goal-1-target-1-plan.md",
+				revision: 1,
+			}),
+		);
+		expect(submittedInput?.targetId).toBe("target-1");
+		expect(submittedInput?.verificationAperture.primarySignalId).toBe("signal-primary");
+		expect(submittedInput?.verificationSignals[0]?.confidenceIfSatisfied).toBe("high");
+		expect(submitted.details?.targetPlanApproval?.targetPlanId).toBe("target-plan-1");
+
+		await tool.execute("fail-plan", {
+			op: "fail_target_plan",
+			target_id: "target-1",
+			target_plan_id: "target-plan-1",
+			revision: 1,
+			reason: "needs-user-input",
+			message: "Cannot choose the right target without operator input.",
+			blockers: ["Missing operator choice."],
+			suggested_questions: ["Which gate should be targeted first?"],
+		});
+		expect(failedInput?.targetPlanId).toBe("target-plan-1");
+		expect(failedInput?.reason).toBe("needs-user-input");
+	});
+
+	it("renders failed target-plan submissions as awaiting user input", async () => {
+		const failedPlan: GoalTargetPlanRecord = {
+			id: "target-plan-1",
+			goalId: "goal-1",
+			targetId: "target-1",
+			targetSequence: 1,
+			planFilePath: "local://goal-goal-1-target-1-plan.md",
+			status: "failed",
+			revision: 3,
+			stateVersionAtStart: 1,
+			parentFrameVersionAtStart: 0,
+			createdAt: 1,
+			updatedAt: 2,
+			failedAt: 2,
+			reviews: [],
+		};
+		const failedGoal = createGoal({ currentTargetPlan: failedPlan });
+		const failedState = createGoalModeState({ goal: failedGoal, runMode: "awaiting-user-input" });
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => createRuntimeHarness().runtime,
+				getGoalModeState: () => failedState,
+				requestGoalTargetPlanApproval: async () =>
+					buildGoalToolResponse(failedGoal, {
+						state: failedState,
+						targetPlan: failedPlan,
+						targetPlanReviews: [],
+					}),
+			}),
+		);
+
+		const result = await tool.execute(
+			"failed-submit",
+			buildSubmitTargetPlanParams({
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: "local://goal-goal-1-target-1-plan.md",
+				revision: 3,
+			}),
+		);
+
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("Target plan failed");
+		expect(text).toContain("awaiting user input");
+		expect(text).not.toContain("Run mode remains planning-target");
+	});
+
 	it("rejects checkpoint when the session review handler is unavailable", async () => {
 		const harness = createRuntimeHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });
@@ -429,6 +759,7 @@ describe("GoalTool", () => {
 			desired_future_claim: "Smoke path is exercised.",
 			closure_standard: "Current smoke output exists.",
 		});
+		await approveCurrentTargetPlan(harness);
 
 		await expect(
 			tool.execute("checkpoint-without-reviewer", {
@@ -482,6 +813,7 @@ describe("GoalTool", () => {
 			desired_future_claim: "Source-link install exercises smoke path.",
 			closure_standard: "Current smoke output exists.",
 		});
+		await approveCurrentTargetPlan(harness);
 		const checkpoint = await tool.execute("checkpoint", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
@@ -543,7 +875,7 @@ describe("GoalTool", () => {
 		});
 
 		expect(resolved.details?.checkpointResolution?.decision).toBe("next_target");
-		expect(resolved.details?.state?.runMode).toBe("working-target");
+		expect(resolved.details?.state?.runMode).toBe("planning-target");
 		expect(resolved.details?.state?.goal.pendingCheckpointId).toBeUndefined();
 		expect(resolved.details?.state?.goal.parentFrame?.acceptedClaims[0]?.id).toBe("source-link-smoke");
 	});

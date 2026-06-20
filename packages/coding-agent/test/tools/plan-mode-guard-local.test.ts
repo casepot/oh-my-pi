@@ -2,15 +2,21 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { enforcePlanModeWrite, resolvePlanPath } from "@oh-my-pi/pi-coding-agent/tools/plan-mode-guard";
+import {
+	enforcePlanModeWrite,
+	enforceReadOnlyPlanningWrite,
+	resolvePlanPath,
+} from "@oh-my-pi/pi-coding-agent/tools/plan-mode-guard";
 
 interface SessionOverrides {
 	artifactsDir?: string | null;
 	sessionId?: string | null;
 	cwd?: string;
 	planMode?: PlanModeState;
+	goalMode?: GoalModeState;
 }
 
 function makeSession(overrides: SessionOverrides): ToolSession {
@@ -25,7 +31,42 @@ function makeSession(overrides: SessionOverrides): ToolSession {
 		getArtifactsDir: () => overrides.artifactsDir ?? null,
 		getSessionId: () => overrides.sessionId ?? null,
 		getPlanModeState: () => overrides.planMode,
+		getGoalModeState: () => overrides.goalMode,
 	} as unknown as ToolSession;
+}
+
+function createGoalPlanningState(planFilePath = "local://goal-goal-1-target-1-plan.md"): GoalModeState {
+	return {
+		enabled: true,
+		mode: "active",
+		runMode: "planning-target",
+		stateVersion: 3,
+		parentFrameVersion: 0,
+		goal: {
+			id: "goal-1",
+			objective: "Ship target planning",
+			status: "active",
+			tokenBudget: undefined,
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: 0,
+			updatedAt: 0,
+			currentTargetPlan: {
+				id: "target-plan-1",
+				goalId: "goal-1",
+				targetId: "target-1",
+				targetSequence: 1,
+				planFilePath,
+				status: "drafting",
+				revision: 1,
+				stateVersionAtStart: 3,
+				parentFrameVersionAtStart: 0,
+				createdAt: 0,
+				updatedAt: 0,
+				reviews: [],
+			},
+		},
+	};
 }
 
 describe("resolvePlanPath local:// support", () => {
@@ -162,5 +203,50 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 		expect(() => enforcePlanModeWrite(session, "[/repo/src/foo.ts#ABCD]", { op: "update" })).toThrow(
 			/working tree is read-only/,
 		);
+	});
+});
+
+describe("enforceReadOnlyPlanningWrite for goal target planning", () => {
+	it("allows only the active target plan file", () => {
+		const goalMode = createGoalPlanningState("local://goal-goal-1-target-1-plan.md");
+		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", goalMode });
+
+		expect(() =>
+			enforceReadOnlyPlanningWrite(session, "local://goal-goal-1-target-1-plan.md", { op: "create" }),
+		).not.toThrow();
+		expect(() =>
+			enforceReadOnlyPlanningWrite(session, "[local://goal-goal-1-target-1-plan.md#ABCD]", { op: "update" }),
+		).not.toThrow();
+		const absolutePlanPath = resolvePlanPath(session, "local://goal-goal-1-target-1-plan.md");
+		expect(() => enforceReadOnlyPlanningWrite(session, `[${absolutePlanPath}#ABCD]`, { op: "update" })).not.toThrow();
+		expect(() => enforceReadOnlyPlanningWrite(session, "local://scratch/notes.md", { op: "update" })).toThrow(
+			/writes are limited to the active target plan file: local:\/\/goal-goal-1-target-1-plan\.md/,
+		);
+		expect(() => enforceReadOnlyPlanningWrite(session, "src/foo.ts", { op: "update" })).toThrow(
+			/writes are limited to the active target plan file/,
+		);
+	});
+
+	it("does not enforce target planning after the goal is paused", () => {
+		const goalMode = createGoalPlanningState("local://goal-goal-1-target-1-plan.md");
+		goalMode.enabled = false;
+		goalMode.goal.status = "paused";
+		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", goalMode });
+
+		expect(() => enforceReadOnlyPlanningWrite(session, "src/foo.ts", { op: "update" })).not.toThrow();
+	});
+
+	it("rejects target-plan renames and deletes", () => {
+		const goalMode = createGoalPlanningState("local://goal-goal-1-target-1-plan.md");
+		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", goalMode });
+
+		expect(() =>
+			enforceReadOnlyPlanningWrite(session, "local://goal-goal-1-target-1-plan.md", { op: "delete" }),
+		).toThrow(/Deleting files is not allowed/);
+		expect(() =>
+			enforceReadOnlyPlanningWrite(session, "local://goal-goal-1-target-1-plan.md", {
+				move: "local://renamed-plan.md",
+			}),
+		).toThrow(/Renaming files is not allowed/);
 	});
 });

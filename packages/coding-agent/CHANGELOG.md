@@ -5,6 +5,7 @@
 ### Added
 
 - Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
+- Added autonomous goal target planning with verification-aperture review before target execution.
 
 
 - Added OMP RPC protocol v1.1 metadata, typed errors, operation lifecycle frames, state/session graph queries, task/subagent frames, host URI/tool hardening, schema/golden fixtures, one-shot probing, and dashboard/gateway integration docs.
@@ -38,6 +39,7 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed autonomous goal target planning so failed/stale plan reviews cannot unlock checkpoints, paused goals stop enforcing target-planning write guards, local plan hashline paths resolve consistently, and target-plan submission requires a required primary verification signal.
 - Fixed inline provider-call context maintenance so tool-result continuations compact and rematerialize before the next request, fail closed with a persisted maintenance error when unsafe maintenance fails, avoid inline handoff/auto-continue, and reset Codex/OpenAI replay state after history rewrites.
 - Fixed provider-call and pre-prompt context maintenance estimates to use materialized provider context with a bounded same-model usage floor, ignoring aborted/error, old-model, and pre-compaction usage.
 - Fixed compaction commits so manual, auto, and inline maintenance discard stale branch summaries, avoid duplicate branch-window compactions, and route `session_compact` hooks by the appended entry id.

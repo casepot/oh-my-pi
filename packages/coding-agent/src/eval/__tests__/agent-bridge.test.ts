@@ -2,6 +2,7 @@ import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
+import type { GoalModeState } from "../../goals/state";
 import type { PlanModeState } from "../../plan-mode/state";
 import * as taskDiscovery from "../../task/discovery";
 import type { ExecutorOptions } from "../../task/executor";
@@ -45,6 +46,8 @@ interface SessionOptions {
 	settings?: Settings;
 	outputManager?: AgentOutputManager;
 	planMode?: boolean;
+	goalMode?: "planning-target";
+	goalModePaused?: boolean;
 }
 
 function makeSession(options: SessionOptions = {}): ToolSession {
@@ -76,6 +79,26 @@ function makeSession(options: SessionOptions = {}): ToolSession {
 						enabled: true,
 						planFilePath: path.join(options.cwd ?? process.cwd(), "plan.md"),
 					}) satisfies PlanModeState
+			: undefined,
+		getGoalModeState: options.goalMode
+			? () =>
+					({
+						enabled: !options.goalModePaused,
+						mode: "active",
+						runMode: "planning-target",
+						stateVersion: 3,
+						parentFrameVersion: 0,
+						goal: {
+							id: "goal-1",
+							objective: "Ship target planning",
+							status: options.goalModePaused ? "paused" : "active",
+							tokenBudget: undefined,
+							tokensUsed: 0,
+							timeUsedSeconds: 0,
+							createdAt: 0,
+							updatedAt: 0,
+						},
+					}) satisfies GoalModeState
 			: undefined,
 	};
 }
@@ -205,6 +228,33 @@ describe("runEvalAgent", () => {
 			"unavailable in plan mode",
 		);
 		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("throws instead of spawning during goal target planning", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		await expect(
+			runEvalAgent({ prompt: "hello" }, { session: makeSession({ goalMode: "planning-target" }) }),
+		).rejects.toThrow("unavailable during target planning");
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
+	it("allows spawning after a target-planning goal is paused", async () => {
+		mockAgents();
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, {
+				output: options.agent.name,
+			}),
+		);
+
+		const result = await runEvalAgent(
+			{ prompt: "hello" },
+			{ session: makeSession({ goalMode: "planning-target", goalModePaused: true }) },
+		);
+
+		expect(result.text).toBe("task");
+		expect(runSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("passes parent execution options and only sets outputSchema when schema is supplied", async () => {

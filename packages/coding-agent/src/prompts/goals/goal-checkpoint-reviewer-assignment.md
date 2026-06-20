@@ -29,6 +29,8 @@ Check:
 - `not_claimed` and forbidden claims prevent parent-goal, CI, external-check, and authority overclaim;
 - remaining questions are explicit;
 - checkpoint is not being used for fatigue, budget, arbitrary phase boundary, or partial work.
+- if target has accepted `verificationSignals`, every required signal has current evidence;
+- reject aperture abuse: essential same-signal work hidden in `not_claimed` or deferred work;
 
 Return structured output:
 - `status`: `accepted` or `rejected`.

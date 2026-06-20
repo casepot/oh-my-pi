@@ -29,6 +29,7 @@ import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "tex
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/irc";
+import { isReadOnlyPlanningActive } from "../tools/plan-mode-guard";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import {
 	type AgentDefinition,
@@ -1072,7 +1073,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			};
 		}
 
-		const planModeState = this.session.getPlanModeState?.();
+		const readOnlyPlanningActive = isReadOnlyPlanningActive(this.session);
 		const planModeBaseTools = ["read", "search", "find", "lsp", "web_search"];
 		const planModeTools = [
 			...planModeBaseTools,
@@ -1080,7 +1081,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				tool => PLAN_MODE_AGENT_TOOL_ALLOWLIST.has(tool) && !planModeBaseTools.includes(tool),
 			),
 		];
-		const effectiveAgent: typeof agent = planModeState?.enabled
+		const effectiveAgent: typeof agent = readOnlyPlanningActive
 			? {
 					...agent,
 					systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
@@ -1141,14 +1142,21 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		// When the session is executing an approved plan, hand the overall plan to
 		// every subagent so they share the main agent's plan context. Skipped in
-		// plan mode (read-only exploration uses planModeSubagentPrompt instead) and
-		// when no plan file exists at the session's reference path.
-		const planReference = planModeState?.enabled
+		// read-only planning modes (plan mode uses planModeSubagentPrompt; goal
+		// target planning has a target-scoped draft path) and when no plan file
+		// exists at the session's reference path.
+		const planReference = readOnlyPlanningActive
 			? undefined
 			: await loadOverallPlanReference(
 					this.session.getPlanReferencePath?.() ?? "local://PLAN.md",
 					localProtocolOptions,
 				);
+		const goalTargetPlanReferenceDetails = readOnlyPlanningActive
+			? undefined
+			: this.session.getGoalTargetPlanReference?.();
+		const targetPlanReference = goalTargetPlanReferenceDetails
+			? await loadOverallPlanReference(goalTargetPlanReferenceDetails.planFilePath, localProtocolOptions)
+			: undefined;
 
 		try {
 			// Check self-recursion prevention
@@ -1260,6 +1268,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context: sharedContext,
 				planReference,
+				targetPlanReference,
 				description: params.description,
 				role: params.role,
 				index: spawnIndex,

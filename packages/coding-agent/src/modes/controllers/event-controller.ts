@@ -5,6 +5,7 @@ import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
+import type { GoalToolDetails } from "../../goals/state";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import {
 	ReadToolGroupComponent,
@@ -838,6 +839,13 @@ export class EventController {
 			this.ctx.showWarning(
 				`Todo update failed${textContent ? `: ${textContent}` : ". Progress may be stale until todo succeeds."}`,
 			);
+		}
+		if (event.toolName === "goal" && !event.isError) {
+			const details = event.result.details as GoalToolDetails | undefined;
+			await this.ctx.handleGoalTargetPlanningStateAfterTool(details?.state);
+			if (details?.op === "submit_target_plan" && details.targetPlanApproval) {
+				await this.ctx.handleGoalTargetPlanApproved(details.targetPlanApproval);
+			}
 		}
 		if (event.toolName === "resolve" && !event.isError) {
 			const details = event.result.details as ResolveToolDetails | undefined;

@@ -12,19 +12,29 @@ import type {
 	GoalCheckpointReview,
 	GoalCheckpointStatus,
 	GoalCompletionVerifierStructuredOutput,
+	GoalConcernCheck,
 	GoalDeliverableDelta,
 	GoalDeliverableMapItem,
+	GoalExcludedWorkClassification,
 	GoalModeState,
 	GoalParentFrame,
 	GoalParentStateDelta,
 	GoalRef,
 	GoalRunMode,
 	GoalRuntimeEvent,
+	GoalScopeCalibration,
 	GoalTarget,
+	GoalTargetPlanBranchEvidence,
+	GoalTargetPlanExcludedWorkReview,
+	GoalTargetPlanFailureReason,
+	GoalTargetPlanRecord,
+	GoalTargetPlanReview,
 	GoalTokenUsage,
+	GoalVerificationAperture,
 	GoalVerificationAttempt,
 	GoalVerificationGap,
 	GoalVerificationRepairState,
+	GoalVerificationSignal,
 	GoalVerificationStatus,
 } from "./state";
 import {
@@ -33,6 +43,7 @@ import {
 	cloneGoalModeState,
 	cloneParentFrame,
 	cloneTarget,
+	cloneTargetPlan,
 	normalizeParentFrame,
 } from "./state";
 
@@ -112,6 +123,60 @@ export interface GoalCheckpointInput {
 	retrospectiveTarget?: GoalStartTargetInput;
 }
 
+export interface GoalSubmitTargetPlanInput {
+	targetId: string;
+	targetPlanId: string;
+	planFilePath: string;
+	revision: number;
+	verificationAperture: GoalVerificationAperture;
+	verificationSignals: GoalVerificationSignal[];
+	concernChecks: GoalConcernCheck[];
+	scopeCalibration: GoalScopeCalibration;
+	branchEvidence: GoalTargetPlanBranchEvidence[];
+	excludedWorkReview: GoalTargetPlanExcludedWorkReview[];
+	workflowReviewRounds: GoalTargetPlanWorkflowReviewRound[];
+	dryRun: GoalTargetPlanDryRun;
+}
+
+export interface GoalTargetPlanWorkflowReviewRound {
+	lens: string;
+	verdict: "accepted" | "revision-required";
+	summary: string;
+	blockers: string[];
+	revised: boolean;
+}
+
+export interface GoalTargetPlanDryRun {
+	status: "passed" | "failed";
+	checks: Array<{ id: string; passed: boolean; rationale: string }>;
+}
+
+export interface GoalTargetPlanExpectation extends GoalSideAgentExpectation {
+	targetPlanId: string;
+	targetSequence: number;
+}
+
+export interface GoalTargetPlanApprovalInput extends GoalSubmitTargetPlanInput {
+	reviews: GoalTargetPlanReview[];
+}
+
+export interface GoalTargetPlanRejectionInput {
+	targetPlanId: string;
+	revision?: number;
+	reviews: GoalTargetPlanReview[];
+	message: string;
+	stage: "draft" | "review" | "approval" | "stale";
+}
+
+export interface GoalTargetPlanFailureInput {
+	targetId: string;
+	targetPlanId: string;
+	revision: number;
+	reason: GoalTargetPlanFailureReason;
+	message: string;
+	blockers: string[];
+	suggestedQuestions: string[];
+}
 export interface GoalCheckpointResolutionInput {
 	checkpointId: string;
 	decision: GoalCheckpointResolutionDecision;
@@ -441,6 +506,7 @@ export interface GoalContextSurface {
 	deliverables?: GoalPromptObject;
 	parent_truth?: GoalPromptObject;
 	current_target?: GoalPromptObject;
+	target_plan?: GoalPromptObject;
 	checkpoint?: GoalPromptObject;
 	latest_resolution?: GoalPromptObject;
 	parent_completion?: GoalPromptObject;
@@ -615,6 +681,18 @@ function compactParentTruthForPrompt(
 	};
 }
 
+function compactTargetPlanForPrompt(plan: GoalTargetPlanRecord | undefined): GoalPromptObject | undefined {
+	if (!plan) return undefined;
+	return {
+		id: plan.id,
+		status: plan.status,
+		revision: plan.revision,
+		planFilePath: plan.planFilePath,
+		failure: plan.failure,
+		requiredAction: "draft_review_submit_target_plan",
+	};
+}
+
 function compactCheckpointForPrompt(checkpoint: GoalCheckpointPacket | undefined): GoalPromptObject | undefined {
 	if (!checkpoint) return undefined;
 	return {
@@ -739,6 +817,9 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 	};
 	if (runMode === "working-target") {
 		surface.current_target = compactTargetForPrompt(currentTarget);
+	} else if (runMode === "planning-target") {
+		surface.current_target = compactTargetForPrompt(currentTarget);
+		surface.target_plan = compactTargetPlanForPrompt(goal.currentTargetPlan);
 	} else if (runMode === "awaiting-checkpoint-resolution") {
 		surface.checkpoint = compactCheckpointForPrompt(checkpoint);
 	} else if (runMode === "awaiting-parent-completion") {
@@ -842,6 +923,13 @@ export function buildGoalContinuationPacket(
 
 function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
+		case "planning-target":
+			return [
+				"Draft/revise the current target plan",
+				"Use read-only workflowz/task discovery and review",
+				"Write only the fixed target plan file",
+				'Call goal({op:"submit_target_plan", ...}) or goal({op:"fail_target_plan", ...})',
+			];
 		case "awaiting-checkpoint-resolution":
 			return ['Call goal({op:"resolve_checkpoint", ...}) before ordinary tools'];
 		case "completed":
@@ -863,6 +951,14 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 
 function disallowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
+		case "planning-target":
+			return [
+				"Implement code changes",
+				"Run mutating commands",
+				"Checkpoint target work",
+				"Call complete",
+				"Shrink the target to pass review",
+			];
 		case "awaiting-checkpoint-resolution":
 			return ["Continue local implementation", "Mutate parent frame in prose", "Call complete before resolution"];
 		case "completed":
@@ -917,6 +1013,13 @@ function validateTokenBudget(tokenBudget: number | undefined): void {
 	if (tokenBudget !== undefined && (!Number.isInteger(tokenBudget) || tokenBudget <= 0)) {
 		throw new Error("goal token_budget must be a positive integer when provided");
 	}
+}
+
+const TARGET_PLAN_REJECTION_CAP = 3;
+
+export function sanitizeGoalPlanSlug(value: string): string {
+	const sanitized = value.replaceAll(/[^A-Za-z0-9_-]/g, "-").replaceAll(/^-+|-+$/g, "");
+	return sanitized || "goal";
 }
 
 function isAccountingStatus(goal: Goal): boolean {
@@ -1181,6 +1284,177 @@ export class GoalRuntime {
 		state.stateVersion += 1;
 		if (options?.parentFrameChanged) state.parentFrameVersion += 1;
 		state.goal.updatedAt = this.#now();
+	}
+
+	#upsertTargetPlan(state: GoalModeState, plan: GoalTargetPlanRecord): GoalTargetPlanRecord {
+		const cloned = cloneTargetPlan(plan);
+		if (!cloned) throw new Error("cannot store invalid target plan");
+		state.goal.currentTargetPlan = cloned;
+		state.goal.targetPlans = upsertById(state.goal.targetPlans ?? [], [cloned]);
+		return cloned;
+	}
+
+	#beginTargetPlanning(state: GoalModeState, target: GoalTarget): void {
+		const planId = `${target.id}-plan`;
+		const planFilePath = `local://goal-${sanitizeGoalPlanSlug(state.goal.id)}-target-${target.sequence}-plan.md`;
+		const existing =
+			state.goal.currentTargetPlan?.id === planId
+				? state.goal.currentTargetPlan
+				: state.goal.targetPlans?.find(plan => plan.id === planId);
+		const now = this.#now();
+		const plan: GoalTargetPlanRecord = {
+			id: planId,
+			goalId: state.goal.id,
+			targetId: target.id,
+			targetSequence: target.sequence,
+			planFilePath,
+			status: "drafting",
+			revision: existing?.revision ?? 1,
+			stateVersionAtStart: state.stateVersion,
+			parentFrameVersionAtStart: target.parentFrameVersion ?? state.parentFrameVersion,
+			createdAt: existing?.createdAt ?? now,
+			updatedAt: now,
+			reviews: existing?.reviews ?? [],
+		};
+		state.goal.currentTargetPlan = plan;
+		this.#upsertTargetPlan(state, plan);
+		state.runMode = "planning-target";
+	}
+
+	#validateTargetPlanSubmission(
+		state: GoalModeState | undefined,
+		input: GoalSubmitTargetPlanInput,
+	): GoalTargetPlanRecord {
+		if (!state?.enabled || state.goal.status !== "active")
+			throw new Error("cannot submit target plan because no active parent goal exists");
+		const target = state.goal.currentTarget;
+		if (target?.status !== "active") throw new Error("cannot submit target plan without an active target");
+		if (input.targetId !== target.id) throw new Error("target_id does not match the current target");
+		const plan = state.goal.currentTargetPlan;
+		if (!plan) throw new Error("no current target plan is pending");
+		if (plan.id !== input.targetPlanId) throw new Error("target_plan_id does not match the current target plan");
+		if (plan.targetId !== target.id) throw new Error("current target plan is stale");
+		if (plan.planFilePath !== input.planFilePath)
+			throw new Error("plan_file_path does not match the current target plan");
+		if (input.revision !== plan.revision) throw new Error("target plan revision is stale");
+		if (state.runMode !== "planning-target") {
+			throw new Error("target plan submission is only allowed while runMode is planning-target");
+		}
+		if (plan.status !== "drafting" && plan.status !== "revision-required") {
+			throw new Error("target plan submission requires a draft or revision-required plan");
+		}
+		const submitted = cloneTargetPlan({
+			...plan,
+			status: "reviewing",
+			updatedAt: this.#now(),
+			verificationAperture: input.verificationAperture,
+			verificationSignals: input.verificationSignals,
+			concernChecks: input.concernChecks,
+			scopeCalibration: input.scopeCalibration,
+			branchEvidence: input.branchEvidence,
+			excludedWorkReview: input.excludedWorkReview,
+		});
+		if (!submitted) throw new Error("target plan submission is invalid");
+		return submitted;
+	}
+
+	#mergeTargetPlanReviews(plan: GoalTargetPlanRecord, reviews: GoalTargetPlanReview[]): GoalTargetPlanReview[] {
+		return upsertById(plan.reviews, reviews);
+	}
+
+	#assertCurrentTargetPlanApprovedForTarget(state: GoalModeState, target: GoalTarget): void {
+		const plan = state.goal.currentTargetPlan;
+		if (
+			!target.planId ||
+			!plan ||
+			plan.id !== target.planId ||
+			plan.targetId !== target.id ||
+			plan.status !== "approved"
+		) {
+			throw new Error("cannot checkpoint before the current target plan is approved");
+		}
+	}
+
+	#assertTargetPlanApprovalGates(input: GoalTargetPlanApprovalInput): void {
+		const apertureReview = input.reviews.find(review => review.lens === "aperture");
+		const executionReview = input.reviews.find(review => review.lens === "execution-readiness");
+		if (!apertureReview || !executionReview) {
+			throw new Error("target plan requires aperture and execution-readiness reviews");
+		}
+		if (input.reviews.some(review => review.status !== "accepted")) {
+			throw new Error("target plan cannot be approved with rejected or failed reviews");
+		}
+		if (apertureReview.apertureClassification !== "right-sized") {
+			throw new Error("target plan aperture review must classify the target as right-sized");
+		}
+		if (!apertureReview.scores || Object.values(apertureReview.scores).some(score => score < 3)) {
+			throw new Error("target plan aperture review scores must all be at least 3");
+		}
+		if (
+			input.reviews.some(review =>
+				review.findings.some(finding => finding.severity === "blocking" || finding.severity === "important"),
+			)
+		) {
+			throw new Error("target plan cannot be approved with blocking or important findings");
+		}
+		const invalidExcludedClassifications: GoalExcludedWorkClassification[] = [
+			"essential-related-work",
+			"stale-or-unsupported",
+		];
+		if (input.excludedWorkReview.some(review => invalidExcludedClassifications.includes(review.classification))) {
+			throw new Error("target plan excluded work contains essential related or stale work");
+		}
+		const signalIds = new Set(input.verificationSignals.map(signal => signal.id));
+		if (signalIds.size !== input.verificationSignals.length) {
+			throw new Error("target plan verification signal ids must be unique");
+		}
+		const requiredSignalIds = new Set(
+			input.verificationSignals.filter(signal => signal.required).map(signal => signal.id),
+		);
+		const primarySignal = input.verificationSignals.find(
+			signal => signal.id === input.verificationAperture.primarySignalId,
+		);
+		if (!primarySignal) {
+			throw new Error("target plan primary signal must reference a verification signal");
+		}
+		if (!primarySignal.required) {
+			throw new Error("target plan primary signal must be required");
+		}
+		if (requiredSignalIds.size === 0) {
+			throw new Error("target plan requires at least one required verification signal");
+		}
+		const concernIds = new Set(input.concernChecks.map(check => check.id));
+		if (concernIds.size !== input.concernChecks.length) {
+			throw new Error("target plan concern check ids must be unique");
+		}
+		for (const signal of input.verificationSignals) {
+			for (const concernId of signal.concernIds) {
+				if (!concernIds.has(concernId))
+					throw new Error(`verification signal references unknown concern ${concernId}`);
+			}
+		}
+		for (const check of input.concernChecks) {
+			for (const signalId of check.coveredBySignalIds) {
+				if (!signalIds.has(signalId)) throw new Error(`concern check references unknown signal ${signalId}`);
+			}
+		}
+		for (const item of input.scopeCalibration.includedRelatedWork) {
+			for (const signalId of item.signalIds) {
+				if (!signalIds.has(signalId))
+					throw new Error(`included related work references unknown signal ${signalId}`);
+			}
+		}
+		for (const branch of input.branchEvidence) {
+			if (branch.required && branch.plannedSignalIds.length === 0) {
+				throw new Error("required branch evidence must reference at least one verification signal");
+			}
+			for (const signalId of branch.plannedSignalIds) {
+				if (!signalIds.has(signalId)) throw new Error(`branch evidence references unknown signal ${signalId}`);
+			}
+		}
+		if (input.dryRun.status !== "passed" || input.dryRun.checks.some(check => !check.passed)) {
+			throw new Error("target plan dry run must pass before approval");
+		}
 	}
 
 	#markActiveAccounting(goal: Goal): void {
@@ -1680,6 +1954,9 @@ export class GoalRuntime {
 			if (!state?.goal) throw new Error("cannot complete goal because no goal is active");
 			if (state.goal.status === "complete") throw new Error("goal is already complete");
 			if (state.goal.status === "dropped") throw new Error("cannot complete a dropped goal");
+			if (state.runMode === "planning-target") {
+				throw new Error("cannot complete parent goal while target planning is pending");
+			}
 			if (state.runMode === "awaiting-user-input") {
 				throw new Error("cannot complete parent goal while awaiting user input or external authority");
 			}
@@ -1749,7 +2026,7 @@ export class GoalRuntime {
 				state.goal.targets = upsertById(state.goal.targets ?? [], [{ ...activeTarget, status: "superseded" }]);
 			}
 			state.goal.currentTarget = target;
-			state.runMode = "working-target";
+			this.#beginTargetPlanning(state, target);
 			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
 			return state;
@@ -1760,6 +2037,9 @@ export class GoalRuntime {
 		const state = this.#getStateClone();
 		if (!state?.enabled || state.goal.status !== "active")
 			throw new Error("cannot checkpoint because no active parent goal exists");
+		if (state.runMode === "planning-target") {
+			throw new Error("cannot checkpoint while target planning is pending");
+		}
 		if (state.runMode === "awaiting-checkpoint-resolution" || state.goal.pendingCheckpointId) {
 			throw new Error("cannot checkpoint while another checkpoint is pending resolution");
 		}
@@ -1782,6 +2062,9 @@ export class GoalRuntime {
 			);
 		}
 		if (target.status !== "active") throw new Error("checkpoint requires an active target");
+		if (state.goal.currentTarget?.id === target.id) {
+			this.#assertCurrentTargetPlanApprovedForTarget(state, target);
+		}
 		const sequence = nextCheckpointSequence(state.goal);
 		const packet: GoalCheckpointPacket = {
 			id: `${state.goal.id}-checkpoint-${sequence}`,
@@ -1826,6 +2109,9 @@ export class GoalRuntime {
 				target = cloneTarget(packet.targetSnapshot);
 			if (!target || target.id !== packet.targetId || target.status !== "active") {
 				throw new Error("checkpoint target is stale");
+			}
+			if (state.goal.currentTarget?.id === target.id) {
+				this.#assertCurrentTargetPlanApprovedForTarget(state, target);
 			}
 			const closedTarget: GoalTarget = { ...target, status: "closed", closedAt: this.#now() };
 			const committedPacket: GoalCheckpointPacket = {
@@ -1923,7 +2209,8 @@ export class GoalRuntime {
 					"checkpoint-resolution",
 				);
 				state.goal.currentTarget = nextTarget;
-				runMode = "working-target";
+				this.#beginTargetPlanning(state, nextTarget);
+				runMode = state.runMode;
 			} else if (input.decision === "parent_completion_candidate") {
 				runMode = "awaiting-parent-completion";
 			}
@@ -2064,6 +2351,203 @@ export class GoalRuntime {
 			await this.#commitState(state, { persist: "goal" });
 			return state;
 		});
+	}
+
+	validateCurrentTargetPlanSubmission(input: GoalSubmitTargetPlanInput): GoalTargetPlanRecord {
+		return this.#validateTargetPlanSubmission(this.#getStateClone(), input);
+	}
+
+	async approveCurrentTargetPlan(input: GoalTargetPlanApprovalInput): Promise<GoalModeState> {
+		this.#assertTargetPlanApprovalGates(input);
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			const submittedPlan = this.#validateTargetPlanSubmission(state, input);
+			if (!state?.goal.currentTarget) throw new Error("cannot approve target plan without an active target");
+			const now = this.#now();
+			const approvedPlan = cloneTargetPlan({
+				...submittedPlan,
+				status: "approved",
+				updatedAt: now,
+				approvedAt: now,
+				failure: undefined,
+				reviews: this.#mergeTargetPlanReviews(submittedPlan, input.reviews),
+			});
+			if (!approvedPlan) throw new Error("target plan approval record is invalid");
+			const target = {
+				...state.goal.currentTarget,
+				planId: approvedPlan.id,
+				verificationAperture: approvedPlan.verificationAperture,
+				verificationSignals: approvedPlan.verificationSignals,
+				concernChecks: approvedPlan.concernChecks,
+				scopeCalibration: approvedPlan.scopeCalibration,
+			};
+			state.goal.currentTarget = target;
+			state.goal.targets = upsertById(state.goal.targets ?? [], [target]);
+			this.#upsertTargetPlan(state, approvedPlan);
+			state.runMode = "working-target";
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	async rejectCurrentTargetPlan(input: GoalTargetPlanRejectionInput): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot reject target plan because no active parent goal exists");
+			const currentPlan = state.goal.currentTargetPlan;
+			if (
+				input.stage === "stale" &&
+				currentPlan?.id === input.targetPlanId &&
+				input.revision !== undefined &&
+				currentPlan.revision !== input.revision
+			) {
+				return state;
+			}
+			if (input.stage === "stale" && (!currentPlan || currentPlan.id !== input.targetPlanId)) {
+				const historicalPlan = state.goal.targetPlans?.find(plan => plan.id === input.targetPlanId);
+				if (!historicalPlan) throw new Error("target_plan_id does not match a known target plan");
+				const stalePlan = cloneTargetPlan({
+					...historicalPlan,
+					status: "stale",
+					updatedAt: this.#now(),
+					reviews: this.#mergeTargetPlanReviews(historicalPlan, input.reviews),
+				});
+				if (!stalePlan) throw new Error("stale target plan record is invalid");
+				state.goal.targetPlans = upsertById(state.goal.targetPlans ?? [], [stalePlan]);
+				this.#bumpState(state);
+				await this.#commitState(state, { persist: "goal" });
+				return state;
+			}
+			if (!currentPlan || currentPlan.id !== input.targetPlanId) {
+				throw new Error("target_plan_id does not match the current target plan");
+			}
+			const now = this.#now();
+			const reviews = this.#mergeTargetPlanReviews(currentPlan, input.reviews);
+			let nextPlan: GoalTargetPlanRecord;
+			if (input.stage === "stale" && (input.revision === undefined || input.revision === currentPlan.revision)) {
+				nextPlan = {
+					...currentPlan,
+					status: "stale",
+					updatedAt: now,
+					reviews,
+				};
+				state.runMode = "awaiting-user-input";
+			} else if (currentPlan.revision >= TARGET_PLAN_REJECTION_CAP) {
+				const reviewerBlockers = reviews.flatMap(review =>
+					review.findings
+						.filter(finding => finding.severity === "blocking" || finding.severity === "important")
+						.map(finding => `${review.lens}:${finding.id}: ${finding.requiredRevision}`),
+				);
+				nextPlan = {
+					...currentPlan,
+					status: "failed",
+					updatedAt: now,
+					failedAt: now,
+					failure: {
+						stage: input.stage,
+						reason: "review-rejection-cap",
+						message: input.message,
+						blockers: reviewerBlockers.length ? reviewerBlockers : [input.message],
+						suggestedQuestions: [
+							"Clarify the right-sized product signal for this target.",
+							"Identify which related same-signal work must be included before execution.",
+						],
+						at: now,
+					},
+					reviews,
+				};
+				state.runMode = "awaiting-user-input";
+			} else {
+				nextPlan = {
+					...currentPlan,
+					status: "revision-required",
+					revision: currentPlan.revision + 1,
+					updatedAt: now,
+					reviews,
+				};
+				state.runMode = "planning-target";
+			}
+			const stored = this.#upsertTargetPlan(state, nextPlan);
+			if (state.goal.currentTarget) state.goal.currentTarget.planId = stored.id;
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	async failCurrentTargetPlan(input: GoalTargetPlanFailureInput): Promise<GoalModeState> {
+		return await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active")
+				throw new Error("cannot fail target plan because no active parent goal exists");
+			const target = state.goal.currentTarget;
+			if (target?.status !== "active") throw new Error("cannot fail target plan without an active target");
+			if (target.id !== input.targetId) throw new Error("target_id does not match the current target");
+			if (state.runMode !== "planning-target") {
+				throw new Error("target plan failure is only allowed while runMode is planning-target");
+			}
+			const plan = state.goal.currentTargetPlan;
+			if (!plan || plan.id !== input.targetPlanId) {
+				throw new Error("target_plan_id does not match the current target plan");
+			}
+			if (plan.targetId !== target.id) throw new Error("current target plan is stale");
+			if (input.revision !== plan.revision) throw new Error("target plan revision is stale");
+			if (plan.status !== "drafting" && plan.status !== "revision-required") {
+				throw new Error("target plan failure requires a draft or revision-required plan");
+			}
+			const now = this.#now();
+			this.#upsertTargetPlan(state, {
+				...plan,
+				status: "failed",
+				updatedAt: now,
+				failedAt: now,
+				failure: {
+					stage: "draft",
+					reason: input.reason,
+					message: input.message,
+					blockers: [...input.blockers],
+					suggestedQuestions: [...input.suggestedQuestions],
+					at: now,
+				},
+			});
+			target.planId = plan.id;
+			state.runMode = "awaiting-user-input";
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal" });
+			return state;
+		});
+	}
+
+	captureTargetPlanExpectation(): GoalTargetPlanExpectation | undefined {
+		const state = this.#host.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!state?.goal || !target || !plan) return undefined;
+		return {
+			goalId: state.goal.id,
+			stateVersion: state.stateVersion,
+			currentTargetId: target.id,
+			pendingCheckpointId: state.goal.pendingCheckpointId,
+			parentFrameVersion: state.parentFrameVersion,
+			targetPlanId: plan.id,
+			targetSequence: target.sequence,
+		};
+	}
+
+	canCommitTargetPlanResult(expected: GoalTargetPlanExpectation | undefined): boolean {
+		if (!expected) return false;
+		const latest = this.#host.getState();
+		if (!latest?.goal || latest.goal.id !== expected.goalId) return false;
+		if (latest.runMode !== "planning-target") return false;
+		if (latest.stateVersion !== expected.stateVersion) return false;
+		if (latest.parentFrameVersion !== expected.parentFrameVersion) return false;
+		if (latest.goal.currentTarget?.id !== expected.currentTargetId) return false;
+		if (latest.goal.currentTarget?.sequence !== expected.targetSequence) return false;
+		if (latest.goal.currentTargetPlan?.id !== expected.targetPlanId) return false;
+		if (latest.goal.pendingCheckpointId !== expected.pendingCheckpointId) return false;
+		return true;
 	}
 
 	captureSideAgentExpectation(options?: { includeParentFrame?: boolean }): GoalSideAgentExpectation | undefined {

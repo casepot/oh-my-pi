@@ -25,6 +25,17 @@ This session is executing an approved plan. Your assignment above is one part of
 </plan>
 {{/if}}
 
+{{#if targetPlanReference}}
+GOAL TARGET PLAN
+===================================
+
+This session is executing an approved goal target plan. Your assignment is within that target only. Use the target plan for closure standard, allowed scope, excluded work, and verification signals. Where the target plan and your assignment conflict, ask the main agent; NEVER widen the target silently. The target plan's full contents are below — NEVER re-read it from the path.
+
+<target_plan path="{{targetPlanReferencePath}}">
+{{targetPlanReference}}
+</target_plan>
+{{/if}}
+
 COOP
 ===================================
 

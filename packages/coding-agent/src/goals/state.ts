@@ -7,13 +7,51 @@ export type GoalVerificationGapSeverity = "blocking" | "important" | "polish";
 export type GoalModeLifecycle = "active" | "exiting";
 export type GoalRunMode =
 	| "working-target"
+	| "planning-target"
 	| "completed"
 	| "awaiting-checkpoint-resolution"
 	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
 	| "awaiting-user-input";
-export const GOAL_MODE_SCHEMA_VERSION = 2;
+export const GOAL_MODE_SCHEMA_VERSION = 3;
 export type GoalDeliverableStatus = "pending" | "partial" | "satisfied" | "blocked" | "stale";
+
+export type GoalTargetPlanStatus = "drafting" | "reviewing" | "revision-required" | "approved" | "failed" | "stale";
+export type GoalTargetPlanReviewStatus = "accepted" | "rejected" | "failed" | "stale";
+export type GoalTargetPlanReviewLens = "aperture" | "execution-readiness";
+export type GoalApertureClassification = "right-sized" | "too-narrow" | "too-broad" | "stale" | "unclear";
+export type GoalTargetPlanRevisionDecision =
+	| "keep"
+	| "merge-required"
+	| "split-required"
+	| "rescope-required"
+	| "refresh-intention"
+	| "needs-user-input";
+export type GoalTargetPlanFailureReason =
+	| "needs-user-input"
+	| "task-unavailable"
+	| "external-authority"
+	| "unable-to-find-right-sized-target"
+	| "review-rejection-cap";
+export type GoalVerificationLayer = "unit" | "integration" | "e2e" | "manual" | "product" | "release-gate";
+export type GoalSignalRole = "primary" | "supporting" | "guardrail";
+export type GoalSignalConfidence = "low" | "medium" | "high";
+export type GoalBlastRadius = "local" | "module" | "workflow" | "multi-subsystem" | "external-or-irreversible";
+export type GoalConcernKind =
+	| "behavior"
+	| "contract"
+	| "state-persistence"
+	| "error-handling"
+	| "security"
+	| "performance"
+	| "migration"
+	| "ux-manual"
+	| "docs-or-operator";
+export type GoalExcludedWorkClassification =
+	| "valid-boundary"
+	| "parent-non-claim"
+	| "essential-related-work"
+	| "stale-or-unsupported";
 
 export interface GoalVerificationEvidenceItem {
 	claim: string;
@@ -193,6 +231,131 @@ export interface GoalParentFrame {
 	lastParentDeltaId?: string;
 }
 
+export interface GoalVerificationSignal {
+	id: string;
+	role: GoalSignalRole;
+	layer: GoalVerificationLayer;
+	concernIds: string[];
+	claim: string;
+	observation: string;
+	method: string;
+	expectedOutcome: string;
+	required: boolean;
+	confidenceIfSatisfied: GoalSignalConfidence;
+	staleIf: string[];
+}
+
+export interface GoalConcernCheck {
+	id: string;
+	kind: GoalConcernKind;
+	whyIndependent: string;
+	coveredBySignalIds: string[];
+}
+
+export interface GoalVerificationAperture {
+	productIntention: string;
+	primarySignalId: string;
+	blastRadius: GoalBlastRadius;
+	confidenceTarget: GoalSignalConfidence;
+	layerRationale: string;
+	residualUncertainty: string[];
+	omittedLayers: Array<{ layer: GoalVerificationLayer; reason: string }>;
+}
+
+export interface GoalScopeCalibration {
+	rightSizingBasis: "product-signal" | "minimum-domain-unit" | "verifier-repair" | "external-authority-slice";
+	whyNotSmaller: string[];
+	whyNotLarger: string[];
+	includedRelatedWork: Array<{ item: string; reason: string; signalIds: string[] }>;
+	deferredRelatedWork: Array<{
+		item: string;
+		reason:
+			| "different-primary-signal"
+			| "different-authority"
+			| "different-blast-radius"
+			| "blocked-external"
+			| "non-goal";
+		followUpHint?: string;
+	}>;
+}
+
+export interface GoalTargetPlanExcludedWorkReview {
+	item: string;
+	classification: GoalExcludedWorkClassification;
+	rationale: string;
+}
+
+export interface GoalTargetPlanBranchEvidence {
+	branch: string;
+	required: boolean;
+	plannedSignalIds: string[];
+	rationale: string;
+}
+
+export interface GoalTargetPlanReviewScore {
+	productSignal: number;
+	relatedWorkBundling: number;
+	concernCohesion: number;
+	verificationAperture: number;
+	blastRadiusCoverage: number;
+	parentUncertaintyReduction: number;
+	antiGaming: number;
+}
+
+export interface GoalTargetPlanReviewFinding {
+	id: string;
+	severity: GoalVerificationGapSeverity;
+	problem: string;
+	requiredRevision: string;
+	supportingEvidence?: string;
+}
+
+export interface GoalTargetPlanReview {
+	id: string;
+	lens: GoalTargetPlanReviewLens;
+	status: GoalTargetPlanReviewStatus;
+	feedback: string;
+	apertureClassification?: GoalApertureClassification;
+	revisionDecision?: GoalTargetPlanRevisionDecision;
+	scores?: GoalTargetPlanReviewScore;
+	findings: GoalTargetPlanReviewFinding[];
+	reviewedAt: number;
+	sideAgentTokensUsed?: number;
+}
+
+export interface GoalTargetPlanFailure {
+	stage: "draft" | "review" | "approval" | "stale";
+	reason: GoalTargetPlanFailureReason;
+	message: string;
+	blockers: string[];
+	suggestedQuestions: string[];
+	at: number;
+}
+
+export interface GoalTargetPlanRecord {
+	id: string;
+	goalId: string;
+	targetId: string;
+	targetSequence: number;
+	planFilePath: string;
+	status: GoalTargetPlanStatus;
+	revision: number;
+	stateVersionAtStart: number;
+	parentFrameVersionAtStart: number;
+	createdAt: number;
+	updatedAt: number;
+	approvedAt?: number;
+	failedAt?: number;
+	failure?: GoalTargetPlanFailure;
+	verificationAperture?: GoalVerificationAperture;
+	verificationSignals?: GoalVerificationSignal[];
+	concernChecks?: GoalConcernCheck[];
+	scopeCalibration?: GoalScopeCalibration;
+	branchEvidence?: GoalTargetPlanBranchEvidence[];
+	excludedWorkReview?: GoalTargetPlanExcludedWorkReview[];
+	reviews: GoalTargetPlanReview[];
+}
+
 export interface GoalTarget {
 	id: string;
 	parentDeliverableIds?: string[];
@@ -215,6 +378,11 @@ export interface GoalTarget {
 	createdFromCheckpointId?: string;
 	createdFromVerificationAttemptId?: string;
 	linkedVerifierBlockerIds?: string[];
+	planId?: string;
+	verificationAperture?: GoalVerificationAperture;
+	verificationSignals?: GoalVerificationSignal[];
+	concernChecks?: GoalConcernCheck[];
+	scopeCalibration?: GoalScopeCalibration;
 }
 
 export interface GoalCheckpointEvidenceItem {
@@ -343,6 +511,8 @@ export interface Goal {
 	parentFrame?: GoalParentFrame;
 	currentTarget?: GoalTarget;
 	targets?: GoalTarget[];
+	currentTargetPlan?: GoalTargetPlanRecord;
+	targetPlans?: GoalTargetPlanRecord[];
 	checkpoints?: GoalCheckpointPacket[];
 	pendingCheckpointId?: string;
 	checkpointResolutions?: GoalCheckpointResolution[];
@@ -384,8 +554,26 @@ export interface GoalCompletionVerificationDetails {
 	continuationMessage?: string;
 }
 
+export interface GoalTargetPlanApprovedDetails {
+	goalId: string;
+	targetId: string;
+	targetPlanId: string;
+	planFilePath: string;
+	title: string;
+}
+
 export interface GoalToolDetails {
-	op: "create" | "get" | "complete" | "resume" | "drop" | "start_target" | "checkpoint" | "resolve_checkpoint";
+	op:
+		| "create"
+		| "get"
+		| "complete"
+		| "resume"
+		| "drop"
+		| "start_target"
+		| "checkpoint"
+		| "resolve_checkpoint"
+		| "submit_target_plan"
+		| "fail_target_plan";
 	goal?: Goal | null;
 	state?: GoalModeState | null;
 	remainingTokens?: number | null;
@@ -394,6 +582,9 @@ export interface GoalToolDetails {
 	checkpoint?: GoalCheckpointPacket;
 	checkpointReview?: GoalCheckpointReview;
 	checkpointResolution?: GoalCheckpointResolution;
+	targetPlan?: GoalTargetPlanRecord;
+	targetPlanReviews?: GoalTargetPlanReview[];
+	targetPlanApproval?: GoalTargetPlanApprovedDetails;
 }
 
 export type GoalRuntimeEvent =
@@ -510,6 +701,7 @@ function normalizeGoalStatus(value: unknown): GoalStatus {
 function normalizeRunMode(value: unknown): GoalRunMode {
 	switch (value) {
 		case "working-target":
+		case "planning-target":
 		case "completed":
 		case "awaiting-checkpoint-resolution":
 		case "awaiting-parent-completion":
@@ -827,6 +1019,111 @@ export function cloneContinuationFocus(focus: GoalContinuationFocus): GoalContin
 	};
 }
 
+function cloneVerificationAperture(
+	aperture: GoalVerificationAperture | undefined,
+): GoalVerificationAperture | undefined {
+	if (!aperture) return undefined;
+	return {
+		...aperture,
+		residualUncertainty: [...aperture.residualUncertainty],
+		omittedLayers: aperture.omittedLayers.map(layer => ({ ...layer })),
+	};
+}
+
+function cloneVerificationSignals(signals: GoalVerificationSignal[] | undefined): GoalVerificationSignal[] | undefined {
+	return signals?.map(signal => ({
+		...signal,
+		concernIds: [...signal.concernIds],
+		staleIf: [...signal.staleIf],
+	}));
+}
+
+function cloneConcernChecks(checks: GoalConcernCheck[] | undefined): GoalConcernCheck[] | undefined {
+	return checks?.map(check => ({
+		...check,
+		coveredBySignalIds: [...check.coveredBySignalIds],
+	}));
+}
+
+function cloneScopeCalibration(calibration: GoalScopeCalibration | undefined): GoalScopeCalibration | undefined {
+	if (!calibration) return undefined;
+	return {
+		...calibration,
+		whyNotSmaller: [...calibration.whyNotSmaller],
+		whyNotLarger: [...calibration.whyNotLarger],
+		includedRelatedWork: calibration.includedRelatedWork.map(item => ({
+			...item,
+			signalIds: [...item.signalIds],
+		})),
+		deferredRelatedWork: calibration.deferredRelatedWork.map(item => ({ ...item })),
+	};
+}
+
+function cloneTargetPlanBranchEvidence(
+	branches: GoalTargetPlanBranchEvidence[] | undefined,
+): GoalTargetPlanBranchEvidence[] | undefined {
+	return branches?.map(branch => ({
+		...branch,
+		plannedSignalIds: [...branch.plannedSignalIds],
+	}));
+}
+
+function cloneTargetPlanExcludedWorkReview(
+	reviews: GoalTargetPlanExcludedWorkReview[] | undefined,
+): GoalTargetPlanExcludedWorkReview[] | undefined {
+	return reviews?.map(review => ({ ...review }));
+}
+
+function cloneTargetPlanFailure(failure: GoalTargetPlanFailure | undefined): GoalTargetPlanFailure | undefined {
+	if (!failure) return undefined;
+	return {
+		...failure,
+		blockers: [...failure.blockers],
+		suggestedQuestions: [...failure.suggestedQuestions],
+	};
+}
+
+function cloneTargetPlanReview(review: GoalTargetPlanReview): GoalTargetPlanReview {
+	return {
+		...review,
+		scores: review.scores ? { ...review.scores } : undefined,
+		findings: review.findings.map(finding => ({ ...finding })),
+	};
+}
+
+export function cloneTargetPlan(plan: GoalTargetPlanRecord | undefined): GoalTargetPlanRecord | undefined {
+	if (!plan) return undefined;
+	return {
+		...plan,
+		failure: cloneTargetPlanFailure(plan.failure),
+		verificationAperture: cloneVerificationAperture(plan.verificationAperture),
+		verificationSignals: cloneVerificationSignals(plan.verificationSignals),
+		concernChecks: cloneConcernChecks(plan.concernChecks),
+		scopeCalibration: cloneScopeCalibration(plan.scopeCalibration),
+		branchEvidence: cloneTargetPlanBranchEvidence(plan.branchEvidence),
+		excludedWorkReview: cloneTargetPlanExcludedWorkReview(plan.excludedWorkReview),
+		reviews: plan.reviews.map(review => cloneTargetPlanReview(review)),
+	};
+}
+
+function upsertTargetPlan(
+	plans: GoalTargetPlanRecord[] | undefined,
+	plan: GoalTargetPlanRecord,
+): GoalTargetPlanRecord[] {
+	const next =
+		plans?.map(item => cloneTargetPlan(item)).filter((item): item is GoalTargetPlanRecord => item !== undefined) ??
+		[];
+	const cloned = cloneTargetPlan(plan);
+	if (!cloned) return next;
+	const existingIndex = next.findIndex(item => item.id === cloned.id);
+	if (existingIndex >= 0) {
+		next[existingIndex] = cloned;
+	} else {
+		next.push(cloned);
+	}
+	return next;
+}
+
 export function cloneTarget(target: GoalTarget | undefined): GoalTarget | undefined {
 	if (!target) return undefined;
 	return {
@@ -839,6 +1136,10 @@ export function cloneTarget(target: GoalTarget | undefined): GoalTarget | undefi
 		staleIf: [...target.staleIf],
 		linkedVerifierBlockerIds: target.linkedVerifierBlockerIds ? [...target.linkedVerifierBlockerIds] : undefined,
 		parentDeliverableIds: target.parentDeliverableIds ? [...target.parentDeliverableIds] : undefined,
+		verificationAperture: cloneVerificationAperture(target.verificationAperture),
+		verificationSignals: cloneVerificationSignals(target.verificationSignals),
+		concernChecks: cloneConcernChecks(target.concernChecks),
+		scopeCalibration: cloneScopeCalibration(target.scopeCalibration),
 	};
 }
 
@@ -938,6 +1239,10 @@ export function cloneGoal(goal: Goal): Goal {
 		targets: goal.targets
 			?.map(target => cloneTarget(target))
 			.filter((target): target is GoalTarget => target !== undefined),
+		currentTargetPlan: cloneTargetPlan(goal.currentTargetPlan),
+		targetPlans: goal.targetPlans
+			?.map(plan => cloneTargetPlan(plan))
+			.filter((plan): plan is GoalTargetPlanRecord => plan !== undefined),
 		checkpoints: goal.checkpoints
 			?.map(packet => cloneCheckpoint(packet))
 			.filter((packet): packet is GoalCheckpointPacket => packet !== undefined),
@@ -1008,6 +1313,9 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 	if (parentFrame) goal.parentFrame = parentFrame;
 	if (isRecord(value.currentTarget)) goal.currentTarget = value.currentTarget as unknown as GoalTarget;
 	if (Array.isArray(value.targets)) goal.targets = value.targets as GoalTarget[];
+	if (isRecord(value.currentTargetPlan))
+		goal.currentTargetPlan = value.currentTargetPlan as unknown as GoalTargetPlanRecord;
+	if (Array.isArray(value.targetPlans)) goal.targetPlans = value.targetPlans as GoalTargetPlanRecord[];
 	if (Array.isArray(value.checkpoints)) goal.checkpoints = value.checkpoints as GoalCheckpointPacket[];
 	goal.pendingCheckpointId = optionalString(value.pendingCheckpointId);
 	if (Array.isArray(value.checkpointResolutions)) {
@@ -1023,6 +1331,16 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 
 function hasResolutionForCheckpoint(goal: Goal, checkpointId: string): boolean {
 	return goal.checkpointResolutions?.some(resolution => resolution.checkpointId === checkpointId) ?? false;
+}
+
+function markTargetPlanStale(goal: Goal, plan: GoalTargetPlanRecord): void {
+	const stalePlan = cloneTargetPlan({
+		...plan,
+		status: "stale",
+		updatedAt: Math.max(plan.updatedAt, goal.updatedAt),
+	});
+	if (!stalePlan) return;
+	goal.targetPlans = upsertTargetPlan(goal.targetPlans, stalePlan);
 }
 
 export function normalizeGoalModeState(value: unknown): GoalModeState | undefined {
@@ -1043,6 +1361,21 @@ export function normalizeGoalModeState(value: unknown): GoalModeState | undefine
 		hasResolutionForCheckpoint(goal, goal.pendingCheckpointId)
 	) {
 		goal.pendingCheckpointId = undefined;
+	}
+	if (runMode === "planning-target") {
+		const currentTarget = goal.currentTarget;
+		const currentPlan = goal.currentTargetPlan;
+		if (!currentTarget) {
+			if (currentPlan) markTargetPlanStale(goal, currentPlan);
+			goal.currentTargetPlan = undefined;
+			runMode = "awaiting-user-input";
+		} else if (!currentPlan || currentPlan.targetId !== currentTarget.id) {
+			if (currentPlan) markTargetPlanStale(goal, currentPlan);
+			goal.currentTargetPlan = undefined;
+			runMode = "awaiting-user-input";
+		} else if (currentPlan.status === "approved") {
+			runMode = "working-target";
+		}
 	}
 	return {
 		enabled: value.enabled === true,
