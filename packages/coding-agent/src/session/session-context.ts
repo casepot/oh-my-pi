@@ -1,8 +1,14 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ProviderPayload, ServiceTier } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { parseGoalModeState, serializeGoalModeState } from "../goals/state";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages";
-import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import {
+	type CompactionEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type ModeChangeEntry,
+	type SessionEntry,
+} from "./session-entries";
 
 export interface SessionContext {
 	messages: AgentMessage[];
@@ -49,6 +55,28 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 		}
 	}
 	return null;
+}
+
+interface CompactGoalModeData {
+	goalId: string;
+	stateVersion: number;
+	snapshotEntryId: string;
+}
+
+function readCompactGoalModeData(data: Record<string, unknown> | undefined): CompactGoalModeData | undefined {
+	if (!data) return undefined;
+	if (
+		typeof data.goalId !== "string" ||
+		typeof data.stateVersion !== "number" ||
+		typeof data.snapshotEntryId !== "string"
+	) {
+		return undefined;
+	}
+	return {
+		goalId: data.goalId,
+		stateVersion: data.stateVersion,
+		snapshotEntryId: data.snapshotEntryId,
+	};
 }
 
 export interface BuildSessionContextOptions {
@@ -135,6 +163,12 @@ export function buildSessionContext(
 	let hasPersistedMCPToolSelection = false;
 	let mode = "none";
 	let modeData: Record<string, unknown> | undefined;
+	const goalSnapshots = new Map<
+		string,
+		{ entry: Extract<SessionEntry, { type: "goal_state_snapshot" }>; pathIndex: number }
+	>();
+	const goalUsageDeltas: Array<{ entry: Extract<SessionEntry, { type: "goal_usage_delta" }>; pathIndex: number }> = [];
+	let latestGoalModeMarker: { entry: ModeChangeEntry; pathIndex: number } | undefined;
 	// Track whether an explicit `model_change` with role="default" has been
 	// seen on this path. Once a user (or the agent itself) records an
 	// explicit default, later assistant-message inference must NOT overwrite
@@ -144,7 +178,8 @@ export function buildSessionContext(
 	// resume (issue #849).
 	let hasExplicitDefaultModel = false;
 
-	for (const entry of path) {
+	for (let pathIndex = 0; pathIndex < path.length; pathIndex++) {
+		const entry = path[pathIndex];
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel ?? "off";
 		} else if (entry.type === "model_change") {
@@ -177,9 +212,46 @@ export function buildSessionContext(
 		} else if (entry.type === "mcp_tool_selection") {
 			selectedMCPToolNames = [...entry.selectedToolNames];
 			hasPersistedMCPToolSelection = true;
+		} else if (entry.type === "goal_state_snapshot") {
+			goalSnapshots.set(entry.id, { entry, pathIndex });
+		} else if (entry.type === "goal_usage_delta") {
+			goalUsageDeltas.push({ entry, pathIndex });
 		} else if (entry.type === "mode_change") {
 			mode = entry.mode;
 			modeData = entry.data;
+			if (entry.mode === "goal" || entry.mode === "goal_paused") {
+				latestGoalModeMarker = { entry, pathIndex };
+			}
+		}
+	}
+
+	if ((mode === "goal" || mode === "goal_paused") && latestGoalModeMarker) {
+		const marker = latestGoalModeMarker.entry;
+		const compact = readCompactGoalModeData(marker.data);
+		const snapshot = compact ? goalSnapshots.get(compact.snapshotEntryId) : undefined;
+		const sourceData =
+			compact && snapshot && snapshot.pathIndex < latestGoalModeMarker.pathIndex
+				? snapshot.entry.state
+				: marker.data;
+		const restored = sourceData ? parseGoalModeState(sourceData, mode === "goal") : undefined;
+		if (restored && (!compact || restored.goal.id === compact.goalId)) {
+			if (mode === "goal") {
+				restored.enabled = true;
+			} else {
+				restored.enabled = false;
+				if (restored.goal.status === "active" || restored.goal.status === "budget-limited") {
+					restored.goal.status = "paused";
+				}
+			}
+			for (const delta of goalUsageDeltas) {
+				if (delta.pathIndex <= latestGoalModeMarker.pathIndex || delta.entry.goalId !== restored.goal.id) continue;
+				restored.goal.tokensUsed = delta.entry.tokensUsed;
+				restored.goal.timeUsedSeconds = delta.entry.timeUsedSeconds;
+				restored.goal.updatedAt = delta.entry.updatedAt;
+			}
+			modeData = serializeGoalModeState(restored);
+		} else {
+			modeData = undefined;
 		}
 	}
 

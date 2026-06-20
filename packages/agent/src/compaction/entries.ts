@@ -110,6 +110,27 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
+export interface GoalStateSnapshotEntry extends SessionEntryBase {
+	type: "goal_state_snapshot";
+	goalId: string;
+	stateVersion: number;
+	schemaVersion: number;
+	reason: "semantic" | "terminal" | "recovery" | "budget-limited";
+	state: Record<string, unknown>;
+}
+
+export interface GoalUsageDeltaEntry extends SessionEntryBase {
+	type: "goal_usage_delta";
+	goalId: string;
+	stateVersion: number;
+	tokenDelta: number;
+	wallSeconds: number;
+	tokensUsed: number;
+	timeUsedSeconds: number;
+	updatedAt: number;
+	budgetLimited?: boolean;
+}
+
 export interface CustomCompactionSessionEntries {}
 
 export type SessionEntry =
@@ -126,6 +147,8 @@ export type SessionEntry =
 	| MCPToolSelectionEntry
 	| SessionInitEntry
 	| ModeChangeEntry
+	| GoalStateSnapshotEntry
+	| GoalUsageDeltaEntry
 	| CustomCompactionSessionEntries[keyof CustomCompactionSessionEntries];
 
 export interface ReadonlySessionManager {

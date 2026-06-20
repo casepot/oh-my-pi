@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { FileEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { CURRENT_SESSION_VERSION, type FileEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { migrateSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 
 describe("migrateSessionEntries", () => {
@@ -26,7 +26,7 @@ describe("migrateSessionEntries", () => {
 		migrateSessionEntries(entries);
 
 		// Header should have version set to current
-		expect((entries[0] as any).version).toBe(3);
+		expect((entries[0] as any).version).toBe(CURRENT_SESSION_VERSION);
 
 		// Entries should have id/parentId
 		const msg1 = entries[1] as any;

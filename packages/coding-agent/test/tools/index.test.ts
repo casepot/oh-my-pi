@@ -365,6 +365,31 @@ describe("createTools", () => {
 		expect(String(planningError)).toContain("Goal target planning is active");
 	});
 
+	it("does not block ordinary tools for paused checkpoint-resolution goals", async () => {
+		const pausedState = {
+			...createActiveGoalState(),
+			enabled: false,
+			runMode: "awaiting-checkpoint-resolution" as const,
+			goal: {
+				...createActiveGoalState().goal,
+				status: "paused" as const,
+				pendingCheckpointId: "checkpoint-1",
+			},
+		};
+		const session = createTestSession({
+			cwd: import.meta.dir,
+			getGoalModeState: () => pausedState,
+			getGoalRuntime: () => undefined,
+		});
+		const tools = await createTools(session, ["bash", "goal"]);
+		const bashTool = tools.find(tool => tool.name === "bash");
+		if (!bashTool) throw new Error("expected bash tool");
+
+		const result = await bashTool.execute("bash-paused-goal", { command: "true" });
+
+		expect(JSON.stringify(result.content)).not.toContain("Goal checkpoint is pending resolution");
+	});
+
 	it("includes search_tool_bm25 when MCP tool discovery is enabled and executable", async () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({

@@ -1,8 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import type { Goal, GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { parseGoalModeState, serializeGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
+	GoalStateSnapshotEntry,
+	GoalUsageDeltaEntry,
+	ModeChangeEntry,
 	ModelChangeEntry,
 	SessionEntry,
 	SessionMessageEntry,
@@ -58,6 +63,76 @@ function thinkingLevel(id: string, parentId: string | null, level: string): Thin
 
 function modelChange(id: string, parentId: string | null, provider: string, modelId: string): ModelChangeEntry {
 	return { type: "model_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", model: `${provider}/${modelId}` };
+}
+
+function goalModeState(
+	id: string,
+	overrides: Partial<Omit<GoalModeState, "goal">> & { goal?: Partial<Goal> } = {},
+): GoalModeState {
+	return {
+		enabled: true,
+		mode: "active",
+		runMode: "working-target",
+		stateVersion: 1,
+		parentFrameVersion: 0,
+		...overrides,
+		goal: {
+			id,
+			objective: "Recover goal state",
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: 1,
+			updatedAt: 1,
+			...overrides.goal,
+		},
+	};
+}
+
+function goalSnapshot(id: string, parentId: string | null, state: GoalModeState): GoalStateSnapshotEntry {
+	const serialized = serializeGoalModeState(state);
+	return {
+		type: "goal_state_snapshot",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		goalId: state.goal.id,
+		stateVersion: state.stateVersion,
+		schemaVersion: serialized.schemaVersion,
+		reason: "semantic",
+		state: serialized,
+	};
+}
+
+function goalMode(
+	id: string,
+	parentId: string | null,
+	mode: "goal" | "goal_paused",
+	data: Record<string, unknown>,
+): ModeChangeEntry {
+	return { type: "mode_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", mode, data };
+}
+
+function goalUsageDelta(
+	id: string,
+	parentId: string | null,
+	state: GoalModeState,
+	tokenDelta: number,
+	wallSeconds: number,
+): GoalUsageDeltaEntry {
+	return {
+		type: "goal_usage_delta",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		goalId: state.goal.id,
+		stateVersion: state.stateVersion,
+		tokenDelta,
+		wallSeconds,
+		tokensUsed: state.goal.tokensUsed,
+		timeUsedSeconds: state.goal.timeUsedSeconds,
+		updatedAt: state.goal.updatedAt,
+	};
 }
 
 describe("buildSessionContext", () => {
@@ -322,6 +397,144 @@ describe("buildSessionContext", () => {
 			expect((ctxBranch.messages[2] as any).content).toBe("q2");
 			expect((ctxBranch.messages[3] as any).summary).toContain("Tried wrong approach");
 			expect((ctxBranch.messages[4] as any).content).toBe("better approach");
+		});
+	});
+
+	describe("with compact goal mode persistence", () => {
+		it("restores legacy full goal mode data", () => {
+			const state = goalModeState("legacy-goal", {
+				stateVersion: 3,
+				goal: { tokensUsed: 2, timeUsedSeconds: 4, updatedAt: 10 },
+			});
+			const entries: SessionEntry[] = [goalMode("mode-legacy", null, "goal", serializeGoalModeState(state))];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(ctx.mode).toBe("goal");
+			expect(ctx.modeData?.snapshotEntryId).toBeUndefined();
+			expect(restored?.goal.id).toBe("legacy-goal");
+			expect(restored?.goal.tokensUsed).toBe(2);
+			expect(restored?.goal.timeUsedSeconds).toBe(4);
+		});
+
+		it("restores compact goal mode markers through their referenced snapshot", () => {
+			const state = goalModeState("compact-goal", {
+				stateVersion: 5,
+				goal: { tokensUsed: 3, timeUsedSeconds: 6, updatedAt: 20 },
+			});
+			const entries: SessionEntry[] = [
+				goalSnapshot("snapshot-1", null, state),
+				goalMode("mode-compact", "snapshot-1", "goal", {
+					goalId: state.goal.id,
+					stateVersion: state.stateVersion,
+					snapshotEntryId: "snapshot-1",
+				}),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(ctx.mode).toBe("goal");
+			expect(ctx.modeData?.snapshotEntryId).toBeUndefined();
+			expect(ctx.modeData?.goal).toBeDefined();
+			expect(restored?.goal.id).toBe("compact-goal");
+			expect(restored?.stateVersion).toBe(5);
+			expect(restored?.goal.tokensUsed).toBe(3);
+		});
+
+		it("ignores newer orphan snapshots after the compact mode marker", () => {
+			const referenced = goalModeState("compact-goal", {
+				stateVersion: 2,
+				goal: { tokensUsed: 1, timeUsedSeconds: 1, updatedAt: 10 },
+			});
+			const orphan = goalModeState("compact-goal", {
+				stateVersion: 3,
+				goal: { tokensUsed: 99, timeUsedSeconds: 99, updatedAt: 99 },
+			});
+			const entries: SessionEntry[] = [
+				goalSnapshot("snapshot-1", null, referenced),
+				goalMode("mode-compact", "snapshot-1", "goal", {
+					goalId: referenced.goal.id,
+					stateVersion: referenced.stateVersion,
+					snapshotEntryId: "snapshot-1",
+				}),
+				goalSnapshot("snapshot-orphan", "mode-compact", orphan),
+			];
+
+			const ctx = buildSessionContext(entries, "snapshot-orphan");
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(restored?.stateVersion).toBe(2);
+			expect(restored?.goal.tokensUsed).toBe(1);
+			expect(restored?.goal.timeUsedSeconds).toBe(1);
+		});
+
+		it("uses the latest compact marker over earlier legacy goal data", () => {
+			const legacy = goalModeState("legacy-goal", { stateVersion: 1 });
+			const compact = goalModeState("compact-goal", { stateVersion: 8 });
+			const entries: SessionEntry[] = [
+				goalMode("mode-legacy", null, "goal", serializeGoalModeState(legacy)),
+				goalSnapshot("snapshot-compact", "mode-legacy", compact),
+				goalMode("mode-compact", "snapshot-compact", "goal", {
+					goalId: compact.goal.id,
+					stateVersion: compact.stateVersion,
+					snapshotEntryId: "snapshot-compact",
+				}),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(restored?.goal.id).toBe("compact-goal");
+			expect(restored?.stateVersion).toBe(8);
+		});
+
+		it("applies usage deltas that follow the latest compact marker", () => {
+			const snapshotState = goalModeState("usage-goal", {
+				stateVersion: 4,
+				goal: { tokensUsed: 2, timeUsedSeconds: 3, updatedAt: 10 },
+			});
+			const deltaState = goalModeState("usage-goal", {
+				stateVersion: 4,
+				goal: { tokensUsed: 9, timeUsedSeconds: 11, updatedAt: 30 },
+			});
+			const entries: SessionEntry[] = [
+				goalSnapshot("snapshot-usage", null, snapshotState),
+				goalMode("mode-usage", "snapshot-usage", "goal", {
+					goalId: snapshotState.goal.id,
+					stateVersion: snapshotState.stateVersion,
+					snapshotEntryId: "snapshot-usage",
+				}),
+				goalUsageDelta("usage-delta", "mode-usage", deltaState, 7, 8),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(restored?.stateVersion).toBe(4);
+			expect(restored?.goal.tokensUsed).toBe(9);
+			expect(restored?.goal.timeUsedSeconds).toBe(11);
+			expect(restored?.goal.updatedAt).toBe(30);
+		});
+
+		it("restores paused compact markers as disabled paused goals", () => {
+			const state = goalModeState("paused-goal", { stateVersion: 6 });
+			const entries: SessionEntry[] = [
+				goalSnapshot("snapshot-paused", null, state),
+				goalMode("mode-paused", "snapshot-paused", "goal_paused", {
+					goalId: state.goal.id,
+					stateVersion: state.stateVersion,
+					snapshotEntryId: "snapshot-paused",
+				}),
+			];
+
+			const ctx = buildSessionContext(entries);
+			const restored = parseGoalModeState(ctx.modeData);
+
+			expect(ctx.mode).toBe("goal_paused");
+			expect(restored?.enabled).toBe(false);
+			expect(restored?.goal.status).toBe("paused");
 		});
 	});
 

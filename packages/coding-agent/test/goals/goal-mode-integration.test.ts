@@ -728,6 +728,43 @@ describe("InteractiveMode goal mode integration", () => {
 		await waiter.inputPromise;
 	});
 
+	it("keeps goals active when target-plan approval aborts a streaming turn", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+		const approval = harness.session.getGoalTargetPlanReference();
+		if (!approval) throw new Error("expected target-plan approval details");
+
+		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
+		const abort = vi.spyOn(harness.session, "abort");
+		const prompt = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+		await harness.mode.handleGoalTargetPlanApproved(approval);
+
+		expect(abort).toHaveBeenCalledWith({ goalReason: "internal" });
+		expect(prompt).toHaveBeenCalledWith(expect.stringContaining("Goal target plan approved."), { synthetic: true });
+		const state = harness.session.getGoalModeState();
+		expect(state?.enabled).toBe(true);
+		expect(state?.runMode).toBe("working-target");
+		expect(() =>
+			harness.session.goalRuntime.buildCheckpointCandidate({
+				status: "closed_with_evidence",
+				summary: "Current smoke output exists.",
+				localClaims: ["Source-link install exercises smoke path"],
+				evidence: [
+					{ claim: "Source-link install exercises smoke path", evidence: "Observed smoke output", current: true },
+				],
+				notClaimed: ["Release is ready"],
+				remainingQuestions: [],
+			}),
+		).not.toThrow("no active parent");
+	});
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
 		harness.mode.planModeEnabled = true;
@@ -1210,11 +1247,33 @@ describe("InteractiveMode goal mode integration", () => {
 			harness.tempDir.path(),
 			path.join(harness.tempDir.path(), "recovery-sessions"),
 		);
-		recoveryManager.appendModeChange("goal", serializeGoalModeState(committedState));
+		const serializedState = serializeGoalModeState(committedState);
+		const snapshotEntryId = recoveryManager.appendGoalStateSnapshot({
+			goalId: committedState.goal.id,
+			stateVersion: committedState.stateVersion,
+			schemaVersion: serializedState.schemaVersion,
+			reason: "recovery",
+			state: serializedState,
+		});
+		recoveryManager.appendModeChange("goal", {
+			goalId: committedState.goal.id,
+			stateVersion: committedState.stateVersion,
+			snapshotEntryId,
+		});
 		await recoveryManager.ensureOnDisk();
 		const recoveryFile = recoveryManager.getSessionFile();
 		if (!recoveryFile) throw new Error("expected recovery session file");
 		const reopenedManager = await SessionManager.open(recoveryFile);
+		const recoveryModeEntry = reopenedManager
+			.getEntries()
+			.find(entry => entry.type === "mode_change" && entry.mode === "goal");
+		if (recoveryModeEntry?.type !== "mode_change") throw new Error("expected recovery goal mode marker");
+		expect(recoveryModeEntry.data).toMatchObject({
+			goalId: committedState.goal.id,
+			stateVersion: committedState.stateVersion,
+			snapshotEntryId,
+		});
+		expect(recoveryModeEntry.data?.goal).toBeUndefined();
 		expect(reopenedManager.getEntries().some(entry => entry.type === "custom_message")).toBe(false);
 		const reopenedContext = reopenedManager.buildSessionContext();
 		const restoredState = parseGoalModeState(reopenedContext.modeData, reopenedContext.mode === "goal");
@@ -1576,10 +1635,31 @@ describe("InteractiveMode goal mode integration", () => {
 		const persistedEntries = (await Bun.file(sessionFile).text())
 			.trim()
 			.split("\n")
-			.map(line => JSON.parse(line) as { type?: string; mode?: string; data?: unknown; customType?: string });
+			.map(
+				line =>
+					JSON.parse(line) as {
+						id?: string;
+						type?: string;
+						mode?: string;
+						data?: Record<string, unknown>;
+						customType?: string;
+					},
+			);
 		const modeEntry = persistedEntries.find(entry => entry.type === "mode_change" && entry.mode === "goal");
-		if (!modeEntry) throw new Error("expected carried goal mode change");
-		const restored = parseGoalModeState(modeEntry.data);
+		if (!modeEntry?.data) throw new Error("expected carried goal mode change");
+		const snapshotEntryId = modeEntry.data.snapshotEntryId;
+		expect(modeEntry.data).toMatchObject({
+			goalId: harness.session.getGoalModeState()?.goal.id,
+			stateVersion: harness.session.getGoalModeState()?.stateVersion,
+		});
+		expect(modeEntry.data.goal).toBeUndefined();
+		expect(typeof snapshotEntryId).toBe("string");
+		expect(persistedEntries.some(entry => entry.type === "goal_state_snapshot" && entry.id === snapshotEntryId)).toBe(
+			true,
+		);
+		const persistedManager = await SessionManager.open(sessionFile);
+		const restoredContext = persistedManager.buildSessionContext();
+		const restored = parseGoalModeState(restoredContext.modeData, restoredContext.mode === "goal");
 		if (!restored) throw new Error("expected restorable goal mode state");
 		expect(restored.runMode).toBe("awaiting-checkpoint-resolution");
 		expect(restored.goal.pendingCheckpointId).toBe(checkpointId);

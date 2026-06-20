@@ -2057,7 +2057,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			contextPreserved: true,
 		});
 		if (this.session.isStreaming) {
-			await this.session.abort();
+			await this.session.abort({ goalReason: "internal" });
 		}
 		this.session.markGoalTargetPlanReferenceSent();
 		try {
@@ -2592,7 +2592,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// in-flight turn first — abort() bumps the prompt generation and cancels pending
 		// continuations, so nothing re-streams in the synchronous gap before prompt().
 		if (this.session.isStreaming) {
-			await this.session.abort();
+			await this.session.abort({ goalReason: "internal" });
 		}
 		await this.session.prompt(planModePrompt, { synthetic: true });
 	}
@@ -3441,7 +3441,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// plan) while the popup is showing. The event listener fires asynchronously
 		// (agent's #emit is fire-and-forget), so without this the model sees
 		// "Plan ready for approval." and immediately re-invokes `resolve` in a loop.
-		await this.session.abort();
+		await this.session.abort({ goalReason: "internal" });
 
 		const planFilePath = details.planFilePath || this.planModePlanFilePath || (await this.#getPlanFilePath());
 		this.planModePlanFilePath = planFilePath;

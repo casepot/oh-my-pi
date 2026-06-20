@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTier, TextContent } from "@oh-my-pi/pi-ai";
 
-export const CURRENT_SESSION_VERSION = 3;
+export const CURRENT_SESSION_VERSION = 4;
 
 export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 
@@ -135,6 +135,27 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
+export interface GoalStateSnapshotEntry extends SessionEntryBase {
+	type: "goal_state_snapshot";
+	goalId: string;
+	stateVersion: number;
+	schemaVersion: number;
+	reason: "semantic" | "terminal" | "recovery" | "budget-limited";
+	state: Record<string, unknown>;
+}
+
+export interface GoalUsageDeltaEntry extends SessionEntryBase {
+	type: "goal_usage_delta";
+	goalId: string;
+	stateVersion: number;
+	tokenDelta: number;
+	wallSeconds: number;
+	tokensUsed: number;
+	timeUsedSeconds: number;
+	updatedAt: number;
+	budgetLimited?: boolean;
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -173,7 +194,9 @@ export type SessionEntry =
 	| TtsrInjectionEntry
 	| MCPToolSelectionEntry
 	| SessionInitEntry
-	| ModeChangeEntry;
+	| ModeChangeEntry
+	| GoalStateSnapshotEntry
+	| GoalUsageDeltaEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;

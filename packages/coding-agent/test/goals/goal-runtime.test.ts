@@ -2,10 +2,12 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildGoalContextSurface,
 	escapeXmlText,
+	type GoalPersistenceReason,
 	GoalRuntime,
 	type GoalRuntimeHost,
 	type GoalStartTargetInput,
 	type GoalTargetPlanApprovalInput,
+	type GoalUsagePersistenceEvent,
 	goalTokenDelta,
 	renderGoalPrompt,
 	renderGoalPromptSurface,
@@ -119,7 +121,12 @@ function createHarness(initial: { state?: TestGoalModeStateInput; usage?: GoalTo
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
 	const events: GoalRuntimeEvent[] = [];
-	const persists: Array<{ mode: "goal" | "goal_paused" | "none"; state?: GoalModeState }> = [];
+	const persists: Array<{
+		mode: "goal" | "goal_paused" | "none";
+		state?: GoalModeState;
+		reason?: GoalPersistenceReason;
+	}> = [];
+	const usagePersists: GoalUsagePersistenceEvent[] = [];
 	const hiddenMessages: Array<{ customType: string; content: string; deliverAs?: "steer" | "followUp" | "nextTurn" }> =
 		[];
 	const host: GoalRuntimeHost = {
@@ -131,8 +138,11 @@ function createHarness(initial: { state?: TestGoalModeStateInput; usage?: GoalTo
 		emit: async event => {
 			events.push(cloneEvent(event));
 		},
-		persist: (mode, persistedState) => {
-			persists.push({ mode, state: cloneState(persistedState) });
+		persist: (mode, persistedState, reason) => {
+			persists.push({ mode, state: cloneState(persistedState), reason });
+		},
+		persistUsage: event => {
+			usagePersists.push({ ...event });
 		},
 		sendHiddenMessage: async message => {
 			hiddenMessages.push({ ...message });
@@ -150,6 +160,7 @@ function createHarness(initial: { state?: TestGoalModeStateInput; usage?: GoalTo
 		},
 		events,
 		persists,
+		usagePersists,
 		hiddenMessages,
 	};
 }
@@ -307,20 +318,36 @@ describe("goal runtime", () => {
 		await harness.runtime.flushUsage("suppressed");
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(2);
 		expect(harness.runtime.snapshot.wallClock.lastAccountedAt).toBe(2_000);
-		expect(harness.persists).toHaveLength(1);
+		expect(harness.persists).toHaveLength(0);
+		expect(harness.usagePersists).toHaveLength(1);
+		expect(harness.usagePersists[0]).toMatchObject({
+			goalId: "goal-1",
+			tokenDelta: 1,
+			wallSeconds: 2,
+			tokensUsed: 1,
+			timeUsedSeconds: 2,
+		});
 
 		harness.advance(400);
 		await harness.runtime.flushUsage("suppressed");
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(2);
 		expect(harness.runtime.snapshot.wallClock.lastAccountedAt).toBe(2_000);
-		expect(harness.persists).toHaveLength(1);
+		expect(harness.persists).toHaveLength(0);
+		expect(harness.usagePersists).toHaveLength(1);
 
 		harness.advance(700);
 		harness.setUsage(createUsage({ input: 2 }));
 		await harness.runtime.flushUsage("suppressed");
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(3);
 		expect(harness.runtime.snapshot.wallClock.lastAccountedAt).toBe(3_000);
-		expect(harness.persists).toHaveLength(2);
+		expect(harness.persists).toHaveLength(0);
+		expect(harness.usagePersists).toHaveLength(2);
+		expect(harness.usagePersists[1]).toMatchObject({
+			tokenDelta: 1,
+			wallSeconds: 1,
+			tokensUsed: 2,
+			timeUsedSeconds: 3,
+		});
 	});
 
 	it("does not persist snapshots on wall-clock-only flushes", async () => {
@@ -328,6 +355,7 @@ describe("goal runtime", () => {
 			state: { enabled: true, mode: "active", goal: createGoal() },
 		});
 
+		expect(harness.usagePersists).toHaveLength(0);
 		harness.runtime.onTurnStart("turn-1", createUsage());
 		harness.advance(2_500);
 		// Flush wall-clock time without any token usage changes.
@@ -336,6 +364,7 @@ describe("goal runtime", () => {
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(2);
 		// But it should not write/persist to the session log.
 		expect(harness.persists).toHaveLength(0);
+		expect(harness.usagePersists).toHaveLength(0);
 	});
 
 	it("steers only once until a budget mutation resets the cycle", async () => {
@@ -351,6 +380,8 @@ describe("goal runtime", () => {
 		harness.setUsage({ input: 2 });
 		await harness.runtime.flushUsage("allowed");
 		expect(harness.getState()?.goal.status).toBe("budget-limited");
+		expect(harness.persists.at(-1)).toMatchObject({ mode: "goal", reason: "budget-limited" });
+		expect(harness.usagePersists).toHaveLength(0);
 		expect(harness.hiddenMessages).toHaveLength(1);
 		expect(harness.hiddenMessages[0]).toMatchObject({
 			customType: "goal-budget-limit",
@@ -370,6 +401,7 @@ describe("goal runtime", () => {
 		harness.setUsage({ input: 15 });
 		await harness.runtime.flushUsage("allowed");
 		expect(harness.getState()?.goal.status).toBe("budget-limited");
+		expect(harness.persists.at(-1)).toMatchObject({ mode: "goal", reason: "budget-limited" });
 		expect(harness.hiddenMessages).toHaveLength(2);
 	});
 
@@ -389,6 +421,24 @@ describe("goal runtime", () => {
 		expect(state?.goal.tokensUsed).toBe(4);
 		expect(state?.goal.timeUsedSeconds).toBe(1);
 		expect(harness.persists.at(-1)?.mode).toBe("goal_paused");
+	});
+
+	it("does not pause active goals when an internal abort stops the task", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.advance(1_000);
+		harness.setUsage({ output: 4 });
+		await harness.runtime.onTaskAborted({ reason: "internal" });
+
+		const state = harness.getState();
+		expect(state?.enabled).toBe(true);
+		expect(state?.goal.status).toBe("active");
+		expect(state?.goal.tokensUsed).toBe(4);
+		expect(state?.goal.timeUsedSeconds).toBe(1);
+		expect(harness.persists.at(-1)?.mode).not.toBe("goal_paused");
 	});
 
 	it("auto-pauses active goals when a thread resumes", async () => {
@@ -1038,12 +1088,34 @@ describe("goal runtime", () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Track accounting" });
 		const before = harness.getState()?.stateVersion;
+		const persistCount = harness.persists.length;
 
 		await harness.runtime.recordExternalUsage(createUsage({ input: 2, output: 1, cacheWrite: 1 }), 1_000);
 
 		expect(harness.getState()?.stateVersion).toBe(before);
 		expect(harness.getState()?.goal.tokensUsed).toBe(4);
 		expect(harness.getState()?.goal.timeUsedSeconds).toBe(1);
+		expect(harness.persists).toHaveLength(persistCount);
+		expect(harness.usagePersists).toHaveLength(1);
+		expect(harness.usagePersists[0]).toMatchObject({
+			tokenDelta: 4,
+			wallSeconds: 1,
+			tokensUsed: 4,
+			timeUsedSeconds: 1,
+		});
+	});
+
+	it("persists a budget-limited snapshot for external usage budget flips", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Track accounting", tokenBudget: 3 });
+		const persistCount = harness.persists.length;
+
+		await harness.runtime.recordExternalUsage(createUsage({ input: 3 }), 1_000);
+
+		expect(harness.getState()?.goal.status).toBe("budget-limited");
+		expect(harness.persists).toHaveLength(persistCount + 1);
+		expect(harness.persists.at(-1)).toMatchObject({ mode: "goal", reason: "budget-limited" });
+		expect(harness.usagePersists).toHaveLength(0);
 	});
 
 	it("starts targets in planning mode and blocks execution before plan approval", async () => {
@@ -1075,6 +1147,49 @@ describe("goal runtime", () => {
 			"Draft/revise the current target plan",
 		);
 		expect(renderGoalPrompt("continuation", planning.goal, planning)).toContain("submit_target_plan");
+	});
+
+	it("explains how to recover before checkpointing a paused goal", () => {
+		const harness = createHarness({
+			state: { enabled: false, mode: "active", goal: createGoal({ status: "paused" }) },
+		});
+
+		expect(() =>
+			harness.runtime.buildCheckpointCandidate({
+				status: "closed_with_evidence",
+				summary: "Smoke evidence recorded.",
+				localClaims: ["Smoke exercises worker startup"],
+				evidence: [{ claim: "Smoke exercises worker startup", evidence: "Observed smoke output", current: true }],
+				notClaimed: ["Parent goal complete"],
+				remainingQuestions: [],
+			}),
+		).toThrow('cannot checkpoint while the goal is paused; call goal({op:"resume"}) before checkpointing');
+	});
+
+	it("reports target-plan identity mismatches with expected and actual values", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+		const approval = buildTargetPlanApprovalInput(planning);
+
+		expect(() =>
+			harness.runtime.validateCurrentTargetPlanSubmission({ ...approval, targetId: "wrong-target" }),
+		).toThrow(`target_id must equal currentTarget.id (${approval.targetId}); got wrong-target`);
+		expect(() =>
+			harness.runtime.validateCurrentTargetPlanSubmission({ ...approval, targetPlanId: "wrong-plan" }),
+		).toThrow(`target_plan_id must equal currentTargetPlan.id (${approval.targetPlanId}); got wrong-plan`);
+		expect(() =>
+			harness.runtime.validateCurrentTargetPlanSubmission({ ...approval, planFilePath: "local://wrong.md" }),
+		).toThrow(
+			`plan_file_path must equal currentTargetPlan.planFilePath (${approval.planFilePath}); got local://wrong.md`,
+		);
+		expect(() => harness.runtime.validateCurrentTargetPlanSubmission({ ...approval, revision: 99 })).toThrow(
+			`revision must equal currentTargetPlan.revision (${approval.revision}); got 99`,
+		);
 	});
 
 	it("approves right-sized target plans and carries verification signals onto the target", async () => {

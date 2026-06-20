@@ -13,12 +13,15 @@ import { ToolError } from "../../tools/tool-errors";
 import { renderStatusLine, truncateToWidth } from "../../tui";
 import {
 	completionBudgetReport,
+	currentTargetPlanSubmitIdentity,
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
 	type GoalStartTargetInput,
 	type GoalSubmitTargetPlanInput,
 	type GoalTargetPlanFailureInput,
 	remainingTokens,
+	renderTargetPlanSubmitSkeleton,
+	validateTargetPlanSubmissionGraph,
 } from "../runtime";
 import type {
 	Goal,
@@ -176,11 +179,11 @@ const evidenceSchema = z
 	})
 	.strict();
 
-const verificationLayerSchema = z.enum(["unit", "integration", "e2e", "manual", "product", "release-gate"]);
-const signalRoleSchema = z.enum(["primary", "supporting", "guardrail"]);
-const signalConfidenceSchema = z.enum(["low", "medium", "high"]);
-const blastRadiusSchema = z.enum(["local", "module", "workflow", "multi-subsystem", "external-or-irreversible"]);
-const concernKindSchema = z.enum([
+const VERIFICATION_LAYER_VALUES = ["unit", "integration", "e2e", "manual", "product", "release-gate"] as const;
+const SIGNAL_ROLE_VALUES = ["primary", "supporting", "guardrail"] as const;
+const SIGNAL_CONFIDENCE_VALUES = ["low", "medium", "high"] as const;
+const BLAST_RADIUS_VALUES = ["local", "module", "workflow", "multi-subsystem", "external-or-irreversible"] as const;
+const CONCERN_KIND_VALUES = [
 	"behavior",
 	"contract",
 	"state-persistence",
@@ -190,13 +193,20 @@ const concernKindSchema = z.enum([
 	"migration",
 	"ux-manual",
 	"docs-or-operator",
-]);
-const excludedWorkClassificationSchema = z.enum([
+] as const;
+const EXCLUDED_WORK_CLASSIFICATION_VALUES = [
 	"valid-boundary",
 	"parent-non-claim",
 	"essential-related-work",
 	"stale-or-unsupported",
-]);
+] as const;
+
+const verificationLayerSchema = z.enum(VERIFICATION_LAYER_VALUES);
+const signalRoleSchema = z.enum(SIGNAL_ROLE_VALUES);
+const signalConfidenceSchema = z.enum(SIGNAL_CONFIDENCE_VALUES);
+const blastRadiusSchema = z.enum(BLAST_RADIUS_VALUES);
+const concernKindSchema = z.enum(CONCERN_KIND_VALUES);
+const excludedWorkClassificationSchema = z.enum(EXCLUDED_WORK_CLASSIFICATION_VALUES);
 
 const verificationApertureSchema = z
 	.object({
@@ -904,10 +914,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			if (!goalSession.requestGoalTargetPlanApproval) {
 				throw new ToolError("submit_target_plan requires an AgentSession target-plan review handler");
 			}
-			response = await goalSession.requestGoalTargetPlanApproval(
-				mapSubmitTargetPlanInput(submitTargetPlanSchema.parse(params)),
-				signal,
-			);
+			const input = mapSubmitTargetPlanInput(submitTargetPlanSchema.parse(params));
+			validateTargetPlanSubmissionGraph(input);
+			response = await goalSession.requestGoalTargetPlanApproval(input, signal);
 		} else if (params.op === "fail_target_plan") {
 			if (!goalSession.requestGoalTargetPlanFailure) {
 				throw new ToolError("fail_target_plan requires an AgentSession target-plan failure handler");
@@ -957,6 +966,7 @@ function visibleGoalObjective(goal: Goal, op: GoalToolInput["op"]): string {
 
 function shouldRenderPendingCheckpoint(goal: Goal, runMode: GoalModeState["runMode"] | undefined): boolean {
 	if (!goal.pendingCheckpointId) return false;
+	if (goal.status === "paused") return false;
 	if (runMode === "awaiting-checkpoint-resolution") return true;
 	return !goal.checkpointResolutions?.some(resolution => resolution.checkpointId === goal.pendingCheckpointId);
 }
@@ -991,6 +1001,17 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
 	if (goal.currentTargetPlan) {
 		text += `\nTarget plan: ${goal.currentTargetPlan.status} ${goal.currentTargetPlan.planFilePath}`;
+		const identity =
+			response.state?.runMode === "planning-target" ? currentTargetPlanSubmitIdentity(response.state) : undefined;
+		if (identity) {
+			text += `\nTarget-plan submit identity:`;
+			text += `\n  target_id: ${identity.targetId}`;
+			text += `\n  target_plan_id: ${identity.targetPlanId}`;
+			text += `\n  plan_file_path: ${identity.planFilePath}`;
+			text += `\n  revision: ${identity.revision}`;
+			text += `\nNext action: write the plan at plan_file_path, then call goal with this submit_target_plan skeleton:\n${renderTargetPlanSubmitSkeleton(identity, { includeOp: true })}`;
+			text += `\nAllowed verification layer values for verification_signals[].layer and verification_aperture.omitted_layers[].layer: ${VERIFICATION_LAYER_VALUES.join(", ")}.`;
+		}
 	}
 	if (shouldRenderPendingCheckpoint(goal, response.state?.runMode)) {
 		text += `\nPending checkpoint: ${goal.pendingCheckpointId}`;

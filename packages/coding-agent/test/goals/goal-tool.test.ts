@@ -449,6 +449,11 @@ describe("GoalTool", () => {
 				],
 			}),
 		});
+		const pausedState = createGoalModeState({
+			enabled: false,
+			runMode: "awaiting-checkpoint-resolution",
+			goal: createGoal({ status: "paused", pendingCheckpointId: "checkpoint-1" }),
+		});
 		let currentState = unresolvedState;
 		const tool = new GoalTool(
 			createToolSession({
@@ -480,6 +485,17 @@ describe("GoalTool", () => {
 		);
 		expect(resolvedRendered).not.toContain("checkpoint pending");
 		expect(resolvedRendered).not.toContain("ordinary tools blocked until resolve_checkpoint");
+
+		currentState = pausedState;
+		const paused = await tool.execute("get-paused", { op: "get" });
+		const pausedContent = paused.content[0];
+		if (pausedContent?.type !== "text") throw new Error("expected text result");
+		expect(pausedContent.text).not.toContain("Pending checkpoint");
+		const pausedRendered = Bun.stripANSI(
+			goalToolRenderer.renderResult(paused, renderOptions, uiTheme, { op: "get" }).render(120).join("\n"),
+		);
+		expect(pausedRendered).not.toContain("checkpoint pending");
+		expect(pausedRendered).not.toContain("ordinary tools blocked until resolve_checkpoint");
 	});
 
 	it("uses op-specific schemas for target, checkpoint, and resolution operations", () => {
@@ -641,6 +657,36 @@ describe("GoalTool", () => {
 		).toBe(false);
 	});
 
+	it("renders copyable target-plan submit identity while planning", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove smoke",
+			desiredFutureClaim: "Smoke path is exercised.",
+			closureStandard: "Current smoke output exists.",
+		});
+		const state = harness.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const result = await tool.execute("get-planning", { op: "get" });
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain(`target_id: ${target.id}`);
+		expect(text).toContain(`target_plan_id: ${plan.id}`);
+		expect(text).toContain(`plan_file_path: ${plan.planFilePath}`);
+		expect(text).toContain(`revision: ${plan.revision}`);
+		expect(text).toContain('"op": "submit_target_plan"');
+		expect(text).toContain('"verification_aperture"');
+		expect(text).toContain("unit, integration, e2e, manual, product, release-gate");
+	});
+
 	it("routes target-plan submit and failure operations to session handlers", async () => {
 		let submittedInput: GoalSubmitTargetPlanInput | undefined;
 		let failedInput: GoalTargetPlanFailureInput | undefined;
@@ -695,6 +741,87 @@ describe("GoalTool", () => {
 		});
 		expect(failedInput?.targetPlanId).toBe("target-plan-1");
 		expect(failedInput?.reason).toBe("needs-user-input");
+	});
+
+	it("rejects invalid target-plan graphs before requesting review", async () => {
+		const base = {
+			targetId: "target-1",
+			targetPlanId: "target-plan-1",
+			planFilePath: "local://goal-goal-1-target-1-plan.md",
+			revision: 1,
+		};
+		const cases: Array<{
+			name: string;
+			message: string;
+			mutate: (params: Extract<GoalToolInput, { op: "submit_target_plan" }>) => void;
+		}> = [
+			{
+				name: "unknown concern",
+				message: "verification signal references unknown concern missing-concern",
+				mutate: params => {
+					params.verification_signals[0]!.concern_ids = ["missing-concern"];
+				},
+			},
+			{
+				name: "unknown covered signal",
+				message: "concern check references unknown signal missing-signal",
+				mutate: params => {
+					params.concern_checks[0]!.covered_by_signal_ids = ["missing-signal"];
+				},
+			},
+			{
+				name: "unknown branch signal",
+				message: "branch evidence references unknown signal missing-branch-signal",
+				mutate: params => {
+					params.branch_evidence[0]!.planned_signal_ids = ["missing-branch-signal"];
+				},
+			},
+			{
+				name: "duplicate signal ids",
+				message: "target plan verification signal ids must be unique",
+				mutate: params => {
+					params.verification_signals = [
+						params.verification_signals[0]!,
+						{ ...params.verification_signals[0]!, role: "supporting" },
+					];
+				},
+			},
+			{
+				name: "duplicate concern ids",
+				message: "target plan concern check ids must be unique",
+				mutate: params => {
+					params.concern_checks = [
+						params.concern_checks[0]!,
+						{ ...params.concern_checks[0]!, covered_by_signal_ids: ["signal-primary"] },
+					];
+				},
+			},
+			{
+				name: "failed dry run",
+				message: "target plan dry_run must pass before submission",
+				mutate: params => {
+					params.dry_run = {
+						status: "failed",
+						checks: [{ id: "dry-run", passed: false, rationale: "Plan step failed." }],
+					};
+				},
+			},
+		];
+
+		for (const item of cases) {
+			const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+			const tool = new GoalTool(
+				createToolSession({
+					getGoalRuntime: () => createRuntimeHarness().runtime,
+					requestGoalTargetPlanApproval,
+				}),
+			);
+			const params = buildSubmitTargetPlanParams(base);
+			item.mutate(params);
+
+			await expect(tool.execute(`submit-${item.name}`, params)).rejects.toThrow(item.message);
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+		}
 	});
 
 	it("renders failed target-plan submissions as awaiting user input", async () => {

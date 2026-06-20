@@ -47,12 +47,26 @@ import {
 	normalizeParentFrame,
 } from "./state";
 
+export type GoalPersistenceReason = "semantic" | "terminal" | "recovery" | "budget-limited";
+
+export interface GoalUsagePersistenceEvent {
+	goalId: string;
+	stateVersion: number;
+	tokenDelta: number;
+	wallSeconds: number;
+	tokensUsed: number;
+	timeUsedSeconds: number;
+	updatedAt: number;
+	budgetLimited?: boolean;
+}
+
 export interface GoalRuntimeHost {
 	getState(): GoalModeState | undefined;
 	setState(state: GoalModeState | undefined): void;
 	getCurrentUsage(): GoalTokenUsage;
 	emit(event: GoalRuntimeEvent): void | Promise<void>;
-	persist(mode: "goal" | "goal_paused" | "none", state?: GoalModeState): void;
+	persist(mode: "goal" | "goal_paused" | "none", state?: GoalModeState, reason?: GoalPersistenceReason): void;
+	persistUsage?(event: GoalUsagePersistenceEvent): void;
 	sendHiddenMessage(message: {
 		customType: string;
 		content: string;
@@ -163,6 +177,102 @@ export interface GoalTargetPlanApprovalInput extends GoalSubmitTargetPlanInput {
 	reviews: GoalTargetPlanReview[];
 }
 
+export interface GoalTargetPlanSubmitIdentity {
+	targetId: string;
+	targetPlanId: string;
+	planFilePath: string;
+	revision: number;
+}
+
+export function currentTargetPlanSubmitIdentity(
+	state: GoalModeState | undefined,
+): GoalTargetPlanSubmitIdentity | undefined {
+	const target = state?.goal.currentTarget;
+	const plan = state?.goal.currentTargetPlan;
+	if (!target || !plan || plan.targetId !== target.id) return undefined;
+	return {
+		targetId: target.id,
+		targetPlanId: plan.id,
+		planFilePath: plan.planFilePath,
+		revision: plan.revision,
+	};
+}
+
+export function renderTargetPlanSubmitSkeleton(
+	identity: GoalTargetPlanSubmitIdentity | undefined,
+	options: { includeOp?: boolean } = {},
+): string {
+	if (!identity) return "null";
+	const body: Record<string, unknown> = {
+		target_id: identity.targetId,
+		target_plan_id: identity.targetPlanId,
+		plan_file_path: identity.planFilePath,
+		revision: identity.revision,
+		verification_aperture: {
+			product_intention: "<observable product intention>",
+			primary_signal_id: "<required primary signal id>",
+			blast_radius: "<local|module|workflow|multi-subsystem|external-or-irreversible>",
+			confidence_target: "<low|medium|high>",
+			layer_rationale: "<why these layers are sufficient>",
+			residual_uncertainty: ["<uncertainty left outside this target>"],
+			omitted_layers: [{ layer: "<unit|integration|e2e|manual|product|release-gate>", reason: "<why omitted>" }],
+		},
+		verification_signals: [
+			{
+				id: "<signal id>",
+				role: "<primary|supporting|guardrail>",
+				layer: "<unit|integration|e2e|manual|product|release-gate>",
+				concern_ids: ["<concern id>"],
+				claim: "<claim this signal proves>",
+				observation: "<observable result>",
+				method: "<how to observe it>",
+				expected_outcome: "<passing outcome>",
+				required: true,
+				confidence_if_satisfied: "<low|medium|high>",
+				stale_if: ["<condition making signal stale>"],
+			},
+		],
+		concern_checks: [
+			{
+				id: "<concern id>",
+				kind: "<behavior|contract|state-persistence|error-handling|security|performance|migration|ux-manual|docs-or-operator>",
+				why_independent: "<why this concern can fail independently>",
+				covered_by_signal_ids: ["<signal id>"],
+			},
+		],
+		scope_calibration: {
+			right_sizing_basis: "<product-signal|minimum-domain-unit|verifier-repair|external-authority-slice>",
+			why_not_smaller: ["<why smaller is insufficient>"],
+			why_not_larger: ["<why larger is out of scope>"],
+			included_related_work: [{ item: "<work item>", reason: "<why included>", signal_ids: ["<signal id>"] }],
+			deferred_related_work: [
+				{
+					item: "<work item>",
+					reason:
+						"<different-primary-signal|different-authority|different-blast-radius|blocked-external|non-goal>",
+					follow_up_hint: "<future target hint>",
+				},
+			],
+		},
+		branch_evidence: [
+			{ branch: "<branch name>", required: true, planned_signal_ids: ["<signal id>"], rationale: "<why needed>" },
+		],
+		excluded_work_review: [
+			{
+				item: "<excluded work>",
+				classification: "<valid-boundary|parent-non-claim|essential-related-work|stale-or-unsupported>",
+				rationale: "<why excluded>",
+			},
+		],
+		workflow_review_rounds: [
+			{ lens: "<review lens>", verdict: "accepted", summary: "<summary>", blockers: [], revised: false },
+		],
+		dry_run: { status: "passed", checks: [{ id: "<check id>", passed: true, rationale: "<why pass>" }] },
+	};
+	const payload = options.includeOp ? { op: "submit_target_plan", ...body } : body;
+	return JSON.stringify(payload, null, 2);
+}
+
 export interface GoalTargetPlanRejectionInput {
 	targetPlanId: string;
 	revision?: number;
@@ -190,6 +300,76 @@ export interface GoalCheckpointResolutionInput {
 	broaderChecksOrInputs?: string[];
 	lessonsForFuture?: string[];
 	nextTarget?: GoalStartTargetInput;
+}
+
+export function validateTargetPlanSubmissionGraph(
+	input: Pick<
+		GoalTargetPlanApprovalInput,
+		| "verificationAperture"
+		| "verificationSignals"
+		| "concernChecks"
+		| "scopeCalibration"
+		| "branchEvidence"
+		| "excludedWorkReview"
+		| "dryRun"
+	>,
+): void {
+	const invalidExcludedClassifications: GoalExcludedWorkClassification[] = [
+		"essential-related-work",
+		"stale-or-unsupported",
+	];
+	if (input.excludedWorkReview.some(review => invalidExcludedClassifications.includes(review.classification))) {
+		throw new Error("target plan excluded work contains essential related or stale work");
+	}
+	const signalIds = new Set(input.verificationSignals.map(signal => signal.id));
+	if (signalIds.size !== input.verificationSignals.length) {
+		throw new Error("target plan verification signal ids must be unique");
+	}
+	const requiredSignalIds = new Set(
+		input.verificationSignals.filter(signal => signal.required).map(signal => signal.id),
+	);
+	const primarySignal = input.verificationSignals.find(
+		signal => signal.id === input.verificationAperture.primarySignalId,
+	);
+	if (!primarySignal) {
+		throw new Error("target plan primary signal must reference a verification signal");
+	}
+	if (!primarySignal.required) {
+		throw new Error("target plan primary signal must be required");
+	}
+	if (requiredSignalIds.size === 0) {
+		throw new Error("target plan requires at least one required verification signal");
+	}
+	const concernIds = new Set(input.concernChecks.map(check => check.id));
+	if (concernIds.size !== input.concernChecks.length) {
+		throw new Error("target plan concern check ids must be unique");
+	}
+	for (const signal of input.verificationSignals) {
+		for (const concernId of signal.concernIds) {
+			if (!concernIds.has(concernId)) throw new Error(`verification signal references unknown concern ${concernId}`);
+		}
+	}
+	for (const check of input.concernChecks) {
+		for (const signalId of check.coveredBySignalIds) {
+			if (!signalIds.has(signalId)) throw new Error(`concern check references unknown signal ${signalId}`);
+		}
+	}
+	for (const item of input.scopeCalibration.includedRelatedWork) {
+		for (const signalId of item.signalIds) {
+			if (!signalIds.has(signalId)) throw new Error(`included related work references unknown signal ${signalId}`);
+		}
+	}
+	for (const branch of input.branchEvidence) {
+		if (branch.required && branch.plannedSignalIds.length === 0) {
+			throw new Error("required branch evidence must reference at least one verification signal");
+		}
+		for (const signalId of branch.plannedSignalIds) {
+			if (!signalIds.has(signalId)) throw new Error(`branch evidence references unknown signal ${signalId}`);
+		}
+	}
+	if (input.dryRun.status !== "passed" || input.dryRun.checks.some(check => !check.passed)) {
+		throw new Error("target plan dry run must pass before approval");
+	}
 }
 
 export interface GoalSideAgentExpectation {
@@ -1272,11 +1452,16 @@ export class GoalRuntime {
 
 	async #commitState(
 		state: GoalModeState | undefined,
-		options?: { persist?: "goal" | "goal_paused" | "none"; emit?: boolean },
+		options?: {
+			persist?: "goal" | "goal_paused" | "none";
+			emit?: boolean;
+			reason?: GoalPersistenceReason;
+		},
 	): Promise<void> {
 		this.#host.setState(state ? cloneGoalModeState(state) : undefined);
 		if (options?.persist) {
-			this.#host.persist(options.persist, state);
+			const reason = options.reason ?? (state?.runMode === "completed" ? "terminal" : "semantic");
+			this.#host.persist(options.persist, state, reason);
 		}
 		if (options?.emit !== false) {
 			await this.#host.emit({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
@@ -1348,14 +1533,25 @@ export class GoalRuntime {
 			throw new Error("cannot submit target plan because no active parent goal exists");
 		const target = state.goal.currentTarget;
 		if (target?.status !== "active") throw new Error("cannot submit target plan without an active target");
-		if (input.targetId !== target.id) throw new Error("target_id does not match the current target");
 		const plan = state.goal.currentTargetPlan;
 		if (!plan) throw new Error("no current target plan is pending");
-		if (plan.id !== input.targetPlanId) throw new Error("target_plan_id does not match the current target plan");
 		if (plan.targetId !== target.id) throw new Error("current target plan is stale");
-		if (plan.planFilePath !== input.planFilePath)
-			throw new Error("plan_file_path does not match the current target plan");
-		if (input.revision !== plan.revision) throw new Error("target plan revision is stale");
+		const identity = currentTargetPlanSubmitIdentity(state);
+		if (!identity) throw new Error("current target plan is stale");
+		if (input.targetId !== identity.targetId)
+			throw new Error(`target_id must equal currentTarget.id (${identity.targetId}); got ${input.targetId}`);
+		if (input.targetPlanId !== identity.targetPlanId)
+			throw new Error(
+				`target_plan_id must equal currentTargetPlan.id (${identity.targetPlanId}); got ${input.targetPlanId}`,
+			);
+		if (input.planFilePath !== identity.planFilePath)
+			throw new Error(
+				`plan_file_path must equal currentTargetPlan.planFilePath (${identity.planFilePath}); got ${input.planFilePath}`,
+			);
+		if (input.revision !== identity.revision)
+			throw new Error(
+				`revision must equal currentTargetPlan.revision (${identity.revision}); got ${input.revision}`,
+			);
 		if (state.runMode !== "planning-target") {
 			throw new Error("target plan submission is only allowed while runMode is planning-target");
 		}
@@ -1416,64 +1612,7 @@ export class GoalRuntime {
 		) {
 			throw new Error("target plan cannot be approved with blocking or important findings");
 		}
-		const invalidExcludedClassifications: GoalExcludedWorkClassification[] = [
-			"essential-related-work",
-			"stale-or-unsupported",
-		];
-		if (input.excludedWorkReview.some(review => invalidExcludedClassifications.includes(review.classification))) {
-			throw new Error("target plan excluded work contains essential related or stale work");
-		}
-		const signalIds = new Set(input.verificationSignals.map(signal => signal.id));
-		if (signalIds.size !== input.verificationSignals.length) {
-			throw new Error("target plan verification signal ids must be unique");
-		}
-		const requiredSignalIds = new Set(
-			input.verificationSignals.filter(signal => signal.required).map(signal => signal.id),
-		);
-		const primarySignal = input.verificationSignals.find(
-			signal => signal.id === input.verificationAperture.primarySignalId,
-		);
-		if (!primarySignal) {
-			throw new Error("target plan primary signal must reference a verification signal");
-		}
-		if (!primarySignal.required) {
-			throw new Error("target plan primary signal must be required");
-		}
-		if (requiredSignalIds.size === 0) {
-			throw new Error("target plan requires at least one required verification signal");
-		}
-		const concernIds = new Set(input.concernChecks.map(check => check.id));
-		if (concernIds.size !== input.concernChecks.length) {
-			throw new Error("target plan concern check ids must be unique");
-		}
-		for (const signal of input.verificationSignals) {
-			for (const concernId of signal.concernIds) {
-				if (!concernIds.has(concernId))
-					throw new Error(`verification signal references unknown concern ${concernId}`);
-			}
-		}
-		for (const check of input.concernChecks) {
-			for (const signalId of check.coveredBySignalIds) {
-				if (!signalIds.has(signalId)) throw new Error(`concern check references unknown signal ${signalId}`);
-			}
-		}
-		for (const item of input.scopeCalibration.includedRelatedWork) {
-			for (const signalId of item.signalIds) {
-				if (!signalIds.has(signalId))
-					throw new Error(`included related work references unknown signal ${signalId}`);
-			}
-		}
-		for (const branch of input.branchEvidence) {
-			if (branch.required && branch.plannedSignalIds.length === 0) {
-				throw new Error("required branch evidence must reference at least one verification signal");
-			}
-			for (const signalId of branch.plannedSignalIds) {
-				if (!signalIds.has(signalId)) throw new Error(`branch evidence references unknown signal ${signalId}`);
-			}
-		}
-		if (input.dryRun.status !== "passed" || input.dryRun.checks.some(check => !check.passed)) {
-			throw new Error("target plan dry run must pass before approval");
-		}
+		validateTargetPlanSubmissionGraph(input);
 	}
 
 	#markActiveAccounting(goal: Goal): void {
@@ -1637,10 +1776,22 @@ export class GoalRuntime {
 			this.#wallClock.lastAccountedAt += wallSeconds * 1000;
 		}
 
-		// Persisting wall-clock-only accounting on every tool event bloats /goal sessions with full
-		// objective snapshots. Keep the in-memory/UI state fresh, but persist only token/budget changes.
-		const shouldPersistUsage = tokenDelta > 0 || flippedToBudgetLimited;
-		await this.#commitState(state, { persist: shouldPersistUsage ? "goal" : undefined });
+		if (flippedToBudgetLimited) {
+			await this.#commitState(state, { persist: "goal", reason: "budget-limited" });
+		} else {
+			if (tokenDelta > 0) {
+				this.#host.persistUsage?.({
+					goalId: state.goal.id,
+					stateVersion: state.stateVersion,
+					tokenDelta,
+					wallSeconds,
+					tokensUsed: state.goal.tokensUsed,
+					timeUsedSeconds: state.goal.timeUsedSeconds,
+					updatedAt: state.goal.updatedAt,
+				});
+			}
+			await this.#commitState(state);
+		}
 
 		if (state.goal.status !== "budget-limited") {
 			this.#budgetReportedFor = undefined;
@@ -1826,7 +1977,20 @@ export class GoalRuntime {
 				state.goal.status = "budget-limited";
 				this.#bumpState(state);
 			}
-			await this.#commitState(state, { persist: "goal" });
+			if (flippedToBudgetLimited) {
+				await this.#commitState(state, { persist: "goal", reason: "budget-limited" });
+			} else {
+				this.#host.persistUsage?.({
+					goalId: state.goal.id,
+					stateVersion: state.stateVersion,
+					tokenDelta,
+					wallSeconds,
+					tokensUsed: state.goal.tokensUsed,
+					timeUsedSeconds: state.goal.timeUsedSeconds,
+					updatedAt: state.goal.updatedAt,
+				});
+				await this.#commitState(state);
+			}
 			if (state.goal.status !== "budget-limited") {
 				this.#budgetReportedFor = undefined;
 			}
@@ -2055,8 +2219,13 @@ export class GoalRuntime {
 
 	buildCheckpointCandidate(input: GoalCheckpointInput): GoalCheckpointPacket {
 		const state = this.#getStateClone();
-		if (!state?.enabled || state.goal.status !== "active")
-			throw new Error("cannot checkpoint because no active parent goal exists");
+		if (!state) throw new Error("cannot checkpoint because no active parent goal exists");
+		if (state.goal.status === "paused" || state.enabled !== true) {
+			throw new Error('cannot checkpoint while the goal is paused; call goal({op:"resume"}) before checkpointing');
+		}
+		if (state.goal.status !== "active") {
+			throw new Error(`cannot checkpoint because parent goal status is ${state.goal.status}`);
+		}
 		if (state.runMode === "planning-target") {
 			throw new Error("cannot checkpoint while target planning is pending");
 		}
@@ -2504,16 +2673,21 @@ export class GoalRuntime {
 				throw new Error("cannot fail target plan because no active parent goal exists");
 			const target = state.goal.currentTarget;
 			if (target?.status !== "active") throw new Error("cannot fail target plan without an active target");
-			if (target.id !== input.targetId) throw new Error("target_id does not match the current target");
-			if (state.runMode !== "planning-target") {
-				throw new Error("target plan failure is only allowed while runMode is planning-target");
-			}
 			const plan = state.goal.currentTargetPlan;
-			if (!plan || plan.id !== input.targetPlanId) {
-				throw new Error("target_plan_id does not match the current target plan");
-			}
+			if (!plan) throw new Error("no current target plan is pending");
 			if (plan.targetId !== target.id) throw new Error("current target plan is stale");
-			if (input.revision !== plan.revision) throw new Error("target plan revision is stale");
+			const identity = currentTargetPlanSubmitIdentity(state);
+			if (!identity) throw new Error("current target plan is stale");
+			if (input.targetId !== identity.targetId)
+				throw new Error(`target_id must equal currentTarget.id (${identity.targetId}); got ${input.targetId}`);
+			if (input.targetPlanId !== identity.targetPlanId)
+				throw new Error(
+					`target_plan_id must equal currentTargetPlan.id (${identity.targetPlanId}); got ${input.targetPlanId}`,
+				);
+			if (input.revision !== identity.revision)
+				throw new Error(
+					`revision must equal currentTargetPlan.revision (${identity.revision}); got ${input.revision}`,
+				);
 			if (plan.status !== "drafting" && plan.status !== "revision-required") {
 				throw new Error("target plan failure requires a draft or revision-required plan");
 			}

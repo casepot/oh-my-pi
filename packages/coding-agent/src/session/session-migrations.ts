@@ -56,6 +56,16 @@ function migrateV2ToV3(entries: FileEntry[]): void {
 	}
 }
 
+/** Migrate v3 → v4: register compact goal persistence entry taxonomy. Mutates in place. */
+function migrateV3ToV4(entries: FileEntry[]): void {
+	for (const entry of entries) {
+		if (entry.type === "session") {
+			entry.version = 4;
+			return;
+		}
+	}
+}
+
 /**
  * Run all necessary migrations to bring entries to current version.
  * Mutates entries in place. Returns true if any migration was applied.
@@ -68,6 +78,7 @@ export function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 
 	if (version < 2) migrateV1ToV2(entries);
 	if (version < 3) migrateV2ToV3(entries);
+	if (version < 4) migrateV3ToV4(entries);
 
 	return true;
 }

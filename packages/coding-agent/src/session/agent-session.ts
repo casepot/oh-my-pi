@@ -205,8 +205,10 @@ import {
 import {
 	buildGoalContinuationPacket,
 	completionBudgetReport,
+	currentTargetPlanSubmitIdentity,
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
+	type GoalPersistenceReason,
 	GoalRuntime,
 	type GoalSubmitTargetPlanInput,
 	type GoalTargetPlanApprovalInput,
@@ -215,7 +217,9 @@ import {
 	renderGoalPrompt,
 	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
+	renderTargetPlanSubmitSkeleton,
 	sanitizeGoalPlanSlug,
+	validateTargetPlanSubmissionGraph,
 } from "../goals/runtime";
 import {
 	type GoalCheckpointGuidanceOutput,
@@ -2017,12 +2021,11 @@ export class AgentSession {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
 				}
 			},
-			persist: (mode, state) => {
-				if (mode === "none") {
-					this.#appendGoalModeChange("none");
-				} else if (state) {
-					this.#appendGoalModeChange(mode, { ...serializeGoalModeState(state) });
-				}
+			persist: (mode, state, reason) => {
+				this.#persistGoalModeChange(mode, state, reason ?? "semantic");
+			},
+			persistUsage: event => {
+				this.#appendGoalUsageDelta(event);
 			},
 			sendHiddenMessage: async message => {
 				await this.sendCustomMessage(
@@ -5598,6 +5601,44 @@ export class AgentSession {
 		this.sessionManager.appendModeChange(mode, data);
 	}
 
+	#persistGoalModeChange(
+		mode: "goal" | "goal_paused" | "none",
+		state: GoalModeState | undefined,
+		reason: GoalPersistenceReason,
+	): void {
+		if (mode === "none") {
+			this.#appendGoalModeChange("none");
+			return;
+		}
+		if (!state) return;
+		const serialized = serializeGoalModeState(state);
+		const snapshotEntryId = this.sessionManager.appendGoalStateSnapshot({
+			goalId: state.goal.id,
+			stateVersion: state.stateVersion,
+			schemaVersion: serialized.schemaVersion,
+			reason,
+			state: serialized,
+		});
+		this.#appendGoalModeChange(mode, {
+			goalId: state.goal.id,
+			stateVersion: state.stateVersion,
+			snapshotEntryId,
+		});
+	}
+
+	#appendGoalUsageDelta(event: {
+		goalId: string;
+		stateVersion: number;
+		tokenDelta: number;
+		wallSeconds: number;
+		tokensUsed: number;
+		timeUsedSeconds: number;
+		updatedAt: number;
+		budgetLimited?: boolean;
+	}): void {
+		this.sessionManager.appendGoalUsageDelta(event);
+	}
+
 	#syncGoalTargetPlanReference(state: GoalModeState | undefined): void {
 		const reference = this.#goalTargetPlanReference;
 		if (!reference) return;
@@ -5821,6 +5862,7 @@ export class AgentSession {
 			throw new ToolError("target plan submission is only allowed while runMode is planning-target");
 		}
 		const currentPlan = this.#goalRuntime.validateCurrentTargetPlanSubmission(input);
+		validateTargetPlanSubmissionGraph(input);
 		const resolvedPlanPath = resolveLocalUrlToPath(
 			normalizeLocalScheme(currentPlan.planFilePath),
 			this.#localProtocolOptions(),
@@ -6801,9 +6843,12 @@ export class AgentSession {
 	}
 
 	#prepareGoalTargetPlanningPrompt(state: GoalModeState, _signal?: AbortSignal): string {
+		const identity = currentTargetPlanSubmitIdentity(state);
 		return prompt.render(goalTargetPlanningPrompt, {
 			goalContextSurface: renderGoalPromptSurface(state, state.goal),
 			currentTargetPlan: JSON.stringify(state.goal.currentTargetPlan ?? null, null, 2),
+			targetPlanSubmitIdentity: JSON.stringify(identity ?? null, null, 2),
+			targetPlanSubmitSkeleton: renderTargetPlanSubmitSkeleton(identity),
 			taskAvailable: this.getToolByName("task") !== undefined,
 			jobAvailable: this.getToolByName("job") !== undefined,
 			ircAvailable: this.getToolByName("irc") !== undefined,
@@ -9594,9 +9639,11 @@ export class AgentSession {
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
 			if (carriedGoalState) {
 				this.#goalModeState = carriedGoalState;
-				this.sessionManager.appendModeChange(carriedGoalState.enabled ? "goal" : "goal_paused", {
-					...serializeGoalModeState(carriedGoalState),
-				});
+				this.#persistGoalModeChange(
+					carriedGoalState.enabled ? "goal" : "goal_paused",
+					carriedGoalState,
+					"recovery",
+				);
 				await this.setActiveToolsByName([...new Set([...activeToolsBeforeHandoff, "goal"])]);
 				this.#armGoalPostCompactionContinuation(carriedGoalState);
 			}

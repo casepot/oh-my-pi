@@ -26,6 +26,8 @@ import {
 	type CustomEntry,
 	type CustomMessageEntry,
 	type FileEntry,
+	type GoalStateSnapshotEntry,
+	type GoalUsageDeltaEntry,
 	type LabelEntry,
 	type MCPToolSelectionEntry,
 	type ModeChangeEntry,
@@ -33,6 +35,7 @@ import {
 	type NewSessionOptions,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
+	type SessionEntryBase,
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
@@ -1166,6 +1169,18 @@ export class SessionManager {
 
 	appendModeChange(mode: string, data?: Record<string, unknown>): string {
 		const entry: ModeChangeEntry = { type: "mode_change", ...this.#freshEntryFields(), mode, data };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	appendGoalStateSnapshot(input: Omit<GoalStateSnapshotEntry, keyof SessionEntryBase | "type">): string {
+		const entry: GoalStateSnapshotEntry = { type: "goal_state_snapshot", ...this.#freshEntryFields(), ...input };
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	appendGoalUsageDelta(input: Omit<GoalUsageDeltaEntry, keyof SessionEntryBase | "type">): string {
+		const entry: GoalUsageDeltaEntry = { type: "goal_usage_delta", ...this.#freshEntryFields(), ...input };
 		this.#recordEntry(entry);
 		return entry.id;
 	}

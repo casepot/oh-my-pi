@@ -8,6 +8,14 @@ Goal target planning is active. Plan the current target only; implementation is 
 {{currentTargetPlan}}
 </current_target_plan>
 
+<target_plan_submit_identity>
+{{targetPlanSubmitIdentity}}
+</target_plan_submit_identity>
+
+<target_plan_submit_skeleton>
+{{targetPlanSubmitSkeleton}}
+</target_plan_submit_skeleton>
+
 Tool availability:
 - task: {{taskAvailable}}
 - job: {{jobAvailable}}
@@ -46,6 +54,8 @@ Plan file MUST include:
 
 `submit_target_plan` payload MUST use the strict tool schema field names:
 - Top-level: `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `workflow_review_rounds`, `dry_run`.
+- Identity mapping: `currentTarget.id` / `targetPlanSubmitIdentity.targetId` -> `target_id`; `currentTargetPlan.id` / `targetPlanSubmitIdentity.targetPlanId` -> `target_plan_id`; `currentTargetPlan.planFilePath` / `targetPlanSubmitIdentity.planFilePath` -> `plan_file_path`; `currentTargetPlan.revision` / `targetPlanSubmitIdentity.revision` -> `revision`.
+- `verification_signals[].layer` and `verification_aperture.omitted_layers[].layer` MUST use one of: `unit`, `integration`, `e2e`, `manual`, `product`, `release-gate`.
 - `verification_aperture.primary_signal_id` MUST name one required entry in `verification_signals`.
 - `verification_signals[].concern_ids`, `concern_checks[].covered_by_signal_ids`, `scope_calibration.included_related_work[].signal_ids`, and `branch_evidence[].planned_signal_ids` MUST reference submitted IDs.
 - `dry_run.status` MUST be `"passed"` and every `dry_run.checks[]` item MUST have `passed: true`.
