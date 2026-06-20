@@ -598,7 +598,11 @@ export const jobToolRenderer = {
 					uiTheme,
 				);
 
-				const all = [header, ...itemLines].map(l => truncateToWidth(l, width, Ellipsis.Unicode));
+				const runningHint =
+					options.isPartial && isPollCall && isWaitingPollDetails(result.details) && counts.running === jobs.length
+						? [uiTheme.fg("dim", "still running; poll later or cancel by id")]
+						: [];
+				const all = [header, ...itemLines, ...runningHint].map(l => truncateToWidth(l, width, Ellipsis.Unicode));
 				cached = { key, lines: all };
 				return all;
 			},

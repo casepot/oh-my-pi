@@ -4,6 +4,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	__resetAutoQaFlushStateForTests,
+	__setAutoQaDbFactoryForTests,
 	createReportToolIssueTool,
 	flushGrievances,
 	isAutoQaEnabled,
@@ -329,6 +330,11 @@ describe("flushGrievances", () => {
 });
 
 describe("createReportToolIssueTool", () => {
+	afterEach(() => {
+		__setAutoQaDbFactoryForTests(null);
+		__resetAutoQaFlushStateForTests();
+	});
+
 	it("acknowledges unknown tool reports without pretending they were recorded", async () => {
 		const session = {
 			settings: Settings.isolated(),
@@ -343,5 +349,75 @@ describe("createReportToolIssueTool", () => {
 			text: "Noted, but 'skill' is not an active built-in tool; no local QA row was recorded.",
 		});
 		expect(result.details).toEqual({ recorded: false, tool: "skill", reason: "not-active-built-in" });
+	});
+
+	it("reports successful local recording without implying session state changed", async () => {
+		const db = openTempDb();
+		__setAutoQaDbFactoryForTests(() => db);
+		const session = {
+			settings: Settings.isolated(),
+			getActiveModelString: () => "p/model",
+		} as unknown as ToolSession;
+		const tool = createReportToolIssueTool(session, ["read"]);
+
+		try {
+			const result = await tool.execute("qa-success", { tool: "proxy_read", report: "selector ignored" });
+
+			expect(result.content[0]).toEqual({
+				type: "text",
+				text: "Recorded diagnostic-only tool issue. This does not change session state.",
+			});
+			expect(result.details).toEqual({ recorded: true, tool: "read" });
+			expect(
+				db.prepare("SELECT model, tool, report, pushed FROM grievances").all() as Array<{
+					model: string;
+					tool: string;
+					report: string;
+					pushed: number;
+				}>,
+			).toEqual([{ model: "p/model", tool: "read", report: "selector ignored", pushed: 0 }]);
+		} finally {
+			db.close();
+		}
+	});
+
+	it("reports local DB open failure without claiming the issue was recorded", async () => {
+		__setAutoQaDbFactoryForTests(() => null);
+		const session = {
+			settings: Settings.isolated(),
+			getActiveModelString: () => "p/model",
+		} as unknown as ToolSession;
+		const tool = createReportToolIssueTool(session, ["read"]);
+
+		const result = await tool.execute("qa-db-missing", { tool: "read", report: "db unavailable" });
+
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: "Could not record tool issue locally; continue work and report manually if needed.",
+		});
+		expect(result.details).toEqual({ recorded: false, tool: "read", reason: "db-unavailable" });
+	});
+
+	it("reports insert failures without running the consent or flush path", async () => {
+		const db = new Database(":memory:");
+		__setAutoQaDbFactoryForTests(() => db);
+		const session = {
+			settings: Settings.isolated({ "dev.autoqa.consent": "unset" }),
+			getActiveModelString: () => "p/model",
+		} as unknown as ToolSession;
+		const tool = createReportToolIssueTool(session, ["read"]);
+
+		try {
+			const result = await tool.execute("qa-insert-failed", { tool: "read", report: "table missing" });
+
+			expect(result.content[0]).toEqual({
+				type: "text",
+				text: "Could not record tool issue locally; continue work and report manually if needed.",
+			});
+			expect(result.details).toEqual({ recorded: false, tool: "read", reason: "insert-failed" });
+			expect(session.settings.get("dev.autoqa.consent")).toBe("unset");
+		} finally {
+			db.close();
+		}
 	});
 });

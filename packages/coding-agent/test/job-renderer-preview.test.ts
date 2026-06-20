@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { jobToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/job";
+import { isWaitingPollDetails, jobToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/job";
 import { prompt } from "@oh-my-pi/pi-utils";
 import taskSummaryTemplate from "../src/prompts/tools/task-summary.md" with { type: "text" };
 
@@ -153,6 +153,58 @@ describe("job renderer task-result preview", () => {
 			expect(output).toContain("Job2 completed");
 			expect(output).toContain("Job3 running");
 			expect(output).toContain("waiting on 2 of 3 jobs");
+		});
+
+		it("renders a recovery hint for live polls where every job is still running", () => {
+			const runningJobsOnly = [
+				{
+					id: "Job1",
+					type: "task" as const,
+					status: "running" as const,
+					label: "Job1 running",
+					durationMs: 1200,
+				},
+			];
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: { jobs: runningJobsOnly },
+			};
+			const component = jobToolRenderer.renderResult(
+				result,
+				{ expanded: true, isPartial: true } as Parameters<typeof jobToolRenderer.renderResult>[1],
+				theme,
+				{ poll: [] },
+			);
+			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+			expect(isWaitingPollDetails(result.details)).toBe(true);
+			expect(output).toContain("waiting on 1 job");
+			expect(output).toContain("still running; poll later or cancel by id");
+		});
+
+		it("does not render the live poll hint when cancel outcomes are present", () => {
+			const runningJobsOnly = [
+				{
+					id: "Job1",
+					type: "task" as const,
+					status: "running" as const,
+					label: "Job1 running",
+					durationMs: 1200,
+				},
+			];
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: { jobs: runningJobsOnly, cancelled: [{ id: "missing", status: "not_found" as const }] },
+			};
+			const component = jobToolRenderer.renderResult(
+				result,
+				{ expanded: true, isPartial: true } as Parameters<typeof jobToolRenderer.renderResult>[1],
+				theme,
+				{ poll: [], cancel: ["missing"] },
+			);
+			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+			expect(isWaitingPollDetails(result.details)).toBe(false);
+			expect(output).toContain("waiting on 1 job");
+			expect(output).not.toContain("still running; poll later or cancel by id");
 		});
 
 		it("shows only finished jobs when isPartial is false and it is a poll call", () => {

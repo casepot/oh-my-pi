@@ -184,6 +184,14 @@ export async function resolveAutoQaConsent(settings: Settings | undefined): Prom
 }
 
 let cachedDb: Database | null = null;
+type AutoQaDbFactory = () => Database | null;
+
+let autoQaDbFactoryForTests: AutoQaDbFactory | null = null;
+
+/** Test-only: override the DB open path without mutating module imports. */
+export function __setAutoQaDbFactoryForTests(factory: AutoQaDbFactory | null): void {
+	autoQaDbFactoryForTests = factory;
+}
 
 /**
  * Open (or return the cached handle for) the auto-QA SQLite database at
@@ -198,6 +206,7 @@ let cachedDb: Database | null = null;
  * never being added on the manual-push path.
  */
 export function openAutoQaDb(): Database | null {
+	if (autoQaDbFactoryForTests) return autoQaDbFactoryForTests();
 	if (cachedDb) return cachedDb;
 	try {
 		const db = new Database(getAutoQaDbDir());
@@ -479,60 +488,83 @@ export function createReportToolIssueTool(session: ToolSession, activeBuiltinNam
 			// Consent only gates whether the row is *shipped* to the shared
 			// backend; that decision rides on `dev.autoqa.consent` and is
 			// enforced inside `flushGrievances` via `resolvePushConfig`.
+			const params = rawParams as { tool: string; report: string };
+			// Some models emit `proxy_<name>` for tools routed through a
+			// passthrough wrapper. Strip the prefix before allowlist check so
+			// `proxy_read` lands as a report against `read`, not a silent drop.
+			const canonicalTool = params.tool.startsWith("proxy_") ? params.tool.slice("proxy_".length) : params.tool;
+			// Acknowledge reports targeting tools that are not active built-ins
+			// (MCP servers, extensions that overrode a built-in name, typos), but
+			// do not persist them as if QA can replay a missing built-in tool.
+			// Empty allowlist means the factory was called without a known active
+			// set, so behave as before and record everything.
+			if (allowedToolNames.size > 0 && !allowedToolNames.has(canonicalTool)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Noted, but '${canonicalTool}' is not an active built-in tool; no local QA row was recorded.`,
+						},
+					],
+					details: { recorded: false, tool: canonicalTool, reason: "not-active-built-in" },
+				};
+			}
+			const db = openAutoQaDb();
+			if (!db) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Could not record tool issue locally; continue work and report manually if needed.",
+						},
+					],
+					details: { recorded: false, tool: canonicalTool, reason: "db-unavailable" },
+				};
+			}
 			try {
-				const params = rawParams as { tool: string; report: string };
-				// Some models emit `proxy_<name>` for tools routed through a
-				// passthrough wrapper. Strip the prefix before allowlist check so
-				// `proxy_read` lands as a report against `read`, not a silent drop.
-				const canonicalTool = params.tool.startsWith("proxy_") ? params.tool.slice("proxy_".length) : params.tool;
-				// Acknowledge reports targeting tools that are not active built-ins
-				// (MCP servers, extensions that overrode a built-in name, typos), but
-				// do not persist them as if QA can replay a missing built-in tool.
-				// Empty allowlist means the factory was called without a known active
-				// set, so behave as before and record everything.
-				if (allowedToolNames.size > 0 && !allowedToolNames.has(canonicalTool)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Noted, but '${canonicalTool}' is not an active built-in tool; no local QA row was recorded.`,
-							},
-						],
-						details: { recorded: false, tool: canonicalTool, reason: "not-active-built-in" },
-					};
-				}
-				const db = openAutoQaDb();
-				if (db) {
-					db.prepare("INSERT INTO grievances (model, version, tool, report) VALUES (?, ?, ?, ?)").run(
-						getModel(),
-						VERSION,
-						canonicalTool,
-						params.report,
-					);
-					// Fire-and-forget background pipeline:
-					//   1. Trigger the consent popup if it hasn't been answered
-					//      (single-flight inside `resolveAutoQaConsent`; subagents
-					//      share the same module-level state).
-					//   2. Attempt a flush — `resolvePushConfig` no-ops when consent
-					//      isn't granted, so a "no" leaves the row local for later
-					//      `omp grievances push` or a future consent change.
-					// Tool execution returns immediately; the model never waits
-					// on the dialog.
-					void (async () => {
-						try {
-							await resolveAutoQaConsent(session.settings);
-							await flushGrievances(db, session.settings);
-						} catch (error) {
-							logger.debug("autoqa post-insert pipeline failed", { error: String(error) });
-						}
-					})();
-				}
+				db.prepare("INSERT INTO grievances (model, version, tool, report) VALUES (?, ?, ?, ?)").run(
+					getModel(),
+					VERSION,
+					canonicalTool,
+					params.report,
+				);
 			} catch (error) {
 				logger.error("Failed to record tool issue", { error });
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Could not record tool issue locally; continue work and report manually if needed.",
+						},
+					],
+					details: { recorded: false, tool: canonicalTool, reason: "insert-failed" },
+				};
 			}
+			// Fire-and-forget background pipeline:
+			//   1. Trigger the consent popup if it hasn't been answered
+			//      (single-flight inside `resolveAutoQaConsent`; subagents
+			//      share the same module-level state).
+			//   2. Attempt a flush — `resolvePushConfig` no-ops when consent
+			//      isn't granted, so a "no" leaves the row local for later
+			//      `omp grievances push` or a future consent change.
+			// Tool execution returns immediately; the model never waits
+			// on the dialog.
+			void (async () => {
+				try {
+					await resolveAutoQaConsent(session.settings);
+					await flushGrievances(db, session.settings);
+				} catch (error) {
+					logger.debug("autoqa post-insert pipeline failed", { error: String(error) });
+				}
+			})();
 			return {
-				content: [{ type: "text", text: "Noted, thanks!" }],
-				details: { recorded: true },
+				content: [
+					{
+						type: "text",
+						text: "Recorded diagnostic-only tool issue. This does not change session state.",
+					},
+				],
+				details: { recorded: true, tool: canonicalTool },
 			};
 		},
 	};

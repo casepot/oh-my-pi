@@ -173,7 +173,12 @@ function renderOpenOrCloseLine(
 			? renderStatusLine({ iconOverride: theme.styledSymbol("tool.browser", "accent"), title, meta }, theme)
 			: renderStatusLine({ icon, title, meta }, theme);
 	if (!output) return new Text(header, 0, 0);
-	const outputLines = output.split("\n").map(line => theme.fg("toolOutput", replaceTabs(line)));
+	const outputLines = output.split("\n").map(line => {
+		const safeLine = replaceTabs(line);
+		if (details?.recovery && safeLine.startsWith("Recovery:")) return theme.fg("warning", safeLine);
+		if (details?.recovery && safeLine.startsWith("Next:")) return theme.fg("muted", safeLine);
+		return theme.fg("toolOutput", safeLine);
+	});
 	return new Text([header, ...outputLines].join("\n"), 0, 0);
 }
 

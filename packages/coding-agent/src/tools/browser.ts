@@ -9,7 +9,15 @@ import { truncateForPrompt } from "./approval";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import { acquireBrowser, type BrowserHandle, type BrowserKind, type BrowserKindTag } from "./browser/registry";
 import type { Observation, ScreenshotResult } from "./browser/tab-protocol";
-import { acquireTab, dropHeadlessTabs, getTab, releaseAllTabs, releaseTab, runInTab } from "./browser/tab-supervisor";
+import {
+	type AcquireTabResult,
+	acquireTab,
+	dropHeadlessTabs,
+	getTab,
+	releaseAllTabs,
+	releaseTab,
+	runInTab,
+} from "./browser/tab-supervisor";
 import type { OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
@@ -59,6 +67,23 @@ const browserSchema = z.object({
 /** Input schema for the browser tool. */
 export type BrowserParams = z.infer<typeof browserSchema>;
 
+export type BrowserRecoveryKind =
+	| "close-existing-tab"
+	| "invalid-argument"
+	| "cdp-unavailable"
+	| "target-not-found"
+	| "tab-worker-failed"
+	| "browser-unavailable"
+	| "local-url-unreachable"
+	| "navigation-failed"
+	| "tab-open-failed";
+
+export interface BrowserRecoveryHint {
+	kind: BrowserRecoveryKind;
+	summary: string;
+	nextAction: string;
+}
+
 /** Details describing a browser tool execution result (for renderers + transcript). */
 export interface BrowserToolDetails {
 	action: BrowserParams["action"];
@@ -69,6 +94,7 @@ export interface BrowserToolDetails {
 	observation?: Observation;
 	screenshots?: ScreenshotResult[];
 	result?: string;
+	recovery?: BrowserRecoveryHint;
 	meta?: OutputMeta;
 }
 
@@ -90,7 +116,133 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	const headless = session.settings.get("browser.headless") as boolean;
 	return { kind: "headless", headless };
 }
+export type BrowserRecoveryPhase = "existing-tab-kind" | "acquire-browser" | "acquire-tab";
 
+export interface BrowserRecoveryContext {
+	phase: BrowserRecoveryPhase;
+	name: string;
+	url?: string;
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function navigationFailureMessage(message: string): boolean {
+	return (
+		message.includes("net::ERR_") ||
+		message.includes("ERR_CONNECTION") ||
+		message.includes("ECONNREFUSED") ||
+		message.includes("Navigation timeout") ||
+		message.includes("TimeoutError")
+	);
+}
+
+function parsedUrl(url: string | undefined): { origin: string; hostname: string } | undefined {
+	if (!url) return undefined;
+	try {
+		const parsed = new URL(url);
+		return { origin: parsed.origin, hostname: parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "") };
+	} catch {
+		return undefined;
+	}
+}
+
+function isLocalHost(hostname: string): boolean {
+	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "0.0.0.0";
+}
+
+export function classifyBrowserRecovery(error: unknown, context: BrowserRecoveryContext): BrowserRecoveryHint {
+	const message = errorMessage(error);
+	if (context.phase === "existing-tab-kind") {
+		return {
+			kind: "close-existing-tab",
+			summary: "Tab is already bound to a different browser kind.",
+			nextAction: `Call browser({ action: "close", name: ${JSON.stringify(context.name)} }) before reopening it with different app/browser settings.`,
+		};
+	}
+	if (
+		message.includes("app.path must be absolute") ||
+		message.includes("browser app.cdp_url must") ||
+		message.includes("app.surface must")
+	) {
+		return {
+			kind: "invalid-argument",
+			summary: "Browser app parameters are invalid.",
+			nextAction: "Fix app.path/app.cdp_url/app.target and retry browser open.",
+		};
+	}
+	if (
+		message.includes("Failed to attach") ||
+		message.includes("Timed out waiting for CDP endpoint") ||
+		message.includes("puppeteer.connect failed")
+	) {
+		return {
+			kind: "cdp-unavailable",
+			summary: "CDP endpoint could not be reached or attached.",
+			nextAction: "Start the app with remote debugging enabled, verify the HTTP cdp_url, then retry.",
+		};
+	}
+	if (message.includes("No page target matched") || message.includes("No page targets available")) {
+		return {
+			kind: "target-not-found",
+			summary: "No attached page matched app.target.",
+			nextAction: "Retry without app.target or use one of the available page title/url substrings.",
+		};
+	}
+	if (message.includes("Failed to start browser tab worker")) {
+		return {
+			kind: "tab-worker-failed",
+			summary: "The browser tab worker could not start.",
+			nextAction: "Retry open; if it repeats, run omp --smoke-test and report the worker startup failure.",
+		};
+	}
+	if (context.phase === "acquire-browser") {
+		return {
+			kind: "browser-unavailable",
+			summary: "Browser process could not be acquired.",
+			nextAction: "Check the app path/CDP endpoint or retry with the default headless browser.",
+		};
+	}
+	if (context.phase === "acquire-tab" && context.url && navigationFailureMessage(message)) {
+		const url = parsedUrl(context.url);
+		if (url && isLocalHost(url.hostname)) {
+			return {
+				kind: "local-url-unreachable",
+				summary: "Requested local URL did not respond.",
+				nextAction: `Start or check the local server at ${url.origin}, then retry browser open.`,
+			};
+		}
+		return {
+			kind: "navigation-failed",
+			summary: "Requested URL failed to load.",
+			nextAction: url
+				? `Verify ${url.origin} is reachable from this machine, then retry browser open.`
+				: "Verify the requested URL is reachable from this machine, then retry browser open.",
+		};
+	}
+	return {
+		kind: "tab-open-failed",
+		summary: "Browser was acquired but the tab could not be opened.",
+		nextAction: "Close the tab and retry, or choose a different name/target.",
+	};
+}
+
+function browserOpenErrorResult(
+	details: BrowserToolDetails,
+	error: unknown,
+	context: BrowserRecoveryContext,
+): AgentToolResult<BrowserToolDetails> {
+	const message = errorMessage(error);
+	const recovery = classifyBrowserRecovery(error, context);
+	details.recovery = recovery;
+	details.result = [
+		`Browser open failed: ${message}`,
+		`Recovery: ${recovery.summary}`,
+		`Next: ${recovery.nextAction}`,
+	].join("\n");
+	return toolResult(details).text(details.result).error().done();
+}
 /**
  * Browser tool: stateful, multi-tab. Three actions:
  * - `open`  → acquire/create a named tab on a browser kind (headless | spawned | connected) and optionally goto a url.
@@ -228,43 +380,56 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
 		const existing = getTab(name);
 		if (existing && !sameBrowserKind(existing.browser.kind, kind)) {
-			throw new ToolError(
+			const error = new ToolError(
 				`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}). Close it first.`,
 			);
+			return browserOpenErrorResult(details, error, { phase: "existing-tab-kind", name });
 		}
 
-		const browser = await untilAborted(signal, () =>
-			acquireBrowser(kind, {
-				cwd: this.session.cwd,
-				viewport: params.viewport
-					? {
-							width: params.viewport.width,
-							height: params.viewport.height,
-							deviceScaleFactor: params.viewport.scale,
-						}
-					: undefined,
-				appArgs: params.app?.args,
-				signal,
-			}),
-		);
+		let browser: BrowserHandle;
+		try {
+			browser = await untilAborted(signal, () =>
+				acquireBrowser(kind, {
+					cwd: this.session.cwd,
+					viewport: params.viewport
+						? {
+								width: params.viewport.width,
+								height: params.viewport.height,
+								deviceScaleFactor: params.viewport.scale,
+							}
+						: undefined,
+					appArgs: params.app?.args,
+					signal,
+				}),
+			);
+		} catch (error) {
+			if (error instanceof ToolAbortError || (error instanceof Error && error.name === "AbortError")) throw error;
+			return browserOpenErrorResult(details, error, { phase: "acquire-browser", name });
+		}
 
-		const result = await untilAborted(signal, () =>
-			acquireTab(name, browser, {
-				url: params.url,
-				waitUntil: params.wait_until,
-				viewport: params.viewport
-					? {
-							width: params.viewport.width,
-							height: params.viewport.height,
-							deviceScaleFactor: params.viewport.scale,
-						}
-					: undefined,
-				target: params.app?.target,
-				timeoutMs,
-				dialogs: params.dialogs,
-				signal,
-			}),
-		);
+		let result: AcquireTabResult;
+		try {
+			result = await untilAborted(signal, () =>
+				acquireTab(name, browser, {
+					url: params.url,
+					waitUntil: params.wait_until,
+					viewport: params.viewport
+						? {
+								width: params.viewport.width,
+								height: params.viewport.height,
+								deviceScaleFactor: params.viewport.scale,
+							}
+						: undefined,
+					target: params.app?.target,
+					timeoutMs,
+					dialogs: params.dialogs,
+					signal,
+				}),
+			);
+		} catch (error) {
+			if (error instanceof ToolAbortError || (error instanceof Error && error.name === "AbortError")) throw error;
+			return browserOpenErrorResult(details, error, { phase: "acquire-tab", name, url: params.url });
+		}
 		const tab = result.tab;
 		const url = tab.info.url;
 		const title = tab.info.title ?? "";
