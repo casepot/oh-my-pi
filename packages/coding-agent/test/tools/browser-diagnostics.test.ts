@@ -2,7 +2,12 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { BrowserTool, type BrowserToolDetails, classifyBrowserRecovery } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import {
+	BrowserTool,
+	type BrowserToolDetails,
+	classifyBrowserRecovery,
+	localTabStaleRiskHint,
+} from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { browserToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/browser/render";
 
 function createSession(): ToolSession {
@@ -47,6 +52,45 @@ describe("browser diagnostics", () => {
 		expect(recovery.kind).toBe("local-url-unreachable");
 		expect(recovery.summary).toBe("Requested local URL did not respond.");
 		expect(recovery.nextAction).toContain("http://127.0.0.1:5190");
+		expect(recovery.nextAction).toContain("strict port");
+		expect(recovery.nextAction).toContain("close/reopen the named browser tab");
+	});
+
+	it("does not warn stale-tab risk for non-local URLs", () => {
+		const recovery = localTabStaleRiskHint({
+			name: "main",
+			requestedUrl: "https://example.com/",
+			finalUrl: "https://example.com/",
+			reused: true,
+		});
+
+		expect(recovery).toBeUndefined();
+	});
+
+	it("warns when reusing a local browser tab", () => {
+		const recovery = localTabStaleRiskHint({
+			name: "main",
+			requestedUrl: "http://127.0.0.1:5173/",
+			finalUrl: "http://127.0.0.1:5173/",
+			reused: true,
+		});
+
+		expect(recovery?.kind).toBe("local-tab-stale-risk");
+		expect(recovery?.summary).toBe("Local browser tab may be showing stale dev-server content.");
+		expect(recovery?.nextAction).toContain('browser({ action: "close", name: "main" })');
+		expect(recovery?.nextAction).toContain("strict port");
+	});
+
+	it("warns when local requested and final origins differ", () => {
+		const recovery = localTabStaleRiskHint({
+			name: "preview",
+			requestedUrl: "http://localhost:5173/",
+			finalUrl: "http://127.0.0.1:4173/",
+			reused: false,
+		});
+
+		expect(recovery?.kind).toBe("local-tab-stale-risk");
+		expect(recovery?.nextAction).toContain('browser({ action: "close", name: "preview" })');
 	});
 
 	it("returns classified error details for invalid CDP open requests", async () => {
@@ -99,5 +143,45 @@ describe("browser diagnostics", () => {
 
 		expect(rendered).toContain("Recovery: CDP endpoint could not be reached or attached.");
 		expect(rendered).toContain("Next: Start the app with remote debugging enabled");
+	});
+
+	it("renders browser recovery guidance on successful local opens", () => {
+		const details: BrowserToolDetails = {
+			action: "open",
+			name: "main",
+			browser: "headless",
+			url: "http://127.0.0.1:5173/",
+			recovery: {
+				kind: "local-tab-stale-risk",
+				summary: "Local browser tab may be showing stale dev-server content.",
+				nextAction:
+					'If the page title/content does not match this run, call browser({ action: "close", name: "main" }), verify the dev server process and strict port, then reopen the requested URL.',
+			},
+		};
+		const rendered = Bun.stripANSI(
+			browserToolRenderer
+				.renderResult(
+					{
+						content: [
+							{
+								type: "text",
+								text: 'Reused tab "main" on headless browser\nURL: http://127.0.0.1:5173/\nRecovery: Local browser tab may be showing stale dev-server content.\nNext: If the page title/content does not match this run, call browser({ action: "close", name: "main" }), verify the dev server process and strict port, then reopen the requested URL.',
+							},
+						],
+						details,
+						isError: false,
+					},
+					{ expanded: true, isPartial: false },
+					theme,
+					{ action: "open", name: "main", url: "http://127.0.0.1:5173/" },
+				)
+				.render(160)
+				.join("\n"),
+		);
+
+		expect(rendered).toContain("Recovery: Local browser tab may be showing stale dev-server content.");
+		expect(rendered).toContain(
+			'Next: If the page title/content does not match this run, call browser({ action: "close", name: "main" })',
+		);
 	});
 });

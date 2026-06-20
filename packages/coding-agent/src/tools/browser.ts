@@ -75,6 +75,7 @@ export type BrowserRecoveryKind =
 	| "tab-worker-failed"
 	| "browser-unavailable"
 	| "local-url-unreachable"
+	| "local-tab-stale-risk"
 	| "navigation-failed"
 	| "tab-open-failed";
 
@@ -122,6 +123,8 @@ export interface BrowserRecoveryContext {
 	phase: BrowserRecoveryPhase;
 	name: string;
 	url?: string;
+	reused?: boolean;
+	finalUrl?: string;
 }
 
 function errorMessage(error: unknown): string {
@@ -210,7 +213,7 @@ export function classifyBrowserRecovery(error: unknown, context: BrowserRecovery
 			return {
 				kind: "local-url-unreachable",
 				summary: "Requested local URL did not respond.",
-				nextAction: `Start or check the local server at ${url.origin}, then retry browser open.`,
+				nextAction: `Start or check the current run's dev server at ${url.origin} with a strict port, close/reopen the named browser tab if content may be stale, then retry browser open.`,
 			};
 		}
 		return {
@@ -225,6 +228,24 @@ export function classifyBrowserRecovery(error: unknown, context: BrowserRecovery
 		kind: "tab-open-failed",
 		summary: "Browser was acquired but the tab could not be opened.",
 		nextAction: "Close the tab and retry, or choose a different name/target.",
+	};
+}
+
+export function localTabStaleRiskHint(input: {
+	name: string;
+	requestedUrl?: string;
+	finalUrl?: string;
+	reused: boolean;
+}): BrowserRecoveryHint | undefined {
+	const requested = parsedUrl(input.requestedUrl);
+	if (!requested || !isLocalHost(requested.hostname)) return undefined;
+	const final = parsedUrl(input.finalUrl);
+	const originMismatch = final !== undefined && requested.origin !== final.origin;
+	if (!input.reused && !originMismatch) return undefined;
+	return {
+		kind: "local-tab-stale-risk",
+		summary: "Local browser tab may be showing stale dev-server content.",
+		nextAction: `If the page title/content does not match this run, call browser({ action: "close", name: ${JSON.stringify(input.name)} }), verify the dev server process and strict port, then reopen the requested URL.`,
 	};
 }
 
@@ -436,13 +457,22 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		details.url = url;
 		details.viewport = tab.info.viewport;
 		const verb = result.created ? "Opened" : "Reused";
+		const recovery = localTabStaleRiskHint({
+			name,
+			requestedUrl: params.url,
+			finalUrl: url,
+			reused: !result.created,
+		});
+		if (recovery) details.recovery = recovery;
 		const lines = [
 			`${verb} tab ${JSON.stringify(name)} on ${describeBrowser(browser)}`,
 			`URL: ${url}`,
 			title ? `Title: ${title}` : null,
+			recovery ? `Recovery: ${recovery.summary}` : null,
+			recovery ? `Next: ${recovery.nextAction}` : null,
 		].filter((l): l is string => typeof l === "string");
 		details.result = lines.join("\n");
-		return toolResult(details).text(lines.join("\n")).done();
+		return toolResult(details).text(details.result).done();
 	}
 
 	async #close(
