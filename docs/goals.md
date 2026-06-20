@@ -221,6 +221,8 @@ Required:
 
 `verification_aperture.primary_signal_id` must name a required entry in `verification_signals`. Signal/concern/scope/branch references must point to submitted ids. `dry_run.status` must be `passed`, every dry-run check must pass, and `workflow_review_rounds` must include the planner-side adversarial review.
 
+`goal({op:"get"})` during `planning-target` prints the exact submission identity (`target_id`, `target_plan_id`, `plan_file_path`, `revision`) and a copyable `submit_target_plan` skeleton. Submissions are rejected if any identity field or graph reference does not match the current plan.
+
 AgentSession runs the target aperture and execution-plan reviewers. Approval switches run mode to `working-target` and injects the approved plan for execution. Rejection keeps run mode `planning-target` with a higher revision. A current stale or failed plan moves to `awaiting-user-input`; stale reviewer output for a superseded revision is ignored and planning continues on the newer revision.
 
 ### `fail_target_plan`
@@ -434,7 +436,7 @@ Goal mode writes custom session messages for durable user-visible state:
 | `goal-checkpoint-resolution` | Controller decision for a checkpoint. |
 | `goal-verification-feedback` | Parent completion verifier rejection details. |
 
-Rubric, checkpoint, target-plan, and resolution artifacts label parent-active/non-completion boundaries. If runtime state was committed while streaming but the custom message was not flushed before restore, AgentSession reconstructs missing rubric/target-plan/checkpoint/resolution artifacts from serialized goal state. Serialized goal state remains source of truth; custom messages are audit surfaces only. Rubric artifacts are display-only and excluded from model context injection.
+Rubric, checkpoint, target-plan, and resolution artifacts label parent-active/non-completion boundaries. If runtime state was committed while streaming but the custom message was not flushed before restore, AgentSession reconstructs missing rubric/target-plan/checkpoint/resolution artifacts from serialized goal state. Serialized goal state remains source of truth; custom messages are audit surfaces only. Rubric artifacts are display-only and excluded from model context injection. Session logs persist full goal state in `goal_state_snapshot` entries; ordinary `mode_change` entries carry only compact `{ goalId, stateVersion, snapshotEntryId }` markers, and accounting-only token updates use `goal_usage_delta`.
 
 ## Compaction, handoff, and recovery
 
@@ -464,7 +466,7 @@ Recovery behavior is mode-aware:
 | `awaiting-verification-repair` | Route to verifier-blocker repair. |
 | `awaiting-user-input` | Do not auto-continue. |
 
-Overflow and incomplete-output recovery preserve goal state without creating or resolving checkpoints. Handoff compaction serializes goal mode state into the new session, restores the `goal` tool, and schedules the correct continuation by run mode.
+Overflow and incomplete-output recovery preserve goal state without creating or resolving checkpoints. Handoff compaction writes a recovery `goal_state_snapshot`, restores the `goal` tool, and schedules the correct continuation by run mode.
 
 ## UI behavior
 

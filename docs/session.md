@@ -78,7 +78,7 @@ Session files are JSONL: one JSON object per line.
 ```json
 {
   "type": "session",
-  "version": 3,
+  "version": 4,
   "id": "1f9d2a6b9c0d1234",
   "timestamp": "2026-02-16T10:20:30.000Z",
   "cwd": "/work/pi",
@@ -124,6 +124,8 @@ All non-header entries include:
 - `ttsr_injection`
 - `session_init`
 - `mode_change`
+- `goal_state_snapshot`
+- `goal_usage_delta`
 - `mcp_tool_selection`
 
 ### `message`
@@ -335,9 +337,80 @@ Extension-provided message that does participate in LLM context. `content` can b
 }
 ```
 
+Goal mode uses `mode_change` as a compact marker. For `mode: "goal"` or `mode: "goal_paused"` in v4 sessions, `data` usually has `{ "goalId": "...", "stateVersion": 12, "snapshotEntryId": "..." }`; the full serialized state lives in the referenced `goal_state_snapshot`. Older sessions may still store the full serialized goal state directly in `mode_change.data`, and loaders preserve that shape.
+
+### `goal_state_snapshot`
+
+```json
+{
+  "type": "goal_state_snapshot",
+  "id": "f2a3b4c5",
+  "parentId": "e2f3a4b5",
+  "timestamp": "2026-02-16T10:30:01.000Z",
+  "goalId": "goal-1",
+  "stateVersion": 12,
+  "schemaVersion": 3,
+  "reason": "semantic",
+  "state": {
+    "schemaVersion": 3,
+    "enabled": true,
+    "mode": "active",
+    "runMode": "working-target",
+    "stateVersion": 12,
+    "parentFrameVersion": 0,
+    "goal": {
+      "id": "goal-1",
+      "objective": "Ship",
+      "status": "active",
+      "tokensUsed": 4200,
+      "timeUsedSeconds": 90,
+      "createdAt": 1760000000000,
+      "updatedAt": 1760000000000
+    }
+  }
+}
+```
+
+The snapshot is followed by the compact mode marker that references it:
+
+```json
+{
+  "type": "mode_change",
+  "id": "f3a4b5c6",
+  "parentId": "f2a3b4c5",
+  "timestamp": "2026-02-16T10:30:01.000Z",
+  "mode": "goal",
+  "data": { "goalId": "goal-1", "stateVersion": 12, "snapshotEntryId": "f2a3b4c5" }
+}
+```
+
+
+`reason` is one of `semantic`, `terminal`, `recovery`, or `budget-limited`. Snapshots are durable recovery anchors; they are not injected into model context as messages.
+
+### `goal_usage_delta`
+
+```json
+{
+  "type": "goal_usage_delta",
+  "id": "a3b4c5d6",
+  "parentId": "f3a4b5c6",
+  "timestamp": "2026-02-16T10:31:00.000Z",
+  "goalId": "goal-1",
+  "stateVersion": 12,
+  "tokenDelta": 731,
+  "wallSeconds": 4,
+  "tokensUsed": 4200,
+  "timeUsedSeconds": 90,
+  "updatedAt": 1760000000000
+}
+```
+
+Usage deltas avoid rewriting full goal state for accounting-only changes. Context reconstruction applies deltas after the latest goal marker for the same `goalId`.
+
+
 ## Versioning and Migration
 
-Current session version: `3`.
+Current session version: `4`.
 
 ### v1 -> v2
 
@@ -354,6 +427,14 @@ Applied when header `version < 3`:
 
 - For `message` entries: rewrites legacy `message.role === "hookMessage"` to `"custom"`.
 - Sets header `version = 3`.
+
+### v3 -> v4
+
+Applied when header `version < 4`:
+
+- Registers compact goal persistence entries (`goal_state_snapshot`, `goal_usage_delta`).
+- Existing full goal `mode_change.data` entries remain valid legacy recovery data.
+- Sets header `version = 4`.
 
 ### Migration Trigger and Persistence
 
@@ -404,7 +485,7 @@ Algorithm:
    - fallback `models.default` from assistant message provider/model if no explicit model change
    - deduplicated `injectedTtsrRules` from all `ttsr_injection` entries
    - selected MCP discovery tools from latest `mcp_tool_selection`
-   - mode/modeData from latest `mode_change` (default mode `"none"`)
+   - mode/modeData from latest `mode_change` (default mode `"none"`); compact goal markers are expanded through earlier `goal_state_snapshot` entries, then later matching `goal_usage_delta` entries update accounting totals
 4. Build message list:
    - `message` entries pass through
    - `custom_message` entries become `custom` AgentMessages via `createCustomMessage`
@@ -414,7 +495,7 @@ Algorithm:
      - emit path entries starting at `firstKeptEntryId` up to the compaction boundary
      - emit entries after the compaction boundary
 
-`custom`, `session_init`, `service_tier_change`, `mcp_tool_selection`, and `ttsr_injection` entries do not inject model context directly.
+`custom`, `session_init`, `service_tier_change`, `mcp_tool_selection`, `ttsr_injection`, `goal_state_snapshot`, and `goal_usage_delta` entries do not inject model context directly.
 
 ## Persistence Guarantees and Failure Model
 

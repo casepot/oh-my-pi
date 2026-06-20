@@ -22,6 +22,9 @@
 ### Changed
 - Changed goal-mode prompts to render a load-bearing controller surface by run mode, keeping full audit checkpoint state in tool details and side-agent artifacts instead of the always-on context.
 
+- Changed goal-mode session persistence to store full state in `goal_state_snapshot` entries, compact mode markers, and accounting-only `goal_usage_delta` entries.
+- Changed goal target-plan submissions to render exact identity/skeleton guidance from `goal({op:"get"})` and validate graph references before review.
+
 - Changed goal-mode rubrics to stay verifier-private in main-agent prompts and side-agent context while exposing compact deliverable maps with target deliverable IDs.
 
 - Changed goal checkpoint guidance and target aperture prompts to preserve project-defined target units and reject internal phase checkpoints.
@@ -40,6 +43,8 @@
 
 ### Fixed
 - Fixed autonomous goal target planning so SDK target-plan handlers route through the active session, planning can coordinate read-only `task` reviewers with `job`/`irc`, and implementation tools remain blocked until approval.
+- Fixed goal-mode lifecycle handling so internal aborts do not pause active goals, paused checkpoint-resolution states do not block ordinary tools, and paused checkpoint errors point to `goal({op:"resume"})`.
+- Fixed operator diagnostics so `report_tool_issue` only confirms persisted reports, browser open failures include classified recovery guidance, and live job polls show the next poll/cancel action.
 - Fixed goal-mode audit durability so UI-only rubric artifacts recover from restored state, duplicate rubric/mode-change entries are suppressed, and active in-flight goals cannot be dropped silently.
 - Fixed startup update banners to use source/install-specific titles and prefixed source checkout lines while preserving the four-line cap.
 - Fixed autonomous goal target planning so failed/stale plan reviews cannot unlock checkpoints, paused goals stop enforcing target-planning write guards, local plan hashline paths resolve consistently, and target-plan submission requires a required primary verification signal.
