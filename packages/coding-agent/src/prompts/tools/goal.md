@@ -9,7 +9,7 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - **Current target**: a bounded slice of local work. Start one before substantial work when the parent needs claim-gated progress.
 - **Checkpoint**: evidence-backed target closure reviewed by a side agent. Accepted checkpoints pause ordinary continuation until `resolve_checkpoint`; rejected checkpoints leave the target active.
 - **Parent frame**: optional claim-gated state: desired/current truth, refs, accepted/candidate/rejected claims, boundaries, residuals, gates, frontier, stale conditions, authority, and external refs.
-- **Run mode**: what continuation is allowed: `working-target`, `awaiting-checkpoint-resolution`, `awaiting-parent-completion`, `awaiting-verification-repair`, `awaiting-user-input`, or `completed`.
+- **Run mode**: what continuation is allowed: `working-target`, `planning-target`, `awaiting-checkpoint-resolution`, `awaiting-parent-completion`, `awaiting-verification-repair`, `awaiting-user-input`, or `completed`.
 </model>
 
 <operations>
@@ -17,6 +17,7 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - `get`: inspect current goal state: parent frame, run mode, target history, current target, checkpoints, resolutions, verifier repair, and remaining budget.
 - `resume`: reactivate a paused parent goal without changing its run mode.
 - `start_target`: start a bounded current target. Requires `title`, `desired_future_claim`, and `closure_standard`. Optional: `expected_parent_contribution`, `parent_deliverable_ids`, `baseline_refs`, `gate_refs`, `evidence_expectation`, `non_goals`, `forbidden_claims`, `stale_if`, `linked_verifier_blocker_ids`.
+- `submit_target_plan` / `fail_target_plan`: during `planning-target`, submit an approved dry-run plan or record why planning cannot continue.
 - `checkpoint`: submit target-closure evidence for review. Requires `status:"closed_with_evidence"`, `summary`, non-empty `local_claims`, non-empty `evidence`, non-empty `not_claimed`, and non-empty `remaining_questions`. Optional: `checks_run`, `artifacts_touched`, `risks_or_caveats`, `stale_if`, `suggested_controller_questions`, `retrospective_target` for legacy sessions only.
 - `resolve_checkpoint`: record the controller decision for the pending accepted checkpoint. Requires `checkpoint_id`, `decision`, `parent_reading`, `not_propagated`, and `remaining_parent_work`. Optional: `parent_delta`, `broader_checks_or_inputs`, `lessons_for_future`, and `next_target` for `decision:"next_target"`.
 - `complete`: attempt verified parent completion. Use only when there is no pending checkpoint and no unrepaired verifier blocker.
@@ -34,9 +35,13 @@ Targets are completion units, not process phases or miniature parent goals.
 - At checkpoint resolution, prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. Use `parent_completion_candidate` only when remaining work is genuinely parent verification, not unresolved implementation, evidence collection, review convergence, or domain closeout.
 </target-aperture>
 
+<target-planning>
+`planning-target` blocks implementation. Use read/discovery tools, read-only `task` reviewers, `job` supervision, and `irc` coordination when available. Write/edit only the active target plan file, then `submit_target_plan` or `fail_target_plan`.
+</target-planning>
+
 <checkpoint-resolution>
 `resolve_checkpoint.decision` must be one of:
-- `next_target`: applies `parent_delta`, clears the pending checkpoint, installs `next_target`, and returns to `working-target`. `next_target` is required for this decision and rejected for every other decision.
+- `next_target`: applies `parent_delta`, clears the pending checkpoint, installs `next_target`, and returns to `planning-target`. `next_target` is required for this decision and rejected for every other decision.
 - `parent_completion_candidate`: applies `parent_delta`, clears the pending checkpoint, enters `awaiting-parent-completion`, and makes the next action `complete`. It does not complete the parent. Use only when every parent deliverable already has accepted current evidence and the remaining work is verifier confirmation.
 - `needs_user_input`, `needs_broader_checks`, `pause_for_external_control`, or `drop_or_replace_recommended`: applies `parent_delta`, clears the pending checkpoint, enters `awaiting-user-input`, and suppresses auto-continuation. Use only when `next_target` and `parent_completion_candidate` are not valid now.
 - NEVER use `pause_for_external_control` merely because parent work remains, target selection is needed, or the current target just checkpointed. Use it only when explicit user/operator/external authority must take over before any valid next target or parent-completion verification can run.

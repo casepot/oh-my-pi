@@ -51,6 +51,7 @@ Target-planning action:
 - Do not implement, checkpoint, complete, or mutate non-plan files.
 - Write only the exact `currentTargetPlan.planFilePath`.
 - Produce a right-sized execution plan with verification signal aperture.
+- Spawn read-only `task` planning reviewers; supervise with `job` and coordinate with `irc` when available.
 - Submit only after dry-run and adversarial planner review pass.
 - Use `fail_target_plan` when no valid plan exists without user/external authority.
 {{/when}}
@@ -62,6 +63,7 @@ Checkpoint-resolution action:
 - The next target must honor project/domain target-unit rules.
 - Use `parent_completion_candidate` only when remaining work is genuinely verifier confirmation.
 - `resolve_checkpoint.next_target` is legal only for `decision:"next_target"`; omit it for `parent_completion_candidate`.
+- `resolve_checkpoint.next_target` installs the next target and returns to `planning-target`; approval required before execution.
 - Do not select `pause_for_external_control` unless explicit user/operator/external authority is required; use `needs_user_input`, `needs_broader_checks`, or `drop_or_replace_recommended` when no valid `next_target` or `parent_completion_candidate` exists.
 - Narrative prose does not mutate the parent frame; only `parent_delta` can admit claims, update gates/residuals/boundaries/frontier, or reference external records.
 {{/when}}

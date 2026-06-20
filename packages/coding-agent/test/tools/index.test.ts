@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
@@ -272,6 +273,96 @@ describe("createTools", () => {
 		await expect(readTool.execute("read-parent-candidate", { path: "package.json" })).rejects.toThrow(
 			"parent completion verification is pending",
 		);
+	});
+
+	it("allows planning coordination tools while blocking implementation tools", async () => {
+		const active = createActiveGoalState();
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "Main",
+			displayName: "Main",
+			kind: "main",
+			session: null,
+			status: "running",
+		});
+		const session = createTestSession({
+			settings: createSettingsWithOverrides({
+				"goal.enabled": true,
+			}),
+			agentRegistry: registry,
+			getAgentId: () => "Main",
+			getGoalModeState: () => ({
+				...active,
+				runMode: "planning-target" as const,
+				goal: {
+					...active.goal,
+					currentTargetPlan: {
+						id: "target-plan-1",
+						goalId: active.goal.id,
+						targetId: "target-1",
+						targetSequence: 1,
+						planFilePath: "local://goal-goal-1-target-1-plan.md",
+						status: "drafting" as const,
+						revision: 1,
+						stateVersionAtStart: 1,
+						parentFrameVersionAtStart: 0,
+						createdAt: 1,
+						updatedAt: 1,
+						reviews: [],
+					},
+				},
+			}),
+		});
+		const tools = await createTools(session, [
+			"read",
+			"find",
+			"search",
+			"lsp",
+			"web_search",
+			"task",
+			"job",
+			"irc",
+			"write",
+			"edit",
+			"goal",
+			"resolve",
+			"bash",
+		]);
+		const names = tools.map(tool => tool.name);
+
+		expect(names).toEqual(
+			expect.arrayContaining([
+				"read",
+				"find",
+				"search",
+				"lsp",
+				"web_search",
+				"task",
+				"job",
+				"irc",
+				"write",
+				"edit",
+				"goal",
+				"resolve",
+			]),
+		);
+		const jobTool = tools.find(tool => tool.name === "job");
+		if (!jobTool) throw new Error("expected job tool");
+		const jobResult = await jobTool.execute("job-list", { list: true });
+		expect(JSON.stringify(jobResult.content)).not.toContain("Goal target planning is active");
+		const ircTool = tools.find(tool => tool.name === "irc");
+		if (!ircTool) throw new Error("expected irc tool");
+		const ircResult = await ircTool.execute("irc-list", { op: "list" });
+		expect(JSON.stringify(ircResult.content)).not.toContain("Goal target planning is active");
+		const bashTool = tools.find(tool => tool.name === "bash");
+		if (!bashTool) throw new Error("expected bash tool");
+		let planningError: unknown;
+		try {
+			await bashTool.execute("bash-plan", { command: "true" });
+		} catch (error) {
+			planningError = error;
+		}
+		expect(String(planningError)).toContain("Goal target planning is active");
 	});
 
 	it("includes search_tool_bm25 when MCP tool discovery is enabled and executable", async () => {

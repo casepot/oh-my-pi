@@ -10,6 +10,8 @@ Goal target planning is active. Plan the current target only; implementation is 
 
 Tool availability:
 - task: {{taskAvailable}}
+- job: {{jobAvailable}}
+- irc: {{ircAvailable}}
 - write: {{writeAvailable}}
 - edit: {{editAvailable}}
 
@@ -24,14 +26,15 @@ Tool availability:
 Workflow:
 1. Call `goal({op:"get"})`; use returned state as authority.
 2. Define the smallest target aperture that materially reduces parent-goal uncertainty.
-3. Use `task` workflowz-style decomposition when independent lenses exist.
-4. Required discovery lenses: architecture/data flow, callsites/contracts, tests/verification.
-5. Docs/external lens only when repo evidence cannot answer.
-6. Draft the plan at exact `currentTargetPlan.planFilePath`.
-7. Run at least one planner-side adversarial review task after the draft when `task` is available.
-8. Revise until blocking findings are resolved.
-9. If no valid plan exists due task infra, user authority, or external authority, call `goal({op:"fail_target_plan", ...})`.
-10. Submit only the final dry-run-passed plan with `goal({op:"submit_target_plan", ...})`.
+3. Spawn read-only `task` reviewers/decomposers when independent lenses exist.
+4. Supervise planning tasks with `job` when available; coordinate overlap with `irc` when available.
+5. Required discovery lenses: architecture/data flow, callsites/contracts, tests/verification.
+6. Docs/external lens only when repo evidence cannot answer.
+7. Draft the plan at exact `currentTargetPlan.planFilePath`.
+8. Run at least one planner-side adversarial review task after the draft when `task` is available.
+9. Revise until blocking findings are resolved.
+10. If no valid plan exists due task infra, user authority, or external authority, call `goal({op:"fail_target_plan", ...})`.
+11. Submit only the final dry-run-passed plan with `goal({op:"submit_target_plan", ...})`.
 
 Plan file MUST include:
 - `## Target Aperture`: claim, closure standard, why this target is right-sized.

@@ -1534,6 +1534,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (!session) throw new Error("Goal mode is not active.");
 				return session.requestGoalCheckpointResolution(input, signal);
 			},
+			requestGoalTargetPlanApproval: (input, signal) => {
+				if (!session) throw new Error("Goal mode is not active.");
+				return session.requestGoalTargetPlanApproval(input, signal);
+			},
+			requestGoalTargetPlanFailure: (input, signal) => {
+				if (!session) throw new Error("Goal mode is not active.");
+				return session.requestGoalTargetPlanFailure(input, signal);
+			},
 			requestGoalCompletion: signal => {
 				if (!session) throw new Error("Goal mode is not active.");
 				return session.requestGoalCompletion(signal);

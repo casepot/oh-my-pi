@@ -1728,21 +1728,26 @@ export class InteractiveMode implements InteractiveModeContext {
 					state?.goal.checkpointResolutions?.some(resolution => resolution.checkpointId === pendingCheckpointId) ??
 					false
 				));
-		const label = checkpointStillPending
-			? this.#goalContinuationTurnInFlight
-				? "Goal resolving checkpoint"
-				: `Goal checkpoint pending${pendingCheckpointId ? `: resolve ${pendingCheckpointId}` : ""}`
-			: state?.runMode === "awaiting-parent-completion"
+		const label =
+			state?.runMode === "planning-target"
 				? this.#goalContinuationTurnInFlight
-					? "Goal verifying parent completion"
-					: "Goal completion verification pending"
-				: state?.runMode === "awaiting-verification-repair"
+					? "Goal reviewing target plan"
+					: "Goal planning target"
+				: checkpointStillPending
 					? this.#goalContinuationTurnInFlight
-						? "Goal repairing verifier blockers"
-						: "Goal verifier repair pending"
-					: state?.runMode === "awaiting-user-input"
-						? "Goal awaiting user/external input"
-						: undefined;
+						? "Goal resolving checkpoint"
+						: `Goal checkpoint pending${pendingCheckpointId ? `: resolve ${pendingCheckpointId}` : ""}`
+					: state?.runMode === "awaiting-parent-completion"
+						? this.#goalContinuationTurnInFlight
+							? "Goal verifying parent completion"
+							: "Goal completion verification pending"
+						: state?.runMode === "awaiting-verification-repair"
+							? this.#goalContinuationTurnInFlight
+								? "Goal repairing verifier blockers"
+								: "Goal verifier repair pending"
+							: state?.runMode === "awaiting-user-input"
+								? "Goal awaiting user/external input"
+								: undefined;
 		const status =
 			this.goalModeEnabled || this.goalModePaused
 				? { enabled: this.goalModeEnabled, paused: this.goalModePaused, label }
@@ -2019,7 +2024,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #enterGoalTargetPlanningTools(): Promise<void> {
 		if (this.#goalTargetPlanningPreviousTools !== undefined) return;
 		const previousTools = this.session.getActiveToolNames();
-		const availablePlanningTools = ["task", "write", "edit", "goal"].filter(
+		const availablePlanningTools = ["task", "job", "irc", "write", "edit", "goal"].filter(
 			toolName => this.session.getToolByName(toolName) !== undefined,
 		);
 		this.#goalTargetPlanningPreviousTools = previousTools;

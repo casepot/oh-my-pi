@@ -233,6 +233,34 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("routes target-plan failure through the SDK AgentSession handler", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			settings: Settings.isolated({ "goal.enabled": true }),
+		});
+
+		try {
+			const goalTool = session.getToolByName("goal");
+			if (!goalTool) throw new Error("expected goal tool");
+			await expect(
+				goalTool.execute("fail-target-plan", {
+					op: "fail_target_plan",
+					target_id: "target-1",
+					target_plan_id: "target-plan-1",
+					revision: 1,
+					reason: "needs-user-input",
+					message: "Planner needs operator input.",
+					blockers: ["Missing operator choice."],
+					suggested_questions: ["Which target aperture should be planned?"],
+				}),
+			).rejects.toThrow("cannot fail target plan because no active parent goal exists");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("does not register the xAI TTS tool unless enabled", async () => {
 		const tempDir = makeTempDir();
 

@@ -3109,7 +3109,7 @@ export class AgentSession {
 	}
 
 	async #ensureGoalTargetPlanningToolsActive(): Promise<void> {
-		const planningTools = ["task", "write", "edit", "goal"].filter(
+		const planningTools = ["task", "job", "irc", "write", "edit", "goal"].filter(
 			toolName => this.getToolByName(toolName) !== undefined,
 		);
 		const activeTools = this.getActiveToolNames();
@@ -6754,6 +6754,8 @@ export class AgentSession {
 			goalContextSurface: renderGoalPromptSurface(state, state.goal),
 			currentTargetPlan: JSON.stringify(state.goal.currentTargetPlan ?? null, null, 2),
 			taskAvailable: this.getToolByName("task") !== undefined,
+			jobAvailable: this.getToolByName("job") !== undefined,
+			ircAvailable: this.getToolByName("irc") !== undefined,
 			writeAvailable: this.getToolByName("write") !== undefined,
 			editAvailable: this.getToolByName("edit") !== undefined,
 		});

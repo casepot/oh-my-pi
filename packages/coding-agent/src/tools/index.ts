@@ -518,6 +518,8 @@ const GOAL_TARGET_PLANNING_ALLOWED_TOOLS: Record<string, true> = {
 	lsp: true,
 	web_search: true,
 	task: true,
+	job: true,
+	irc: true,
 	write: true,
 	edit: true,
 	resolve: true,
@@ -534,7 +536,7 @@ function goalRunModeBlockMessage(session: ToolSession, toolName: string): string
 		if (GOAL_TARGET_PLANNING_ALLOWED_TOOLS[toolName]) return undefined;
 		const planFilePath = state.goal.currentTargetPlan?.planFilePath;
 		const planHint = planFilePath ? ` Write/edit only the active target plan file: ${planFilePath}.` : "";
-		return `Goal target planning is active; only read/search/find/lsp/web_search/task/goal/write/edit/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
+		return `Goal target planning is active; only read/search/find/lsp/web_search/task/job/irc/goal/write/edit/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
 	}
 	if (state.runMode === "awaiting-checkpoint-resolution" && state.goal.pendingCheckpointId !== undefined) {
 		const checkpointId = state.goal.pendingCheckpointId;
