@@ -1027,6 +1027,9 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			if (feedback) text += `\n\nReviewer feedback:\n${feedback}`;
 		}
 	}
+	if (op === "drop") {
+		text += "\n\nGoal dropped. Formal goal mode is off; no checkpoint or parent completion was recorded.";
+	}
 	if (response.completionVerification?.status === "rejected") {
 		const totalAttemptText =
 			response.completionVerification.totalAttempts === undefined

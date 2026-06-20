@@ -1059,6 +1059,8 @@ describe("GoalTool", () => {
 		const result = await tool.execute("call-drop", { op: "drop" });
 		expect(result.details?.op).toBe("drop");
 		expect(result.details?.goal?.status).toBe("dropped");
+		expect(JSON.stringify(result.content)).toContain("Formal goal mode is off");
+		expect(JSON.stringify(result.content)).toContain("no checkpoint or parent completion was recorded");
 		expect(harness.getState()).toBeUndefined();
 	});
 });

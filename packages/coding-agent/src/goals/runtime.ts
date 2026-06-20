@@ -61,6 +61,9 @@ export interface GoalRuntimeHost {
 	now?(): number;
 }
 
+const ACTIVE_GOAL_DROP_ERROR =
+	"cannot drop goal while active goal work is pending; fail the target plan, resolve the checkpoint, or complete/repair parent verification first";
+
 export interface GoalTurnSnapshot {
 	turnId: string;
 	baselineUsage: GoalTokenUsage;
@@ -1321,6 +1324,22 @@ export class GoalRuntime {
 		state.runMode = "planning-target";
 	}
 
+	#assertGoalDropAllowed(state: GoalModeState): void {
+		const plan = state.goal.currentTargetPlan;
+		if (
+			state.runMode === "planning-target" ||
+			plan?.status === "drafting" ||
+			plan?.status === "reviewing" ||
+			plan?.status === "revision-required" ||
+			state.goal.currentTarget?.status === "active" ||
+			state.goal.pendingCheckpointId !== undefined ||
+			state.runMode === "awaiting-parent-completion" ||
+			state.runMode === "awaiting-verification-repair"
+		) {
+			throw new Error(ACTIVE_GOAL_DROP_ERROR);
+		}
+	}
+
 	#validateTargetPlanSubmission(
 		state: GoalModeState | undefined,
 		input: GoalSubmitTargetPlanInput,
@@ -1929,9 +1948,10 @@ export class GoalRuntime {
 
 	async dropGoal(): Promise<Goal | undefined> {
 		return await this.#withAccounting(async () => {
-			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
 			if (!state?.goal) return undefined;
+			this.#assertGoalDropAllowed(state);
+			await this.#flushUsageLocked("suppressed");
 			const dropped = { ...state.goal, status: "dropped" as const, updatedAt: this.#now() };
 			const droppedState: GoalModeState = {
 				...state,
@@ -1941,7 +1961,7 @@ export class GoalRuntime {
 			};
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;
-			await this.#host.emit({ type: "goal_updated", goal: dropped, state: droppedState });
+			await this.#commitState(droppedState, { persist: "goal" });
 			await this.#commitState(undefined, { persist: "none", emit: false });
 			return dropped;
 		});

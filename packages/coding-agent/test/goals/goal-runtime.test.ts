@@ -483,6 +483,26 @@ describe("goal runtime", () => {
 		}
 		expect(lastEvent.goal?.status).toBe("dropped");
 		expect(lastEvent.state?.enabled).toBe(false);
+		expect(harness.persists.map(entry => entry.mode)).toEqual(["goal", "none"]);
+		expect(harness.persists[0]?.state?.goal.status).toBe("dropped");
+		expect(harness.persists[0]?.state?.enabled).toBe(false);
+		expect(harness.persists[1]?.state).toBeUndefined();
+	});
+
+	it("rejects dropGoal while active target work is pending", async () => {
+		const error =
+			"cannot drop goal while active goal work is pending; fail the target plan, resolve the checkpoint, or complete/repair parent verification first";
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+
+		await expect(harness.runtime.dropGoal()).rejects.toThrow(error);
+		expect(harness.getState()?.goal.status).toBe("active");
+		expect(harness.persists.map(entry => entry.mode)).toEqual(["goal", "goal"]);
 	});
 
 	it("rejects op=create on the runtime when a non-dropped goal already exists", async () => {
