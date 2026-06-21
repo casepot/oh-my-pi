@@ -3,6 +3,7 @@ import goalCompactionContextTemplate from "../prompts/goals/goal-compaction-cont
 import goalPostCompactionContinuationTemplate from "../prompts/goals/goal-post-compaction-continuation.md" with {
 	type: "text",
 };
+import { buildGoalBoundaryStateRef } from "./boundary-audit";
 import {
 	buildGoalContinuationPacket,
 	escapeXmlText,
@@ -97,6 +98,7 @@ export function buildGoalCompactionContext(state: GoalModeState | undefined): Go
 		preserveData: {
 			goalMode: serializedState,
 			goalContinuationPacket: continuationPacket,
+			goalBoundaryRef: buildGoalBoundaryStateRef(state, "compaction"),
 		},
 	};
 }

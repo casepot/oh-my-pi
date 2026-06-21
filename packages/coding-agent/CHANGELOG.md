@@ -6,6 +6,7 @@
 
 - Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
 - Added autonomous goal target planning with verification-aperture review before target execution.
+- Added non-context goal boundary audit records for compaction, checkpoint, target-plan, and goal-tool error boundaries.
 
 
 - Added OMP RPC protocol v1.1 metadata, typed errors, operation lifecycle frames, state/session graph queries, task/subagent frames, host URI/tool hardening, schema/golden fixtures, one-shot probing, and dashboard/gateway integration docs.
@@ -22,6 +23,7 @@
 ### Changed
 - Changed goal-mode blocked recovery to use explicit blocked-state records and `recover_blocked_state` identity handshakes for failed/stale target plans and checkpoint external pauses.
 - Changed goal-mode prompts to render a load-bearing controller surface by run mode, keeping full audit checkpoint state in tool details and side-agent artifacts instead of the always-on context.
+- Changed approved goal target-plan prompts to carry plan references, hashes, and revisions instead of injecting the full plan body by default.
 
 - Changed goal-mode session persistence to store full state in `goal_state_snapshot` entries, compact mode markers, and accounting-only `goal_usage_delta` entries.
 - Changed goal target-plan submissions to render exact identity/skeleton guidance from `goal({op:"get"})` and validate graph references before review.
@@ -45,6 +47,8 @@
 
 ### Fixed
 - Fixed goal target-plan schema failures to normalize concern-kind layer aliases before review and clarify that primary signals must be exact signal IDs while concern kinds are not verification layers.
+- Fixed goal compaction preserve data so stale goal-owned state from older compactions is stripped and refreshed from the latest live goal state.
+- Fixed goal-mode todo error handling so planning/checkpoint run modes do not receive retry reminders for a tool that is currently disallowed.
 - Fixed goal-mode failed target-plan recovery so user/external input can reopen planning for the same active target instead of dead-ending behind resume/start_target guards.
 - Fixed goal-mode operator smoothness so usage totals render after usage deltas and target-plan/checkpoint panes expose actionable status and IDs.
 - Fixed localhost browser recovery guidance to call out stale tabs and dev-server port mismatches.

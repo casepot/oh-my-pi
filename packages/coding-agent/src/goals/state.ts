@@ -666,6 +666,11 @@ export interface GoalTargetPlanApprovedDetails {
 	targetPlanId: string;
 	planFilePath: string;
 	title: string;
+	revision?: number;
+	planHash?: string;
+	planBytes?: number;
+	stateVersionAtApproval?: number;
+	parentFrameVersionAtApproval?: number;
 }
 
 export interface GoalToolTargetPlanReviewSummary {

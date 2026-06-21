@@ -197,6 +197,20 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import {
+	buildGoalBoundaryCarrierAudit,
+	buildGoalBoundaryStateRef,
+	collectGoalCompactionPreserveMismatches,
+	GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE,
+	GOAL_OWNED_COMPACTION_PRESERVE_KEYS,
+	type GoalBoundaryAuditAction,
+	type GoalBoundaryAuditRecord,
+	type GoalBoundaryKind,
+	type GoalBoundaryStateRef,
+	goalCompactionOmittedFields,
+	goalCompactionPreservedFields,
+	mergeGoalCompactionPreserveData,
+} from "../goals/boundary-audit";
+import {
 	buildGoalCompactionContext,
 	buildGoalPostCompactionContinuation,
 	consumeGoalPostCompactionContinuation,
@@ -1446,6 +1460,23 @@ interface AutoCompactionOptions {
 	sourceSignal?: AbortSignal;
 	throwOnError?: boolean;
 	triggerContextTokens?: number;
+}
+
+interface GoalBoundaryAuditInput {
+	kind: GoalBoundaryKind;
+	before?: GoalBoundaryStateRef;
+	after?: GoalBoundaryStateRef;
+	carriers?: GoalBoundaryAuditRecord["carriers"];
+	preservedFields?: string[];
+	staleFields?: string[];
+	omittedFields?: string[];
+	recoveryInstruction?: string;
+	action: GoalBoundaryAuditAction;
+}
+
+interface GoalCompactionRefreshResult {
+	preserveData: Record<string, unknown> | undefined;
+	auditRecord: GoalBoundaryAuditRecord;
 }
 
 interface ActiveAutoCompactionRun {
@@ -2818,22 +2849,43 @@ export class AgentSession {
 				}
 				if (toolName === "todo" && isError) {
 					const errorText = content?.find(part => part.type === "text")?.text;
-					const reminderText = [
-						"<system-reminder>",
-						"todo failed, so todo progress is not visible to the user.",
-						errorText ? `Failure: ${errorText}` : "Failure: todo returned an error.",
-						"Fix the todo payload and call todo again before continuing.",
-						"</system-reminder>",
-					].join("\n");
-					await this.sendCustomMessage(
-						{
-							customType: "todo-error-reminder",
-							content: reminderText,
-							display: false,
-							details: { toolName, errorText },
-						},
-						{ deliverAs: "nextTurn" },
-					);
+					const goalState = this.#goalModeState;
+					const todoRetryAllowed =
+						!goalState?.enabled ||
+						goalState.goal.status !== "active" ||
+						goalState.runMode === "working-target" ||
+						goalState.runMode === "awaiting-verification-repair";
+					if (!todoRetryAllowed) {
+						const ref = buildGoalBoundaryStateRef(goalState, "error");
+						this.#appendGoalBoundaryAudit({
+							kind: "goal-error",
+							before: ref,
+							after: ref,
+							carriers: [buildGoalBoundaryCarrierAudit("todo-error", { runMode: goalState?.runMode })],
+							preservedFields: ["runMode", "allowed-tools"],
+							staleFields: [],
+							omittedFields: ["todo-error-reminder"],
+							recoveryInstruction: "Do not retry todo while goal run mode blocks it; follow goal policy.now.",
+							action: "skipped",
+						});
+					} else {
+						const reminderText = [
+							"<system-reminder>",
+							"todo failed, so todo progress is not visible to the user.",
+							errorText ? `Failure: ${errorText}` : "Failure: todo returned an error.",
+							"Fix the todo payload and call todo again before continuing.",
+							"</system-reminder>",
+						].join("\n");
+						await this.sendCustomMessage(
+							{
+								customType: "todo-error-reminder",
+								content: reminderText,
+								display: false,
+								details: { toolName, errorText },
+							},
+							{ deliverAs: "nextTurn" },
+						);
+					}
 				}
 				if (toolName === "checkpoint" && !isError) {
 					const checkpointEntryId = this.sessionManager.getEntries().at(-1)?.id ?? null;
@@ -5650,6 +5702,7 @@ export class AgentSession {
 			goal.currentTarget?.id !== reference.targetId ||
 			goal.currentTarget.status !== "active" ||
 			goal.currentTargetPlan?.id !== reference.targetPlanId ||
+			(reference.revision !== undefined && goal.currentTargetPlan.revision !== reference.revision) ||
 			goal.currentTargetPlan.status !== "approved"
 		) {
 			this.#goalTargetPlanReference = undefined;
@@ -5798,10 +5851,22 @@ export class AgentSession {
 		checkpoint?: GoalCheckpointPacket;
 		checkpointReview?: GoalCheckpointReview;
 	}> {
+		const boundaryBefore = buildGoalBoundaryStateRef(this.#goalModeState, "checkpoint");
 		const candidate = this.#goalRuntime.buildCheckpointCandidate(input);
 		const expected = this.#goalRuntime.captureSideAgentExpectation({ includeParentFrame: true });
 		const review = await this.#reviewGoalCheckpoint(candidate, signal);
 		if (!this.#goalRuntime.canCommitSideAgentResult(expected)) {
+			this.#appendGoalBoundaryAudit({
+				kind: "checkpoint",
+				before: boundaryBefore,
+				after: buildGoalBoundaryStateRef(this.#goalModeState, "checkpoint"),
+				carriers: [],
+				preservedFields: ["stateVersion", "runMode", "currentTargetId", "pendingCheckpointId"],
+				staleFields: ["checkpoint-review"],
+				omittedFields: [],
+				recoveryInstruction: 'Refresh with goal({ op: "get" }) before retrying checkpoint.',
+				action: "aborted",
+			});
 			throw new Error("checkpoint review result is stale because goal state changed");
 		}
 		const state =
@@ -5810,6 +5875,19 @@ export class AgentSession {
 				: await this.#goalRuntime.rejectCheckpoint(candidate, review);
 		const checkpoint = review.status === "accepted" ? state.goal.checkpoints?.at(-1) : candidate;
 		if (checkpoint) await this.#publishGoalCheckpointArtifact(state.goal, checkpoint, review);
+		this.#appendGoalBoundaryAudit({
+			kind: "checkpoint",
+			before: boundaryBefore,
+			after: buildGoalBoundaryStateRef(state, "checkpoint"),
+			carriers: [],
+			preservedFields: ["stateVersion", "runMode", "currentTargetId", "pendingCheckpointId"],
+			staleFields: [],
+			omittedFields: [],
+			...(review.status === "accepted"
+				? {}
+				: { recoveryInstruction: "Revise checkpoint evidence before retrying checkpoint." }),
+			action: review.status === "accepted" ? "accepted" : "skipped",
+		});
 		return {
 			goal: state.goal,
 			state,
@@ -5863,6 +5941,7 @@ export class AgentSession {
 		if (state.runMode !== "planning-target") {
 			throw new ToolError("target plan submission is only allowed while runMode is planning-target");
 		}
+		const boundaryBefore = buildGoalBoundaryStateRef(state, "target-plan");
 		const currentPlan = this.#goalRuntime.validateCurrentTargetPlanSubmission(input);
 		validateTargetPlanSubmissionGraph(input);
 		const resolvedPlanPath = resolveLocalUrlToPath(
@@ -5870,8 +5949,13 @@ export class AgentSession {
 			this.#localProtocolOptions(),
 		);
 		let planContent: string;
+		let planHash: string;
+		let planBytes: number;
 		try {
-			planContent = await Bun.file(resolvedPlanPath).text();
+			const planFile = Bun.file(resolvedPlanPath);
+			planContent = await planFile.text();
+			planHash = Bun.hash(planContent).toString(16);
+			planBytes = planFile.size;
 		} catch (error) {
 			if (isEnoent(error)) throw new ToolError("target plan file is missing or empty");
 			throw error;
@@ -5887,6 +5971,23 @@ export class AgentSession {
 				message: "target plan review result is stale because goal state changed",
 				stage: "stale",
 			});
+			this.#appendGoalBoundaryAudit({
+				kind: "target-plan-approval",
+				before: boundaryBefore,
+				after: buildGoalBoundaryStateRef(this.#goalModeState, "target-plan"),
+				carriers: [
+					buildGoalBoundaryCarrierAudit("target-plan", {
+						runMode: this.#goalModeState?.runMode,
+						currentTargetPlanId: input.targetPlanId,
+						targetPlanRevision: input.revision,
+					}),
+				],
+				preservedFields: ["targetId", "targetPlanId", "revision", "planHash"],
+				staleFields: ["target-plan-review"],
+				omittedFields: [],
+				recoveryInstruction: 'Refresh with goal({ op: "get" }) before resubmitting the target plan.',
+				action: "aborted",
+			});
 			throw new ToolError("target plan review result is stale because goal state changed");
 		}
 		if (reviews.some(review => review.status !== "accepted")) {
@@ -5898,6 +5999,23 @@ export class AgentSession {
 			});
 			const rejectedPlan = rejected.goal.currentTargetPlan;
 			if (rejectedPlan) await this.#publishGoalTargetPlanArtifact(rejected.goal, rejectedPlan, reviews);
+			this.#appendGoalBoundaryAudit({
+				kind: "target-plan-approval",
+				before: boundaryBefore,
+				after: buildGoalBoundaryStateRef(rejected, "target-plan"),
+				carriers: [
+					buildGoalBoundaryCarrierAudit("target-plan", {
+						runMode: rejected.runMode,
+						currentTargetPlanId: rejectedPlan?.id,
+						targetPlanRevision: rejectedPlan?.revision,
+					}),
+				],
+				preservedFields: ["targetId", "targetPlanId", "revision", "planHash"],
+				staleFields: [],
+				omittedFields: ["approved-plan-context"],
+				recoveryInstruction: "Revise the target plan against reviewer findings.",
+				action: "skipped",
+			});
 			return {
 				goal: rejected.goal,
 				state: rejected,
@@ -5922,6 +6040,23 @@ export class AgentSession {
 			});
 			const rejectedPlan = rejected.goal.currentTargetPlan;
 			if (rejectedPlan) await this.#publishGoalTargetPlanArtifact(rejected.goal, rejectedPlan, allReviews);
+			this.#appendGoalBoundaryAudit({
+				kind: "target-plan-approval",
+				before: boundaryBefore,
+				after: buildGoalBoundaryStateRef(rejected, "target-plan"),
+				carriers: [
+					buildGoalBoundaryCarrierAudit("target-plan", {
+						runMode: rejected.runMode,
+						currentTargetPlanId: rejectedPlan?.id,
+						targetPlanRevision: rejectedPlan?.revision,
+					}),
+				],
+				preservedFields: ["targetId", "targetPlanId", "revision", "planHash"],
+				staleFields: [],
+				omittedFields: ["approved-plan-context"],
+				recoveryInstruction: "Revise the target plan against approval-gate feedback.",
+				action: "skipped",
+			});
 			return {
 				goal: rejected.goal,
 				state: rejected,
@@ -5939,10 +6074,33 @@ export class AgentSession {
 					targetPlanId: approvedPlan.id,
 					planFilePath: approvedPlan.planFilePath,
 					title: `goal-${sanitizeGoalPlanSlug(approvedPlan.goalId)}-target-${approvedPlan.targetSequence}`,
+					revision: approvedPlan.revision,
+					planHash,
+					planBytes,
+					stateVersionAtApproval: approvedState.stateVersion,
+					parentFrameVersionAtApproval: approvedState.parentFrameVersion,
 				}
 			: undefined;
 		if (targetPlanApproval) this.setGoalTargetPlanReference(targetPlanApproval);
 		if (approvedPlan) await this.#publishGoalTargetPlanArtifact(approvedState.goal, approvedPlan, reviews);
+		this.#appendGoalBoundaryAudit({
+			kind: "target-plan-approval",
+			before: boundaryBefore,
+			after: buildGoalBoundaryStateRef(approvedState, "approved-plan"),
+			carriers: [
+				buildGoalBoundaryCarrierAudit("target-plan", {
+					stateVersion: approvedState.stateVersion,
+					runMode: approvedState.runMode,
+					currentTargetPlanId: approvedPlan?.id,
+					targetPlanRevision: approvedPlan?.revision,
+				}),
+			],
+			preservedFields: ["targetId", "targetPlanId", "revision", "planFilePath", "planHash", "planBytes"],
+			staleFields: [],
+			omittedFields: ["fullPlanContent"],
+			recoveryInstruction: "Read the plan file only if exact execution details are needed.",
+			action: "accepted",
+		});
 		return {
 			goal: approvedState.goal,
 			state: approvedState,
@@ -6229,14 +6387,14 @@ export class AgentSession {
 		if (state.runMode === "awaiting-user-input") return undefined;
 		const goalId = state.goal.id;
 		const stateVersion = state.stateVersion;
+		const postCompaction = this.#consumeGoalPostCompactionContinuation(state);
+		if (postCompaction) return postCompaction;
 		if (state.runMode === "planning-target") {
 			const promptText = this.#prepareGoalTargetPlanningPrompt(state, signal);
 			const latest = this.#goalModeState;
 			if (!latest?.enabled || latest.goal.id !== goalId || latest.stateVersion !== stateVersion) return undefined;
 			return { kind: "target-planning", customType: "goal-target-planning", prompt: promptText };
 		}
-		const postCompaction = this.#consumeGoalPostCompactionContinuation(state);
-		if (postCompaction) return postCompaction;
 		if (state.runMode === "awaiting-checkpoint-resolution") {
 			const promptText = await this.#prepareGoalCheckpointGuidancePrompt(state, signal);
 			const latest = this.#goalModeState;
@@ -7121,13 +7279,13 @@ export class AgentSession {
 		this.#goalTargetPlanReference = undefined;
 	}
 
-	renderGoalTargetPlanApprovedPrompt(input: {
-		planContent: string;
-		planFilePath: string;
-		contextPreserved?: boolean;
-	}): string {
+	renderGoalTargetPlanApprovedPrompt(input: GoalTargetPlanApprovedDetails & { contextPreserved?: boolean }): string {
 		return prompt.render(goalTargetPlanApprovedPrompt, {
-			planContent: input.planContent,
+			targetId: input.targetId,
+			targetPlanId: input.targetPlanId,
+			revision: input.revision ?? "unknown",
+			planHash: input.planHash ?? "unknown",
+			planBytes: input.planBytes ?? "unknown",
 			planFilePath: input.planFilePath,
 			contextPreserved: input.contextPreserved === true,
 		});
@@ -7277,26 +7435,75 @@ export class AgentSession {
 		if (!reference || reference.sent) return null;
 		const state = this.#goalModeState;
 		if (!state?.enabled || state.goal.status !== "active") return null;
+		const currentPlan = state.goal.currentTargetPlan;
 		if (state.goal.currentTarget?.id !== reference.targetId) return null;
-		if (state.goal.currentTargetPlan?.id !== reference.targetPlanId) return null;
-		if (state.goal.currentTargetPlan.status !== "approved") return null;
-
-		const resolvedPlanPath = resolveLocalUrlToPath(
-			normalizeLocalScheme(reference.planFilePath),
-			this.#localProtocolOptions(),
-		);
-		let planContent: string;
-		try {
-			planContent = await Bun.file(resolvedPlanPath).text();
-		} catch (error) {
-			if (isEnoent(error)) return null;
-			throw error;
+		if (currentPlan?.id !== reference.targetPlanId) return null;
+		if (currentPlan.status !== "approved") return null;
+		if (reference.revision !== undefined && currentPlan.revision !== reference.revision) {
+			this.#appendGoalBoundaryAudit({
+				kind: "target-plan-reference",
+				before: buildGoalBoundaryStateRef(state, "approved-plan"),
+				after: buildGoalBoundaryStateRef(state, "approved-plan"),
+				carriers: [
+					buildGoalBoundaryCarrierAudit("target-plan-reference", {
+						runMode: state.runMode,
+						currentTargetPlanId: reference.targetPlanId,
+						targetPlanRevision: reference.revision,
+					}),
+				],
+				preservedFields: ["targetId", "targetPlanId", "revision"],
+				staleFields: ["targetPlanRevision"],
+				omittedFields: ["goal-target-plan-reference"],
+				recoveryInstruction: 'Call goal({ op: "get" }) before using target-plan reference context.',
+				action: "skipped",
+			});
+			return null;
 		}
-		if (!planContent.trim()) return null;
+
+		let planHash = reference.planHash;
+		let planBytes = reference.planBytes;
+		if (!planHash || planBytes === undefined) {
+			const resolvedPlanPath = resolveLocalUrlToPath(
+				normalizeLocalScheme(reference.planFilePath),
+				this.#localProtocolOptions(),
+			);
+			let planContent: string;
+			try {
+				const planFile = Bun.file(resolvedPlanPath);
+				planContent = await planFile.text();
+				planHash = Bun.hash(planContent).toString(16);
+				planBytes = planFile.size;
+			} catch (error) {
+				if (isEnoent(error)) return null;
+				throw error;
+			}
+			if (!planContent.trim()) return null;
+		}
 
 		const content = prompt.render(goalTargetPlanReferencePrompt, {
+			targetId: reference.targetId,
+			targetPlanId: reference.targetPlanId,
+			revision: reference.revision ?? currentPlan.revision,
+			planHash,
+			planBytes,
 			planFilePath: reference.planFilePath,
-			planContent,
+		});
+		this.#appendGoalBoundaryAudit({
+			kind: "target-plan-reference",
+			before: buildGoalBoundaryStateRef(state, "approved-plan"),
+			after: buildGoalBoundaryStateRef(state, "approved-plan"),
+			carriers: [
+				buildGoalBoundaryCarrierAudit("target-plan-reference", {
+					runMode: state.runMode,
+					currentTargetPlanId: reference.targetPlanId,
+					targetPlanRevision: reference.revision ?? currentPlan.revision,
+				}),
+			],
+			preservedFields: ["targetId", "targetPlanId", "revision", "planFilePath", "planHash", "planBytes"],
+			staleFields: [],
+			omittedFields: ["fullPlanContent"],
+			recoveryInstruction: "Read the plan file only if exact execution details are needed.",
+			action: "accepted",
 		});
 		reference.sent = true;
 		return {
@@ -9294,6 +9501,7 @@ export class AgentSession {
 			const compactionSettings = this.settings.getGroup("compaction");
 			const pathEntries = this.sessionManager.getBranch();
 			const baseLeafId = this.sessionManager.getLeafId();
+			const compactionBoundaryBefore = buildGoalBoundaryStateRef(this.#goalModeState, "compaction");
 			const baseLatestCompactionId = getLatestCompactionEntry(pathEntries)?.id;
 			const preparation = prepareCompaction(pathEntries, compactionSettings);
 			if (!preparation) {
@@ -9439,6 +9647,8 @@ export class AgentSession {
 			if (compactionAbortController.signal.aborted) {
 				throw new CompactionCancelledError();
 			}
+			const goalCompactionRefresh = this.#refreshGoalCompactionPreserveData(preserveData, compactionBoundaryBefore);
+			preserveData = goalCompactionRefresh.preserveData;
 
 			const appendResult = this.sessionManager.tryAppendPreparedCompaction({
 				baseLeafId,
@@ -9452,8 +9662,20 @@ export class AgentSession {
 				preserveData,
 			});
 			if (appendResult.status !== "appended") {
+				this.#appendGoalBoundaryAudit({
+					kind: "compaction",
+					before: compactionBoundaryBefore,
+					after: buildGoalBoundaryStateRef(this.#goalModeState, "compaction"),
+					carriers: [],
+					preservedFields: goalCompactionPreservedFields(preserveData),
+					staleFields: [`branch:${appendResult.status}`],
+					omittedFields: ["compaction-entry"],
+					recoveryInstruction: 'Call goal({ op: "get" }) before further goal work.',
+					action: "skipped",
+				});
 				throw new Error(`Compaction result is ${appendResult.status}; branch changed before append.`);
 			}
+			this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, goalCompactionRefresh.auditRecord);
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#armGoalPostCompactionContinuation();
@@ -10780,6 +11002,65 @@ export class AgentSession {
 		throw this.#buildCompactionAuthError();
 	}
 
+	#buildGoalBoundaryAuditRecord(input: GoalBoundaryAuditInput): GoalBoundaryAuditRecord {
+		return {
+			schemaVersion: 1,
+			kind: input.kind,
+			boundaryId: `${input.kind}-${Snowflake.next()}`,
+			...(input.before ? { before: input.before } : {}),
+			...(input.after ? { after: input.after } : {}),
+			carriers: input.carriers ?? [],
+			preservedFields: input.preservedFields ?? [],
+			staleFields: input.staleFields ?? [],
+			omittedFields: input.omittedFields ?? [],
+			...(input.recoveryInstruction ? { recoveryInstruction: input.recoveryInstruction } : {}),
+			action: input.action,
+			recordedAt: Date.now(),
+		};
+	}
+
+	#appendGoalBoundaryAudit(input: GoalBoundaryAuditInput): void {
+		this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, this.#buildGoalBoundaryAuditRecord(input));
+	}
+
+	#refreshGoalCompactionPreserveData(
+		preserveData: Record<string, unknown> | undefined,
+		before: GoalBoundaryStateRef | undefined,
+	): GoalCompactionRefreshResult {
+		const hadGoalOwnedKeys = GOAL_OWNED_COMPACTION_PRESERVE_KEYS.some(
+			key => preserveData !== undefined && key in preserveData,
+		);
+		const freshGoalPreserveData = this.#buildGoalCompactionContext()?.preserveData;
+		const merged = mergeGoalCompactionPreserveData(preserveData, freshGoalPreserveData);
+		const staleFields = collectGoalCompactionPreserveMismatches(merged, this.#goalModeState);
+		const omittedFields = goalCompactionOmittedFields(merged, this.#goalModeState);
+		const auditRecord = this.#buildGoalBoundaryAuditRecord({
+			kind: "compaction",
+			before,
+			after: buildGoalBoundaryStateRef(this.#goalModeState, "compaction"),
+			carriers: [
+				buildGoalBoundaryCarrierAudit("goalMode", merged?.goalMode),
+				buildGoalBoundaryCarrierAudit("goalContinuationPacket", merged?.goalContinuationPacket),
+				buildGoalBoundaryCarrierAudit("goalBoundaryRef", merged?.goalBoundaryRef),
+			],
+			preservedFields: goalCompactionPreservedFields(merged),
+			staleFields,
+			omittedFields,
+			...(staleFields.length > 0
+				? {
+						recoveryInstruction:
+							'Discard stale compaction goal state and call goal({ op: "get" }) before further goal work.',
+					}
+				: {}),
+			action: staleFields.length > 0 ? "aborted" : hadGoalOwnedKeys ? "regenerated" : "accepted",
+		});
+		if (staleFields.length > 0) {
+			this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, auditRecord);
+			throw new Error(`Goal compaction preserveData is stale: ${staleFields.join(", ")}`);
+		}
+		return { preserveData: merged, auditRecord };
+	}
+
 	#armGoalPostCompactionContinuation(state: GoalModeState | undefined = this.#goalModeState): void {
 		this.#goalPostCompactionContinuation = buildGoalPostCompactionContinuation(state);
 	}
@@ -11150,6 +11431,7 @@ export class AgentSession {
 			let hookCompaction: CompactionResult | undefined;
 			let fromExtension = false;
 			let preserveData: Record<string, unknown> | undefined;
+			const compactionBoundaryBefore = buildGoalBoundaryStateRef(this.#goalModeState, "compaction");
 
 			if (this.#extensionRunner?.hasHandlers("session_before_compact")) {
 				const hookResult = (await this.#extensionRunner.emit({
@@ -11354,6 +11636,9 @@ export class AgentSession {
 				return false;
 			}
 
+			const goalCompactionRefresh = this.#refreshGoalCompactionPreserveData(preserveData, compactionBoundaryBefore);
+			preserveData = goalCompactionRefresh.preserveData;
+
 			const appendResult = this.sessionManager.tryAppendPreparedCompaction({
 				baseLeafId,
 				baseLatestCompactionId,
@@ -11366,6 +11651,17 @@ export class AgentSession {
 				preserveData,
 			});
 			if (appendResult.status !== "appended") {
+				this.#appendGoalBoundaryAudit({
+					kind: "compaction",
+					before: compactionBoundaryBefore,
+					after: buildGoalBoundaryStateRef(this.#goalModeState, "compaction"),
+					carriers: [],
+					preservedFields: goalCompactionPreservedFields(preserveData),
+					staleFields: [`branch:${appendResult.status}`],
+					omittedFields: ["compaction-entry"],
+					recoveryInstruction: 'Call goal({ op: "get" }) before further goal work.',
+					action: "skipped",
+				});
 				logger.warn("Discarding stale auto-compaction result", {
 					reason,
 					status: appendResult.status,
@@ -11382,6 +11678,7 @@ export class AgentSession {
 				});
 				return false;
 			}
+			this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, goalCompactionRefresh.auditRecord);
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			if (options.armGoalContinuation !== false) {

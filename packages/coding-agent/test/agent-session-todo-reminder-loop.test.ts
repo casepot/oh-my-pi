@@ -57,7 +57,11 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
 	}
 
-	function emitToolResult(toolName: string, details: Record<string, unknown> = {}): void {
+	function emitToolResult(
+		toolName: string,
+		details: Record<string, unknown> = {},
+		options: { isError?: boolean; text?: string } = {},
+	): void {
 		const toolCallId = `call_${toolName}_${Date.now()}_${Math.random()}`;
 		const toolCall: ToolCall = { type: "toolCall", id: toolCallId, name: toolName, arguments: {} };
 		const assistantMsg: AssistantMessage = {
@@ -78,7 +82,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 			timestamp: Date.now(),
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		const content: TextContent[] = [{ type: "text", text: "ok" }];
+		const content: TextContent[] = [{ type: "text", text: options.text ?? "ok" }];
 		session.agent.emitExternalEvent({
 			type: "message_end",
 			message: {
@@ -86,7 +90,7 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 				toolCallId,
 				toolName,
 				content,
-				isError: false,
+				isError: options.isError === true,
 				details,
 				timestamp: Date.now(),
 			},
@@ -158,6 +162,33 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		emitTextOnlyStop();
 		await withTimeout(firstReminderPromise, 1000, "todo_reminder never fired");
 		expect(reminderAttempts).toEqual([1]);
+	});
+
+	it("suppresses todo error retry reminders while goal planning disallows todo", async () => {
+		await session.goalRuntime.createGoal({ objective: "Improve release reliability" });
+		await session.goalRuntime.startTarget({
+			title: "Plan source-link smoke",
+			desiredFutureClaim: "Source-link smoke has current bounded evidence.",
+			closureStandard: "Current source-link smoke output exists.",
+		});
+		emitToolResult("todo", {}, { isError: true, text: "Tool todo is unavailable during goal target planning." });
+		await session.waitForIdle();
+
+		const todoRetryReminders = sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === "todo-error-reminder");
+		expect(todoRetryReminders).toHaveLength(0);
+		const boundaryAudits = sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom" && entry.customType === "goal_boundary_audit");
+		expect(boundaryAudits).toHaveLength(1);
+		const boundaryAudit = boundaryAudits[0];
+		if (boundaryAudit?.type !== "custom") throw new Error("expected goal boundary audit");
+		expect(boundaryAudit.data).toMatchObject({
+			kind: "goal-error",
+			action: "skipped",
+			omittedFields: ["todo-error-reminder"],
+		});
 	});
 
 	it("fires exactly one reminder per user pause when the agent only acknowledges", async () => {

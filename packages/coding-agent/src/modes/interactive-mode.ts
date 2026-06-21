@@ -2047,15 +2047,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async handleGoalTargetPlanApproved(details: GoalTargetPlanApprovedDetails): Promise<void> {
-		const planContent = await this.#readPlanFile(details.planFilePath);
-		if (!planContent) {
-			this.showError(`Target plan file not found at ${details.planFilePath}`);
-			return;
-		}
 		this.session.setGoalTargetPlanReference(details);
 		const targetPlanPrompt = this.session.renderGoalTargetPlanApprovedPrompt({
-			planContent,
-			planFilePath: details.planFilePath,
+			...details,
 			contextPreserved: true,
 		});
 		if (this.session.isStreaming) {

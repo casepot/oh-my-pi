@@ -459,7 +459,7 @@ function appendCompactableHistory(harness: GoalHarness): void {
 	});
 }
 
-function installCompactionMock() {
+function installCompactionMock(preserveData: Record<string, unknown> = { compactMock: "preserved" }) {
 	return vi
 		.spyOn(compactionModule, "compact")
 		.mockImplementation(async (preparation, _model, _apiKey, _instructions, _signal, options) => ({
@@ -467,7 +467,7 @@ function installCompactionMock() {
 			firstKeptEntryId: preparation.firstKeptEntryId,
 			tokensBefore: preparation.tokensBefore,
 			details: { extraContext: options?.extraContext },
-			preserveData: { compactMock: "preserved" },
+			preserveData,
 		}));
 }
 
@@ -740,6 +740,17 @@ describe("InteractiveMode goal mode integration", () => {
 		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const approval = harness.session.getGoalTargetPlanReference();
 		if (!approval) throw new Error("expected target-plan approval details");
+		const targetPlanApprovalAudits = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom" && entry.customType === "goal_boundary_audit")
+			.filter(entry => entry.type === "custom" && JSON.stringify(entry.data).includes('"target-plan-approval"'));
+		const targetPlanApprovalAudit = targetPlanApprovalAudits[targetPlanApprovalAudits.length - 1];
+		if (targetPlanApprovalAudit?.type !== "custom") throw new Error("expected target-plan approval audit");
+		expect(targetPlanApprovalAudit.data).toMatchObject({
+			kind: "target-plan-approval",
+			action: "accepted",
+			omittedFields: ["fullPlanContent"],
+		});
 
 		Object.defineProperty(harness.session, "isStreaming", { configurable: true, get: () => true });
 		const abort = vi.spyOn(harness.session, "abort");
@@ -749,6 +760,14 @@ describe("InteractiveMode goal mode integration", () => {
 
 		expect(abort).toHaveBeenCalledWith({ goalReason: "internal" });
 		expect(prompt).toHaveBeenCalledWith(expect.stringContaining("Goal target plan approved."), { synthetic: true });
+		const approvedPrompt = prompt.mock.calls[0]?.[0];
+		if (typeof approvedPrompt !== "string") throw new Error("expected approved target plan prompt");
+		if (!approval.planHash) throw new Error("expected target plan hash");
+		expect(approvedPrompt).toContain("<approved_target_plan_ref");
+		expect(approvedPrompt).toContain(approval.planFilePath);
+		expect(approvedPrompt).toContain(approval.planHash);
+		expect(approvedPrompt).not.toContain("## Verification Signal Aperture");
+		expect(approvedPrompt).not.toContain("Primary signal: focused target evidence.");
 		const state = harness.session.getGoalModeState();
 		expect(state?.enabled).toBe(true);
 		expect(state?.runMode).toBe("working-target");
@@ -1099,6 +1118,17 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("active");
 		expect(harness.session.getGoalModeState()?.goal.pendingCheckpointId).toBe(checkpointId);
 		expect(JSON.stringify(checkpoint.content)).toContain("Parent goal remains active");
+		const checkpointAudits = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom" && entry.customType === "goal_boundary_audit")
+			.filter(entry => entry.type === "custom" && JSON.stringify(entry.data).includes('"checkpoint"'));
+		const checkpointAudit = checkpointAudits[checkpointAudits.length - 1];
+		if (checkpointAudit?.type !== "custom") throw new Error("expected checkpoint audit");
+		expect(checkpointAudit.data).toMatchObject({
+			kind: "checkpoint",
+			action: "accepted",
+			staleFields: [],
+		});
 		await expect(goalTool.execute("complete-while-pending", { op: "complete" })).rejects.toThrow(
 			"checkpoint is pending resolution",
 		);
@@ -1450,6 +1480,115 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.session.getGoalModeState()?.enabled).toBe(true);
 		expect(harness.session.getGoalModeState()?.runMode).toBe("awaiting-checkpoint-resolution");
 		expect(showStatus).toHaveBeenCalledWith("Checkpoint resolution continuation scheduled.");
+	});
+
+	it("refreshes compaction preserveData from the latest goal state after target transitions", async () => {
+		harness.authStorage.setRuntimeApiKey("anthropic", "test-key");
+		harness.settings.set("compaction.keepRecentTokens", 1);
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target-source-link", {
+			op: "start_target",
+			title: "Prove source-link smoke before compaction",
+			desired_future_claim: "Source-link smoke has current bounded evidence.",
+			closure_standard: "Current source-link smoke output exists.",
+			forbidden_claims: ["Tarball smoke is verified"],
+		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+		const staleState = harness.session.getGoalModeState();
+		const staleTarget = staleState?.goal.currentTarget;
+		const stalePlan = staleState?.goal.currentTargetPlan;
+		if (!staleState?.enabled || !staleTarget || !stalePlan) throw new Error("expected first approved target");
+		installCompactionMock({
+			compactMock: "preserved",
+			goalMode: serializeGoalModeState(staleState),
+			goalContinuationPacket: {
+				stateVersion: staleState.stateVersion,
+				runMode: staleState.runMode,
+				parentGoalId: staleState.goal.id,
+				parentFrameVersion: staleState.parentFrameVersion,
+				currentTargetId: staleTarget.id,
+			},
+			goalBoundaryRef: {
+				schemaVersion: 1,
+				purpose: "compaction",
+				goalId: staleState.goal.id,
+				stateVersion: staleState.stateVersion,
+				runMode: staleState.runMode,
+				parentFrameVersion: staleState.parentFrameVersion,
+				currentTargetId: staleTarget.id,
+				currentTargetPlanId: stalePlan.id,
+				targetPlanRevision: stalePlan.revision,
+				capturedAt: Date.now(),
+			},
+		});
+
+		const checkpoint = await goalTool.execute("checkpoint-source-link", {
+			op: "checkpoint",
+			status: "closed_with_evidence",
+			summary: "Source-link smoke passed.",
+			local_claims: ["Source-link smoke has current bounded evidence"],
+			evidence: [
+				{ claim: "Source-link smoke has current bounded evidence", evidence: "Observed output", current: true },
+			],
+			not_claimed: ["Tarball smoke is verified"],
+			remaining_questions: ["Should tarball smoke be next?"],
+		});
+		const checkpointId = checkpoint.details?.checkpoint?.id;
+		if (!checkpointId) throw new Error("expected checkpoint id");
+		await goalTool.execute("resolve-to-tarball", {
+			op: "resolve_checkpoint",
+			checkpoint_id: checkpointId,
+			decision: "next_target",
+			parent_reading: "Source-link smoke is accepted; tarball smoke remains open.",
+			not_propagated: ["Tarball smoke is verified"],
+			remaining_parent_work: ["Collect tarball smoke evidence"],
+			next_target: {
+				title: "Prove tarball smoke after stale compaction",
+				desired_future_claim: "Tarball smoke has current bounded evidence.",
+				closure_standard: "Current tarball smoke output exists.",
+				forbidden_claims: ["Source-link smoke proves tarball smoke"],
+			},
+		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+		const latestState = harness.session.getGoalModeState();
+		const latestTarget = latestState?.goal.currentTarget;
+		const latestPlan = latestState?.goal.currentTargetPlan;
+		if (!latestState?.enabled || !latestTarget || !latestPlan) throw new Error("expected second approved target");
+
+		appendCompactableHistory(harness);
+		const compacted = await harness.session.compact();
+		const preservedGoalMode = parseGoalModeState(compacted.preserveData?.goalMode);
+		expect(preservedGoalMode?.stateVersion).toBe(latestState.stateVersion);
+		expect(preservedGoalMode?.goal.currentTarget?.id).toBe(latestTarget.id);
+		expect(preservedGoalMode?.goal.currentTargetPlan?.id).toBe(latestPlan.id);
+		const packet = compacted.preserveData?.goalContinuationPacket;
+		if (!packet || typeof packet !== "object" || Array.isArray(packet)) {
+			throw new Error("expected goal continuation packet");
+		}
+		const packetRecord = packet as Record<string, unknown>;
+		expect(packetRecord.stateVersion).toBe(latestState.stateVersion);
+		expect(packetRecord.currentTargetId).toBe(latestTarget.id);
+		const boundaryRef = compacted.preserveData?.goalBoundaryRef;
+		if (!boundaryRef || typeof boundaryRef !== "object" || Array.isArray(boundaryRef)) {
+			throw new Error("expected goal boundary ref");
+		}
+		const boundaryRecord = boundaryRef as Record<string, unknown>;
+		expect(boundaryRecord.stateVersion).toBe(latestState.stateVersion);
+		expect(boundaryRecord.currentTargetId).toBe(latestTarget.id);
+		expect(boundaryRecord.currentTargetPlanId).toBe(latestPlan.id);
+		expect(compacted.preserveData?.compactMock).toBe("preserved");
+		const auditEntries = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom" && entry.customType === "goal_boundary_audit");
+		const auditEntry = auditEntries[auditEntries.length - 1];
+		if (auditEntry?.type !== "custom") throw new Error("expected compaction boundary audit");
+		expect(auditEntry.data).toMatchObject({
+			kind: "compaction",
+			action: "regenerated",
+			staleFields: [],
+			omittedFields: [],
+		});
 	});
 
 	it("exercises a Gateway-like release flow through checkpoint, compaction, verifier repair, and final completion", async () => {
