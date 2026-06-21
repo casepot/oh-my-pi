@@ -16,10 +16,10 @@ import {
 	currentTargetPlanSubmitIdentity,
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
+	type GoalRecoverBlockedStateInput,
 	type GoalStartTargetInput,
 	type GoalSubmitTargetPlanInput,
 	type GoalTargetPlanFailureInput,
-	type GoalTargetPlanReopenInput,
 	remainingTokens,
 	renderTargetPlanSubmitSkeleton,
 	validateTargetPlanSubmissionGraph,
@@ -540,16 +540,80 @@ const failTargetPlanSchema = z
 	})
 	.strict();
 
-const reopenTargetPlanSchema = z
+const recoveryReasonSchema = z.enum(["user-input", "broader-checks", "external-authority", "state-refresh"]);
+
+const recoverBlockedStateSchema = z
 	.object({
-		op: z.literal("reopen_target_plan"),
-		target_id: z.string(),
-		target_plan_id: z.string(),
-		revision: z.number().int().min(1),
-		reason: z.enum(["user-input", "broader-checks", "external-authority"]),
+		op: z.literal("recover_blocked_state"),
+		kind: z.enum(["target-plan", "checkpoint-external-pause"]),
+		action: z.enum(["restart_target_planning", "start_next_target", "enter_parent_completion"]),
+		blocked_state_id: z.string(),
+		target_id: z.string().optional(),
+		target_plan_id: z.string().optional(),
+		revision: z.number().int().min(1).optional(),
+		source_status: z.enum(["failed", "stale"]).optional(),
+		checkpoint_id: z.string().optional(),
+		checkpoint_resolution_id: z.string().optional(),
+		reason: recoveryReasonSchema,
 		guidance: z.string().min(1),
+		parent_delta: parentDeltaSchema.optional(),
+		next_target: maybeTargetSchema.optional(),
 	})
-	.strict();
+	.strict()
+	.superRefine((value, context) => {
+		if (value.kind === "target-plan") {
+			if (value.action !== "restart_target_planning") {
+				context.addIssue({
+					code: "custom",
+					path: ["action"],
+					message: "target-plan recovery requires action restart_target_planning",
+				});
+			}
+			for (const field of ["target_id", "target_plan_id", "revision", "source_status"] as const) {
+				if (value[field] === undefined) {
+					context.addIssue({
+						code: "custom",
+						path: [field],
+						message: `${field} is required for target-plan recovery`,
+					});
+				}
+			}
+			return;
+		}
+		if (value.action === "restart_target_planning") {
+			context.addIssue({
+				code: "custom",
+				path: ["action"],
+				message: "checkpoint-external-pause recovery cannot restart target planning",
+			});
+		}
+		for (const field of ["checkpoint_id", "checkpoint_resolution_id"] as const) {
+			if (value[field] === undefined) {
+				context.addIssue({
+					code: "custom",
+					path: [field],
+					message: `${field} is required for checkpoint-external-pause recovery`,
+				});
+			}
+		}
+		if (value.action === "start_next_target") {
+			if (value.next_target === undefined || !isTargetParams(value.next_target)) {
+				context.addIssue({
+					code: "custom",
+					path: ["next_target"],
+					message: "next_target is required when action is start_next_target",
+				});
+			}
+			return;
+		}
+		if (value.next_target !== undefined) {
+			context.addIssue({
+				code: "custom",
+				path: ["next_target"],
+				message: "next_target is not allowed when action is enter_parent_completion",
+			});
+		}
+	});
 
 const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	createSchema,
@@ -562,7 +626,7 @@ const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	resolveCheckpointSchema,
 	submitTargetPlanSchema,
 	failTargetPlanSchema,
-	reopenTargetPlanSchema,
+	recoverBlockedStateSchema,
 ]);
 
 const goalSchema = goalDiscriminatedSchema;
@@ -899,14 +963,51 @@ function mapFailTargetPlanInput(params: z.infer<typeof failTargetPlanSchema>): G
 		suggestedQuestions: params.suggested_questions,
 	};
 }
+function requireRecoverField<T>(value: T | undefined, field: string): T {
+	if (value !== undefined) return value;
+	throw new ToolError(`${field} is required for recover_blocked_state`);
+}
 
-function mapReopenTargetPlanInput(params: z.infer<typeof reopenTargetPlanSchema>): GoalTargetPlanReopenInput {
+function mapRecoverBlockedStateInput(params: z.infer<typeof recoverBlockedStateSchema>): GoalRecoverBlockedStateInput {
+	if (params.kind === "target-plan") {
+		return {
+			kind: "target-plan",
+			action: "restart_target_planning",
+			blockedStateId: params.blocked_state_id,
+			targetId: requireRecoverField(params.target_id, "target_id"),
+			targetPlanId: requireRecoverField(params.target_plan_id, "target_plan_id"),
+			revision: requireRecoverField(params.revision, "revision"),
+			sourceStatus: requireRecoverField(params.source_status, "source_status"),
+			reason: params.reason,
+			guidance: params.guidance,
+		};
+	}
+	if (params.action === "start_next_target") {
+		const nextTarget = requireRecoverField(params.next_target, "next_target");
+		if (!isTargetParams(nextTarget)) {
+			throw new ToolError("next_target is required for checkpoint-external-pause recovery");
+		}
+		return {
+			kind: "checkpoint-external-pause",
+			action: "start_next_target",
+			blockedStateId: params.blocked_state_id,
+			checkpointId: requireRecoverField(params.checkpoint_id, "checkpoint_id"),
+			checkpointResolutionId: requireRecoverField(params.checkpoint_resolution_id, "checkpoint_resolution_id"),
+			reason: params.reason,
+			guidance: params.guidance,
+			parentDelta: mapParentDelta(params.parent_delta),
+			nextTarget: mapTargetInput(nextTarget),
+		};
+	}
 	return {
-		targetId: params.target_id,
-		targetPlanId: params.target_plan_id,
-		revision: params.revision,
+		kind: "checkpoint-external-pause",
+		action: "enter_parent_completion",
+		blockedStateId: params.blocked_state_id,
+		checkpointId: requireRecoverField(params.checkpoint_id, "checkpoint_id"),
+		checkpointResolutionId: requireRecoverField(params.checkpoint_resolution_id, "checkpoint_resolution_id"),
 		reason: params.reason,
 		guidance: params.guidance,
+		parentDelta: mapParentDelta(params.parent_delta),
 	};
 }
 
@@ -989,9 +1090,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				mapFailTargetPlanInput(failTargetPlanSchema.parse(params)),
 				signal,
 			);
-		} else if (params.op === "reopen_target_plan") {
-			const state = await runtime.reopenFailedTargetPlan(
-				mapReopenTargetPlanInput(reopenTargetPlanSchema.parse(params)),
+		} else if (params.op === "recover_blocked_state") {
+			const state = await runtime.recoverBlockedState(
+				mapRecoverBlockedStateInput(recoverBlockedStateSchema.parse(params)),
 			);
 			response = buildGoalToolResponse(state.goal, { state, targetPlan: state.goal.currentTargetPlan });
 		} else {
@@ -1069,15 +1170,20 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\nNext action: write the plan at plan_file_path, then call goal with this submit_target_plan skeleton:\n${renderTargetPlanSubmitSkeleton(identity, { includeOp: true })}`;
 			text += `\nAllowed verification layer values for verification_signals[].layer and verification_aperture.omitted_layers[].layer: ${VERIFICATION_LAYER_VALUES.join(", ")}.`;
 		}
-		if (
-			goal.currentTargetPlan.status === "failed" &&
-			response.state?.runMode === "awaiting-user-input" &&
-			goal.currentTarget?.status === "active" &&
-			goal.currentTargetPlan.targetId === goal.currentTarget.id
-		) {
-			text += `\nNext action after user/external input: call goal({op:"reopen_target_plan", target_id:"${goal.currentTarget.id}", target_plan_id:"${goal.currentTargetPlan.id}", revision:${goal.currentTargetPlan.revision}, reason:"user-input", guidance:"<decision or authority>"}).`;
-			text += "\nDo not call resume or start_target for failed target-plan recovery.";
+	}
+	const block = goal.currentBlockedState;
+	if (block?.status === "open" && response.state?.runMode === "awaiting-user-input") {
+		const action = block.allowedActions[0];
+		let skeleton =
+			action === undefined
+				? "no recovery action is available"
+				: `goal({op:"recover_blocked_state", blocked_state_id:"${block.id}", kind:"${block.kind}", action:"${action}", ...})`;
+		if (block.kind === "target-plan") {
+			skeleton = `goal({op:"recover_blocked_state", kind:"target-plan", action:"restart_target_planning", blocked_state_id:"${block.id}", target_id:"${block.source.targetId}", target_plan_id:"${block.source.targetPlanId}", revision:${block.source.revision}, source_status:"${block.source.status}", reason:"user-input", guidance:"<decision or authority>"})`;
+		} else if (block.kind === "checkpoint-external-pause" && action) {
+			skeleton = `goal({op:"recover_blocked_state", kind:"checkpoint-external-pause", action:"${action}", blocked_state_id:"${block.id}", checkpoint_id:"${block.source.checkpointId}", checkpoint_resolution_id:"${block.source.checkpointResolutionId}", reason:"user-input", guidance:"<decision or authority>", ...})`;
 		}
+		text += `\n\nBlocked state requires input: ${block.kind}. If current input resolves it, call ${skeleton}. Do not call resume or start_target directly while blocked_state is open.`;
 	}
 	if (
 		goal.status !== "paused" &&
@@ -1110,7 +1216,7 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += "\n\nTarget plan approved. Goal mode remains active; execution may begin for the current target.";
 		} else if (response.targetPlan.status === "failed" || response.state?.runMode === "awaiting-user-input") {
 			text +=
-				"\n\nTarget plan failed. Goal mode is awaiting user/external input; when input resolves the blockers, call reopen_target_plan for the same active target.";
+				"\n\nTarget plan failed. Goal mode is awaiting user/external input; when input resolves the blockers, call recover_blocked_state for the current blocked_state.";
 		} else {
 			text += "\n\nTarget plan rejected. Run mode remains planning-target; revise the plan using reviewer feedback.";
 			const feedback = response.targetPlanReviews
@@ -1120,9 +1226,12 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			if (feedback) text += `\n\nReviewer feedback:\n${feedback}`;
 		}
 	}
-	if (op === "reopen_target_plan" && response.targetPlan) {
+	if (op === "recover_blocked_state" && response.state?.runMode === "planning-target") {
 		text +=
-			"\n\nTarget plan reopened. Goal mode is planning-target for the same active target. Write only the new plan_file_path, then submit_target_plan.";
+			"\n\nBlocked state recovered. Goal mode is planning-target. Write only the new plan_file_path, then submit_target_plan.";
+	} else if (op === "recover_blocked_state" && response.state?.runMode === "awaiting-parent-completion") {
+		text +=
+			'\n\nBlocked state recovered. Next action: call goal({op:"complete"}) for parent completion verification.';
 	}
 	if (op === "drop") {
 		text += "\n\nGoal dropped. Formal goal mode is off; no checkpoint or parent completion was recorded.";
@@ -1163,8 +1272,8 @@ function describeOp(op: string | undefined): string {
 			return "submit target plan";
 		case "fail_target_plan":
 			return "fail target plan";
-		case "reopen_target_plan":
-			return "reopen target plan";
+		case "recover_blocked_state":
+			return "recover blocked state";
 		default:
 			return op ?? "?";
 	}
@@ -1244,8 +1353,8 @@ export const goalToolRenderer = {
 		const checkpointRejected = details?.checkpointReview?.status === "rejected";
 		const targetPlan = details?.targetPlan;
 		const targetPlanBadge =
-			op === "reopen_target_plan" && targetPlan?.status === "drafting"
-				? ({ label: "target plan reopened", color: "success" } as const)
+			op === "recover_blocked_state" && targetPlan?.status === "drafting"
+				? ({ label: "blocked state recovered", color: "success" } as const)
 				: op === "submit_target_plan" && targetPlan?.status === "revision-required"
 					? ({ label: "target plan rejected", color: "warning" } as const)
 					: targetPlan?.status === "failed"

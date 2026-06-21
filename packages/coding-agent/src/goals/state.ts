@@ -13,7 +13,7 @@ export type GoalRunMode =
 	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
 	| "awaiting-user-input";
-export const GOAL_MODE_SCHEMA_VERSION = 3;
+export const GOAL_MODE_SCHEMA_VERSION = 4;
 export type GoalDeliverableStatus = "pending" | "partial" | "satisfied" | "blocked" | "stale";
 
 export type GoalTargetPlanStatus = "drafting" | "reviewing" | "revision-required" | "approved" | "failed" | "stale";
@@ -323,23 +323,114 @@ export interface GoalTargetPlanReview {
 	sideAgentTokensUsed?: number;
 }
 
-export type GoalTargetPlanReopenReason = "user-input" | "broader-checks" | "external-authority";
-
-export interface GoalTargetPlanRecovery {
-	sourceTargetPlanId: string;
-	sourceRevision: number;
-	reason: GoalTargetPlanReopenReason;
-	guidance: string;
-	blockers: string[];
-	at: number;
-}
-
 export interface GoalTargetPlanFailure {
 	stage: "draft" | "review" | "approval" | "stale";
 	reason: GoalTargetPlanFailureReason;
 	message: string;
 	blockers: string[];
 	suggestedQuestions: string[];
+	at: number;
+}
+
+export type GoalBlockedStateKind = "target-plan" | "checkpoint-external-pause" | "operator-input-required";
+export type GoalBlockedStateStatus = "open" | "resolved" | "superseded";
+export type GoalRecoveryReason = "user-input" | "broader-checks" | "external-authority" | "state-refresh";
+export type GoalBlockedStateAction = "restart_target_planning" | "start_next_target" | "enter_parent_completion";
+
+export interface GoalBlockedStateBase {
+	id: string;
+	sequence: number;
+	kind: GoalBlockedStateKind;
+	status: GoalBlockedStateStatus;
+	message: string;
+	blockers: string[];
+	suggestedQuestions: string[];
+	allowedActions: GoalBlockedStateAction[];
+	stateVersionAtBlock: number;
+	parentFrameVersionAtBlock: number;
+	createdAt: number;
+	updatedAt: number;
+	resolvedAt?: number;
+	recoveryId?: string;
+	supersededAt?: number;
+	supersededBy?: string;
+}
+
+export interface GoalTargetPlanBlockedState extends GoalBlockedStateBase {
+	kind: "target-plan";
+	source: {
+		targetId: string;
+		targetSequence: number;
+		targetPlanId: string;
+		revision: number;
+		status: "failed" | "stale";
+		planFilePath: string;
+	};
+	allowedActions: ["restart_target_planning"];
+}
+
+export interface GoalCheckpointExternalPauseBlockedState extends GoalBlockedStateBase {
+	kind: "checkpoint-external-pause";
+	source: {
+		checkpointId: string;
+		checkpointResolutionId: string;
+		decision:
+			| "needs_user_input"
+			| "needs_broader_checks"
+			| "pause_for_external_control"
+			| "drop_or_replace_recommended";
+	};
+	broaderChecksOrInputs: string[];
+	remainingParentWork: string[];
+	allowedActions: Array<"start_next_target" | "enter_parent_completion">;
+}
+
+export interface GoalOperatorInputBlockedState extends GoalBlockedStateBase {
+	kind: "operator-input-required";
+	source: {
+		reason: "legacy-migration" | "ambiguous-controller-state";
+	};
+	allowedActions: [];
+}
+
+export type GoalBlockedState =
+	| GoalTargetPlanBlockedState
+	| GoalCheckpointExternalPauseBlockedState
+	| GoalOperatorInputBlockedState;
+
+export type GoalBlockedStateSource = GoalBlockedState["source"];
+
+export interface GoalRecoveryResultSummary {
+	runMode: GoalRunMode;
+	targetId?: string;
+	targetPlanId?: string;
+	planFilePath?: string;
+	checkpointResolutionId?: string;
+	parentFrameVersion?: number;
+}
+
+export interface GoalRecoveryRecord {
+	id: string;
+	sequence: number;
+	blockedStateId: string;
+	kind: GoalBlockedStateKind;
+	action: GoalBlockedStateAction;
+	reason: GoalRecoveryReason;
+	guidance: string;
+	blockers: string[];
+	source: GoalBlockedStateSource;
+	result: GoalRecoveryResultSummary;
+	at: number;
+}
+
+export interface GoalRecoveryLink {
+	recoveryId: string;
+	blockedStateId: string;
+	kind: GoalBlockedStateKind;
+	action: GoalBlockedStateAction;
+	reason: GoalRecoveryReason;
+	guidance: string;
+	blockers: string[];
 	at: number;
 }
 
@@ -358,7 +449,7 @@ export interface GoalTargetPlanRecord {
 	approvedAt?: number;
 	failedAt?: number;
 	failure?: GoalTargetPlanFailure;
-	recoveredFromFailure?: GoalTargetPlanRecovery;
+	recoveredFrom?: GoalRecoveryLink;
 	verificationAperture?: GoalVerificationAperture;
 	verificationSignals?: GoalVerificationSignal[];
 	concernChecks?: GoalConcernCheck[];
@@ -531,6 +622,9 @@ export interface Goal {
 	lastCheckpointResolutionId?: string;
 	lastCheckpointRejection?: GoalCheckpointRejection;
 	verificationRepair?: GoalVerificationRepairState;
+	currentBlockedState?: GoalBlockedState;
+	blockedStates?: GoalBlockedState[];
+	recoveryHistory?: GoalRecoveryRecord[];
 }
 
 export interface GoalModeState {
@@ -591,10 +685,7 @@ export interface GoalToolTargetPlanSummary {
 	revision: number;
 	reviews: GoalToolTargetPlanReviewSummary[];
 	failure?: Pick<GoalTargetPlanFailure, "stage" | "reason" | "message" | "blockers">;
-	recoveredFromFailure?: Pick<
-		GoalTargetPlanRecovery,
-		"sourceTargetPlanId" | "sourceRevision" | "reason" | "guidance" | "blockers"
-	>;
+	recoveredFrom?: GoalRecoveryLink;
 }
 
 export interface GoalToolTargetSummary {
@@ -638,6 +729,24 @@ export interface GoalToolCheckpointResolutionSummary {
 	decision: GoalCheckpointResolutionDecision;
 	nextTarget?: GoalToolTargetSummary;
 }
+export interface GoalToolBlockedStateSummary {
+	id: string;
+	kind: GoalBlockedStateKind;
+	status: GoalBlockedStateStatus;
+	message: string;
+	blockers: string[];
+	suggestedQuestions: string[];
+	allowedActions: GoalBlockedStateAction[];
+	source: GoalBlockedStateSource;
+	requiredOperation?: "recover_blocked_state";
+	broaderChecksOrInputs?: string[];
+	remainingParentWork?: string[];
+}
+
+export type GoalToolRecoverySummary = Pick<
+	GoalRecoveryRecord,
+	"id" | "blockedStateId" | "kind" | "action" | "reason" | "guidance" | "blockers" | "result" | "at"
+>;
 
 export interface GoalToolDetails {
 	op:
@@ -651,7 +760,7 @@ export interface GoalToolDetails {
 		| "resolve_checkpoint"
 		| "submit_target_plan"
 		| "fail_target_plan"
-		| "reopen_target_plan";
+		| "recover_blocked_state";
 	goal?: GoalToolGoalSummary | null;
 	state?: GoalToolStateSummary | null;
 	remainingTokens?: number | null;
@@ -662,6 +771,8 @@ export interface GoalToolDetails {
 	checkpointResolution?: GoalToolCheckpointResolutionSummary;
 	targetPlanApproval?: GoalTargetPlanApprovedDetails;
 	targetPlan?: GoalToolTargetPlanSummary;
+	blockedState?: GoalToolBlockedStateSummary;
+	recovery?: GoalToolRecoverySummary;
 }
 
 export type GoalRuntimeEvent =
@@ -1160,11 +1271,56 @@ function cloneTargetPlanFailure(failure: GoalTargetPlanFailure | undefined): Goa
 	};
 }
 
-function cloneTargetPlanRecovery(recovery: GoalTargetPlanRecovery | undefined): GoalTargetPlanRecovery | undefined {
+export function cloneRecoveryLink(recovery: GoalRecoveryLink | undefined): GoalRecoveryLink | undefined {
 	if (!recovery) return undefined;
 	return {
 		...recovery,
 		blockers: [...recovery.blockers],
+	};
+}
+
+export function cloneBlockedState(block: GoalBlockedState | undefined): GoalBlockedState | undefined {
+	if (!block) return undefined;
+	const base = {
+		...block,
+		blockers: [...block.blockers],
+		suggestedQuestions: [...block.suggestedQuestions],
+		allowedActions: [...block.allowedActions],
+		source: { ...block.source },
+	};
+	if (block.kind === "checkpoint-external-pause") {
+		return {
+			...base,
+			kind: "checkpoint-external-pause",
+			source: { ...block.source },
+			broaderChecksOrInputs: [...block.broaderChecksOrInputs],
+			remainingParentWork: [...block.remainingParentWork],
+			allowedActions: [...block.allowedActions],
+		};
+	}
+	if (block.kind === "target-plan") {
+		return {
+			...base,
+			kind: "target-plan",
+			source: { ...block.source },
+			allowedActions: ["restart_target_planning"],
+		};
+	}
+	return {
+		...base,
+		kind: "operator-input-required",
+		source: { ...block.source },
+		allowedActions: [],
+	};
+}
+
+export function cloneRecoveryRecord(recovery: GoalRecoveryRecord | undefined): GoalRecoveryRecord | undefined {
+	if (!recovery) return undefined;
+	return {
+		...recovery,
+		blockers: [...recovery.blockers],
+		source: { ...recovery.source },
+		result: { ...recovery.result },
 	};
 }
 
@@ -1181,7 +1337,7 @@ export function cloneTargetPlan(plan: GoalTargetPlanRecord | undefined): GoalTar
 	return {
 		...plan,
 		failure: cloneTargetPlanFailure(plan.failure),
-		recoveredFromFailure: cloneTargetPlanRecovery(plan.recoveredFromFailure),
+		recoveredFrom: cloneRecoveryLink(plan.recoveredFrom),
 		verificationAperture: cloneVerificationAperture(plan.verificationAperture),
 		verificationSignals: cloneVerificationSignals(plan.verificationSignals),
 		concernChecks: cloneConcernChecks(plan.concernChecks),
@@ -1200,6 +1356,42 @@ function upsertTargetPlan(
 		plans?.map(item => cloneTargetPlan(item)).filter((item): item is GoalTargetPlanRecord => item !== undefined) ??
 		[];
 	const cloned = cloneTargetPlan(plan);
+	if (!cloned) return next;
+	const existingIndex = next.findIndex(item => item.id === cloned.id);
+	if (existingIndex >= 0) {
+		next[existingIndex] = cloned;
+	} else {
+		next.push(cloned);
+	}
+	return next;
+}
+
+export function upsertBlockedState(
+	states: GoalBlockedState[] | undefined,
+	block: GoalBlockedState,
+): GoalBlockedState[] {
+	const next =
+		states?.map(item => cloneBlockedState(item)).filter((item): item is GoalBlockedState => item !== undefined) ?? [];
+	const cloned = cloneBlockedState(block);
+	if (!cloned) return next;
+	const existingIndex = next.findIndex(item => item.id === cloned.id);
+	if (existingIndex >= 0) {
+		next[existingIndex] = cloned;
+	} else {
+		next.push(cloned);
+	}
+	return next;
+}
+
+export function upsertRecoveryRecord(
+	records: GoalRecoveryRecord[] | undefined,
+	record: GoalRecoveryRecord,
+): GoalRecoveryRecord[] {
+	const next =
+		records
+			?.map(item => cloneRecoveryRecord(item))
+			.filter((item): item is GoalRecoveryRecord => item !== undefined) ?? [];
+	const cloned = cloneRecoveryRecord(record);
 	if (!cloned) return next;
 	const existingIndex = next.findIndex(item => item.id === cloned.id);
 	if (existingIndex >= 0) {
@@ -1344,6 +1536,13 @@ export function cloneGoal(goal: Goal): Goal {
 				}
 			: undefined,
 		verificationRepair: cloneVerificationRepair(goal.verificationRepair),
+		currentBlockedState: cloneBlockedState(goal.currentBlockedState),
+		blockedStates: goal.blockedStates
+			?.map(block => cloneBlockedState(block))
+			.filter((block): block is GoalBlockedState => block !== undefined),
+		recoveryHistory: goal.recoveryHistory
+			?.map(record => cloneRecoveryRecord(record))
+			.filter((record): record is GoalRecoveryRecord => record !== undefined),
 	};
 }
 
@@ -1360,6 +1559,141 @@ function normalizeVerificationAttempts(value: unknown): GoalVerificationAttempt[
 		if (!isRecord(item)) return [];
 		if (typeof item.id !== "string" || typeof item.sequence !== "number") return [];
 		return [item as unknown as GoalVerificationAttempt];
+	});
+}
+
+function isGoalRecoveryReason(value: unknown): value is GoalRecoveryReason {
+	return (
+		value === "user-input" ||
+		value === "broader-checks" ||
+		value === "external-authority" ||
+		value === "state-refresh"
+	);
+}
+
+function normalizeRecoveryReason(value: unknown): GoalRecoveryReason {
+	return isGoalRecoveryReason(value) ? value : "user-input";
+}
+
+export function isNonContinuingCheckpointDecision(
+	decision: unknown,
+): decision is Extract<
+	GoalCheckpointResolutionDecision,
+	"needs_user_input" | "needs_broader_checks" | "pause_for_external_control" | "drop_or_replace_recommended"
+> {
+	return (
+		decision === "needs_user_input" ||
+		decision === "needs_broader_checks" ||
+		decision === "pause_for_external_control" ||
+		decision === "drop_or_replace_recommended"
+	);
+}
+
+function normalizeTargetPlanRecord(value: unknown): GoalTargetPlanRecord | undefined {
+	if (!isRecord(value)) return undefined;
+	const normalized = { ...value };
+	const legacyRecoveryKey = "recoveredFrom" + "Failure";
+	const legacyRecovery = normalized[legacyRecoveryKey];
+	delete normalized[legacyRecoveryKey];
+	if (!isRecord(normalized.recoveredFrom) && isRecord(legacyRecovery)) {
+		const planId = optionalString(normalized.id) ?? "unknown-target-plan";
+		normalized.recoveredFrom = {
+			recoveryId: `${planId}-legacy-recovery`,
+			blockedStateId: `${planId}-legacy-blocked-state`,
+			kind: "target-plan",
+			action: "restart_target_planning",
+			reason: normalizeRecoveryReason(legacyRecovery.reason),
+			guidance: optionalString(legacyRecovery.guidance) ?? "",
+			blockers: stringArray(legacyRecovery.blockers),
+			at: optionalNumber(legacyRecovery.at) ?? optionalNumber(normalized.updatedAt) ?? 0,
+		} satisfies GoalRecoveryLink;
+	}
+	return cloneTargetPlan(normalized as unknown as GoalTargetPlanRecord);
+}
+
+function normalizeBlockedStateRecord(value: unknown): GoalBlockedState | undefined {
+	if (!isRecord(value)) return undefined;
+	const kind = value.kind;
+	if (kind !== "target-plan" && kind !== "checkpoint-external-pause" && kind !== "operator-input-required") {
+		return undefined;
+	}
+	const status: GoalBlockedStateStatus =
+		value.status === "resolved" || value.status === "superseded" || value.status === "open" ? value.status : "open";
+	const base = {
+		id: optionalString(value.id) ?? "",
+		sequence: optionalNumber(value.sequence) ?? 0,
+		status,
+		message: optionalString(value.message) ?? "",
+		blockers: stringArray(value.blockers),
+		suggestedQuestions: stringArray(value.suggestedQuestions),
+		stateVersionAtBlock: optionalNumber(value.stateVersionAtBlock) ?? 0,
+		parentFrameVersionAtBlock: optionalNumber(value.parentFrameVersionAtBlock) ?? 0,
+		createdAt: optionalNumber(value.createdAt) ?? 0,
+		updatedAt: optionalNumber(value.updatedAt) ?? optionalNumber(value.createdAt) ?? 0,
+		resolvedAt: optionalNumber(value.resolvedAt),
+		recoveryId: optionalString(value.recoveryId),
+		supersededAt: optionalNumber(value.supersededAt),
+		supersededBy: optionalString(value.supersededBy),
+	};
+	if (!base.id) return undefined;
+	if (kind === "target-plan") {
+		const source = isRecord(value.source) ? value.source : undefined;
+		const sourceStatus = source?.status === "stale" ? "stale" : source?.status === "failed" ? "failed" : undefined;
+		if (!source || !sourceStatus) return undefined;
+		return cloneBlockedState({
+			...base,
+			kind: "target-plan",
+			source: {
+				targetId: optionalString(source.targetId) ?? "",
+				targetSequence: optionalNumber(source.targetSequence) ?? 0,
+				targetPlanId: optionalString(source.targetPlanId) ?? "",
+				revision: optionalNumber(source.revision) ?? 0,
+				status: sourceStatus,
+				planFilePath: optionalString(source.planFilePath) ?? "",
+			},
+			allowedActions: ["restart_target_planning"],
+		});
+	}
+	if (kind === "checkpoint-external-pause") {
+		const source = isRecord(value.source) ? value.source : undefined;
+		const decision = source?.decision;
+		if (!source || !isNonContinuingCheckpointDecision(decision)) return undefined;
+		return cloneBlockedState({
+			...base,
+			kind: "checkpoint-external-pause",
+			source: {
+				checkpointId: optionalString(source.checkpointId) ?? "",
+				checkpointResolutionId: optionalString(source.checkpointResolutionId) ?? "",
+				decision,
+			},
+			broaderChecksOrInputs: stringArray(value.broaderChecksOrInputs),
+			remainingParentWork: stringArray(value.remainingParentWork),
+			allowedActions: ["start_next_target", "enter_parent_completion"],
+		});
+	}
+	return cloneBlockedState({
+		...base,
+		kind: "operator-input-required",
+		source: {
+			reason:
+				isRecord(value.source) && value.source.reason === "legacy-migration"
+					? "legacy-migration"
+					: "ambiguous-controller-state",
+		},
+		allowedActions: [],
+	});
+}
+
+function normalizeRecoveryRecord(value: unknown): GoalRecoveryRecord | undefined {
+	if (!isRecord(value) || typeof value.id !== "string" || typeof value.blockedStateId !== "string") return undefined;
+	return cloneRecoveryRecord({
+		...(value as unknown as GoalRecoveryRecord),
+		reason: normalizeRecoveryReason(value.reason),
+		blockers: stringArray(value.blockers),
+		source: isRecord(value.source) ? ({ ...value.source } as GoalBlockedStateSource) : ({} as GoalBlockedStateSource),
+		result: isRecord(value.result)
+			? ({ ...value.result } as unknown as GoalRecoveryResultSummary)
+			: { runMode: "awaiting-user-input" },
 	});
 }
 
@@ -1399,9 +1733,12 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 	if (parentFrame) goal.parentFrame = parentFrame;
 	if (isRecord(value.currentTarget)) goal.currentTarget = value.currentTarget as unknown as GoalTarget;
 	if (Array.isArray(value.targets)) goal.targets = value.targets as GoalTarget[];
-	if (isRecord(value.currentTargetPlan))
-		goal.currentTargetPlan = value.currentTargetPlan as unknown as GoalTargetPlanRecord;
-	if (Array.isArray(value.targetPlans)) goal.targetPlans = value.targetPlans as GoalTargetPlanRecord[];
+	if (isRecord(value.currentTargetPlan)) goal.currentTargetPlan = normalizeTargetPlanRecord(value.currentTargetPlan);
+	if (Array.isArray(value.targetPlans)) {
+		goal.targetPlans = value.targetPlans
+			.map(plan => normalizeTargetPlanRecord(plan))
+			.filter((plan): plan is GoalTargetPlanRecord => plan !== undefined);
+	}
 	if (Array.isArray(value.checkpoints)) goal.checkpoints = value.checkpoints as GoalCheckpointPacket[];
 	goal.pendingCheckpointId = optionalString(value.pendingCheckpointId);
 	if (Array.isArray(value.checkpointResolutions)) {
@@ -1412,6 +1749,18 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 		goal.lastCheckpointRejection = value.lastCheckpointRejection as unknown as GoalCheckpointRejection;
 	if (isRecord(value.verificationRepair))
 		goal.verificationRepair = value.verificationRepair as unknown as GoalVerificationRepairState;
+	if (isRecord(value.currentBlockedState))
+		goal.currentBlockedState = normalizeBlockedStateRecord(value.currentBlockedState);
+	if (Array.isArray(value.blockedStates)) {
+		goal.blockedStates = value.blockedStates
+			.map(block => normalizeBlockedStateRecord(block))
+			.filter((block): block is GoalBlockedState => block !== undefined);
+	}
+	if (Array.isArray(value.recoveryHistory)) {
+		goal.recoveryHistory = value.recoveryHistory
+			.map(record => normalizeRecoveryRecord(record))
+			.filter((record): record is GoalRecoveryRecord => record !== undefined);
+	}
 	return cloneGoal(goal);
 }
 
@@ -1429,6 +1778,219 @@ function markTargetPlanStale(goal: Goal, plan: GoalTargetPlanRecord): void {
 	goal.targetPlans = upsertTargetPlan(goal.targetPlans, stalePlan);
 }
 
+function nextBlockedStateSequence(goal: Goal): number {
+	const maxHistorical = goal.blockedStates?.reduce((max, block) => Math.max(max, block.sequence), 0) ?? 0;
+	const currentSequence = goal.currentBlockedState?.sequence ?? 0;
+	return Math.max(maxHistorical, currentSequence) + 1;
+}
+
+function currentRecoverableTargetPlan(goal: Goal): GoalTargetPlanRecord | undefined {
+	const target = goal.currentTarget;
+	const plan = goal.currentTargetPlan;
+	if (target?.status !== "active") return undefined;
+	if (!plan || plan.targetId !== target.id) return undefined;
+	return plan.status === "failed" || plan.status === "stale" ? plan : undefined;
+}
+
+function latestNonContinuingCheckpointResolution(goal: Goal): GoalCheckpointResolution | undefined {
+	const resolution = goal.checkpointResolutions?.find(item => item.id === goal.lastCheckpointResolutionId);
+	return resolution && isNonContinuingCheckpointDecision(resolution.decision) ? resolution : undefined;
+}
+
+function targetPlanBlockedStateBlockers(plan: GoalTargetPlanRecord, message: string): string[] {
+	if (plan.failure?.blockers.length) return [...plan.failure.blockers];
+	const reviewBlockers = plan.reviews.flatMap(review =>
+		review.findings
+			.filter(finding => finding.severity === "blocking" || finding.severity === "important")
+			.map(finding => `${review.lens}:${finding.id}: ${finding.requiredRevision}`),
+	);
+	return reviewBlockers.length ? reviewBlockers : [message];
+}
+
+function blockedStateMatchesCurrentGoal(goal: Goal, block: GoalBlockedState): boolean {
+	if (block.kind === "target-plan") {
+		const target = goal.currentTarget;
+		const plan = goal.currentTargetPlan;
+		return (
+			target?.status === "active" &&
+			target.id === block.source.targetId &&
+			target.sequence === block.source.targetSequence &&
+			plan?.id === block.source.targetPlanId &&
+			plan.revision === block.source.revision &&
+			plan.status === block.source.status &&
+			plan.planFilePath === block.source.planFilePath
+		);
+	}
+	if (block.kind === "checkpoint-external-pause") {
+		const resolution = goal.checkpointResolutions?.find(item => item.id === block.source.checkpointResolutionId);
+		return (
+			goal.pendingCheckpointId === undefined &&
+			goal.lastCheckpointResolutionId === block.source.checkpointResolutionId &&
+			resolution?.checkpointId === block.source.checkpointId &&
+			resolution.decision === block.source.decision &&
+			isNonContinuingCheckpointDecision(resolution.decision)
+		);
+	}
+	return (
+		currentRecoverableTargetPlan(goal) === undefined && latestNonContinuingCheckpointResolution(goal) === undefined
+	);
+}
+
+function installBlockedState(goal: Goal, block: GoalBlockedState): GoalBlockedState {
+	const current = goal.currentBlockedState;
+	if (current?.status === "open" && current.id !== block.id) {
+		const superseded = cloneBlockedState({
+			...current,
+			status: "superseded",
+			updatedAt: block.createdAt,
+			supersededAt: block.createdAt,
+			supersededBy: block.id,
+		});
+		if (superseded) goal.blockedStates = upsertBlockedState(goal.blockedStates, superseded);
+	}
+	const installed = cloneBlockedState(block) ?? block;
+	goal.currentBlockedState = installed;
+	goal.blockedStates = upsertBlockedState(goal.blockedStates, installed);
+	return installed;
+}
+
+function synthesizeTargetPlanBlockedState(
+	goal: Goal,
+	plan: GoalTargetPlanRecord,
+	stateVersion: number,
+	parentFrameVersion: number,
+): GoalBlockedState | undefined {
+	const target = goal.currentTarget;
+	if (target?.status !== "active" || (plan.status !== "failed" && plan.status !== "stale")) return undefined;
+	const message = plan.failure?.message || `target plan is ${plan.status}`;
+	const sequence = nextBlockedStateSequence(goal);
+	return {
+		id: `${goal.id}-blocked-${sequence}`,
+		sequence,
+		kind: "target-plan",
+		status: "open",
+		message,
+		blockers: targetPlanBlockedStateBlockers(plan, message),
+		suggestedQuestions: plan.failure ? [...plan.failure.suggestedQuestions] : [],
+		allowedActions: ["restart_target_planning"],
+		stateVersionAtBlock: stateVersion,
+		parentFrameVersionAtBlock: parentFrameVersion,
+		createdAt: goal.updatedAt,
+		updatedAt: goal.updatedAt,
+		source: {
+			targetId: target.id,
+			targetSequence: target.sequence,
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			status: plan.status,
+			planFilePath: plan.planFilePath,
+		},
+	};
+}
+
+function synthesizeCheckpointBlockedState(
+	goal: Goal,
+	resolution: GoalCheckpointResolution,
+	stateVersion: number,
+	parentFrameVersion: number,
+): GoalBlockedState {
+	const message = "Checkpoint resolution is awaiting user, broader-check, or external input.";
+	const blockers = resolution.broaderChecksOrInputs.length
+		? [...resolution.broaderChecksOrInputs]
+		: resolution.remainingParentWork.length
+			? [...resolution.remainingParentWork]
+			: [message];
+	const sequence = nextBlockedStateSequence(goal);
+	return {
+		id: `${goal.id}-blocked-${sequence}`,
+		sequence,
+		kind: "checkpoint-external-pause",
+		status: "open",
+		message,
+		blockers,
+		suggestedQuestions: [...resolution.broaderChecksOrInputs],
+		allowedActions: ["start_next_target", "enter_parent_completion"],
+		stateVersionAtBlock: stateVersion,
+		parentFrameVersionAtBlock: parentFrameVersion,
+		createdAt: goal.updatedAt,
+		updatedAt: goal.updatedAt,
+		source: {
+			checkpointId: resolution.checkpointId,
+			checkpointResolutionId: resolution.id,
+			decision: resolution.decision as Extract<
+				GoalCheckpointResolutionDecision,
+				"needs_user_input" | "needs_broader_checks" | "pause_for_external_control" | "drop_or_replace_recommended"
+			>,
+		},
+		broaderChecksOrInputs: [...resolution.broaderChecksOrInputs],
+		remainingParentWork: [...resolution.remainingParentWork],
+	};
+}
+
+function synthesizeOperatorBlockedState(
+	goal: Goal,
+	stateVersion: number,
+	parentFrameVersion: number,
+): GoalBlockedState {
+	const message = "Goal is awaiting user input without a recoverable blocked source.";
+	const sequence = nextBlockedStateSequence(goal);
+	return {
+		id: `${goal.id}-blocked-${sequence}`,
+		sequence,
+		kind: "operator-input-required",
+		status: "open",
+		message,
+		blockers: [message],
+		suggestedQuestions: [],
+		allowedActions: [],
+		stateVersionAtBlock: stateVersion,
+		parentFrameVersionAtBlock: parentFrameVersion,
+		createdAt: goal.updatedAt,
+		updatedAt: goal.updatedAt,
+		source: { reason: "ambiguous-controller-state" },
+	};
+}
+
+export function synthesizeBlockedStateForAwaitingInput(
+	goal: Goal,
+	runMode: GoalRunMode,
+	stateVersion: number,
+	parentFrameVersion: number,
+): GoalBlockedState | undefined {
+	if (runMode !== "awaiting-user-input") {
+		const current = goal.currentBlockedState;
+		if (current?.status === "open") {
+			const superseded = cloneBlockedState({
+				...current,
+				status: "superseded",
+				updatedAt: current.updatedAt,
+				supersededAt: current.updatedAt,
+			});
+			if (superseded) goal.blockedStates = upsertBlockedState(goal.blockedStates, superseded);
+		}
+		goal.currentBlockedState = undefined;
+		return undefined;
+	}
+	const current = goal.currentBlockedState;
+	if (current?.status === "open" && blockedStateMatchesCurrentGoal(goal, current)) {
+		goal.blockedStates = upsertBlockedState(goal.blockedStates, current);
+		return current;
+	}
+	const plan = currentRecoverableTargetPlan(goal);
+	if (plan) {
+		const block = synthesizeTargetPlanBlockedState(goal, plan, stateVersion, parentFrameVersion);
+		return block ? installBlockedState(goal, block) : undefined;
+	}
+	const resolution = latestNonContinuingCheckpointResolution(goal);
+	if (resolution) {
+		return installBlockedState(
+			goal,
+			synthesizeCheckpointBlockedState(goal, resolution, stateVersion, parentFrameVersion),
+		);
+	}
+	return installBlockedState(goal, synthesizeOperatorBlockedState(goal, stateVersion, parentFrameVersion));
+}
+
 export function normalizeGoalModeState(value: unknown): GoalModeState | undefined {
 	if (!isRecord(value)) return undefined;
 	const goal = normalizeGoal(value.goal);
@@ -1436,6 +1998,8 @@ export function normalizeGoalModeState(value: unknown): GoalModeState | undefine
 	let mode = normalizeLifecycle(value.mode);
 	let runMode = normalizeRunMode(value.runMode);
 	let reason: "completed" | undefined = value.reason === "completed" ? "completed" : undefined;
+	const stateVersion = optionalNumber(value.stateVersion) ?? 0;
+	const parentFrameVersion = optionalNumber(value.parentFrameVersion) ?? (goal.parentFrame ? 1 : 0);
 	if (goal.status === "complete" || (mode === "exiting" && reason === "completed")) {
 		mode = "exiting";
 		reason = "completed";
@@ -1463,13 +2027,14 @@ export function normalizeGoalModeState(value: unknown): GoalModeState | undefine
 			runMode = "working-target";
 		}
 	}
+	synthesizeBlockedStateForAwaitingInput(goal, runMode, stateVersion, parentFrameVersion);
 	return {
 		enabled: value.enabled === true,
 		mode,
 		runMode,
 		reason,
-		stateVersion: optionalNumber(value.stateVersion) ?? 0,
-		parentFrameVersion: optionalNumber(value.parentFrameVersion) ?? (goal.parentFrame ? 1 : 0),
+		stateVersion,
+		parentFrameVersion,
 		goal,
 	};
 }

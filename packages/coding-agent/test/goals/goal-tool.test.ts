@@ -611,25 +611,60 @@ describe("GoalTool", () => {
 				suggested_questions: ["Which gate should be targeted first?"],
 			}).success,
 		).toBe(true);
+		const recoverTargetPlanPayload = {
+			op: "recover_blocked_state",
+			kind: "target-plan",
+			action: "restart_target_planning",
+			blocked_state_id: "goal-1-blocked-1",
+			target_id: "target-1",
+			target_plan_id: "target-1-plan",
+			revision: 3,
+			source_status: "failed",
+			reason: "user-input",
+			guidance: "Use the user's quest decision.",
+		};
+		expect(tool.parameters.safeParse(recoverTargetPlanPayload).success).toBe(true);
+		expect(tool.parameters.safeParse({ ...recoverTargetPlanPayload, extra: "not allowed" }).success).toBe(false);
 		expect(
 			tool.parameters.safeParse({
-				op: "reopen_target_plan",
-				target_id: "target-1",
-				target_plan_id: "target-1-plan",
-				revision: 3,
+				op: "recover_blocked_state",
+				kind: "checkpoint-external-pause",
+				action: "start_next_target",
+				blocked_state_id: "goal-1-blocked-2",
+				checkpoint_id: "goal-1-checkpoint-1",
+				checkpoint_resolution_id: "goal-1-checkpoint-resolution-1",
 				reason: "user-input",
-				guidance: "Use the user's quest decision.",
+				guidance: "Start the next target.",
+			}).success,
+		).toBe(false);
+		expect(
+			tool.parameters.safeParse({
+				op: "recover_blocked_state",
+				kind: "checkpoint-external-pause",
+				action: "start_next_target",
+				blocked_state_id: "goal-1-blocked-2",
+				checkpoint_id: "goal-1-checkpoint-1",
+				checkpoint_resolution_id: "goal-1-checkpoint-resolution-1",
+				reason: "user-input",
+				guidance: "Start the next target.",
+				next_target: {
+					title: "Prove smoke",
+					desired_future_claim: "Smoke path is exercised.",
+					closure_standard: "Current smoke output exists.",
+				},
 			}).success,
 		).toBe(true);
 		expect(
 			tool.parameters.safeParse({
-				op: "reopen_target_plan",
-				target_id: "target-1",
-				target_plan_id: "target-1-plan",
-				revision: 3,
+				op: "recover_blocked_state",
+				kind: "checkpoint-external-pause",
+				action: "enter_parent_completion",
+				blocked_state_id: "goal-1-blocked-2",
+				checkpoint_id: "goal-1-checkpoint-1",
+				checkpoint_resolution_id: "goal-1-checkpoint-resolution-1",
 				reason: "user-input",
-				guidance: "Use the user's quest decision.",
-				extra: "not allowed",
+				guidance: "Enter parent completion.",
+				next_target: {},
 			}).success,
 		).toBe(false);
 		expect(
@@ -802,23 +837,31 @@ describe("GoalTool", () => {
 
 		const getResult = await tool.execute("get-failed-plan", { op: "get" });
 		const getText = getResult.content[0]?.type === "text" ? getResult.content[0].text : "";
-		expect(getText).toContain("reopen_target_plan");
-		expect(getText).toContain("Do not call resume or start_target");
+		const block = failed.goal.currentBlockedState;
+		if (block?.kind !== "target-plan") throw new Error("expected target-plan blocked state");
+		expect(getText).toContain("recover_blocked_state");
+		expect(getText).toContain(block.id);
+		expect(getText).toContain("Do not call resume or start_target directly");
 
-		const reopened = await tool.execute("reopen-plan", {
-			op: "reopen_target_plan",
+		const recovered = await tool.execute("recover-blocked-state", {
+			op: "recover_blocked_state",
+			kind: "target-plan",
+			action: "restart_target_planning",
+			blocked_state_id: block.id,
 			target_id: target.id,
 			target_plan_id: failedPlan.id,
 			revision: failedPlan.revision,
+			source_status: "failed",
 			reason: "user-input",
 			guidance: "Use the user's quest decision.",
 		});
-		const reopenedText = reopened.content[0]?.type === "text" ? reopened.content[0].text : "";
-		expect(reopened.details?.state?.runMode).toBe("planning-target");
-		expect(reopened.details?.targetPlan?.status).toBe("drafting");
-		expect(reopened.details?.targetPlan?.revision).toBe(1);
-		expect(reopenedText).toContain("Target plan reopened");
-		expect(reopenedText).toContain('"op": "submit_target_plan"');
+		const recoveredText = recovered.content[0]?.type === "text" ? recovered.content[0].text : "";
+		expect(recovered.details?.state?.runMode).toBe("planning-target");
+		expect(recovered.details?.targetPlan?.status).toBe("drafting");
+		expect(recovered.details?.targetPlan?.revision).toBe(1);
+		expect(recovered.details?.recovery?.blockedStateId).toBe(block.id);
+		expect(recoveredText).toContain("Blocked state recovered");
+		expect(recoveredText).toContain('"op": "submit_target_plan"');
 	});
 
 	it("routes target-plan submit and failure operations to session handlers", async () => {

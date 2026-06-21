@@ -791,7 +791,7 @@ describe("InteractiveMode goal mode integration", () => {
 		);
 	});
 
-	it("keeps failed target-plan recovery manual until reopen_target_plan", async () => {
+	it("keeps blocked target-plan recovery manual until recover_blocked_state", async () => {
 		await harness.mode.handleGoalModeCommand("Improve quest reliability");
 		const goalTool = await activeGoalTool(harness);
 		await goalTool.execute("target-failed-plan", {
@@ -815,14 +815,21 @@ describe("InteractiveMode goal mode integration", () => {
 			blockers: ["Missing equipment decision."],
 			suggested_questions: ["Does equipping Ember Charm complete Warden's Spark?"],
 		});
-		expect(harness.session.getGoalModeState()?.runMode).toBe("awaiting-user-input");
+		const blocked = harness.session.getGoalModeState();
+		const block = blocked?.goal.currentBlockedState;
+		if (block?.kind !== "target-plan") throw new Error("expected target-plan blocked state");
+		expect(blocked?.runMode).toBe("awaiting-user-input");
 		expect(await harness.session.prepareGoalContinuationDispatch()).toBeUndefined();
 
-		await goalTool.execute("reopen-plan", {
-			op: "reopen_target_plan",
+		await goalTool.execute("recover-blocked-state", {
+			op: "recover_blocked_state",
+			kind: "target-plan",
+			action: "restart_target_planning",
+			blocked_state_id: block.id,
 			target_id: target.id,
 			target_plan_id: plan.id,
 			revision: plan.revision,
+			source_status: "failed",
 			reason: "user-input",
 			guidance: "Operator chose equip-completes quest.",
 		});
@@ -835,8 +842,8 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(dispatch?.kind).toBe("target-planning");
 		expect(dispatch?.customType).toBe("goal-target-planning");
 		expect(dispatch?.prompt).toContain("Operator chose equip-completes quest.");
-		expect(dispatch?.prompt).toContain("recoveredFromFailure");
-		expect(dispatch?.prompt).toContain(reopenedPlan?.id ?? "missing-reopened-plan");
+		expect(dispatch?.prompt).toContain("recoveredFrom");
+		expect(dispatch?.prompt).toContain(reopenedPlan?.id ?? "missing-recovered-plan");
 	});
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
@@ -1267,11 +1274,24 @@ describe("InteractiveMode goal mode integration", () => {
 			verifierCallsBefore,
 		);
 		expect(harness.session.getGoalModeState()?.goal.totalVerificationAttempts).toBe(0);
-		const next = await goalTool.execute("start-after-pause", {
-			op: "start_target",
-			title: "Choose next release gate",
-			desired_future_claim: "Next release gate has selected evidence.",
-			closure_standard: "Current selected-gate evidence exists.",
+		const blockedState = harness.session.getGoalModeState()?.goal.currentBlockedState;
+		if (blockedState?.kind !== "checkpoint-external-pause") {
+			throw new Error("expected checkpoint external-pause blocked state");
+		}
+		const next = await goalTool.execute("recover-after-pause", {
+			op: "recover_blocked_state",
+			kind: "checkpoint-external-pause",
+			action: "start_next_target",
+			blocked_state_id: blockedState.id,
+			checkpoint_id: blockedState.source.checkpointId,
+			checkpoint_resolution_id: blockedState.source.checkpointResolutionId,
+			reason: "user-input",
+			guidance: "Operator chose the next release gate.",
+			next_target: {
+				title: "Choose next release gate",
+				desired_future_claim: "Next release gate has selected evidence.",
+				closure_standard: "Current selected-gate evidence exists.",
+			},
 		});
 		expect(next.details?.state?.runMode).toBe("planning-target");
 	});

@@ -18,7 +18,7 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - `resume`: reactivate a paused parent goal without changing its run mode.
 - `start_target`: start a bounded current target. Requires `title`, `desired_future_claim`, and `closure_standard`. Optional: `expected_parent_contribution`, `parent_deliverable_ids`, `baseline_refs`, `gate_refs`, `evidence_expectation`, `non_goals`, `forbidden_claims`, `stale_if`, `linked_verifier_blocker_ids`.
 - `submit_target_plan` / `fail_target_plan`: during `planning-target`, submit an approved plan with passing read-only `dry_run` simulation or record why planning cannot continue.
-- `reopen_target_plan`: after user/broader-check/external input resolves a failed current target plan, reopen planning for the same active target with a fresh target-plan id/revision. Requires `target_id`, `target_plan_id`, `revision`, `reason`, and `guidance`.
+- `recover_blocked_state`: after user/broader-check/external input resolves an open `blocked_state`, recover using exactly one listed `blocked_state.allowedActions` item and the source identity from `blocked_state`. Target-plan blocks restart planning for the same active target with a fresh target-plan id/revision. Checkpoint-external-pause blocks either start the next target or enter parent-completion verification.
 - `checkpoint`: submit target-closure evidence for review. Requires `status:"closed_with_evidence"`, `summary`, non-empty `local_claims`, non-empty `evidence`, non-empty `not_claimed`, and non-empty `remaining_questions`. Optional: `checks_run`, `artifacts_touched`, `risks_or_caveats`, `stale_if`, `suggested_controller_questions`, `retrospective_target` for legacy sessions only.
 - `resolve_checkpoint`: record the controller decision for the pending accepted checkpoint. Requires `checkpoint_id`, `decision`, `parent_reading`, `not_propagated`, and `remaining_parent_work`. Optional: `parent_delta`, `broader_checks_or_inputs`, `lessons_for_future`, and `next_target` for `decision:"next_target"`.
 - `complete`: attempt verified parent completion. Use only when there is no pending checkpoint and no unrepaired verifier blocker.
@@ -41,7 +41,7 @@ Targets are product-meaningful completion units, not process phases or miniature
 
 <target-planning>
 `planning-target` blocks implementation. Use read/discovery tools, read-only `task` reviewers when they materially reduce uncertainty, `job` supervision, and `irc` coordination when available. Write/edit only the active target plan file. `dry_run` is read-only planner simulation, not executed verification. Then call `submit_target_plan` or `fail_target_plan`.
-- Failed target-plan recovery uses `reopen_target_plan`, not `resume` or `start_target`; the reopened plan gets a new identity from `goal({op:"get"})`.
+- Target-plan failed/stale recovery uses `recover_blocked_state` with action `restart_target_planning`; the recovered plan gets a new identity from `goal({op:"get"})`.
 </target-planning>
 
 <checkpoint-resolution>

@@ -20,6 +20,7 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed goal-mode blocked recovery to use explicit blocked-state records and `recover_blocked_state` identity handshakes for failed/stale target plans and checkpoint external pauses.
 - Changed goal-mode prompts to render a load-bearing controller surface by run mode, keeping full audit checkpoint state in tool details and side-agent artifacts instead of the always-on context.
 
 - Changed goal-mode session persistence to store full state in `goal_state_snapshot` entries, compact mode markers, and accounting-only `goal_usage_delta` entries.

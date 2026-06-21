@@ -67,9 +67,9 @@ Verifier-repair action:
 {{#when runMode "==" "awaiting-user-input"}}
 Awaiting-input action:
 - Wait when no new user/broader-check/external input is present.
-- If current input resolves `target_plan.requiredAction == "reopen_target_plan_after_user_or_external_input"`, call `goal({op:"reopen_target_plan", ...})` using `blocked_state.recoveryIdentity`.
+- If current input resolves `blocked_state.requiredOperation == "recover_blocked_state"`, call `goal({op:"recover_blocked_state", ...})` using `blocked_state.id`, `blocked_state.source`, and one listed `blocked_state.allowedActions` item.
 - Put the concrete user/external decision in `guidance`; use `reason:"user-input"` for direct user answers.
-- NEVER call `resume` or `start_target` to recover a failed target plan.
+- NEVER call `resume` or direct `start_target` while `blocked_state` is open.
 {{/when}}
 
 Parent invariant:

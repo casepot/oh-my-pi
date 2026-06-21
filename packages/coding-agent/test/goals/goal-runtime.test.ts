@@ -747,12 +747,16 @@ describe("goal runtime", () => {
 			suggestedQuestions: ["Which quest branch should be planned?"],
 		});
 
+		const block = failed.goal.currentBlockedState;
+		if (block?.kind !== "target-plan") throw new Error("expected target-plan blocked state");
 		const surface = renderGoalPromptSurface(failed, failed.goal);
-		expect(surface).toContain('"recoveryAction": "reopen_target_plan"');
+		expect(surface).toContain('"requiredOperation": "recover_blocked_state"');
+		expect(surface).toContain('"allowedActions": [');
+		expect(surface).toContain(block.id);
 		expect(surface).toContain(plan.id);
-		expect(surface).toContain('"reopen_target_plan_after_user_or_external_input"');
+		expect(surface).not.toContain("reopen_" + "target_plan");
 		const continuationPrompt = renderGoalPrompt("continuation", failed.goal, failed);
-		expect(continuationPrompt).toContain("reopen_target_plan");
+		expect(continuationPrompt).toContain("recover_blocked_state");
 		expect(continuationPrompt).toContain("NEVER call");
 		expect(continuationPrompt).toContain("resume");
 		expect(continuationPrompt).toContain("start_target");
@@ -1334,7 +1338,7 @@ describe("goal runtime", () => {
 		).toThrow("target plan is approved");
 	});
 
-	it("reopens failed target plans after user input without replacing the active target", async () => {
+	it("recovers failed target-plan blocks with a fresh plan attempt", async () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
 		let state = await harness.runtime.startTarget({
@@ -1357,109 +1361,152 @@ describe("goal runtime", () => {
 
 		const targetId = state.goal.currentTarget?.id;
 		const failedPlan = state.goal.currentTargetPlan;
-		if (!targetId || !failedPlan) throw new Error("expected failed target plan");
+		const block = state.goal.currentBlockedState;
+		if (!targetId || !failedPlan || !block || block.kind !== "target-plan")
+			throw new Error("expected failed target-plan block");
 		expect(state.runMode).toBe("awaiting-user-input");
-		expect(state.goal.currentTarget?.status).toBe("active");
-		expect(failedPlan.status).toBe("failed");
+		expect(block.source.status).toBe("failed");
 		expect(failedPlan.revision).toBe(3);
 		expect(failedPlan.failure?.reason).toBe("review-rejection-cap");
 
 		const resumed = await harness.runtime.resumeGoal();
 		expect(resumed.runMode).toBe("awaiting-user-input");
-		expect(resumed.goal.currentTargetPlan?.status).toBe("failed");
+		expect(resumed.goal.currentBlockedState?.id).toBe(block.id);
 		await expect(
 			harness.runtime.startTarget({
 				title: "Start a replacement target",
 				desiredFutureClaim: "Replacement target is active.",
 				closureStandard: "Replacement target has evidence.",
 			}),
-		).rejects.toThrow("another target is already active");
+		).rejects.toThrow("cannot start target while goal is blocked");
 
-		const reopened = await harness.runtime.reopenFailedTargetPlan({
+		const recovered = await harness.runtime.recoverBlockedState({
+			kind: "target-plan",
+			action: "restart_target_planning",
+			blockedStateId: block.id,
 			targetId,
 			targetPlanId: failedPlan.id,
 			revision: failedPlan.revision,
+			sourceStatus: "failed",
 			reason: "user-input",
 			guidance: " Complete Warden's Spark after equipping Ember Charm. ",
 		});
-		const reopenedTarget = reopened.goal.currentTarget;
-		const reopenedPlan = reopened.goal.currentTargetPlan;
-		if (!reopenedTarget || !reopenedPlan) throw new Error("expected reopened target plan");
+		const recoveredTarget = recovered.goal.currentTarget;
+		const recoveredPlan = recovered.goal.currentTargetPlan;
+		if (!recoveredTarget || !recoveredPlan) throw new Error("expected recovered target plan");
 
-		expect(reopened.runMode).toBe("planning-target");
-		expect(reopenedTarget.id).toBe(targetId);
-		expect(reopenedTarget.status).toBe("active");
-		expect(reopenedTarget.planId).toBe(reopenedPlan.id);
-		expect(reopenedPlan.id).not.toBe(failedPlan.id);
-		expect(reopenedPlan.planFilePath).not.toBe(failedPlan.planFilePath);
-		expect(reopenedPlan.planFilePath.endsWith("-plan-reopen-1.md")).toBe(true);
-		expect(reopenedPlan.status).toBe("drafting");
-		expect(reopenedPlan.revision).toBe(1);
-		expect(reopenedPlan.recoveredFromFailure?.sourceTargetPlanId).toBe(failedPlan.id);
-		expect(reopenedPlan.recoveredFromFailure?.sourceRevision).toBe(failedPlan.revision);
-		expect(reopenedPlan.recoveredFromFailure?.reason).toBe("user-input");
-		expect(reopenedPlan.recoveredFromFailure?.guidance).toBe("Complete Warden's Spark after equipping Ember Charm.");
-		expect(reopened.goal.targetPlans?.find(plan => plan.id === failedPlan.id)?.status).toBe("failed");
-		expect(reopenedPlan.failure).toBeUndefined();
-		expect(reopenedPlan.failedAt).toBeUndefined();
-		expect(reopenedPlan.approvedAt).toBeUndefined();
-		expect(reopenedPlan.verificationAperture).toBeUndefined();
-		expect(reopenedPlan.verificationSignals).toBeUndefined();
-		expect(reopenedPlan.concernChecks).toBeUndefined();
-		expect(reopenedPlan.scopeCalibration).toBeUndefined();
-		expect(reopenedPlan.branchEvidence).toBeUndefined();
-		expect(reopenedPlan.excludedWorkReview).toBeUndefined();
-		expect(reopenedPlan.reviews).toEqual([]);
+		expect(recovered.runMode).toBe("planning-target");
+		expect(recoveredTarget.id).toBe(targetId);
+		expect(recoveredTarget.status).toBe("active");
+		expect(recoveredTarget.planId).toBe(recoveredPlan.id);
+		expect(recoveredPlan.id).toBe(`${targetId}-plan-attempt-2`);
+		expect(recoveredPlan.planFilePath.endsWith("-plan-attempt-2.md")).toBe(true);
+		expect(recoveredPlan.status).toBe("drafting");
+		expect(recoveredPlan.revision).toBe(1);
+		expect(recoveredPlan.recoveredFrom?.blockedStateId).toBe(block.id);
+		expect(recoveredPlan.recoveredFrom?.reason).toBe("user-input");
+		expect(recoveredPlan.recoveredFrom?.guidance).toBe("Complete Warden's Spark after equipping Ember Charm.");
+		expect(recovered.goal.targetPlans?.find(plan => plan.id === failedPlan.id)?.status).toBe("failed");
+		expect(recovered.goal.currentBlockedState).toBeUndefined();
+		expect(recovered.goal.recoveryHistory?.some(record => record.blockedStateId === block.id)).toBe(true);
+		expect(recoveredPlan.failure).toBeUndefined();
+		expect(recoveredPlan.failedAt).toBeUndefined();
+		expect(recoveredPlan.approvedAt).toBeUndefined();
+		expect(recoveredPlan.verificationAperture).toBeUndefined();
+		expect(recoveredPlan.verificationSignals).toBeUndefined();
+		expect(recoveredPlan.concernChecks).toBeUndefined();
+		expect(recoveredPlan.scopeCalibration).toBeUndefined();
+		expect(recoveredPlan.branchEvidence).toBeUndefined();
+		expect(recoveredPlan.excludedWorkReview).toBeUndefined();
+		expect(recoveredPlan.reviews).toEqual([]);
 
-		const newSubmission = buildTargetPlanApprovalInput(reopened);
+		const newSubmission = buildTargetPlanApprovalInput(recovered);
 		expect(() =>
 			harness.runtime.validateCurrentTargetPlanSubmission({
 				...newSubmission,
 				targetPlanId: failedPlan.id,
 				revision: failedPlan.revision,
 			}),
-		).toThrow(`target_plan_id must equal currentTargetPlan.id (${reopenedPlan.id}); got ${failedPlan.id}`);
+		).toThrow(`target_plan_id must equal currentTargetPlan.id (${recoveredPlan.id}); got ${failedPlan.id}`);
 		expect(() => harness.runtime.validateCurrentTargetPlanSubmission(newSubmission)).not.toThrow();
-
-		const rejected = await harness.runtime.rejectCurrentTargetPlan({
-			targetPlanId: reopenedPlan.id,
-			revision: reopenedPlan.revision,
-			reviews: [rejectedTargetPlanReview("execution-readiness")],
-			message: "target plan reviewer rejected the reopened submission",
-			stage: "review",
-		});
-		expect(rejected.runMode).toBe("planning-target");
-		expect(rejected.goal.currentTargetPlan?.status).toBe("revision-required");
-		expect(rejected.goal.currentTargetPlan?.revision).toBe(2);
 	});
 
-	it("rejects stale failed-plan reopen requests", async () => {
+	it("recovers stale target-plan blocks with a fresh plan attempt", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Recover a stale plan" });
+		const planning = await harness.runtime.startTarget({
+			title: "Plan went stale",
+			desiredFutureClaim: "Stale plan can restart planning.",
+			closureStandard: "Fresh plan identity exists.",
+		});
+		const stalePlan = planning.goal.currentTargetPlan;
+		if (!stalePlan) throw new Error("expected stale plan setup");
+		const stale = await harness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: stalePlan.id,
+			revision: stalePlan.revision,
+			reviews: [rejectedTargetPlanReview("execution-readiness")],
+			message: "target plan review result is stale because goal state changed",
+			stage: "stale",
+		});
+		const target = stale.goal.currentTarget;
+		const currentStalePlan = stale.goal.currentTargetPlan;
+		const block = stale.goal.currentBlockedState;
+		if (!target || !currentStalePlan || !block || block.kind !== "target-plan")
+			throw new Error("expected stale target-plan block");
+		expect(block.source.status).toBe("stale");
+
+		const recovered = await harness.runtime.recoverBlockedState({
+			kind: "target-plan",
+			action: "restart_target_planning",
+			blockedStateId: block.id,
+			targetId: target.id,
+			targetPlanId: currentStalePlan.id,
+			revision: currentStalePlan.revision,
+			sourceStatus: "stale",
+			reason: "state-refresh",
+			guidance: "Refresh the stale plan from current state.",
+		});
+
+		expect(recovered.runMode).toBe("planning-target");
+		expect(recovered.goal.currentTarget?.id).toBe(target.id);
+		expect(recovered.goal.currentTargetPlan?.id).toBe(`${target.id}-plan-attempt-2`);
+		expect(recovered.goal.currentTargetPlan?.status).toBe("drafting");
+		expect(recovered.goal.currentTargetPlan?.revision).toBe(1);
+		expect(recovered.goal.currentTargetPlan?.recoveredFrom?.blockedStateId).toBe(block.id);
+		expect(recovered.goal.targetPlans?.find(plan => plan.id === currentStalePlan.id)?.status).toBe("stale");
+	});
+
+	it("guards blocked-state target-plan recovery identity and state", async () => {
 		const wrongModeHarness = createHarness();
 		await wrongModeHarness.runtime.createGoal({ objective: "Reject wrong run mode" });
 		const planning = await wrongModeHarness.runtime.startTarget({
 			title: "Plan still drafting",
-			desiredFutureClaim: "Drafting plan cannot be reopened.",
+			desiredFutureClaim: "Drafting plan cannot recover.",
 			closureStandard: "Drafting plan remains pending.",
 		});
 		const planningTarget = planning.goal.currentTarget;
 		const planningPlan = planning.goal.currentTargetPlan;
 		if (!planningTarget || !planningPlan) throw new Error("expected planning target");
 		await expect(
-			wrongModeHarness.runtime.reopenFailedTargetPlan({
+			wrongModeHarness.runtime.recoverBlockedState({
+				kind: "target-plan",
+				action: "restart_target_planning",
+				blockedStateId: "missing",
 				targetId: planningTarget.id,
 				targetPlanId: planningPlan.id,
 				revision: planningPlan.revision,
+				sourceStatus: "failed",
 				reason: "user-input",
 				guidance: "Operator answered.",
 			}),
-		).rejects.toThrow("cannot reopen target plan unless goal is awaiting user input");
+		).rejects.toThrow("cannot recover blocked state unless goal is awaiting user input");
 
 		const failedHarness = createHarness();
 		await failedHarness.runtime.createGoal({ objective: "Reject stale failed-plan identity" });
 		const failedPlanning = await failedHarness.runtime.startTarget({
 			title: "Plan failed",
 			desiredFutureClaim: "Failed plan awaits user input.",
-			closureStandard: "Failed plan can reopen with matching identity.",
+			closureStandard: "Failed plan can recover with matching identity.",
 		});
 		const failedTarget = failedPlanning.goal.currentTarget;
 		const failedDraft = failedPlanning.goal.currentTargetPlan;
@@ -1474,65 +1521,277 @@ describe("goal runtime", () => {
 			suggestedQuestions: ["Which branch?"],
 		});
 		const failedPlan = failed.goal.currentTargetPlan;
-		if (!failedPlan) throw new Error("expected failed plan");
+		const block = failed.goal.currentBlockedState;
+		if (!failedPlan || !block || block.kind !== "target-plan") throw new Error("expected failed plan block");
+		const recoveryInput = {
+			kind: "target-plan" as const,
+			action: "restart_target_planning" as const,
+			blockedStateId: block.id,
+			targetId: failedTarget.id,
+			targetPlanId: failedPlan.id,
+			revision: failedPlan.revision,
+			sourceStatus: "failed" as const,
+			reason: "user-input" as const,
+			guidance: "Operator answered.",
+		};
 		await expect(
-			failedHarness.runtime.reopenFailedTargetPlan({
-				targetId: failedTarget.id,
-				targetPlanId: failedPlan.id,
-				revision: failedPlan.revision + 1,
-				reason: "user-input",
-				guidance: "Operator answered.",
-			}),
+			failedHarness.runtime.recoverBlockedState({ ...recoveryInput, blockedStateId: "wrong-block" }),
+		).rejects.toThrow(`blocked_state_id must equal currentBlockedState.id (${block.id}); got wrong-block`);
+		await expect(
+			failedHarness.runtime.recoverBlockedState({
+				...recoveryInput,
+				action: "start_next_target",
+			} as unknown as Parameters<GoalRuntime["recoverBlockedState"]>[0]),
+		).rejects.toThrow("blocked state does not allow restart_target_planning");
+		await expect(
+			failedHarness.runtime.recoverBlockedState({ ...recoveryInput, revision: failedPlan.revision + 1 }),
 		).rejects.toThrow(
 			`revision must equal currentTargetPlan.revision (${failedPlan.revision}); got ${failedPlan.revision + 1}`,
 		);
 		await expect(
-			failedHarness.runtime.reopenFailedTargetPlan({
-				targetId: failedTarget.id,
-				targetPlanId: "wrong-plan",
-				revision: failedPlan.revision,
-				reason: "user-input",
-				guidance: "Operator answered.",
-			}),
-		).rejects.toThrow(`target_plan_id must equal currentTargetPlan.id (${failedPlan.id}); got wrong-plan`);
-		await expect(
-			failedHarness.runtime.reopenFailedTargetPlan({
-				targetId: failedTarget.id,
-				targetPlanId: failedPlan.id,
-				revision: failedPlan.revision,
-				reason: "user-input",
-				guidance: "  ",
-			}),
-		).rejects.toThrow("reopen_target_plan guidance must be non-empty");
+			failedHarness.runtime.recoverBlockedState({ ...recoveryInput, sourceStatus: "stale" }),
+		).rejects.toThrow("source_status must equal currentTargetPlan.status (failed); got stale");
+		await expect(failedHarness.runtime.recoverBlockedState({ ...recoveryInput, guidance: "  " })).rejects.toThrow(
+			"recover_blocked_state guidance must be non-empty",
+		);
 
-		const staleHarness = createHarness();
-		await staleHarness.runtime.createGoal({ objective: "Reject non-failed plan" });
-		const stalePlanning = await staleHarness.runtime.startTarget({
-			title: "Plan went stale",
-			desiredFutureClaim: "Stale plan waits for input.",
-			closureStandard: "Stale plan is not failed.",
+		const pendingHarness = createHarness({
+			state: {
+				...failed,
+				goal: { ...failed.goal, pendingCheckpointId: "pending-checkpoint" },
+			},
 		});
-		const stalePlan = stalePlanning.goal.currentTargetPlan;
-		if (!stalePlan) throw new Error("expected stale plan setup");
-		const stale = await staleHarness.runtime.rejectCurrentTargetPlan({
-			targetPlanId: stalePlan.id,
-			revision: stalePlan.revision,
-			reviews: [rejectedTargetPlanReview("execution-readiness")],
-			message: "target plan review result is stale because goal state changed",
-			stage: "stale",
+		await expect(pendingHarness.runtime.recoverBlockedState(recoveryInput)).rejects.toThrow(
+			"cannot recover target planning while a checkpoint is pending resolution",
+		);
+
+		const repairHarness = createHarness({
+			state: {
+				...failed,
+				goal: {
+					...failed.goal,
+					verificationRepair: {
+						verificationAttemptId: "verify-1",
+						feedback: "Need fresh evidence.",
+						blockers: [],
+						evidenceToCollect: [],
+						avoidRepeating: [],
+						createdAt: 0,
+						workEpoch: 0,
+					},
+				},
+			},
 		});
-		const staleTarget = stale.goal.currentTarget;
-		const currentStalePlan = stale.goal.currentTargetPlan;
-		if (!staleTarget || !currentStalePlan) throw new Error("expected stale target plan");
-		await expect(
-			staleHarness.runtime.reopenFailedTargetPlan({
-				targetId: staleTarget.id,
-				targetPlanId: currentStalePlan.id,
-				revision: currentStalePlan.revision,
-				reason: "user-input",
-				guidance: "Operator answered.",
+		await expect(repairHarness.runtime.recoverBlockedState(recoveryInput)).rejects.toThrow(
+			"cannot recover target planning while verifier repair is pending",
+		);
+	});
+
+	it("recovers checkpoint external pauses through allowed actions", async () => {
+		const startHarness = createHarness();
+		await startHarness.runtime.createGoal({ objective: "Continue after external checkpoint input" });
+		await startApprovedTarget(startHarness, {
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke evidence exists.",
+			closureStandard: "Current smoke evidence closes the target.",
+		});
+		const startCandidate = startHarness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Smoke evidence recorded.",
+			localClaims: ["Smoke exercises worker startup"],
+			evidence: [
+				{ claim: "Smoke exercises worker startup", evidence: "Observed focused smoke output", current: true },
+			],
+			notClaimed: ["Release is ready"],
+			remainingQuestions: ["Which installer surface is next?"],
+		});
+		await startHarness.runtime.commitCheckpoint(startCandidate, {
+			status: "accepted",
+			feedback: "Target closure evidence is bounded and current.",
+			evidenceChecked: startCandidate.evidence,
+			blockers: [],
+			reviewedAt: 10,
+		});
+		const paused = await startHarness.runtime.recordCheckpointResolution({
+			checkpointId: startCandidate.id,
+			decision: "needs_user_input",
+			parentReading: "Need operator input before selecting next target.",
+			notPropagated: [],
+			remainingParentWork: ["Pick next installer surface."],
+			broaderChecksOrInputs: ["Operator must choose source-link or tarball."],
+			lessonsForFuture: [],
+		});
+		const block = paused.goal.currentBlockedState;
+		if (block?.kind !== "checkpoint-external-pause") throw new Error("expected checkpoint block");
+		expect(paused.runMode).toBe("awaiting-user-input");
+		expect(paused.goal.pendingCheckpointId).toBeUndefined();
+
+		const recovered = await startHarness.runtime.recoverBlockedState({
+			kind: "checkpoint-external-pause",
+			action: "start_next_target",
+			blockedStateId: block.id,
+			checkpointId: block.source.checkpointId,
+			checkpointResolutionId: block.source.checkpointResolutionId,
+			reason: "user-input",
+			guidance: "Operator selected source-link next.",
+			nextTarget: {
+				title: "Prove source-link smoke",
+				desiredFutureClaim: "Source-link smoke evidence exists.",
+				closureStandard: "Current source-link smoke evidence closes the target.",
+			},
+		});
+		expect(recovered.runMode).toBe("planning-target");
+		expect(recovered.goal.currentTarget?.createdBy).toBe("checkpoint-resolution");
+		expect(recovered.goal.currentTargetPlan?.status).toBe("drafting");
+		expect(recovered.goal.currentBlockedState).toBeUndefined();
+
+		const completionHarness = createHarness();
+		await completionHarness.runtime.createGoal({ objective: "Complete after external checkpoint input" });
+		await startApprovedTarget(completionHarness, {
+			title: "Prove release smoke",
+			desiredFutureClaim: "Release smoke evidence exists.",
+			closureStandard: "Current release smoke evidence closes the target.",
+		});
+		const completionCandidate = completionHarness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Release evidence recorded.",
+			localClaims: ["Release smoke exercises worker startup"],
+			evidence: [
+				{ claim: "Release smoke exercises worker startup", evidence: "Observed smoke output", current: true },
+			],
+			notClaimed: ["Release is verified"],
+			remainingQuestions: ["Parent verifier should decide."],
+		});
+		await completionHarness.runtime.commitCheckpoint(completionCandidate, {
+			status: "accepted",
+			feedback: "Target closure evidence is bounded and current.",
+			evidenceChecked: completionCandidate.evidence,
+			blockers: [],
+			reviewedAt: 20,
+		});
+		const completionPaused = await completionHarness.runtime.recordCheckpointResolution({
+			checkpointId: completionCandidate.id,
+			decision: "needs_user_input",
+			parentReading: "Need operator input before parent completion.",
+			notPropagated: [],
+			remainingParentWork: ["Operator must approve parent completion attempt."],
+			broaderChecksOrInputs: [],
+			lessonsForFuture: [],
+		});
+		const completionBlock = completionPaused.goal.currentBlockedState;
+		if (completionBlock?.kind !== "checkpoint-external-pause")
+			throw new Error("expected completion checkpoint block");
+		const parentReady = await completionHarness.runtime.recoverBlockedState({
+			kind: "checkpoint-external-pause",
+			action: "enter_parent_completion",
+			blockedStateId: completionBlock.id,
+			checkpointId: completionBlock.source.checkpointId,
+			checkpointResolutionId: completionBlock.source.checkpointResolutionId,
+			reason: "user-input",
+			guidance: "Operator approved parent completion verification.",
+		});
+		expect(parentReady.runMode).toBe("awaiting-parent-completion");
+		expect(parentReady.goal.currentBlockedState).toBeUndefined();
+	});
+
+	it("normalizes legacy awaiting-user-input states into blocked states", () => {
+		const target = {
+			id: "target-1",
+			sequence: 1,
+			status: "active" as const,
+			title: "Recover target",
+			desiredFutureClaim: "Target plan recovers.",
+			closureStandard: "Recovered plan exists.",
+			baselineRefs: [],
+			gateRefs: [],
+			evidenceExpectation: [],
+			nonGoals: [],
+			forbiddenClaims: [],
+			staleIf: [],
+			createdAt: 0,
+			planId: "target-1-plan",
+			createdBy: "initial" as const,
+		};
+		const failedPlan = {
+			id: "target-1-plan",
+			goalId: "goal-1",
+			targetId: "target-1",
+			targetSequence: 1,
+			planFilePath: "local://target-plan.md",
+			status: "failed" as const,
+			revision: 1,
+			stateVersionAtStart: 1,
+			parentFrameVersionAtStart: 0,
+			createdAt: 0,
+			updatedAt: 0,
+			failedAt: 0,
+			failure: {
+				stage: "draft" as const,
+				reason: "needs-user-input" as const,
+				message: "Need user input.",
+				blockers: ["Need answer."],
+				suggestedQuestions: ["Answer?"],
+				at: 0,
+			},
+			reviews: [],
+		};
+		const failedState = parseGoalModeState({
+			enabled: true,
+			mode: "active",
+			runMode: "awaiting-user-input",
+			stateVersion: 2,
+			parentFrameVersion: 0,
+			goal: createGoal({
+				currentTarget: target,
+				targets: [target],
+				currentTargetPlan: failedPlan,
+				targetPlans: [failedPlan],
 			}),
-		).rejects.toThrow("current target plan is not failed");
+		});
+		expect(failedState?.goal.currentBlockedState?.kind).toBe("target-plan");
+		expect(failedState?.goal.currentBlockedState?.allowedActions).toEqual(["restart_target_planning"]);
+
+		const checkpointState = parseGoalModeState({
+			enabled: true,
+			mode: "active",
+			runMode: "awaiting-user-input",
+			stateVersion: 3,
+			parentFrameVersion: 0,
+			goal: createGoal({
+				checkpointResolutions: [
+					{
+						id: "resolution-1",
+						sequence: 1,
+						goalId: "goal-1",
+						checkpointId: "checkpoint-1",
+						decision: "needs_user_input",
+						parentReading: "Need input.",
+						notPropagated: [],
+						remainingParentWork: ["Choose next target."],
+						broaderChecksOrInputs: [],
+						lessonsForFuture: [],
+						createdAt: 0,
+					},
+				],
+				lastCheckpointResolutionId: "resolution-1",
+			}),
+		});
+		expect(checkpointState?.goal.currentBlockedState?.kind).toBe("checkpoint-external-pause");
+		expect(checkpointState?.goal.currentBlockedState?.allowedActions).toEqual([
+			"start_next_target",
+			"enter_parent_completion",
+		]);
+
+		const ambiguousState = parseGoalModeState({
+			enabled: true,
+			mode: "active",
+			runMode: "awaiting-user-input",
+			stateVersion: 4,
+			parentFrameVersion: 0,
+			goal: createGoal(),
+		});
+		expect(ambiguousState?.goal.currentBlockedState?.kind).toBe("operator-input-required");
+		expect(ambiguousState?.goal.currentBlockedState?.allowedActions).toEqual([]);
 	});
 
 	it("does not let stale target-plan reviews discard a newer revision", async () => {
@@ -1902,6 +2161,10 @@ describe("goal runtime", () => {
 
 		expect(resolved.runMode).toBe("awaiting-user-input");
 		expect(resolved.goal.pendingCheckpointId).toBeUndefined();
+		const block = resolved.goal.currentBlockedState;
+		if (block?.kind !== "checkpoint-external-pause") {
+			throw new Error("expected checkpoint external-pause blocked state");
+		}
 		await expect(
 			harness.runtime.recordCheckpointResolution({
 				checkpointId,
@@ -1914,11 +2177,21 @@ describe("goal runtime", () => {
 		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow(
 			"cannot complete parent goal while awaiting user input or external authority",
 		);
-		const next = await startApprovedTarget(harness, {
-			title: "Choose next gate",
-			desiredFutureClaim: "Next release gate has selected evidence.",
-			closureStandard: "Current selected-gate evidence exists.",
+		const recovered = await harness.runtime.recoverBlockedState({
+			kind: "checkpoint-external-pause",
+			action: "start_next_target",
+			blockedStateId: block.id,
+			checkpointId: block.source.checkpointId,
+			checkpointResolutionId: block.source.checkpointResolutionId,
+			reason: "user-input",
+			guidance: "Operator chose the next release gate.",
+			nextTarget: {
+				title: "Choose next gate",
+				desiredFutureClaim: "Next release gate has selected evidence.",
+				closureStandard: "Current selected-gate evidence exists.",
+			},
 		});
+		const next = await approveTargetPlan(harness, recovered);
 		expect(next.runMode).toBe("working-target");
 	});
 

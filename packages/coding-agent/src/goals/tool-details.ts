@@ -1,18 +1,22 @@
 import type {
 	Goal,
+	GoalBlockedState,
 	GoalCheckpointPacket,
 	GoalCheckpointResolution,
 	GoalCheckpointReview,
 	GoalCompletionVerificationDetails,
 	GoalModeState,
+	GoalRecoveryRecord,
 	GoalTarget,
 	GoalTargetPlanApprovedDetails,
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
+	GoalToolBlockedStateSummary,
 	GoalToolCheckpointResolutionSummary,
 	GoalToolCheckpointSummary,
 	GoalToolDetails,
 	GoalToolGoalSummary,
+	GoalToolRecoverySummary,
 	GoalToolStateSummary,
 	GoalToolTargetPlanSummary,
 	GoalToolTargetSummary,
@@ -133,15 +137,44 @@ export function summarizeTargetPlan(
 					blockers: [...plan.failure.blockers],
 				}
 			: undefined,
-		recoveredFromFailure: plan.recoveredFromFailure
+		recoveredFrom: plan.recoveredFrom
 			? {
-					sourceTargetPlanId: plan.recoveredFromFailure.sourceTargetPlanId,
-					sourceRevision: plan.recoveredFromFailure.sourceRevision,
-					reason: plan.recoveredFromFailure.reason,
-					guidance: plan.recoveredFromFailure.guidance,
-					blockers: [...plan.recoveredFromFailure.blockers],
+					...plan.recoveredFrom,
+					blockers: [...plan.recoveredFrom.blockers],
 				}
 			: undefined,
+	};
+}
+
+export function summarizeBlockedState(block: GoalBlockedState | undefined): GoalToolBlockedStateSummary | undefined {
+	if (!block) return undefined;
+	return {
+		id: block.id,
+		kind: block.kind,
+		status: block.status,
+		message: block.message,
+		blockers: [...block.blockers],
+		suggestedQuestions: [...block.suggestedQuestions],
+		allowedActions: [...block.allowedActions],
+		source: { ...block.source },
+		requiredOperation: block.allowedActions.length ? "recover_blocked_state" : undefined,
+		broaderChecksOrInputs: block.kind === "checkpoint-external-pause" ? [...block.broaderChecksOrInputs] : undefined,
+		remainingParentWork: block.kind === "checkpoint-external-pause" ? [...block.remainingParentWork] : undefined,
+	};
+}
+
+export function summarizeRecovery(recovery: GoalRecoveryRecord | undefined): GoalToolRecoverySummary | undefined {
+	if (!recovery) return undefined;
+	return {
+		id: recovery.id,
+		blockedStateId: recovery.blockedStateId,
+		kind: recovery.kind,
+		action: recovery.action,
+		reason: recovery.reason,
+		guidance: recovery.guidance,
+		blockers: [...recovery.blockers],
+		result: { ...recovery.result },
+		at: recovery.at,
 	};
 }
 
@@ -159,5 +192,9 @@ export function buildGoalToolDetails(op: GoalToolDetails["op"], source: GoalTool
 		checkpointResolution: summarizeCheckpointResolution(source.checkpointResolution),
 		targetPlanApproval: source.targetPlanApproval,
 		targetPlan: summarizeTargetPlan(source.targetPlan, source.targetPlanReviews),
+		blockedState: summarizeBlockedState(source.goal?.currentBlockedState),
+		recovery: summarizeRecovery(
+			op === "recover_blocked_state" ? source.state?.goal.recoveryHistory?.at(-1) : undefined,
+		),
 	};
 }

@@ -45,7 +45,7 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 ## Workflow
 
 1. Call `goal({op:"get"})`; use returned state as authority.
-   - If `currentTargetPlan.recoveredFromFailure` exists, treat its guidance/blockers as mandatory repair input and use only the current target_plan_id/revision from `goal({op:"get"})`; never reuse the failed source plan id.
+   - If `currentTargetPlan.recoveredFrom` exists, treat its guidance/blockers as mandatory repair input and use only the current target_plan_id/revision from `goal({op:"get"})`; never reuse any failed/stale source plan id.
 2. Ground every path, symbol, signature, behavior, and callsite in this-session evidence.
 3. Validate target aperture against product signal, same-signal work, blast radius, and parent deliverables.
 4. Use required discovery lenses: architecture/data flow, callsites/contracts, tests/verification.

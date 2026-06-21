@@ -14,6 +14,6 @@ Compaction policy:
 - `awaiting-checkpoint-resolution`: route to checkpoint guidance and `resolve_checkpoint`.
 - `awaiting-parent-completion`: call `goal({op:"complete"})`; do not resume implementation.
 - `awaiting-verification-repair`: require fresh repair/evidence before another `complete`.
-- `awaiting-user-input`: wait for user/check/external-control input.
+- `awaiting-user-input`: preserve `blocked_state` and wait unless current input explicitly recovers it through `recover_blocked_state`.
 - Overflow or incomplete-output recovery is not checkpoint evidence.
 </goal_mode_compaction_context>
