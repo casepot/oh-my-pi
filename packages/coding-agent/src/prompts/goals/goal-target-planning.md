@@ -77,7 +77,7 @@ Derive `submit_target_plan` from the plan and skeleton. Use strict tool-schema f
 - `verification_aperture.product_intention` MUST name the product signal made truthful.
 - `verification_aperture.primary_signal_id` MUST copy one required `verification_signals[].id` exactly; do not invent a product-intention label unless a required signal with that exact id exists.
 - `verification_signals[].layer` and `verification_aperture.omitted_layers[].layer` MUST use one of: `unit`, `integration`, `e2e`, `manual`, `product`, `release-gate`.
-- `ux-manual` and `docs-or-operator` are `concern_checks[].kind` values only; NEVER use them as `verification_signals[].layer`.
+- Concern kinds are NOT layers. NEVER put `behavior`, `contract`, `state-persistence`, `error-handling`, `security`, `performance`, `migration`, `ux-manual`, or `docs-or-operator` in `verification_signals[].layer`.
 - `verification_signals[].concern_ids`, `concern_checks[].covered_by_signal_ids`, `scope_calibration.included_related_work[].signal_ids`, and `branch_evidence[].planned_signal_ids` MUST reference submitted IDs.
 - `scope_calibration.why_not_smaller` MUST reject micro-targets; `why_not_larger` MUST name the independent signal/boundary that splits.
 - `excluded_work_review` includes only load-bearing exclusions; classify essential same-signal exclusions as unsafe and revise/fail.

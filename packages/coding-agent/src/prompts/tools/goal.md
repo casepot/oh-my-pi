@@ -42,7 +42,7 @@ Targets are product-meaningful completion units, not process phases or miniature
 <target-planning>
 `planning-target` blocks implementation. Use read/discovery tools, read-only `task` reviewers when they materially reduce uncertainty, `job` supervision, and `irc` coordination when available. Write/edit only the active target plan file. `dry_run` is read-only planner simulation, not executed verification. Then call `submit_target_plan` or `fail_target_plan`.
 - Target-plan failed/stale recovery uses `recover_blocked_state` with action `restart_target_planning`; the recovered plan gets a new identity from `goal({op:"get"})`.
-- In `submit_target_plan`, `verification_aperture.primary_signal_id` is an exact required `verification_signals[].id`; `verification_signals[].layer` never accepts concern-kind values such as `ux-manual` or `docs-or-operator`.
+- In `submit_target_plan`, `verification_aperture.primary_signal_id` is an exact required `verification_signals[].id`; `verification_signals[].layer` never accepts concern-kind values such as `behavior`, `contract`, `security`, `ux-manual`, or `docs-or-operator`.
 </target-planning>
 
 <checkpoint-resolution>

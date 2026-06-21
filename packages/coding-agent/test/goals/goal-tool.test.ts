@@ -806,7 +806,7 @@ describe("GoalTool", () => {
 		expect(text).toContain('"verification_aperture"');
 		expect(text).toContain("unit, integration, e2e, manual, product, release-gate");
 		expect(text).toContain('"primary_signal_id": "<copy exact id of one required verification_signals[] entry>"');
-		expect(text).toContain("never ux-manual/docs-or-operator");
+		expect(text).toContain("never concern kind");
 		expect(text).toContain("concern taxonomy, not verification layer");
 	});
 
@@ -1031,12 +1031,6 @@ describe("GoalTool", () => {
 			'submit_target_plan invalid at verification_signals/3/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
 		);
 
-		const aliasLayerParams = buildSubmitTargetPlanParams(base);
-		(aliasLayerParams.verification_signals[0] as { layer: string }).layer = "docs-or-operator";
-		await expect(tool.execute("invalid-signal-layer-alias", aliasLayerParams)).rejects.toThrow(
-			'"docs-or-operator" is a concern_checks[].kind value, not a verification layer',
-		);
-
 		const omittedParams = buildSubmitTargetPlanParams(base);
 		(omittedParams.verification_aperture.omitted_layers[0] as { layer: string }).layer = "browser";
 		await expect(tool.execute("invalid-omitted-layer", omittedParams)).rejects.toThrow(
@@ -1051,8 +1045,12 @@ describe("GoalTool", () => {
 		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
 	});
 
-	it("lets submit target-plan validation errors reach compact goal diagnostics", async () => {
-		const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+	it("normalizes concern-kind layer aliases before target-plan review", async () => {
+		let submittedInput: GoalSubmitTargetPlanInput | undefined;
+		const requestGoalTargetPlanApproval = vi.fn(async (input: GoalSubmitTargetPlanInput) => {
+			submittedInput = input;
+			return buildGoalToolResponse(createGoal());
+		});
 		const tool = new GoalTool(
 			createToolSession({
 				getGoalRuntime: () => createRuntimeHarness().runtime,
@@ -1065,7 +1063,7 @@ describe("GoalTool", () => {
 			planFilePath: "local://goal-goal-1-target-1-plan.md",
 			revision: 1,
 		});
-		(params.verification_signals[0] as { layer: string }).layer = "ux-manual";
+		(params.verification_signals[0] as { layer: string }).layer = "contract";
 
 		let effectiveArgs: Record<string, unknown>;
 		try {
@@ -1081,10 +1079,9 @@ describe("GoalTool", () => {
 			effectiveArgs = params;
 		}
 
-		await expect(tool.execute("call-invalid-layer", effectiveArgs as GoalToolInput)).rejects.toThrow(
-			'"ux-manual" is a concern_checks[].kind value, not a verification layer',
-		);
-		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+		await tool.execute("call-invalid-layer", effectiveArgs as GoalToolInput);
+		expect(requestGoalTargetPlanApproval).toHaveBeenCalledTimes(1);
+		expect(submittedInput?.verificationSignals[0]?.layer).toBe("integration");
 	});
 
 	it("returns concise recovery text for invalid target-plan non-enum fields", async () => {

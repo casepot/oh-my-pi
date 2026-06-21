@@ -230,7 +230,7 @@ export function renderTargetPlanSubmitSkeleton(
 			{
 				id: "<primary signal id copied by verification_aperture.primary_signal_id>",
 				role: "<primary|supporting|guardrail>",
-				layer: "<unit|integration|e2e|manual|product|release-gate only; never ux-manual/docs-or-operator>",
+				layer: "<unit|integration|e2e|manual|product|release-gate only; never concern kind (behavior, contract, state-persistence, error-handling, security, performance, migration, ux-manual, docs-or-operator)>",
 				concern_ids: ["<concern id>"],
 				claim: "<claim this signal proves>",
 				observation: "<observable result>",

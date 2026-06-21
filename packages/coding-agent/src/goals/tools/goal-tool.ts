@@ -211,6 +211,20 @@ const signalConfidenceSchema = z.enum(SIGNAL_CONFIDENCE_VALUES);
 const blastRadiusSchema = z.enum(BLAST_RADIUS_VALUES);
 const concernKindSchema = z.enum(CONCERN_KIND_VALUES);
 const excludedWorkClassificationSchema = z.enum(EXCLUDED_WORK_CLASSIFICATION_VALUES);
+type VerificationLayerValue = (typeof VERIFICATION_LAYER_VALUES)[number];
+type ConcernKindValue = (typeof CONCERN_KIND_VALUES)[number];
+
+const CONCERN_KIND_LAYER_ALIASES: Record<ConcernKindValue, VerificationLayerValue> = {
+	behavior: "integration",
+	contract: "integration",
+	"state-persistence": "integration",
+	"error-handling": "unit",
+	security: "integration",
+	performance: "integration",
+	migration: "integration",
+	"ux-manual": "manual",
+	"docs-or-operator": "manual",
+};
 
 const verificationApertureSchema = z
 	.object({
@@ -958,21 +972,42 @@ function requiredVerificationSignalIds(params: unknown): string[] {
 	}
 	return ids;
 }
+function normalizeVerificationLayerAlias(value: unknown): VerificationLayerValue | undefined {
+	return typeof value === "string" && value in CONCERN_KIND_LAYER_ALIASES
+		? CONCERN_KIND_LAYER_ALIASES[value as ConcernKindValue]
+		: undefined;
+}
+
+function normalizeSubmitTargetPlanLayerAliases(params: unknown): unknown {
+	if (getRecordValue(params, "op") !== "submit_target_plan" || !params || typeof params !== "object") {
+		return params;
+	}
+	const signals = getRecordValue(params, "verification_signals");
+	if (!Array.isArray(signals)) return params;
+	let normalizedSignals: unknown[] | undefined;
+	for (let index = 0; index < signals.length; index += 1) {
+		const signal = signals[index];
+		const normalizedLayer = normalizeVerificationLayerAlias(getRecordValue(signal, "layer"));
+		if (!normalizedLayer || !signal || typeof signal !== "object" || Array.isArray(signal)) continue;
+		normalizedSignals ??= signals.slice();
+		normalizedSignals[index] = { ...signal, layer: normalizedLayer };
+	}
+	return normalizedSignals ? { ...params, verification_signals: normalizedSignals } : params;
+}
 
 function layerAliasHint(value: unknown): string {
-	if (value === "ux-manual") {
-		return ' "ux-manual" is a concern_checks[].kind value, not a verification layer; use "manual" for human UI checks.';
-	}
-	if (value === "docs-or-operator") {
-		return ' "docs-or-operator" is a concern_checks[].kind value, not a verification layer; choose "product", "manual", or "release-gate" based on the observation.';
+	if (typeof value === "string" && value in CONCERN_KIND_LAYER_ALIASES) {
+		const normalized = CONCERN_KIND_LAYER_ALIASES[value as ConcernKindValue];
+		return ` ${formatDiagnosticValue(value)} is a concern_checks[].kind value, not a verification layer; use a verification layer such as ${formatDiagnosticValue(normalized)}.`;
 	}
 	return "";
 }
 
 function parseSubmitTargetPlanToolInput(params: GoalToolInput): GoalSubmitTargetPlanInput {
-	const parsed = submitTargetPlanSchema.safeParse(params);
+	const normalizedParams = normalizeSubmitTargetPlanLayerAliases(params);
+	const parsed = submitTargetPlanSchema.safeParse(normalizedParams);
 	if (parsed.success) return mapSubmitTargetPlanInput(parsed.data);
-	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error, params));
+	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error, normalizedParams));
 }
 
 function formatSubmitTargetPlanSchemaError(error: z.ZodError, params?: unknown): string {
