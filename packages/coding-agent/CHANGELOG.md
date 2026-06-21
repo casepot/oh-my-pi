@@ -44,6 +44,7 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed goal target-plan schema failures to route through compact goal-tool diagnostics and clarify that primary signals must be exact signal IDs while `ux-manual` / `docs-or-operator` remain concern kinds, not verification layers.
 - Fixed goal-mode failed target-plan recovery so user/external input can reopen planning for the same active target instead of dead-ending behind resume/start_target guards.
 - Fixed goal-mode operator smoothness so usage totals render after usage deltas and target-plan/checkpoint panes expose actionable status and IDs.
 - Fixed localhost browser recovery guidance to call out stale tabs and dev-server port mismatches.

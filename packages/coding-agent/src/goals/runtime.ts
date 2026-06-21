@@ -219,7 +219,7 @@ export function renderTargetPlanSubmitSkeleton(
 		revision: identity.revision,
 		verification_aperture: {
 			product_intention: "<observable product intention>",
-			primary_signal_id: "<required primary signal id>",
+			primary_signal_id: "<copy exact id of one required verification_signals[] entry>",
 			blast_radius: "<local|module|workflow|multi-subsystem|external-or-irreversible>",
 			confidence_target: "<low|medium|high>",
 			layer_rationale: "<why these layers are sufficient>",
@@ -228,9 +228,9 @@ export function renderTargetPlanSubmitSkeleton(
 		},
 		verification_signals: [
 			{
-				id: "<signal id>",
+				id: "<primary signal id copied by verification_aperture.primary_signal_id>",
 				role: "<primary|supporting|guardrail>",
-				layer: "<unit|integration|e2e|manual|product|release-gate>",
+				layer: "<unit|integration|e2e|manual|product|release-gate only; never ux-manual/docs-or-operator>",
 				concern_ids: ["<concern id>"],
 				claim: "<claim this signal proves>",
 				observation: "<observable result>",
@@ -244,7 +244,7 @@ export function renderTargetPlanSubmitSkeleton(
 		concern_checks: [
 			{
 				id: "<concern id>",
-				kind: "<behavior|contract|state-persistence|error-handling|security|performance|migration|ux-manual|docs-or-operator>",
+				kind: "<behavior|contract|state-persistence|error-handling|security|performance|migration|ux-manual|docs-or-operator; concern taxonomy, not verification layer>",
 				why_independent: "<why this concern can fail independently>",
 				covered_by_signal_ids: ["<signal id>"],
 			},

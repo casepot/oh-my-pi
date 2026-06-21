@@ -75,8 +75,9 @@ Derive `submit_target_plan` from the plan and skeleton. Use strict tool-schema f
 - Top-level: `op`, `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `workflow_review_rounds`, `dry_run`.
 - Identity mapping: `currentTarget.id` / `targetPlanSubmitIdentity.targetId` -> `target_id`; `currentTargetPlan.id` / `targetPlanSubmitIdentity.targetPlanId` -> `target_plan_id`; `currentTargetPlan.planFilePath` / `targetPlanSubmitIdentity.planFilePath` -> `plan_file_path`; `currentTargetPlan.revision` / `targetPlanSubmitIdentity.revision` -> `revision`.
 - `verification_aperture.product_intention` MUST name the product signal made truthful.
-- `verification_aperture.primary_signal_id` MUST name one required entry in `verification_signals`.
+- `verification_aperture.primary_signal_id` MUST copy one required `verification_signals[].id` exactly; do not invent a product-intention label unless a required signal with that exact id exists.
 - `verification_signals[].layer` and `verification_aperture.omitted_layers[].layer` MUST use one of: `unit`, `integration`, `e2e`, `manual`, `product`, `release-gate`.
+- `ux-manual` and `docs-or-operator` are `concern_checks[].kind` values only; NEVER use them as `verification_signals[].layer`.
 - `verification_signals[].concern_ids`, `concern_checks[].covered_by_signal_ids`, `scope_calibration.included_related_work[].signal_ids`, and `branch_evidence[].planned_signal_ids` MUST reference submitted IDs.
 - `scope_calibration.why_not_smaller` MUST reject micro-targets; `why_not_larger` MUST name the independent signal/boundary that splits.
 - `excluded_work_review` includes only load-bearing exclusions; classify essential same-signal exclusions as unsafe and revise/fail.

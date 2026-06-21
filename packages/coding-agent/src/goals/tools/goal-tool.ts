@@ -922,20 +922,69 @@ function mapSubmitTargetPlanInput(params: z.infer<typeof submitTargetPlanSchema>
 	};
 }
 
+function getRecordValue(value: unknown, key: string): unknown {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)[key]
+		: undefined;
+}
+
+function getValueAtIssuePath(value: unknown, path: readonly PropertyKey[]): unknown {
+	let current = value;
+	for (const segment of path) {
+		if (typeof segment === "number") {
+			current = Array.isArray(current) ? current[segment] : undefined;
+		} else {
+			current = getRecordValue(current, String(segment));
+		}
+		if (current === undefined) return undefined;
+	}
+	return current;
+}
+
+function formatDiagnosticValue(value: unknown): string {
+	if (typeof value === "string") return `"${value}"`;
+	if (value === undefined) return "missing";
+	return JSON.stringify(value) ?? String(value);
+}
+
+function requiredVerificationSignalIds(params: unknown): string[] {
+	const signals = getRecordValue(params, "verification_signals");
+	if (!Array.isArray(signals)) return [];
+	const ids: string[] = [];
+	for (const signal of signals) {
+		if (getRecordValue(signal, "required") !== true) continue;
+		const id = getRecordValue(signal, "id");
+		if (typeof id === "string" && id.length > 0) ids.push(id);
+	}
+	return ids;
+}
+
+function layerAliasHint(value: unknown): string {
+	if (value === "ux-manual") {
+		return ' "ux-manual" is a concern_checks[].kind value, not a verification layer; use "manual" for human UI checks.';
+	}
+	if (value === "docs-or-operator") {
+		return ' "docs-or-operator" is a concern_checks[].kind value, not a verification layer; choose "product", "manual", or "release-gate" based on the observation.';
+	}
+	return "";
+}
+
 function parseSubmitTargetPlanToolInput(params: GoalToolInput): GoalSubmitTargetPlanInput {
 	const parsed = submitTargetPlanSchema.safeParse(params);
 	if (parsed.success) return mapSubmitTargetPlanInput(parsed.data);
-	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error));
+	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error, params));
 }
 
-function formatSubmitTargetPlanSchemaError(error: z.ZodError): string {
+function formatSubmitTargetPlanSchemaError(error: z.ZodError, params?: unknown): string {
 	const issue = error.issues[0];
 	if (!issue) {
 		return 'submit_target_plan arguments are invalid. Call goal({op:"get"}) and reuse the target-plan submit identity.';
 	}
 	const path = issue.path.map(segment => String(segment)).join("/") || "(root)";
 	if (path.endsWith("/layer") || /^verification_aperture\/omitted_layers\/\d+\/layer$/.test(path)) {
-		return `submit_target_plan invalid at ${path}: allowed values are ${VERIFICATION_LAYER_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+		const submitted = getValueAtIssuePath(params, issue.path);
+		const hint = layerAliasHint(submitted);
+		return `submit_target_plan invalid at ${path}: allowed values are ${VERIFICATION_LAYER_VALUES.join(", ")}.${hint} Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
 	}
 	if (path.endsWith("/role")) {
 		return `submit_target_plan invalid at ${path}: allowed values are ${SIGNAL_ROLE_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
@@ -948,6 +997,12 @@ function formatSubmitTargetPlanSchemaError(error: z.ZodError): string {
 	}
 	if (path.endsWith("/kind")) {
 		return `submit_target_plan invalid at ${path}: allowed values are ${CONCERN_KIND_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	}
+	if (path === "verification_aperture/primary_signal_id") {
+		const submitted = getValueAtIssuePath(params, issue.path);
+		const requiredIds = requiredVerificationSignalIds(params);
+		const idHint = requiredIds.length > 0 ? ` Required signal ids: ${requiredIds.join(", ")}.` : "";
+		return `submit_target_plan invalid at ${path}: primary_signal_id must exactly match one required verification_signals[].id. Received ${formatDiagnosticValue(submitted)}.${idHint} Call goal({op:"get"}) and reuse the target-plan submit identity.`;
 	}
 	return `submit_target_plan invalid at ${path}: ${issue.message}. Call goal({op:"get"}) and reuse the target-plan submit identity.`;
 }
@@ -1018,6 +1073,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 	readonly description = prompt.render(goalDescription);
 	readonly parameters = goalSchema;
 	readonly strict = true;
+	readonly lenientArgValidation = true;
 	readonly intent = "omit" as const;
 	readonly #session: ToolSession;
 

@@ -568,6 +568,7 @@ describe("GoalTool", () => {
 		expect(tool.description).toContain("checkpoint");
 		expect(tool.description).toContain("resolve_checkpoint");
 		expect(tool.description).toContain("Invalid uses");
+		expect(tool.lenientArgValidation).toBe(true);
 
 		expect(
 			tool.parameters.safeParse({
@@ -804,6 +805,9 @@ describe("GoalTool", () => {
 		expect(text).toContain('"op": "submit_target_plan"');
 		expect(text).toContain('"verification_aperture"');
 		expect(text).toContain("unit, integration, e2e, manual, product, release-gate");
+		expect(text).toContain('"primary_signal_id": "<copy exact id of one required verification_signals[] entry>"');
+		expect(text).toContain("never ux-manual/docs-or-operator");
+		expect(text).toContain("concern taxonomy, not verification layer");
 	});
 
 	it("renders and executes failed target-plan recovery", async () => {
@@ -1027,10 +1031,58 @@ describe("GoalTool", () => {
 			'submit_target_plan invalid at verification_signals/3/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
 		);
 
+		const aliasLayerParams = buildSubmitTargetPlanParams(base);
+		(aliasLayerParams.verification_signals[0] as { layer: string }).layer = "docs-or-operator";
+		await expect(tool.execute("invalid-signal-layer-alias", aliasLayerParams)).rejects.toThrow(
+			'"docs-or-operator" is a concern_checks[].kind value, not a verification layer',
+		);
+
 		const omittedParams = buildSubmitTargetPlanParams(base);
 		(omittedParams.verification_aperture.omitted_layers[0] as { layer: string }).layer = "browser";
 		await expect(tool.execute("invalid-omitted-layer", omittedParams)).rejects.toThrow(
 			'submit_target_plan invalid at verification_aperture/omitted_layers/0/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
+		);
+
+		const primaryParams = buildSubmitTargetPlanParams(base);
+		primaryParams.verification_aperture.primary_signal_id = "truthful-default-surfaces";
+		await expect(tool.execute("invalid-primary-signal-id", primaryParams)).rejects.toThrow(
+			'primary_signal_id must exactly match one required verification_signals[].id. Received "truthful-default-surfaces". Required signal ids: signal-primary.',
+		);
+		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+	});
+
+	it("lets submit target-plan validation errors reach compact goal diagnostics", async () => {
+		const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => createRuntimeHarness().runtime,
+				requestGoalTargetPlanApproval,
+			}),
+		);
+		const params = buildSubmitTargetPlanParams({
+			targetId: "target-1",
+			targetPlanId: "target-plan-1",
+			planFilePath: "local://goal-goal-1-target-1-plan.md",
+			revision: 1,
+		});
+		(params.verification_signals[0] as { layer: string }).layer = "ux-manual";
+
+		let effectiveArgs: Record<string, unknown>;
+		try {
+			effectiveArgs = validateToolArguments(tool, {
+				type: "toolCall",
+				id: "call-invalid-layer",
+				name: "goal",
+				arguments: params,
+			}) as Record<string, unknown>;
+		} catch (error) {
+			expect(String(error)).toContain('Validation failed for tool "goal"');
+			if (!tool.lenientArgValidation) throw error;
+			effectiveArgs = params;
+		}
+
+		await expect(tool.execute("call-invalid-layer", effectiveArgs as GoalToolInput)).rejects.toThrow(
+			'"ux-manual" is a concern_checks[].kind value, not a verification layer',
 		);
 		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
 	});
