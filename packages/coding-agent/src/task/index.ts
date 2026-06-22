@@ -1141,10 +1141,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const parentArtifactManager = this.session.getArtifactManager?.() ?? undefined;
 
 		// When the session is executing an approved plan, hand the overall plan to
-		// every subagent so they share the main agent's plan context. Skipped in
-		// read-only planning modes (plan mode uses planModeSubagentPrompt; goal
-		// target planning has a target-scoped draft path) and when no plan file
-		// exists at the session's reference path.
+		// every subagent so they share the main agent's plan context. Goal target
+		// execution gets a bounded execution summary instead of full plan file
+		// contents so subagent context does not balloon.
 		const planReference = readOnlyPlanningActive
 			? undefined
 			: await loadOverallPlanReference(
@@ -1154,9 +1153,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const goalTargetPlanReferenceDetails = readOnlyPlanningActive
 			? undefined
 			: this.session.getGoalTargetPlanReference?.();
-		const targetPlanReference = goalTargetPlanReferenceDetails
-			? await loadOverallPlanReference(goalTargetPlanReferenceDetails.planFilePath, localProtocolOptions)
-			: undefined;
+		const targetPlanReference =
+			goalTargetPlanReferenceDetails?.executionSummary !== undefined
+				? {
+						path: goalTargetPlanReferenceDetails.planFilePath,
+						content: JSON.stringify(goalTargetPlanReferenceDetails.executionSummary, null, 2),
+					}
+				: undefined;
 
 		try {
 			// Check self-recursion prevention

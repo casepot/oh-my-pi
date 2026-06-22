@@ -287,7 +287,7 @@ export interface ToolSession {
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
 	getPlanReferencePath?: () => string;
-	/** Approved goal target plan reference for target-execution context handoff. */
+	/** Approved goal target plan reference and execution summary for target-execution handoff. */
 	getGoalTargetPlanReference?: () => GoalTargetPlanApprovedDetails | undefined;
 	/** Goal mode state (if active or paused) */
 	getGoalModeState?: () => GoalModeState | undefined;

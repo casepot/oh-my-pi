@@ -17,6 +17,7 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - `get`: inspect current goal state: parent frame, run mode, target history, current target, checkpoints, resolutions, verifier repair, and remaining budget.
 - `resume`: reactivate a paused parent goal without changing its run mode.
 - `start_target`: start a bounded current target. Requires `title`, `desired_future_claim`, and `closure_standard`. Optional: `expected_parent_contribution`, `parent_deliverable_ids`, `baseline_refs`, `gate_refs`, `evidence_expectation`, `non_goals`, `forbidden_claims`, `stale_if`, `linked_verifier_blocker_ids`.
+- `target_plan_schema`: during `planning-target`, return the payload schema/reference text without mutating goal state. Call before drafting the payload, or after schema diagnostics mention unknown keys or invalid object shapes; do not guess aliases, nesting, enum values, or array/object shapes.
 - `submit_target_plan` / `lint_target_plan` / `fail_target_plan`: during `planning-target`, use file-backed `payload_file_path` calls, never inline payload objects. Payload JSON sidecar is canonical for lint/submit; Markdown is executor-facing narrative.
 - `recover_blocked_state`: after user/broader-check/external input resolves an open `blocked_state`, recover using exactly one listed `blocked_state.allowedActions` item and the source identity from `blocked_state`. Target-plan blocks restart planning for the same active target with a fresh target-plan id/revision. Checkpoint-external-pause blocks either start the next target or enter parent-completion verification.
 - `checkpoint`: submit target-closure evidence for review. Requires `status:"closed_with_evidence"`, `summary`, non-empty `local_claims`, non-empty `evidence`, non-empty `not_claimed`, and non-empty `remaining_questions`. Optional: `checks_run`, `artifacts_touched`, `risks_or_caveats`, `stale_if`, `suggested_controller_questions`, `retrospective_target` for legacy sessions only.
@@ -42,7 +43,7 @@ Targets are product-meaningful completion units, not process phases or miniature
 <target-planning>
 `planning-target` blocks implementation. Use read/discovery tools, read-only `task` reviewers when they materially reduce uncertainty, `job` supervision, and `irc` coordination when available.
 - Write/edit only the active Markdown plan file and its payload JSON sidecar.
-- Existing plan files SHOULD be edited in place; create only missing files.
+- Existing plan and payload files SHOULD be patched in place; create only missing files and avoid whole-file rewrites for schema-only fixes.
 - Payload JSON sidecar is canonical for lint/submit; Markdown is executor-facing narrative.
 - Markdown MUST agree on executor-visible semantics, but SHOULD NOT mirror schema-only payload fixes.
 - `dry_run` is read-only planner simulation, not executed verification.

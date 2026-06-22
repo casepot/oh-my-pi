@@ -479,6 +479,143 @@ function collectMatrixDiagnostics(
 	return diagnostics;
 }
 
+function sortedByBranchAndRowId<T extends { branch: string; id: string }>(items: T[]): T[] {
+	return [...items].sort((left, right) => {
+		const branchOrder = left.branch.localeCompare(right.branch);
+		return branchOrder === 0 ? left.id.localeCompare(right.id) : branchOrder;
+	});
+}
+
+function textMentionsAny(haystack: readonly string[], needles: readonly string[]): boolean {
+	return haystack.some(text => needles.some(needle => needle.length > 0 && text.includes(needle)));
+}
+
+export function collectScenarioBranchConsistencyDiagnostics(
+	input: GoalTargetPlanGraphInput,
+): GoalTargetPlanLintDiagnostic[] {
+	const matrix = input.scenarioMatrix;
+	if (!matrix) return [];
+	const diagnostics: GoalTargetPlanLintDiagnostic[] = [];
+	const branchEvidence = input.branchEvidence.map((branch, index) => ({ ...branch, index }));
+	const branchEvidenceByBranch = new Map<string, typeof branchEvidence>();
+	for (const branch of branchEvidence) {
+		branchEvidenceByBranch.set(branch.branch, [...(branchEvidenceByBranch.get(branch.branch) ?? []), branch]);
+	}
+	const inScopeRows = matrix.rowsInScope.map((row, index) => ({ ...row, index }));
+	const leftOpenRows = matrix.rowsLeftOpen.map((row, index) => ({ ...row, index }));
+	for (const row of sortedByBranchAndRowId(inScopeRows)) {
+		if (branchEvidenceByBranch.has(row.branch)) continue;
+		diagnostics.push(
+			lintDiagnostic({
+				severity: "error",
+				code: "matrix.branch_missing_evidence",
+				path: ["scenario_matrix", "rows_in_scope", row.index, "branch"],
+				message: `in-scope matrix branch ${row.branch} must have matching branch_evidence`,
+				guidance: "Add branch_evidence for this in-scope branch or remove the row from scope.",
+				offender: { kind: "matrix_row", id: row.id },
+			}),
+		);
+	}
+	const matrixRowsByBranch = new Map<string, Array<{ id: string; path: Array<string | number> }>>();
+	for (const row of inScopeRows) {
+		matrixRowsByBranch.set(row.branch, [
+			...(matrixRowsByBranch.get(row.branch) ?? []),
+			{ id: row.id, path: ["scenario_matrix", "rows_in_scope", row.index] },
+		]);
+	}
+	for (const row of leftOpenRows) {
+		matrixRowsByBranch.set(row.branch, [
+			...(matrixRowsByBranch.get(row.branch) ?? []),
+			{ id: row.id, path: ["scenario_matrix", "rows_left_open", row.index] },
+		]);
+	}
+	for (const [branch, rows] of [...matrixRowsByBranch.entries()].sort(([left], [right]) =>
+		left.localeCompare(right),
+	)) {
+		if (rows.length <= 1) continue;
+		diagnostics.push(
+			lintDiagnostic({
+				severity: "error",
+				code: "matrix.duplicate_branch",
+				path: rows[0]?.path ?? ["scenario_matrix"],
+				message: `matrix branch ${branch} appears in more than one row`,
+				guidance: "Represent each branch exactly once across rows_in_scope and rows_left_open.",
+				offender: { kind: "matrix_row", id: branch, value: rows.map(row => row.id).sort() },
+			}),
+		);
+	}
+	for (const branch of [...branchEvidence].sort((left, right) => left.branch.localeCompare(right.branch))) {
+		if (!branch.required) continue;
+		const matchingInScopeRows = inScopeRows.filter(row => row.branch === branch.branch);
+		const matchingLeftOpenRows = leftOpenRows.filter(row => row.branch === branch.branch);
+		if (matchingInScopeRows.length === 0 && matchingLeftOpenRows.length > 0) {
+			diagnostics.push(
+				lintDiagnostic({
+					severity: "error",
+					code: "branch.required_left_open",
+					path: ["branch_evidence", branch.index, "branch"],
+					message: `required branch ${branch.branch} cannot be represented only in rows_left_open`,
+					guidance: "Move the required branch into rows_in_scope or mark it non-required.",
+					offender: {
+						kind: "matrix_row",
+						id: branch.branch,
+						value: matchingLeftOpenRows.map(row => row.id).sort(),
+					},
+				}),
+			);
+			continue;
+		}
+		const row = matchingInScopeRows[0];
+		if (!row) continue;
+		const rowSignalIds = new Set(row.signalIds);
+		for (const [signalIndex, signalId] of branch.plannedSignalIds.entries()) {
+			if (rowSignalIds.has(signalId)) continue;
+			diagnostics.push(
+				lintDiagnostic({
+					severity: "error",
+					code: "branch.signal_mismatch",
+					path: ["branch_evidence", branch.index, "planned_signal_ids", signalIndex],
+					message: `required branch ${branch.branch} plans signal ${signalId} but its in-scope matrix row omits it`,
+					guidance:
+						"Add the signal id to the matching scenario_matrix.rows_in_scope[] row or remove it from branch_evidence.",
+					offender: { kind: "signal", id: signalId },
+				}),
+			);
+		}
+	}
+	const card = input.targetCard;
+	if (!card) return diagnostics;
+	const scenarios = card.verificationScenarios;
+	const closedAcceptanceRows = card.acceptanceRows.closed;
+	for (const row of sortedByBranchAndRowId(inScopeRows)) {
+		if (!textMentionsAny(scenarios, [row.id, row.branch])) {
+			diagnostics.push(
+				lintDiagnostic({
+					severity: "error",
+					code: "card.scenario_missing_branch",
+					path: ["target_card", "verification_scenarios"],
+					message: `target_card.verification_scenarios must mention in-scope row ${row.id}`,
+					guidance: "Add a verification_scenarios entry containing this row id or branch.",
+					offender: { kind: "matrix_row", id: row.id },
+				}),
+			);
+		}
+		if (!textMentionsAny(closedAcceptanceRows, [row.id, row.branch, ...row.signalIds])) {
+			diagnostics.push(
+				lintDiagnostic({
+					severity: "error",
+					code: "card.acceptance_missing_closed_row",
+					path: ["target_card", "acceptance_rows", "closed"],
+					message: `target_card.acceptance_rows.closed must mention in-scope row ${row.id}`,
+					guidance: "Add a closed acceptance row containing this row id, branch, or signal id.",
+					offender: { kind: "matrix_row", id: row.id },
+				}),
+			);
+		}
+	}
+	return diagnostics;
+}
+
 export function effectiveTargetUnitRules(goal: Pick<Goal, "targetUnitRules"> | undefined): GoalTargetUnitRule[] {
 	const byId = new Map<string, GoalTargetUnitRule>();
 	for (const rule of BUILT_IN_TARGET_UNIT_RULES) byId.set(rule.id, rule);
@@ -763,6 +900,7 @@ export function collectTargetPlanGraphDiagnostics(
 	}
 	diagnostics.push(...collectMatrixDiagnostics(input, options));
 	diagnostics.push(...collectTargetCardDiagnostics(input, options.mode));
+	diagnostics.push(...collectScenarioBranchConsistencyDiagnostics(input));
 	diagnostics.push(...collectTargetUnitDiagnostics(input, options));
 	return diagnostics;
 }

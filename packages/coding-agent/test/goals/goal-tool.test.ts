@@ -33,6 +33,11 @@ import {
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import goalTargetExecutionReviewerAssignment from "../../src/prompts/goals/goal-target-execution-reviewer-assignment.md" with {
+	type: "text",
+};
+import goalTargetPlanningPrompt from "../../src/prompts/goals/goal-target-planning.md" with { type: "text" };
+import goalToolPrompt from "../../src/prompts/tools/goal.md" with { type: "text" };
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
 	return {
@@ -426,12 +431,28 @@ function resolvePayloadFilePath(
 	return resolveLocalUrlToPath(payloadFilePath, localProtocolOptions);
 }
 
+function defaultTargetPlanMarkdown(): string {
+	return [
+		"## Target Claim",
+		"Target behavior is directly verified.",
+		"",
+		"## Implementation",
+		"- Complete the happy path target behavior.",
+		"",
+		"## Verification",
+		"- signal-primary: Run the focused check.",
+		"- happy path",
+		"",
+	].join("\n");
+}
+
 async function writeTargetPlanPayloadCall(
 	params: SubmitTargetPlanParams,
 	options: {
 		op?: TargetPlanPayloadCall["op"];
 		localProtocolOptions?: NonNullable<ToolSession["localProtocolOptions"]>;
 		mutatePayload?: (payload: Record<string, unknown>) => void;
+		planText?: string | null;
 	} = {},
 ): Promise<TargetPlanPayloadCall> {
 	const payloadFilePath = targetPlanPayloadFilePath(params.plan_file_path);
@@ -442,10 +463,26 @@ async function writeTargetPlanPayloadCall(
 		resolvePayloadFilePath(payloadFilePath, options.localProtocolOptions),
 		`${JSON.stringify(payload, null, 2)}\n`,
 	);
+	if (options.planText !== null) {
+		await Bun.write(
+			resolvePayloadFilePath(params.plan_file_path, options.localProtocolOptions),
+			options.planText ?? defaultTargetPlanMarkdown(),
+		);
+	}
 	return { op: options.op ?? "submit_target_plan", payload_file_path: payloadFilePath } as TargetPlanPayloadCall;
 }
 
 describe("GoalTool", () => {
+	it("keeps target-planning prompt contracts explicit", () => {
+		expect(goalTargetPlanningPrompt).toContain("patch it in place and preserve still-valid decisions");
+		expect(goalTargetPlanningPrompt).toContain("do not guess schema field names, aliases, nesting, enum values");
+		expect(goalTargetPlanningPrompt).toContain("Local self-check before submit MUST confirm");
+		expect(goalToolPrompt).toContain("avoid whole-file rewrites for schema-only fixes");
+		expect(goalToolPrompt).toContain("do not guess aliases, nesting, enum values, or array/object shapes");
+		expect(goalTargetExecutionReviewerAssignment).toContain("Markdown/payload semantic drift");
+		expect(goalTargetExecutionReviewerAssignment).toContain("camelCase aliases, guessed nesting");
+	});
+
 	it("routes create/get/complete operations and returns completion budget details", async () => {
 		const createGoalState = createGoalModeState({
 			enabled: true,
@@ -758,6 +795,13 @@ describe("GoalTool", () => {
 				payload_file_path: "local://goal-goal-1-target-1-plan.payload.json",
 			}).success,
 		).toBe(true);
+		expect(tool.parameters.safeParse({ op: "target_plan_schema" }).success).toBe(true);
+		expect(
+			tool.parameters.safeParse({
+				op: "target_plan_schema",
+				payload_file_path: "local://goal-goal-1-target-1-plan.payload.json",
+			}).success,
+		).toBe(false);
 		expect(
 			tool.parameters.safeParse(
 				buildSubmitTargetPlanParams({
@@ -980,6 +1024,50 @@ describe("GoalTool", () => {
 		expect(text).not.toContain("verification_signals");
 		expect(text).not.toContain("target_card");
 		expect(text).toContain("unit, integration, e2e, manual, product, release-gate");
+	});
+
+	it("returns target-plan schema reference only while planning", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove schema reference",
+			desiredFutureClaim: "Planner can inspect target-plan payload schema on demand.",
+			closureStandard: "Schema reference text is available without mutating goal state.",
+		});
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.setUsage(createUsage({ input: 5 }));
+		const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+				requestGoalTargetPlanApproval,
+			}),
+		);
+
+		const result = await tool.execute("target-plan-schema", { op: "target_plan_schema" });
+
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("# Target-plan payload schema reference");
+		expect(text).toContain("## Minimal valid payload shape");
+		expect(text).toContain('"target_id"');
+		expect(text).toContain("`targetId` -> `target_id`");
+		expect(result.details?.op).toBe("target_plan_schema");
+		expect(result.details?.state?.runMode).toBe("planning-target");
+		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+		expect(harness.usagePersists).toHaveLength(0);
+
+		const workingHarness = createRuntimeHarness();
+		await workingHarness.runtime.createGoal({ objective: "Improve release reliability" });
+		const workingTool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => workingHarness.runtime,
+				getGoalModeState: () => workingHarness.getState(),
+			}),
+		);
+		await expect(workingTool.execute("target-plan-schema-working", { op: "target_plan_schema" })).rejects.toThrow(
+			"target_plan_schema is only available while run mode is planning-target",
+		);
 	});
 
 	it("renders and executes failed target-plan recovery", async () => {
@@ -1246,6 +1334,242 @@ describe("GoalTool", () => {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("Target plan lint");
 			expect(text).toContain("target plan must include target_card");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("maps camelCase target-plan schema aliases to snake_case diagnostics", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove alias diagnostics",
+			desiredFutureClaim: "Lint explains camelCase payload aliases.",
+			closureStandard: "Diagnostics point to canonical snake_case fields.",
+		});
+		const state = harness.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const localProtocolOptions = createLocalProtocolOptions(tempDir);
+			const tool = new GoalTool(
+				createToolSession({
+					cwd: ".",
+					localProtocolOptions,
+					getGoalRuntime: () => harness.runtime,
+					getGoalModeState: () => harness.getState(),
+				}),
+			);
+			const base = {
+				targetId: target.id,
+				targetPlanId: plan.id,
+				planFilePath: plan.planFilePath,
+				revision: plan.revision,
+			};
+			const lintWith = async (mutatePayload: (payload: Record<string, unknown>) => void) => {
+				const call = await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
+					op: "lint_target_plan",
+					localProtocolOptions,
+					mutatePayload,
+				});
+				const result = await tool.execute("lint-alias", call);
+				return result.details?.targetPlanLint?.diagnostics ?? [];
+			};
+
+			const topLevelDiagnostics = await lintWith(payload => {
+				payload.targetId = payload.target_id;
+				delete payload.target_id;
+			});
+			const topLevelAlias = topLevelDiagnostics.find(
+				diagnostic => diagnostic.guidance === "Use snake_case key target_id, not targetId.",
+			);
+			expect(topLevelAlias?.path).toBe("/target_id");
+			expect(topLevelAlias?.repairPatches).toEqual([
+				{
+					description: "Rename targetId to target_id.",
+					operations: [
+						{ op: "add", path: "/target_id", value: target.id },
+						{ op: "remove", path: "/targetId" },
+					],
+				},
+			]);
+			expect(
+				topLevelDiagnostics.some(
+					diagnostic => diagnostic.path === "/target_id" && diagnostic.code === "schema.missing_required",
+				),
+			).toBe(false);
+
+			const nestedDiagnostics = await lintWith(payload => {
+				const signal = (payload.verification_signals as Record<string, unknown>[])[0];
+				if (!signal) throw new Error("expected signal");
+				signal.expectedOutcome = signal.expected_outcome;
+				delete signal.expected_outcome;
+			});
+			const nestedAlias = nestedDiagnostics.find(
+				diagnostic => diagnostic.guidance === "Use snake_case key expected_outcome, not expectedOutcome.",
+			);
+			expect(nestedAlias?.path).toBe("/verification_signals/0/expected_outcome");
+			expect(nestedAlias?.repairPatches?.[0]?.operations).toEqual([
+				{ op: "add", path: "/verification_signals/0/expected_outcome", value: "The focused check passes." },
+				{ op: "remove", path: "/verification_signals/0/expectedOutcome" },
+			]);
+			expect(
+				nestedDiagnostics.some(
+					diagnostic =>
+						diagnostic.path === "/verification_signals/0/expected_outcome" &&
+						diagnostic.code === "schema.missing_required",
+				),
+			).toBe(false);
+
+			const canonicalPlusAliasDiagnostics = await lintWith(payload => {
+				payload.targetId = payload.target_id;
+			});
+			const canonicalPlusAlias = canonicalPlusAliasDiagnostics.find(
+				diagnostic => diagnostic.guidance === "Use snake_case key target_id, not targetId.",
+			);
+			expect(canonicalPlusAlias?.path).toBe("/target_id");
+			expect(canonicalPlusAlias?.repairPatches).toBeUndefined();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("checks Markdown agreement before target-plan review", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove Markdown agreement",
+			desiredFutureClaim: "Markdown and payload agree before review.",
+			closureStandard: "Sparse or stale Markdown blocks submit.",
+		});
+		const state = harness.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const localProtocolOptions = createLocalProtocolOptions(tempDir);
+			const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+			const tool = new GoalTool(
+				createToolSession({
+					cwd: ".",
+					localProtocolOptions,
+					getGoalRuntime: () => harness.runtime,
+					getGoalModeState: () => harness.getState(),
+					requestGoalTargetPlanApproval,
+				}),
+			);
+			const base = {
+				targetId: target.id,
+				targetPlanId: plan.id,
+				planFilePath: plan.planFilePath,
+				revision: plan.revision,
+			};
+			const enrichPayload = (payload: Record<string, unknown>): void => {
+				payload.scenario_matrix = {
+					id: "matrix-1",
+					primary_signal_group_id: "signal-primary",
+					rows_in_scope: [
+						{
+							id: "row-happy",
+							branch: "happy path",
+							signal_ids: ["signal-primary"],
+							concern_ids: ["concern-behavior"],
+							acceptance: "Happy path works.",
+							expected_outcome: "The focused check passes.",
+							stale_if: [],
+						},
+					],
+					rows_left_open: [],
+					splitting_safety: { safe: true, rationale: "No split." },
+				};
+				const targetCard = payload.target_card as Record<string, unknown>;
+				targetCard.acceptance_rows = { closed: ["row-happy happy path signal-primary"], open: [] };
+				targetCard.verification_scenarios = ["row-happy happy path signal-primary"];
+				targetCard.workstreams = [
+					{
+						id: "ws-main",
+						label: "Main",
+						kind: "main",
+						files: ["src/feature.ts"],
+						contract_inputs: ["Existing caller"],
+						contract_outputs: ["Verified behavior"],
+					},
+				];
+			};
+			const completeMarkdown = [
+				"## Target Claim",
+				"Happy path target behavior.",
+				"",
+				"## Implementation",
+				"- Update src/feature.ts for row-happy happy path.",
+				"",
+				"## Verification",
+				"- signal-primary: Run the focused check.",
+				"",
+			].join("\n");
+
+			await expect(
+				tool.execute(
+					"submit-sparse-markdown",
+					await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
+						localProtocolOptions,
+						mutatePayload: enrichPayload,
+						planText: "Sparse payload-rich plan.",
+					}),
+				),
+			).rejects.toThrow("target plan Markdown must include heading ## Target Claim");
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+
+			await expect(
+				tool.execute(
+					"submit-missing-branch",
+					await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
+						localProtocolOptions,
+						mutatePayload: enrichPayload,
+						planText: completeMarkdown.replace("row-happy happy path", "executor path"),
+					}),
+				),
+			).rejects.toThrow("target plan Markdown must mention in-scope branch happy path or row row-happy");
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+
+			await expect(
+				tool.execute(
+					"submit-missing-file",
+					await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
+						localProtocolOptions,
+						mutatePayload: enrichPayload,
+						planText: completeMarkdown.replace("src/feature.ts", "implementation file"),
+					}),
+				),
+			).rejects.toThrow("target plan Markdown must mention workstream file src/feature.ts");
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+
+			const lintCall = await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
+				op: "lint_target_plan",
+				localProtocolOptions,
+				mutatePayload: enrichPayload,
+				planText: completeMarkdown.replace("src/feature.ts", "implementation file"),
+			});
+			const payloadPath = resolvePayloadFilePath(lintCall.payload_file_path, localProtocolOptions);
+			const planPath = resolvePayloadFilePath(plan.planFilePath, localProtocolOptions);
+			const payloadBefore = await Bun.file(payloadPath).text();
+			const planBefore = await Bun.file(planPath).text();
+
+			const lintResult = await tool.execute("lint-missing-file", lintCall);
+
+			const markdownDiagnostic = lintResult.details?.targetPlanLint?.diagnostics.find(
+				diagnostic => diagnostic.code === "plan_markdown.workstream_file_missing",
+			);
+			expect(markdownDiagnostic).toMatchObject({
+				severity: "warning",
+				blocksSubmission: false,
+			});
+			expect(await Bun.file(payloadPath).text()).toBe(payloadBefore);
+			expect(await Bun.file(planPath).text()).toBe(planBefore);
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

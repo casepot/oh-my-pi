@@ -349,12 +349,18 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 	await Bun.write(
 		resolvedPlanPath,
 		[
-			"# Target plan",
+			"## Target Claim",
 			"",
-			"## Verification Signal Aperture",
+			"Target behavior is directly verified. Parent completion remains outside this target.",
 			"",
-			"- Primary signal: focused target evidence.",
-			"- Parent completion remains outside this target.",
+			"## Implementation",
+			"",
+			"- Execute the bounded happy path target work.",
+			"",
+			"## Verification",
+			"",
+			`- ${primarySignalId}: Run the focused check.`,
+			"- happy path",
 		].join("\n"),
 	);
 	const payloadFilePath = targetPlanPayloadFilePath(plan.planFilePath);
@@ -792,6 +798,9 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(approvedPrompt).toContain("<approved_target_plan_ref");
 		expect(approvedPrompt).toContain(approval.planFilePath);
 		expect(approvedPrompt).toContain(approval.planHash);
+		expect(approvedPrompt).toContain("<approved_target_execution_summary>");
+		expect(approvedPrompt).toContain("Run the focused check.");
+		expect(approvedPrompt).toContain("Parent completion");
 		expect(approvedPrompt).not.toContain("## Verification Signal Aperture");
 		expect(approvedPrompt).not.toContain("Primary signal: focused target evidence.");
 		const state = harness.session.getGoalModeState();
@@ -809,6 +818,56 @@ describe("InteractiveMode goal mode integration", () => {
 				remainingQuestions: [],
 			}),
 		).not.toThrow("no active parent");
+	});
+
+	it("reviews target plans from focused context artifacts", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		harness.session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "UNRELATED_TRANSCRIPT_SENTINEL_DO_NOT_INCLUDE" }],
+			timestamp: Date.now(),
+		});
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+		});
+		const targetState = harness.session.getGoalModeState();
+		const targetId = targetState?.goal.currentTarget?.id;
+		const targetPlanId = targetState?.goal.currentTargetPlan?.id;
+		if (!targetId || !targetPlanId) throw new Error("expected target and target plan ids");
+
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+
+		const reviewerCalls = goalSideAgentCalls.filter(call =>
+			["goal-target-aperture-reviewer", "goal-target-execution-reviewer"].includes(call.agent.name),
+		);
+		expect(reviewerCalls).toHaveLength(2);
+		for (const reviewerCall of reviewerCalls) {
+			expect(reviewerCall.agent.tools).toEqual(["read", "search", "find", "yield"]);
+			expect(reviewerCall.strictToolNames).toBe(true);
+			expect(reviewerCall.task).toContain("Focused target-plan review context file");
+			expect(reviewerCall.task).toContain("Serialized goal state file");
+			expect(reviewerCall.task).toContain("Proposed plan file");
+			expect(reviewerCall.task).toContain("Submitted target-plan JSON");
+			expect(reviewerCall.task).toContain("Target-unit rules");
+			expect(reviewerCall.task).toContain("do not expect a full transcript");
+			expect(reviewerCall.task).not.toContain("Transcript file");
+			if (!reviewerCall.contextFile) throw new Error("expected focused reviewer context file");
+			expect(reviewerCall.task).toContain(reviewerCall.contextFile);
+			const context = await Bun.file(reviewerCall.contextFile).text();
+			expect(context).toContain("# Focused target-plan review context");
+			expect(context).toContain(targetId);
+			expect(context).toContain(targetPlanId);
+			expect(context).toContain('"goalStateFile"');
+			expect(context).toContain('"planMarkdownPath"');
+			expect(context).toContain('"resolvedPlanFile"');
+			expect(context).toContain('"payloadSubmissionFile"');
+			expect(context).toContain("## Target-unit rules");
+			expect(context).not.toContain("UNRELATED_TRANSCRIPT_SENTINEL_DO_NOT_INCLUDE");
+		}
 	});
 
 	it("rejects parent completion while a target plan is still drafting", async () => {

@@ -894,12 +894,22 @@ describe("goal runtime", () => {
 				nextRelevantTarget: "Continue partial documentation proof.",
 			},
 		]);
-		await startApprovedTarget(harness, {
+		const working = await startApprovedTarget(harness, {
 			title: "Prove source-link smoke",
 			desiredFutureClaim: "Source-link install exercises smoke path.",
 			closureStandard: "Smoke output is observed.",
 			parentDeliverableIds: ["D1"],
 		});
+		const workingSurface = buildGoalContextSurface(working, working.goal);
+		expect(workingSurface.target_execution_summary).toMatchObject({
+			targetTitle: "Prove source-link smoke",
+			closureStandard: "Smoke output is observed.",
+			requiredSignals: [expect.objectContaining({ method: "Run the focused check." })],
+			excludedWork: [expect.objectContaining({ item: "Parent completion" })],
+		});
+		const workingSurfaceText = renderGoalPromptSurface(working, working.goal);
+		expect(workingSurfaceText).toContain('"target_execution_summary"');
+		expect(workingSurfaceText).toContain("Run the focused check.");
 		const candidate = harness.runtime.buildCheckpointCandidate({
 			status: "closed_with_evidence",
 			summary: "Source-link smoke passed.",

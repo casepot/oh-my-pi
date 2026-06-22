@@ -272,8 +272,8 @@ export interface ExecutorOptions {
 	 */
 	planReference?: { path: string; content: string };
 	/**
-	 * Approved goal target plan, handed off separately from the overall plan so
-	 * subagents keep target scope distinct from parent-goal scope.
+	 * Approved goal target-plan execution summary, handed off separately from the
+	 * overall plan so subagents keep target scope distinct from parent-goal scope.
 	 */
 	targetPlanReference?: { path: string; content: string };
 	description?: string;

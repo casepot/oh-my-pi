@@ -47,6 +47,8 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed goal target-planning throughput by adding schema-reference lookups, alias-aware lint diagnostics, focused reviewer context, execution-summary handoff, and stricter prompt self-checks.
+
 - Reduced goal target-plan rewrite churn by making file-backed payload edits canonical, limiting Markdown updates to executor-visible semantic changes, and delegating gate-prerequisite target-unit checks to reviewers.
 - Fixed goal target-planning write guards, continuation/compaction guidance, and tool-issue reporting so the active payload JSON sidecar is writable and visible alongside the Markdown plan.
 - Fixed goal target-plan lint treadmill behavior by showing every lint diagnostic and documenting nested payload object shapes in the target-planning prompt.

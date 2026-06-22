@@ -52,6 +52,8 @@ const GOAL_TOOL_OPS = new Set<GoalToolDetails["op"]>([
 	"checkpoint",
 	"resolve_checkpoint",
 	"submit_target_plan",
+	"lint_target_plan",
+	"target_plan_schema",
 	"fail_target_plan",
 ]);
 

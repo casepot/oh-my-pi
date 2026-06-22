@@ -191,7 +191,7 @@ describe("task agent capability descriptions", () => {
 				getArtifactsDir: () => tempDir.path(),
 				getSessionId: () => "session-1",
 			});
-			await Bun.write(resolvedPlanPath, "# Approved target plan\n\nExecute these steps.");
+			await Bun.write(resolvedPlanPath, "# Approved target plan\n\nFULL_PLAN_CONTENT_SHOULD_NOT_INLINE");
 			const session = {
 				...createSession({ "async.enabled": false }),
 				getArtifactsDir: () => tempDir.path(),
@@ -202,6 +202,34 @@ describe("task agent capability descriptions", () => {
 					targetPlanId: "target-plan-1",
 					planFilePath,
 					title: "goal-goal-1-target-1",
+					revision: 1,
+					executionSummary: {
+						targetId: "target-1",
+						targetPlanId: "target-plan-1",
+						planFilePath,
+						revision: 1,
+						targetTitle: "Prove target behavior",
+						closureStandard: "Target behavior is observed.",
+						implementationFiles: ["src/release.ts"],
+						requiredSignals: [
+							{
+								id: "signal-target-1",
+								role: "primary",
+								layer: "integration",
+								claim: "Target behavior is verified.",
+								method: "Run the focused check.",
+								expectedOutcome: "The focused check passes.",
+								staleIf: ["Relevant code changes."],
+							},
+						],
+						excludedWork: [],
+						nonGoals: [],
+						forbiddenClaims: [],
+						knownLimits: [],
+						checkpointEvidence: ["Focused check passes."],
+						staleIf: ["Relevant code changes."],
+						readPlanFileWhen: "Exact details are missing.",
+					},
 				}),
 			} as ToolSession;
 			const tool = await TaskTool.create(session);
@@ -210,7 +238,8 @@ describe("task agent capability descriptions", () => {
 
 			const options = runSpy.mock.calls[0]?.[0];
 			expect(options?.targetPlanReference?.path).toBe(planFilePath);
-			expect(options?.targetPlanReference?.content).toContain("Approved target plan");
+			expect(options?.targetPlanReference?.content).toContain("Target behavior is verified.");
+			expect(options?.targetPlanReference?.content).not.toContain("FULL_PLAN_CONTENT_SHOULD_NOT_INLINE");
 		} finally {
 			tempDir.removeSync();
 		}

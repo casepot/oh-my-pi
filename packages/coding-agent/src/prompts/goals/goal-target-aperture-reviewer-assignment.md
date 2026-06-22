@@ -1,7 +1,7 @@
 Review the submitted goal target plan for verification-aperture correctness.
 
 Inputs:
-- Transcript file: {{contextFile}}
+- Focused target-plan review context file: {{contextFile}}
 - Serialized goal state file: {{goalStateFile}}
 - Goal state snapshot: {{goalStateSnapshot}}
 - Proposed plan file: {{planFile}}
@@ -16,10 +16,11 @@ Evaluate:
 - Blast radius: local/module/workflow/multi-subsystem/external impact is accounted for.
 - Parent uncertainty reduction: target closes a meaningful uncertainty in the parent frame.
 - Anti-gaming: no micro-targets, process phases, non-goal abuse, umbrella target, independent-signal bundling, or evidence gaming.
-- Freshness against transcript and serialized state.
+- Freshness against focused context, serialized state, submitted plan, and payload artifacts.
 - Scenario matrix: in-scope rows cover submitted branch evidence; rows left open map to independent signal/authority/blast-radius boundaries.
 - Target card: depth matches risk; capability/user surface/known limits/checkpoint evidence are concrete.
 - Target-unit rules: every applicable rule is enforced or explicitly exempted with a safe rationale.
+- Use artifact references from the focused context file; do not expect a full transcript.
 
 Decision rules:
 - too-narrow implies revisionDecision merge-required or rescope-required.

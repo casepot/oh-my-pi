@@ -24,8 +24,8 @@ Tool availability:
 - First action MUST be `goal({op:"get"})`.
 - The plan MUST let a fresh executor complete the current target with zero design decisions.
 - NEVER implement, checkpoint, complete, or mutate files outside the active plan and payload sidecar while planning.
-- Create exact `currentTargetPlan.planFilePath` only if missing/empty; otherwise edit it in place.
-- Create exact `targetPlanSubmitIdentity.payloadFilePath` only if missing/empty; otherwise edit it in place.
+- Create exact `currentTargetPlan.planFilePath` only if missing/empty; otherwise patch it in place and preserve still-valid decisions.
+- Create exact `targetPlanSubmitIdentity.payloadFilePath` only if missing/empty; otherwise patch it in place and preserve still-valid fields.
 - `targetPlanSubmitIdentity.payloadFilePath` is the lint/submit authority.
 - Markdown updates are REQUIRED only for executor-visible semantic changes: target claim, scope boundary, branch, workstream, verification scenario, known limit, or implementation step.
 - Schema-only payload fixes MUST NOT cause Markdown churn: ids, ordering, enum normalization, `target_unit_rule_ids`, `workflow_review_rounds`, or lint-only cross-reference repairs.
@@ -47,6 +47,7 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 1. Call `goal({op:"get"})`; use returned state as authority.
    - If `currentTargetPlan.recoveredFrom` exists, treat its guidance/blockers as mandatory repair input and use only the current target_plan_id/revision from `goal({op:"get"})`; never reuse any failed/stale source plan id.
 2. Ground every path, symbol, signature, behavior, and callsite in this-session evidence.
+   - Before drafting payload fields, call `goal({op:"target_plan_schema"})`; do not guess schema field names, aliases, nesting, enum values, or array/object shapes from memory.
 3. Validate target aperture against product signal, same-signal work, blast radius, and parent deliverables.
 4. Use required discovery lenses: architecture/data flow, callsites/contracts, tests/verification.
 5. Use docs/external lens only when repo evidence cannot answer.
@@ -61,6 +62,13 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 14. Lint with `goal({op:"lint_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
 15. Fix diagnostics by patching addressed payload fields first.
 16. Patch Markdown only when the fix changes executor-visible semantics.
+
+Local self-check before submit MUST confirm:
+- No guessed schema keys remain; every payload key is from `target_plan_schema` or accepted lint diagnostics.
+- Markdown has `## Target Claim`, `## Implementation`, and `## Verification` only when they carry execution decisions.
+- Markdown and payload agree on executor-visible semantics: target claim, scope boundary, branch rows, workstreams, verification signals, and known limits.
+- The payload identity exactly matches `targetPlanSubmitIdentity`.
+- The plan leaves no signature/schema/test/fallback choice to the executor.
 17. Submit with `goal({op:"submit_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
 
 ## Plan file

@@ -32,6 +32,7 @@ import type {
 	GoalTargetPlanBranchEvidence,
 	GoalTargetPlanDepth,
 	GoalTargetPlanExcludedWorkReview,
+	GoalTargetPlanExecutionSummary,
 	GoalTargetPlanFailureReason,
 	GoalTargetPlanLintDiagnostic,
 	GoalTargetPlanLintResult,
@@ -61,6 +62,7 @@ import {
 	upsertRecoveryRecord,
 } from "./state";
 import { collectTargetPlanGraphDiagnostics, lintDiagnostic } from "./target-plan-lint";
+import { implementationFanoutRequired } from "./tool-details";
 
 export type GoalPersistenceReason = "semantic" | "terminal" | "recovery" | "budget-limited";
 
@@ -619,6 +621,7 @@ export interface GoalContextSurface {
 	target_unit_rules?: GoalPromptObject[];
 	current_target?: GoalPromptObject;
 	target_plan?: GoalPromptObject;
+	target_execution_summary?: GoalTargetPlanExecutionSummary;
 	checkpoint?: GoalPromptObject;
 	latest_resolution?: GoalPromptObject;
 	parent_completion?: GoalPromptObject;
@@ -807,6 +810,100 @@ function compactTargetPlanForPrompt(plan: GoalTargetPlanRecord | undefined): Goa
 			plan.status === "failed" || plan.status === "stale"
 				? "recover_blocked_state_after_input_or_refresh"
 				: "draft_review_submit_target_plan",
+	};
+}
+
+function uniqueStrings(values: string[]): string[] {
+	const seen = new Set<string>();
+	const output: string[] = [];
+	for (const value of values) {
+		if (!value || seen.has(value)) continue;
+		seen.add(value);
+		output.push(value);
+	}
+	return output;
+}
+
+export function buildGoalTargetPlanExecutionSummary(
+	plan: GoalTargetPlanRecord | undefined,
+	target: GoalTarget | undefined,
+): GoalTargetPlanExecutionSummary | undefined {
+	if (!plan) return undefined;
+	const targetCard = plan.targetCard ?? target?.targetCard;
+	const workstreams = targetCard?.workstreams?.map(workstream => ({
+		id: workstream.id,
+		label: workstream.label,
+		kind: workstream.kind,
+		files: [...workstream.files],
+		contractInputs: [...workstream.contractInputs],
+		contractOutputs: [...workstream.contractOutputs],
+	}));
+	const requiredSignals =
+		plan.verificationSignals
+			?.filter(signal => signal.required)
+			.map(signal => ({
+				id: signal.id,
+				role: signal.role,
+				layer: signal.layer,
+				claim: signal.claim,
+				method: signal.method,
+				expectedOutcome: signal.expectedOutcome,
+				staleIf: [...signal.staleIf],
+			})) ?? [];
+	return {
+		targetId: plan.targetId,
+		targetPlanId: plan.id,
+		planFilePath: plan.planFilePath,
+		revision: plan.revision,
+		targetTitle: target?.title,
+		desiredFutureClaim: target?.desiredFutureClaim,
+		closureStandard: target?.closureStandard,
+		capabilityClaim: targetCard?.capabilityClaim,
+		userVisibleSurface: targetCard?.userVisibleSurface,
+		planDepth: plan.planDepth,
+		primarySignalGroupId: plan.primarySignalGroupId ?? plan.verificationAperture?.primarySignalId,
+		implementationFanoutRequired: implementationFanoutRequired(plan),
+		implementationFiles: uniqueStrings(workstreams?.flatMap(workstream => workstream.files) ?? []),
+		workstreams,
+		sharedContract: targetCard?.sharedContract,
+		acceptanceRows: targetCard
+			? {
+					closed: [...targetCard.acceptanceRows.closed],
+					open: [...targetCard.acceptanceRows.open],
+				}
+			: undefined,
+		requiredSignals,
+		scenarioRowsInScope: plan.scenarioMatrix?.rowsInScope.map(row => ({
+			id: row.id,
+			branch: row.branch,
+			signalIds: [...row.signalIds],
+			acceptance: row.acceptance,
+			expectedOutcome: row.expectedOutcome,
+			staleIf: [...row.staleIf],
+		})),
+		scenarioRowsLeftOpen: plan.scenarioMatrix?.rowsLeftOpen.map(row => ({
+			id: row.id,
+			branch: row.branch,
+			reason: row.reason,
+			followUpHint: row.followUpHint,
+		})),
+		excludedWork:
+			plan.excludedWorkReview?.map(item => ({
+				item: item.item,
+				classification: item.classification,
+				rationale: item.rationale,
+			})) ?? [],
+		nonGoals: [...(target?.nonGoals ?? [])],
+		forbiddenClaims: [...(target?.forbiddenClaims ?? [])],
+		knownLimits: [...(targetCard?.knownLimits ?? [])],
+		checkpointEvidence: [...(targetCard?.checkpointEvidence ?? [])],
+		staleIf: uniqueStrings([
+			...(target?.staleIf ?? []),
+			...requiredSignals.flatMap(signal => signal.staleIf),
+			...(plan.scenarioMatrix?.rowsInScope.flatMap(row => row.staleIf) ?? []),
+		]),
+		readPlanFileWhen:
+			"Exact edit order, file/symbol details, command text, or recovery detail is missing from this summary.",
 	};
 }
 
@@ -1011,6 +1108,7 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 	};
 	if (runMode === "working-target") {
 		surface.current_target = compactTargetForPrompt(currentTarget);
+		surface.target_execution_summary = buildGoalTargetPlanExecutionSummary(goal.currentTargetPlan, currentTarget);
 	} else if (runMode === "planning-target") {
 		surface.current_target = compactTargetForPrompt(currentTarget);
 		surface.target_plan = compactTargetPlanForPrompt(goal.currentTargetPlan);

@@ -523,6 +523,69 @@ export interface GoalRecoveryLink {
 	at: number;
 }
 
+export interface GoalTargetPlanExecutionSignalSummary {
+	id: string;
+	role: GoalSignalRole;
+	layer: GoalVerificationLayer;
+	claim: string;
+	method: string;
+	expectedOutcome: string;
+	staleIf: string[];
+}
+
+export interface GoalTargetPlanExecutionScenarioSummary {
+	id: string;
+	branch: string;
+	signalIds: string[];
+	acceptance: string;
+	expectedOutcome: string;
+	staleIf: string[];
+}
+
+export interface GoalTargetPlanExecutionOpenScenarioSummary {
+	id: string;
+	branch: string;
+	reason: GoalScenarioMatrixOpenRow["reason"];
+	followUpHint: string;
+}
+
+export interface GoalTargetPlanExecutionExcludedWorkSummary {
+	item: string;
+	classification: GoalExcludedWorkClassification;
+	rationale: string;
+}
+
+export interface GoalTargetPlanExecutionSummary {
+	targetId: string;
+	targetPlanId: string;
+	planFilePath: string;
+	revision: number;
+	targetTitle?: string;
+	desiredFutureClaim?: string;
+	closureStandard?: string;
+	capabilityClaim?: string;
+	userVisibleSurface?: string;
+	planDepth?: GoalTargetPlanDepth;
+	primarySignalGroupId?: string;
+	implementationFanoutRequired?: boolean;
+	implementationFiles: string[];
+	workstreams?: Array<
+		Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "files" | "contractInputs" | "contractOutputs">
+	>;
+	sharedContract?: string;
+	acceptanceRows?: GoalTargetCard["acceptanceRows"];
+	requiredSignals: GoalTargetPlanExecutionSignalSummary[];
+	scenarioRowsInScope?: GoalTargetPlanExecutionScenarioSummary[];
+	scenarioRowsLeftOpen?: GoalTargetPlanExecutionOpenScenarioSummary[];
+	excludedWork: GoalTargetPlanExecutionExcludedWorkSummary[];
+	nonGoals: string[];
+	forbiddenClaims: string[];
+	knownLimits: string[];
+	checkpointEvidence: string[];
+	staleIf: string[];
+	readPlanFileWhen: string;
+}
+
 export interface GoalTargetPlanRecord {
 	id: string;
 	goalId: string;
@@ -774,6 +837,7 @@ export interface GoalTargetPlanApprovedDetails {
 	matrixRowCounts?: { inScope: number; leftOpen: number };
 	implementationFanoutRequired?: boolean;
 	workstreamSummary?: Array<Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "files">>;
+	executionSummary?: GoalTargetPlanExecutionSummary;
 }
 
 export interface GoalToolTargetPlanReviewSummary {
@@ -926,6 +990,7 @@ export interface GoalToolDetails {
 		| "resolve_checkpoint"
 		| "submit_target_plan"
 		| "lint_target_plan"
+		| "target_plan_schema"
 		| "fail_target_plan"
 		| "recover_blocked_state";
 	goal?: GoalToolGoalSummary | null;

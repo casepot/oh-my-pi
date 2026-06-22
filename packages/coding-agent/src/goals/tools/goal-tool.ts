@@ -6,6 +6,7 @@ import { z } from "zod/v4";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "../../internal-urls";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
+import targetPlanSchemaReference from "../../prompts/goals/goal-target-plan-schema-reference.md" with { type: "text" };
 import goalDescription from "../../prompts/tools/goal.md" with { type: "text" };
 import { formatDuration } from "../../slash-commands/helpers/format";
 import type { ToolSession } from "../../tools";
@@ -43,6 +44,7 @@ import type {
 	GoalTargetPlanLintDiagnostic,
 	GoalTargetPlanLintResult,
 	GoalTargetPlanRecord,
+	GoalTargetPlanRepairPatch,
 	GoalTargetPlanReview,
 	GoalToolDetails,
 	GoalToolGoalSummary,
@@ -605,6 +607,66 @@ const targetPlanPayloadShape = {
 	dry_run: targetPlanDryRunSchema,
 };
 const targetPlanPayloadSchema = z.object(targetPlanPayloadShape).strict();
+const TARGET_PLAN_PAYLOAD_FIELD_ALIASES: Record<string, string> = {
+	targetId: "target_id",
+	targetPlanId: "target_plan_id",
+	planFilePath: "plan_file_path",
+	primarySignalId: "primary_signal_id",
+	verificationAperture: "verification_aperture",
+	verificationSignals: "verification_signals",
+	concernChecks: "concern_checks",
+	scopeCalibration: "scope_calibration",
+	branchEvidence: "branch_evidence",
+	excludedWorkReview: "excluded_work_review",
+	scenarioMatrix: "scenario_matrix",
+	targetCard: "target_card",
+	primarySignalGroupId: "primary_signal_group_id",
+	planDepth: "plan_depth",
+	concernIds: "concern_ids",
+	expectedOutcome: "expected_outcome",
+	confidenceIfSatisfied: "confidence_if_satisfied",
+	staleIf: "stale_if",
+	coveredBySignalIds: "covered_by_signal_ids",
+	plannedSignalIds: "planned_signal_ids",
+	rowsInScope: "rows_in_scope",
+	rowsLeftOpen: "rows_left_open",
+	acceptanceRows: "acceptance_rows",
+	knownLimits: "known_limits",
+	verificationScenarios: "verification_scenarios",
+	checkpointEvidence: "checkpoint_evidence",
+	workflowReviewRounds: "workflow_review_rounds",
+	dryRun: "dry_run",
+	productIntention: "product_intention",
+	confidenceTarget: "confidence_target",
+	layerRationale: "layer_rationale",
+	residualUncertainty: "residual_uncertainty",
+	omittedLayers: "omitted_layers",
+	whyIndependent: "why_independent",
+	rightSizingBasis: "right_sizing_basis",
+	whyNotSmaller: "why_not_smaller",
+	whyNotLarger: "why_not_larger",
+	includedRelatedWork: "included_related_work",
+	deferredRelatedWork: "deferred_related_work",
+	signalIds: "signal_ids",
+	followUpHint: "follow_up_hint",
+	targetUnitRuleIds: "target_unit_rule_ids",
+	targetUnitExemptions: "target_unit_exemptions",
+	ruleId: "rule_id",
+	splittingSafety: "splitting_safety",
+	nextLargerTarget: "next_larger_target",
+	unblocksMatrixId: "unblocks_matrix_id",
+	capabilityClaim: "capability_claim",
+	trustPrivacyClaim: "trust_privacy_claim",
+	confidenceEarned: "confidence_earned",
+	authorityBoundary: "authority_boundary",
+	policyDeletionImplications: "policy_deletion_implications",
+	userVisibleSurface: "user_visible_surface",
+	sharedContract: "shared_contract",
+	reviewLenses: "review_lenses",
+	rollbackCutover: "rollback_cutover",
+	contractInputs: "contract_inputs",
+	contractOutputs: "contract_outputs",
+};
 const submitTargetPlanInlineSchema = z
 	.object({
 		op: z.literal("submit_target_plan"),
@@ -617,6 +679,7 @@ const submitTargetPlanSchema = z
 const lintTargetPlanSchema = z
 	.object({ op: z.literal("lint_target_plan"), payload_file_path: z.string().min(1) })
 	.strict();
+const targetPlanSchemaReferenceSchema = z.object({ op: z.literal("target_plan_schema") }).strict();
 
 const failTargetPlanSchema = z
 	.object({
@@ -722,6 +785,7 @@ const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	resolveCheckpointSchema,
 	submitTargetPlanSchema,
 	lintTargetPlanSchema,
+	targetPlanSchemaReferenceSchema,
 	failTargetPlanSchema,
 	recoverBlockedStateSchema,
 ]);
@@ -1097,10 +1161,12 @@ function mapSubmitTargetPlanInput(
 	};
 }
 
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function getRecordValue(value: unknown, key: string): unknown {
-	return value && typeof value === "object" && !Array.isArray(value)
-		? (value as Record<string, unknown>)[key]
-		: undefined;
+	return isRecordValue(value) ? value[key] : undefined;
 }
 
 function getValueAtIssuePath(value: unknown, path: readonly PropertyKey[]): unknown {
@@ -1173,6 +1239,117 @@ function jsonPointerPath(path: readonly PropertyKey[]): string {
 	return `/${path.map(segment => String(segment).replaceAll("~", "~0").replaceAll("/", "~1")).join("/")}`;
 }
 
+function targetPlanPayloadFieldAlias(alias: string): string | undefined {
+	return TARGET_PLAN_PAYLOAD_FIELD_ALIASES[alias];
+}
+
+function unrecognizedAliasEntries(
+	issue: z.ZodError["issues"][number],
+): Array<{ alias: string; canonical: string; aliasPath: PropertyKey[]; canonicalPath: PropertyKey[] }> | undefined {
+	if (issue.code !== "unrecognized_keys") return undefined;
+	const entries = issue.keys.flatMap(alias => {
+		const canonical = targetPlanPayloadFieldAlias(alias);
+		return canonical
+			? [{ alias, canonical, aliasPath: [...issue.path, alias], canonicalPath: [...issue.path, canonical] }]
+			: [];
+	});
+	return entries.length > 0 ? entries : undefined;
+}
+
+function firstUnrecognizedAlias(
+	issue: z.ZodError["issues"][number],
+): { alias: string; canonical: string; aliasPath: PropertyKey[]; canonicalPath: PropertyKey[] } | undefined {
+	return unrecognizedAliasEntries(issue)?.[0];
+}
+
+function collectAliasCanonicalDiagnosticPaths(error: z.ZodError): Set<string> {
+	const paths = new Set<string>();
+	for (const issue of error.issues) {
+		const entries = unrecognizedAliasEntries(issue);
+		if (!entries) continue;
+		for (const entry of entries) paths.add(jsonPointerPath(entry.canonicalPath));
+	}
+	return paths;
+}
+
+function isMissingCanonicalForAlias(issue: z.ZodError["issues"][number], aliasCanonicalPaths: Set<string>): boolean {
+	return (
+		issue.code === "invalid_type" &&
+		"input" in issue &&
+		issue.input === undefined &&
+		aliasCanonicalPaths.has(jsonPointerPath(issue.path))
+	);
+}
+
+function targetPlanAliasRepairPatches(
+	params: unknown,
+	parentPath: readonly PropertyKey[],
+	alias: string,
+	canonical: string,
+): GoalTargetPlanRepairPatch[] | undefined {
+	const parent = getValueAtIssuePath(params, parentPath);
+	if (!isRecordValue(parent) || Object.hasOwn(parent, canonical)) return undefined;
+	return [
+		{
+			description: `Rename ${alias} to ${canonical}.`,
+			operations: [
+				{ op: "add", path: jsonPointerPath([...parentPath, canonical]), value: parent[alias] },
+				{ op: "remove", path: jsonPointerPath([...parentPath, alias]) },
+			],
+		},
+	];
+}
+
+function unrecognizedKeyDiagnostics(
+	issue: z.ZodError["issues"][number],
+	params: unknown,
+): GoalTargetPlanLintDiagnostic[] {
+	if (issue.code !== "unrecognized_keys") {
+		return [
+			{
+				severity: "error",
+				code: schemaDiagnosticCode(issue),
+				path: jsonPointerPath(issue.path),
+				message: issue.message,
+				guidance: schemaDiagnosticGuidance(issue, params),
+				blocksSubmission: true,
+				offender: {
+					kind: "schema",
+					value: schemaIssueOffenderValue(issue, params),
+				},
+			},
+		];
+	}
+	const diagnostics: GoalTargetPlanLintDiagnostic[] = [];
+	for (const alias of issue.keys) {
+		const canonical = targetPlanPayloadFieldAlias(alias);
+		const parentPath = issue.path;
+		if (!canonical) {
+			diagnostics.push({
+				severity: "error",
+				code: schemaDiagnosticCode(issue),
+				path: jsonPointerPath([...parentPath, alias]),
+				message: `Unrecognized key ${alias}.`,
+				guidance: schemaDiagnosticGuidance(issue, params),
+				blocksSubmission: true,
+				offender: { kind: "schema", value: getValueAtIssuePath(params, [...parentPath, alias]) },
+			});
+			continue;
+		}
+		diagnostics.push({
+			severity: "error",
+			code: schemaDiagnosticCode(issue),
+			path: jsonPointerPath([...parentPath, canonical]),
+			message: `Unrecognized key ${alias}.`,
+			guidance: `Use snake_case key ${canonical}, not ${alias}.`,
+			blocksSubmission: true,
+			offender: { kind: "schema", value: getValueAtIssuePath(params, [...parentPath, alias]) },
+			repairPatches: targetPlanAliasRepairPatches(params, parentPath, alias, canonical),
+		});
+	}
+	return diagnostics;
+}
+
 function assertCanonicalTargetPlanPayloadPath(payload: unknown, payloadFilePath: string, session: ToolSession): void {
 	const planFilePath = getRecordValue(payload, "plan_file_path");
 	if (typeof planFilePath !== "string" || !planFilePath.trim()) return;
@@ -1219,6 +1396,8 @@ function schemaDiagnosticCode(issue: z.ZodError["issues"][number]): string {
 }
 
 function schemaDiagnosticGuidance(issue: z.ZodError["issues"][number], params?: unknown): string {
+	const alias = firstUnrecognizedAlias(issue);
+	if (alias) return `Use snake_case key ${alias.canonical}, not ${alias.alias}.`;
 	const path = issue.path.map(segment => String(segment)).join("/");
 	if (path.endsWith("/layer") || /^verification_aperture\/omitted_layers\/\d+\/layer$/.test(path)) {
 		const submitted = getValueAtIssuePath(params, issue.path);
@@ -1248,18 +1427,19 @@ function schemaIssueOffenderValue(issue: z.ZodError["issues"][number], params: u
 }
 
 function schemaIssuesToDiagnostics(error: z.ZodError, params: unknown): GoalTargetPlanLintDiagnostic[] {
-	return error.issues.map(issue => ({
-		severity: "error",
-		code: schemaDiagnosticCode(issue),
-		path: jsonPointerPath(issue.path),
-		message: issue.message,
-		guidance: schemaDiagnosticGuidance(issue, params),
-		blocksSubmission: true,
-		offender: {
-			kind: "schema",
-			value: schemaIssueOffenderValue(issue, params),
-		},
-	}));
+	const aliasCanonicalPaths = collectAliasCanonicalDiagnosticPaths(error);
+	const diagnostics: GoalTargetPlanLintDiagnostic[] = [];
+	const seen = new Set<string>();
+	for (const issue of error.issues) {
+		if (isMissingCanonicalForAlias(issue, aliasCanonicalPaths)) continue;
+		for (const diagnostic of unrecognizedKeyDiagnostics(issue, params)) {
+			const key = `${diagnostic.code}\0${diagnostic.path}\0${diagnostic.message}\0${diagnostic.guidance}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			diagnostics.push(diagnostic);
+		}
+	}
+	return diagnostics;
 }
 
 function payloadFileReadDiagnostic(error: unknown): GoalTargetPlanLintDiagnostic {
@@ -1282,6 +1462,148 @@ function payloadFileReadDiagnostic(error: unknown): GoalTargetPlanLintDiagnostic
 	};
 }
 
+type TargetPlanMarkdownAgreementMode = "lint" | "submit";
+
+function targetPlanMarkdownSeverity(mode: TargetPlanMarkdownAgreementMode): GoalTargetPlanLintDiagnostic["severity"] {
+	return mode === "submit" ? "error" : "warning";
+}
+
+function targetPlanMarkdownDiagnostic(input: {
+	mode: TargetPlanMarkdownAgreementMode;
+	code: string;
+	path: Array<string | number>;
+	message: string;
+	guidance: string;
+	offender?: GoalTargetPlanLintDiagnostic["offender"];
+}): GoalTargetPlanLintDiagnostic {
+	const severity = targetPlanMarkdownSeverity(input.mode);
+	return {
+		severity,
+		code: input.code,
+		path: jsonPointerPath(input.path),
+		message: input.message,
+		guidance: input.guidance,
+		blocksSubmission: severity === "error",
+		offender: input.offender,
+	};
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function hasMarkdownHeading(markdown: string, heading: string): boolean {
+	return new RegExp(`^##\\s+${escapeRegExp(heading)}\\s*$`, "m").test(markdown);
+}
+
+function markdownMentionsAny(markdown: string, values: readonly string[]): boolean {
+	return values.some(value => value.length > 0 && markdown.includes(value));
+}
+
+function collectTargetPlanMarkdownAgreementDiagnostics(
+	input: GoalSubmitTargetPlanInput,
+	markdown: string,
+	mode: TargetPlanMarkdownAgreementMode,
+): GoalTargetPlanLintDiagnostic[] {
+	const diagnostics: GoalTargetPlanLintDiagnostic[] = [];
+	for (const heading of ["Target Claim", "Implementation", "Verification"]) {
+		if (hasMarkdownHeading(markdown, heading)) continue;
+		diagnostics.push(
+			targetPlanMarkdownDiagnostic({
+				mode,
+				code: "plan_markdown.heading_missing",
+				path: ["plan_file_path"],
+				message: `target plan Markdown must include heading ## ${heading}`,
+				guidance: "Patch the plan Markdown in place and add the required executor-facing section.",
+				offender: { kind: "schema", id: "plan_file_path", value: input.planFilePath },
+			}),
+		);
+	}
+	const rows = [...(input.scenarioMatrix?.rowsInScope ?? [])].sort((left, right) => {
+		const branchOrder = left.branch.localeCompare(right.branch);
+		return branchOrder === 0 ? left.id.localeCompare(right.id) : branchOrder;
+	});
+	for (const row of rows) {
+		if (markdownMentionsAny(markdown, [row.branch, row.id])) continue;
+		diagnostics.push(
+			targetPlanMarkdownDiagnostic({
+				mode,
+				code: "plan_markdown.branch_missing",
+				path: ["plan_file_path"],
+				message: `target plan Markdown must mention in-scope branch ${row.branch} or row ${row.id}`,
+				guidance: "Patch Implementation or Verification to name the branch/row the executor must close.",
+				offender: { kind: "matrix_row", id: row.id },
+			}),
+		);
+	}
+	const workstreams = input.targetCard?.workstreams ?? [];
+	for (const workstream of workstreams) {
+		for (const file of workstream.files) {
+			if (markdown.includes(file)) continue;
+			diagnostics.push(
+				targetPlanMarkdownDiagnostic({
+					mode,
+					code: "plan_markdown.workstream_file_missing",
+					path: ["plan_file_path"],
+					message: `target plan Markdown must mention workstream file ${file}`,
+					guidance: "Patch Implementation to list this workstream file path.",
+					offender: { kind: "target_card", id: workstream.id, value: file },
+				}),
+			);
+		}
+	}
+	for (const signal of input.verificationSignals.filter(signal => signal.required)) {
+		if (markdownMentionsAny(markdown, [signal.id, signal.method])) continue;
+		diagnostics.push(
+			targetPlanMarkdownDiagnostic({
+				mode,
+				code: "plan_markdown.verification_signal_missing",
+				path: ["plan_file_path"],
+				message: `target plan Markdown must mention required verification signal ${signal.id} or method`,
+				guidance: "Patch Verification to name this signal id or its exact verification method.",
+				offender: { kind: "signal", id: signal.id },
+			}),
+		);
+	}
+	return diagnostics;
+}
+
+function targetPlanMarkdownReadDiagnostic(
+	input: GoalSubmitTargetPlanInput,
+	error: unknown,
+	mode: TargetPlanMarkdownAgreementMode,
+): GoalTargetPlanLintDiagnostic {
+	const missing = isEnoent(error);
+	const toolMessage = error instanceof ToolError ? error.message : undefined;
+	return targetPlanMarkdownDiagnostic({
+		mode,
+		code: missing ? "plan_markdown.missing" : toolMessage ? "plan_markdown.invalid_path" : "plan_markdown.unreadable",
+		path: ["plan_file_path"],
+		message: missing ? "target plan Markdown file is missing" : (toolMessage ?? "target plan Markdown is unreadable"),
+		guidance: missing
+			? "Create the executor-facing Markdown plan at plan_file_path."
+			: "Fix plan_file_path or make the Markdown plan readable.",
+		offender: {
+			kind: "schema",
+			id: "plan_file_path",
+			value: { planFilePath: input.planFilePath, error: error instanceof Error ? error.message : String(error) },
+		},
+	});
+}
+
+async function targetPlanMarkdownAgreementDiagnostics(
+	input: GoalSubmitTargetPlanInput,
+	session: ToolSession,
+	mode: TargetPlanMarkdownAgreementMode,
+): Promise<GoalTargetPlanLintDiagnostic[]> {
+	try {
+		const markdown = await Bun.file(resolveTargetPlanPayloadPath(input.planFilePath, session)).text();
+		return collectTargetPlanMarkdownAgreementDiagnostics(input, markdown, mode);
+	} catch (error) {
+		return [targetPlanMarkdownReadDiagnostic(input, error, mode)];
+	}
+}
+
 async function parseTargetPlanPayloadForLint(
 	params: z.infer<typeof lintTargetPlanSchema>,
 	session: ToolSession,
@@ -1296,14 +1618,17 @@ async function parseTargetPlanPayloadForLint(
 		return { diagnostics: [payloadFileReadDiagnostic(error)] };
 	}
 	const parsed = targetPlanPayloadSchema.safeParse(payload);
-	if (parsed.success) return { input: mapSubmitTargetPlanInput(parsed.data), diagnostics: [] };
+	if (parsed.success) {
+		const input = mapSubmitTargetPlanInput(parsed.data);
+		return { input, diagnostics: await targetPlanMarkdownAgreementDiagnostics(input, session, "lint") };
+	}
 	return { diagnostics: schemaIssuesToDiagnostics(parsed.error, payload) };
 }
 
 async function parseSubmitTargetPlanToolInput(
 	params: z.infer<typeof submitTargetPlanSchema>,
 	session: ToolSession,
-): Promise<GoalSubmitTargetPlanInput> {
+): Promise<{ input: GoalSubmitTargetPlanInput; diagnostics: GoalTargetPlanLintDiagnostic[] }> {
 	let payload: unknown;
 	try {
 		payload = await targetPlanPayloadFromParams(params, session);
@@ -1315,7 +1640,10 @@ async function parseSubmitTargetPlanToolInput(
 	}
 	const inlinePayload = { ...(payload as Record<string, unknown>), op: "submit_target_plan" as const };
 	const parsed = submitTargetPlanInlineSchema.safeParse(inlinePayload);
-	if (parsed.success) return mapSubmitTargetPlanInput(parsed.data);
+	if (parsed.success) {
+		const input = mapSubmitTargetPlanInput(parsed.data);
+		return { input, diagnostics: await targetPlanMarkdownAgreementDiagnostics(input, session, "submit") };
+	}
 	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error, inlinePayload));
 }
 
@@ -1327,6 +1655,11 @@ function formatSubmitTargetPlanSchemaError(error: z.ZodError, params?: unknown):
 	const issue = error.issues[0];
 	if (!issue) {
 		return 'submit_target_plan arguments are invalid. Call goal({op:"get"}) and reuse the target-plan submit identity.';
+	}
+	const alias = firstUnrecognizedAlias(issue);
+	if (alias) {
+		const aliasPath = alias.canonicalPath.map(segment => String(segment)).join("/") || "(root)";
+		return `submit_target_plan invalid at ${aliasPath}: Use snake_case key ${alias.canonical}, not ${alias.alias}. Call goal({op:"get"}) and reuse the target-plan submit identity.`;
 	}
 	const path = issue.path.map(segment => String(segment)).join("/") || "(root)";
 	if (path.endsWith("/layer") || /^verification_aperture\/omitted_layers\/\d+\/layer$/.test(path)) {
@@ -1440,6 +1773,21 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		if (!runtime) throw new ToolError("Goal mode is not active.");
 
 		const operation = goalOperationSchema.safeParse(args);
+		if (operation.success && operation.data.op === "target_plan_schema") {
+			targetPlanSchemaReferenceSchema.parse(args);
+			const state = this.#session.getGoalModeState?.() ?? null;
+			if (state?.runMode !== "planning-target") {
+				throw new ToolError("target_plan_schema is only available while run mode is planning-target.");
+			}
+			const response = buildGoalToolResponse(state.goal, {
+				state,
+				targetPlan: state.goal.currentTargetPlan,
+			});
+			return {
+				content: [{ type: "text", text: targetPlanSchemaReference }],
+				details: buildGoalToolDetails("target_plan_schema", response),
+			};
+		}
 		if (operation.success && operation.data.op === "lint_target_plan") {
 			const lintParams = lintTargetPlanSchema.parse(args);
 			const parsed = await parseTargetPlanPayloadForLint(lintParams, this.#session);
@@ -1498,11 +1846,11 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			if (!goalSession.requestGoalTargetPlanApproval) {
 				throw new ToolError("submit_target_plan requires an AgentSession target-plan review handler");
 			}
-			const input = await parseSubmitTargetPlanToolInput(submitTargetPlanSchema.parse(params), this.#session);
-			const lint = runtime.lintCurrentTargetPlanSubmission(input, [], "submit");
+			const parsed = await parseSubmitTargetPlanToolInput(submitTargetPlanSchema.parse(params), this.#session);
+			const lint = runtime.lintCurrentTargetPlanSubmission(parsed.input, parsed.diagnostics, "submit");
 			const blockingDiagnostic = firstBlockingLintDiagnostic(lint);
 			if (blockingDiagnostic) throw new ToolError(blockingDiagnostic.message);
-			response = await goalSession.requestGoalTargetPlanApproval(input, signal);
+			response = await goalSession.requestGoalTargetPlanApproval(parsed.input, signal);
 		} else if (params.op === "lint_target_plan") {
 			throw new ToolError("lint_target_plan must be handled before goal state mutation.");
 		} else if (params.op === "fail_target_plan") {
@@ -1730,6 +2078,8 @@ function describeOp(op: string | undefined): string {
 			return "submit target plan";
 		case "lint_target_plan":
 			return "lint target plan";
+		case "target_plan_schema":
+			return "target plan schema";
 		case "fail_target_plan":
 			return "fail target plan";
 		case "recover_blocked_state":

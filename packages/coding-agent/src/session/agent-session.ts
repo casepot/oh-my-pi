@@ -218,6 +218,7 @@ import {
 } from "../goals/compaction-continuation";
 import {
 	buildGoalContinuationPacket,
+	buildGoalTargetPlanExecutionSummary,
 	completionBudgetReport,
 	currentTargetPlanSubmitIdentity,
 	effectiveTargetUnitRules,
@@ -6194,6 +6195,7 @@ export class AgentSession {
 					matrixRowCounts: matrixRowCounts(approvedPlan),
 					implementationFanoutRequired: implementationFanoutRequired(approvedPlan),
 					workstreamSummary: targetPlanWorkstreamSummary(approvedPlan),
+					executionSummary: buildGoalTargetPlanExecutionSummary(approvedPlan, approvedState.goal.currentTarget),
 				}
 			: undefined;
 		if (targetPlanApproval) this.setGoalTargetPlanReference(targetPlanApproval);
@@ -7011,9 +7013,6 @@ export class AgentSession {
 		return await this.#withSerializedGoalSideAgent(async () => {
 			const state = this.#goalModeState;
 			if (!state?.goal) throw new Error("cannot review target plan because no goal is active");
-			const contextFile = await this.#writeGoalTranscriptFile("target-plan-review", state.goal.id, {
-				includeRubric: true,
-			});
 			const goalStateFile = await this.#writeGoalStateSnapshotFile("target-plan-review", state, {
 				includeRubric: true,
 			});
@@ -7024,6 +7023,15 @@ export class AgentSession {
 			await Bun.write(submissionFile, `${JSON.stringify(input, null, 2)}\n`);
 			const targetUnitRules = JSON.stringify(effectiveTargetUnitRules(state.goal), null, 2);
 			const planFile = resolveLocalUrlToPath(normalizeLocalScheme(plan.planFilePath), this.#localProtocolOptions());
+			const contextFile = await this.#writeGoalTargetPlanReviewContextFile({
+				state,
+				plan,
+				submission: input,
+				goalStateFile,
+				planFile,
+				submissionFile,
+				targetUnitRules,
+			});
 			return await Promise.all([
 				this.#runGoalTargetApertureReview({
 					contextFile,
@@ -7317,6 +7325,121 @@ export class AgentSession {
 		return await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-goal-side-agents-"));
 	}
 
+	async #writeGoalTargetPlanReviewContextFile(input: {
+		state: GoalModeState;
+		plan: GoalTargetPlanRecord;
+		submission: GoalSubmitTargetPlanInput;
+		goalStateFile: string;
+		planFile: string;
+		submissionFile: string;
+		targetUnitRules: string;
+	}): Promise<string> {
+		const dir = path.dirname(input.goalStateFile);
+		await fs.promises.mkdir(dir, { recursive: true });
+		const goal = input.state.goal;
+		const target = goal.currentTarget;
+		const targetCard = input.submission.targetCard ?? input.plan.targetCard ?? target?.targetCard;
+		const safeGoalId = goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
+		const filePath = path.join(dir, `${Date.now()}-${safeGoalId}-target-plan-review-context.txt`);
+		const latestCheckpoint = goal.checkpoints?.at(-1);
+		const latestResolution = goal.checkpointResolutions?.at(-1);
+		const checkpointSummary = latestCheckpoint
+			? {
+					id: latestCheckpoint.id,
+					status: latestCheckpoint.status,
+					summary: latestCheckpoint.summary,
+					localClaims: latestCheckpoint.localClaims,
+					notClaimed: latestCheckpoint.notClaimed,
+					remainingQuestions: latestCheckpoint.remainingQuestions,
+					reviewStatus: latestCheckpoint.review?.status,
+					reviewFeedback: latestCheckpoint.review?.feedback,
+				}
+			: null;
+		const resolutionSummary = latestResolution
+			? {
+					id: latestResolution.id,
+					checkpointId: latestResolution.checkpointId,
+					decision: latestResolution.decision,
+					parentReading: latestResolution.parentReading,
+					notPropagated: latestResolution.notPropagated,
+					remainingParentWork: latestResolution.remainingParentWork,
+					broaderChecksOrInputs: latestResolution.broaderChecksOrInputs,
+					lessonsForFuture: latestResolution.lessonsForFuture,
+					nextTargetTitle: latestResolution.nextTarget?.title,
+				}
+			: null;
+		const content = [
+			"# Focused target-plan review context",
+			"",
+			"## Current goal",
+			JSON.stringify(
+				{
+					id: goal.id,
+					title: goal.objective,
+					status: goal.status,
+					runMode: input.state.runMode,
+					stateVersion: input.state.stateVersion,
+					parentFrameVersion: input.state.parentFrameVersion,
+				},
+				null,
+				2,
+			),
+			"",
+			"## Compact goal prompt surface",
+			renderGoalPromptSurface(input.state, goal),
+			"",
+			"## Current target",
+			JSON.stringify(
+				{
+					id: target?.id,
+					title: target?.title,
+					status: target?.status,
+					capabilityClaim: targetCard?.capabilityClaim,
+					closureStandard: target?.closureStandard,
+					staleIf: target?.staleIf ?? [],
+					nonGoals: target?.nonGoals ?? [],
+					forbiddenClaims: target?.forbiddenClaims ?? [],
+					targetPlan: {
+						id: input.plan.id,
+						status: input.plan.status,
+						revision: input.plan.revision,
+						planDepth: input.submission.planDepth ?? input.plan.planDepth,
+					},
+				},
+				null,
+				2,
+			),
+			"",
+			"## Artifact references",
+			JSON.stringify(
+				{
+					goalStateFile: input.goalStateFile,
+					planMarkdownPath: input.plan.planFilePath,
+					resolvedPlanFile: input.planFile,
+					payloadSubmissionFile: input.submissionFile,
+					targetUnitRules: "inline below",
+				},
+				null,
+				2,
+			),
+			"",
+			"## Latest checkpoint summary",
+			JSON.stringify(checkpointSummary, null, 2),
+			"",
+			"## Latest checkpoint resolution summary",
+			JSON.stringify(resolutionSummary, null, 2),
+			"",
+			"## Target-unit rules",
+			input.targetUnitRules,
+			"",
+			"## Goal rubric",
+			goal.rubric ?? "(none)",
+			"",
+		].join("\n");
+		await Bun.write(filePath, content);
+		return filePath;
+	}
+
 	async #writeGoalTranscriptFile(
 		kind: string,
 		goalId: string,
@@ -7447,6 +7570,7 @@ export class AgentSession {
 			workstreamSummary: input.workstreamSummary?.length
 				? JSON.stringify(input.workstreamSummary, null, 2)
 				: undefined,
+			executionSummary: input.executionSummary ? JSON.stringify(input.executionSummary, null, 2) : undefined,
 		});
 	}
 
@@ -7638,6 +7762,8 @@ export class AgentSession {
 			}
 			if (!planContent.trim()) return null;
 		}
+		const executionSummary =
+			reference.executionSummary ?? buildGoalTargetPlanExecutionSummary(currentPlan, state.goal.currentTarget);
 
 		const content = prompt.render(goalTargetPlanReferencePrompt, {
 			targetId: reference.targetId,
@@ -7652,6 +7778,7 @@ export class AgentSession {
 				? `in_scope=${reference.matrixRowCounts.inScope}, left_open=${reference.matrixRowCounts.leftOpen}`
 				: undefined,
 			implementationFanoutRequired: reference.implementationFanoutRequired === true,
+			executionSummary: executionSummary ? JSON.stringify(executionSummary, null, 2) : undefined,
 		});
 		this.#appendGoalBoundaryAudit({
 			kind: "target-plan-reference",

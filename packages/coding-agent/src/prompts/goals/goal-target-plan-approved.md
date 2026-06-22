@@ -9,15 +9,21 @@ You MAY implement only target `{{targetId}}` using plan `{{targetPlanId}}` revis
 Target-plan approval is not checkpoint completion.
 Target completion is not parent completion.
 {{#has tools "todo"}}
-Before execution, initialize todo tracking from the approved plan steps if `todo` remains allowed.
+Before execution, initialize todo tracking from the approved execution summary if `todo` remains allowed.
 After each completed step, immediately update `todo`.
-If goal run mode blocks `todo`, continue from the approved plan; do not retry `todo`.
+If the summary lacks exact sequencing, read the plan file and initialize todos from the exact plan steps.
 {{/has}}
-The plan file is authority when exact steps are needed:
+Start from the approved execution summary. The plan file is a detail/recovery artifact:
 - path: `{{planFilePath}}`
 - hash: `{{planHash}}`
 - bytes: `{{planBytes}}`
-Read the plan only if recovery or execution needs exact file/symbol/verification detail.
+Read the plan only if exact file/symbol/command/recovery detail is missing from the summary.
+{{#if executionSummary}}
+
+<approved_target_execution_summary>
+{{executionSummary}}
+</approved_target_execution_summary>
+{{/if}}
 {{#if planDepth}}
 - plan_depth: `{{planDepth}}`
 {{/if}}
@@ -31,9 +37,9 @@ Read the plan only if recovery or execution needs exact file/symbol/verification
 - workstreams: {{workstreamSummary}}
 {{/if}}
 {{#if implementationFanoutRequired}}
-- Implementation fanout is recommended by plan metadata only if `task` remains allowed after you read the approved plan and can split by workstream contract. NEVER spawn tasks automatically from this notice.
+- Implementation fanout is recommended by summary metadata only if `task` remains allowed and you can split by workstream contract. NEVER spawn tasks automatically from this notice.
 {{/if}}
-Use target card/matrix summaries as orientation only; the plan file remains authority for exact steps.
+Use target card/matrix summaries as execution guardrails; the plan file remains authority for exact details only when needed.
 </instruction>
 
 <approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />

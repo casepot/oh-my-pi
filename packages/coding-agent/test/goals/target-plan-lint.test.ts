@@ -62,6 +62,33 @@ function validLightTargetPlanInput(): GoalTargetPlanGraphInput {
 	};
 }
 
+function validScenarioMatrixTargetPlanInput(): GoalTargetPlanGraphInput {
+	const input = validLightTargetPlanInput();
+	input.scenarioMatrix = {
+		id: "matrix-auth",
+		primarySignalGroupId: "auth-visible",
+		rowsInScope: [
+			{
+				id: "row-happy-path",
+				branch: "happy path",
+				signalIds: ["signal-auth"],
+				concernIds: ["concern-auth"],
+				acceptance: "Happy path auth result is visible.",
+				expectedOutcome: "Auth result is rendered.",
+				staleIf: [],
+			},
+		],
+		rowsLeftOpen: [],
+		splittingSafety: { safe: true, rationale: "No independent auth branch is left open." },
+	};
+	input.targetCard = {
+		...input.targetCard!,
+		acceptanceRows: { closed: ["row-happy-path happy path signal-auth"], open: [] },
+		verificationScenarios: ["row-happy-path happy path signal-auth"],
+	};
+	return input;
+}
+
 function customGateRule(): GoalTargetUnitRule {
 	return {
 		id: "release-gate-before-cutover",
@@ -171,5 +198,105 @@ describe("target-plan lint rules", () => {
 			blocksSubmission: true,
 			message: "target unit rule requires a complete acceptance slice",
 		});
+	});
+
+	it("blocks scenario branch consistency drift deterministically", () => {
+		const cases: Array<{
+			name: string;
+			code: string;
+			mutate: (input: GoalTargetPlanGraphInput) => void;
+		}> = [
+			{
+				name: "missing branch evidence",
+				code: "matrix.branch_missing_evidence",
+				mutate: input => {
+					input.branchEvidence = [];
+				},
+			},
+			{
+				name: "duplicate branch",
+				code: "matrix.duplicate_branch",
+				mutate: input => {
+					input.scenarioMatrix!.rowsLeftOpen = [
+						{
+							id: "row-open",
+							branch: "happy path",
+							reason: "different-primary-signal",
+							followUpHint: "Plan separately.",
+						},
+					];
+				},
+			},
+			{
+				name: "required branch left open",
+				code: "branch.required_left_open",
+				mutate: input => {
+					input.scenarioMatrix!.rowsInScope = [];
+					input.scenarioMatrix!.rowsLeftOpen = [
+						{
+							id: "row-open",
+							branch: "happy path",
+							reason: "different-primary-signal",
+							followUpHint: "Plan separately.",
+						},
+					];
+				},
+			},
+			{
+				name: "branch signal mismatch",
+				code: "branch.signal_mismatch",
+				mutate: input => {
+					input.verificationSignals = [
+						...input.verificationSignals,
+						{ ...input.verificationSignals[0]!, id: "signal-support", role: "supporting" },
+					];
+					input.branchEvidence[0]!.plannedSignalIds = ["signal-support"];
+				},
+			},
+			{
+				name: "card scenario missing branch",
+				code: "card.scenario_missing_branch",
+				mutate: input => {
+					input.targetCard!.verificationScenarios = ["unrelated scenario"];
+				},
+			},
+			{
+				name: "card acceptance missing row",
+				code: "card.acceptance_missing_closed_row",
+				mutate: input => {
+					input.targetCard!.acceptanceRows = { closed: ["unrelated row"], open: [] };
+				},
+			},
+		];
+
+		for (const item of cases) {
+			const input = validScenarioMatrixTargetPlanInput();
+			item.mutate(input);
+
+			const diagnostic = collectTargetPlanGraphDiagnostics(input, { mode: "submit" }).find(
+				entry => entry.code === item.code,
+			);
+
+			expect(diagnostic, item.name).toMatchObject({ severity: "error", blocksSubmission: true });
+		}
+
+		const deterministic = validScenarioMatrixTargetPlanInput();
+		const baseRow = deterministic.scenarioMatrix!.rowsInScope[0]!;
+		deterministic.branchEvidence = [];
+		deterministic.scenarioMatrix!.rowsInScope = [
+			{ ...baseRow, id: "row-z", branch: "z branch" },
+			{ ...baseRow, id: "row-a", branch: "a branch" },
+		];
+		deterministic.targetCard!.verificationScenarios = ["row-z z branch signal-auth", "row-a a branch signal-auth"];
+		deterministic.targetCard!.acceptanceRows = {
+			closed: ["row-z z branch signal-auth", "row-a a branch signal-auth"],
+			open: [],
+		};
+
+		const missingBranchDiagnostics = collectTargetPlanGraphDiagnostics(deterministic, { mode: "submit" }).filter(
+			diagnostic => diagnostic.code === "matrix.branch_missing_evidence",
+		);
+
+		expect(missingBranchDiagnostics.map(diagnostic => diagnostic.offender?.id)).toEqual(["row-a", "row-z"]);
 	});
 });
