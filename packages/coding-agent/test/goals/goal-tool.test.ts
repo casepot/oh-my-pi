@@ -35,6 +35,9 @@ import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import goalContinuationPrompt from "../../src/prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../../src/prompts/goals/goal-mode-active.md" with { type: "text" };
+import goalTargetApertureReviewerAssignment from "../../src/prompts/goals/goal-target-aperture-reviewer-assignment.md" with {
+	type: "text",
+};
 import goalTargetExecutionReviewerAssignment from "../../src/prompts/goals/goal-target-execution-reviewer-assignment.md" with {
 	type: "text",
 };
@@ -281,6 +284,15 @@ type SubmitTargetPlanParams = {
 		known_limits: string[];
 		user_visible_surface: string;
 		acceptance_rows: { closed: string[]; open: string[] };
+		workstreams?: Array<{
+			id: string;
+			label: string;
+			kind: string;
+			role?: string;
+			files: string[];
+			contract_inputs: string[];
+			contract_outputs: string[];
+		}>;
 		verification_scenarios: string[];
 		checkpoint_evidence: string[];
 	};
@@ -288,7 +300,9 @@ type SubmitTargetPlanParams = {
 		product_intention: string;
 		primary_signal_id: string;
 		blast_radius: string;
+		blast_radius_scope?: string;
 		confidence_target: string;
+		confidence_rationale?: string;
 		layer_rationale: string;
 		residual_uncertainty: string[];
 		omitted_layers: Array<{ layer: string; reason: string }>;
@@ -304,22 +318,31 @@ type SubmitTargetPlanParams = {
 		expected_outcome: string;
 		required: boolean;
 		confidence_if_satisfied: string;
+		confidence_rationale?: string;
 		stale_if: string[];
 	}>;
 	concern_checks: Array<{
 		id: string;
 		kind: string;
+		lens?: string;
 		why_independent: string;
 		covered_by_signal_ids: string[];
 	}>;
 	scope_calibration: {
 		right_sizing_basis: string;
+		right_sizing_rationale?: string;
 		why_not_smaller: string[];
 		why_not_larger: string[];
 		included_related_work: Array<{ item: string; reason: string; signal_ids: string[] }>;
-		deferred_related_work: Array<{ item: string; reason: string; follow_up_hint: string }>;
+		deferred_related_work: Array<{ item: string; reason: string; rationale?: string; follow_up_hint: string }>;
 	};
-	branch_evidence: Array<{ branch: string; required: boolean; planned_signal_ids: string[]; rationale: string }>;
+	branch_evidence: Array<{
+		branch: string;
+		row_ids?: string[];
+		required: boolean;
+		planned_signal_ids: string[];
+		rationale: string;
+	}>;
 	excluded_work_review: Array<{ item: string; classification: string; rationale: string }>;
 	workflow_review_rounds: Array<{
 		lens: string;
@@ -357,7 +380,9 @@ function buildSubmitTargetPlanParams(source: {
 			product_intention: "Prove the target behavior with direct evidence.",
 			primary_signal_id: "signal-primary",
 			blast_radius: "local",
+			blast_radius_scope: "Single target surface and focused verification.",
 			confidence_target: "high",
+			confidence_rationale: "High only for this target behavior.",
 			layer_rationale: "The target is local and directly observable.",
 			residual_uncertainty: ["Parent completion remains outside this target."],
 			omitted_layers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
@@ -374,6 +399,7 @@ function buildSubmitTargetPlanParams(source: {
 				expected_outcome: "The focused check passes.",
 				required: true,
 				confidence_if_satisfied: "high",
+				confidence_rationale: "High only for the focused target behavior.",
 				stale_if: ["Relevant code changes."],
 			},
 		],
@@ -381,12 +407,14 @@ function buildSubmitTargetPlanParams(source: {
 			{
 				id: "concern-behavior",
 				kind: "behavior",
+				lens: "focused target behavior",
 				why_independent: "Behavior can fail independently of parent completion.",
 				covered_by_signal_ids: ["signal-primary"],
 			},
 		],
 		scope_calibration: {
 			right_sizing_basis: "product-signal",
+			right_sizing_rationale: "One product signal can close without claiming parent completion.",
 			why_not_smaller: ["Smaller work would not produce an observable signal."],
 			why_not_larger: ["Larger work would claim parent-level completion."],
 			included_related_work: [
@@ -396,12 +424,19 @@ function buildSubmitTargetPlanParams(source: {
 				{
 					item: "Parent completion verification",
 					reason: "different-primary-signal",
+					rationale: "Parent verification needs broader evidence.",
 					follow_up_hint: "Checkpoint first.",
 				},
 			],
 		},
 		branch_evidence: [
-			{ branch: "happy path", required: true, planned_signal_ids: ["signal-primary"], rationale: "Primary signal." },
+			{
+				branch: "happy path",
+				row_ids: ["row-happy"],
+				required: true,
+				planned_signal_ids: ["signal-primary"],
+				rationale: "Primary signal.",
+			},
 		],
 		excluded_work_review: [
 			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
@@ -479,10 +514,25 @@ describe("GoalTool", () => {
 		expect(goalTargetPlanningPrompt).toContain("patch it in place and preserve still-valid decisions");
 		expect(goalTargetPlanningPrompt).toContain("do not guess schema field names, aliases, nesting, enum values");
 		expect(goalTargetPlanningPrompt).toContain("Local self-check before submit MUST confirm");
-		expect(goalToolPrompt).toContain("avoid whole-file rewrites for schema-only fixes");
+		expect(goalTargetPlanningPrompt).toContain("Enum fields classify");
+		expect(goalTargetPlanningPrompt).toContain("Use `branch_evidence[].row_ids` to link scenario rows");
+		expect(goalTargetPlanningPrompt).toContain("self-contained; it never depends on prior attempts");
+		expect(goalTargetPlanningPrompt).toContain("implementation oracle");
+		expect(goalTargetPlanningPrompt).toContain("schema citations or self-approval prose are not evidence");
+		expect(goalToolPrompt).toContain("Prefer `eval` or bash-run `jq`/`python` structured transforms");
+		expect(goalTargetPlanningPrompt).toContain(
+			"Use `eval` or bash-run `jq`/`python` for whole-file payload rewrites",
+		);
 		expect(goalToolPrompt).toContain("do not guess aliases, nesting, enum values, or array/object shapes");
 		expect(goalTargetExecutionReviewerAssignment).toContain("Markdown/payload semantic drift");
 		expect(goalTargetExecutionReviewerAssignment).toContain("camelCase aliases, guessed nesting");
+		expect(goalTargetExecutionReviewerAssignment).toContain("Submitted target-plan JSON");
+		expect(goalTargetExecutionReviewerAssignment).toContain("context artifacts use internal camelCase");
+		expect(goalTargetExecutionReviewerAssignment).toContain("complete acceptance delta");
+		expect(goalTargetExecutionReviewerAssignment).toContain("NEVER drip-feed one blocker per round");
+		expect(goalTargetExecutionReviewerAssignment).toContain("Submitted target-plan JSON uses exact schema keys");
+		expect(goalTargetApertureReviewerAssignment).toContain("Preserve prior accepted aperture");
+		expect(goalTargetApertureReviewerAssignment).toContain("Leave execution-detail blockers to execution readiness");
 	});
 
 	it("keeps target acquisition guidance before target creation", () => {
@@ -1080,6 +1130,9 @@ describe("GoalTool", () => {
 		expect(text).toContain("## Minimal valid payload shape");
 		expect(text).toContain('"target_id"');
 		expect(text).toContain("`targetId` -> `target_id`");
+		expect(text).toContain("Enum fields classify");
+		expect(text).toContain("`blastRadiusScope` -> `blast_radius_scope`");
+		expect(text).toContain("`rowIds` -> `row_ids`");
 		expect(result.details?.op).toBe("target_plan_schema");
 		expect(result.details?.state?.runMode).toBe("planning-target");
 		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
@@ -1200,6 +1253,21 @@ describe("GoalTool", () => {
 			expect(submittedInput?.targetId).toBe("target-1");
 			expect(submittedInput?.verificationAperture.primarySignalId).toBe("signal-primary");
 			expect(submittedInput?.verificationSignals[0]?.confidenceIfSatisfied).toBe("high");
+			expect(submittedInput?.verificationAperture.blastRadiusScope).toBe(
+				"Single target surface and focused verification.",
+			);
+			expect(submittedInput?.verificationAperture.confidenceRationale).toBe("High only for this target behavior.");
+			expect(submittedInput?.verificationSignals[0]?.confidenceRationale).toBe(
+				"High only for the focused target behavior.",
+			);
+			expect(submittedInput?.concernChecks[0]?.lens).toBe("focused target behavior");
+			expect(submittedInput?.scopeCalibration.rightSizingRationale).toBe(
+				"One product signal can close without claiming parent completion.",
+			);
+			expect(submittedInput?.scopeCalibration.deferredRelatedWork[0]?.rationale).toBe(
+				"Parent verification needs broader evidence.",
+			);
+			expect(submittedInput?.branchEvidence[0]?.rowIds).toEqual(["row-happy"]);
 			expect(submitted.details?.targetPlanApproval?.targetPlanId).toBe("target-plan-1");
 
 			await tool.execute("fail-plan", {
@@ -1451,6 +1519,47 @@ describe("GoalTool", () => {
 				),
 			).toBe(false);
 
+			const salienceAliasDiagnostics = await lintWith(payload => {
+				const aperture = payload.verification_aperture as Record<string, unknown>;
+				aperture.confidenceRationale = aperture.confidence_rationale;
+				delete aperture.confidence_rationale;
+				const branch = (payload.branch_evidence as Record<string, unknown>[])[0];
+				if (!branch) throw new Error("expected branch evidence");
+				branch.rowIds = branch.row_ids;
+				delete branch.row_ids;
+			});
+			expect(
+				salienceAliasDiagnostics.some(
+					diagnostic =>
+						diagnostic.guidance === "Use snake_case key confidence_rationale, not confidenceRationale.",
+				),
+			).toBe(true);
+			expect(
+				salienceAliasDiagnostics.some(
+					diagnostic => diagnostic.guidance === "Use snake_case key row_ids, not rowIds.",
+				),
+			).toBe(true);
+
+			const workstreamRoleDiagnostics = await lintWith(payload => {
+				const targetCard = payload.target_card as Record<string, unknown>;
+				targetCard.workstreams = [
+					{
+						id: "ws-other",
+						label: "Other work",
+						kind: "other",
+						role: 1,
+						files: [],
+						contract_inputs: [],
+						contract_outputs: [],
+					},
+				];
+			});
+			const workstreamRoleDiagnostic = workstreamRoleDiagnostics.find(
+				diagnostic => diagnostic.path === "/target_card/workstreams/0/role",
+			);
+			expect(workstreamRoleDiagnostic?.guidance).toContain("Workstream role must be a string");
+			expect(workstreamRoleDiagnostic?.guidance).not.toContain("Allowed role values");
+
 			const canonicalPlusAliasDiagnostics = await lintWith(payload => {
 				payload.targetId = payload.target_id;
 			});
@@ -1521,6 +1630,7 @@ describe("GoalTool", () => {
 						id: "ws-main",
 						label: "Main",
 						kind: "main",
+						role: "primary implementation",
 						files: ["src/feature.ts"],
 						contract_inputs: ["Existing caller"],
 						contract_outputs: ["Verified behavior"],
@@ -1553,15 +1663,47 @@ describe("GoalTool", () => {
 
 			await expect(
 				tool.execute(
-					"submit-missing-branch",
+					"submit-missing-branch-without-row-ids",
 					await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
 						localProtocolOptions,
-						mutatePayload: enrichPayload,
+						mutatePayload: payload => {
+							enrichPayload(payload);
+							const branchEvidence = payload.branch_evidence as Record<string, unknown>[];
+							delete branchEvidence[0]?.row_ids;
+						},
 						planText: completeMarkdown.replace("row-happy happy path", "executor path"),
 					}),
 				),
 			).rejects.toThrow("target plan Markdown must mention in-scope branch happy path or row row-happy");
 			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+
+			const lintMissingBranch = await tool.execute(
+				"lint-missing-branch",
+				await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
+					op: "lint_target_plan",
+					localProtocolOptions,
+					mutatePayload: enrichPayload,
+					planText: completeMarkdown.replace("row-happy happy path", "executor path"),
+				}),
+			);
+			expect(lintMissingBranch.details?.targetPlanLint?.diagnostics).toContainEqual(
+				expect.objectContaining({
+					code: "plan_markdown.branch_missing",
+					severity: "warning",
+					blocksSubmission: false,
+				}),
+			);
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+
+			await tool.execute(
+				"submit-missing-branch",
+				await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
+					localProtocolOptions,
+					mutatePayload: enrichPayload,
+					planText: completeMarkdown.replace("row-happy happy path", "executor path"),
+				}),
+			);
+			expect(requestGoalTargetPlanApproval).toHaveBeenCalledTimes(1);
 
 			await expect(
 				tool.execute(
@@ -1573,7 +1715,7 @@ describe("GoalTool", () => {
 					}),
 				),
 			).rejects.toThrow("target plan Markdown must mention workstream file src/feature.ts");
-			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+			expect(requestGoalTargetPlanApproval).toHaveBeenCalledTimes(1);
 
 			const lintCall = await writeTargetPlanPayloadCall(buildSubmitTargetPlanParams(base), {
 				op: "lint_target_plan",
@@ -1597,7 +1739,7 @@ describe("GoalTool", () => {
 			});
 			expect(await Bun.file(payloadPath).text()).toBe(payloadBefore);
 			expect(await Bun.file(planPath).text()).toBe(planBefore);
-			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+			expect(requestGoalTargetPlanApproval).toHaveBeenCalledTimes(1);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -1898,6 +2040,18 @@ describe("GoalTool", () => {
 				'submit_target_plan invalid at verification_aperture/omitted_layers/0/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
 			);
 
+			const confidenceParams = buildSubmitTargetPlanParams(base);
+			confidenceParams.verification_aperture.confidence_target = "target-specific" as string;
+			await expect(
+				tool.execute("invalid-confidence-target", await writeTargetPlanPayloadCall(confidenceParams)),
+			).rejects.toThrow("put specific confidence scope in confidence_rationale");
+
+			const rightSizingParams = buildSubmitTargetPlanParams(base);
+			rightSizingParams.scope_calibration.right_sizing_basis = "same payload" as string;
+			await expect(
+				tool.execute("invalid-right-sizing-basis", await writeTargetPlanPayloadCall(rightSizingParams)),
+			).rejects.toThrow("put the specific sizing argument in right_sizing_rationale");
+
 			const primaryParams = buildSubmitTargetPlanParams(base);
 			primaryParams.verification_aperture.primary_signal_id = "truthful-default-surfaces";
 			await expect(
@@ -1970,6 +2124,27 @@ describe("GoalTool", () => {
 				"submit_target_plan invalid at revision:",
 			);
 			await expect(tool.execute("invalid-revision-repeat", call)).rejects.toThrow('Call goal({op:"get"})');
+
+			const invalidWorkstreamRole = buildSubmitTargetPlanParams({
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: path.join(tempDir, "target-plan-role.md"),
+				revision: 1,
+			});
+			invalidWorkstreamRole.target_card.workstreams = [
+				{
+					id: "ws-other",
+					label: "Other work",
+					kind: "other",
+					role: 1 as unknown as string,
+					files: [],
+					contract_inputs: [],
+					contract_outputs: [],
+				},
+			];
+			await expect(
+				tool.execute("invalid-workstream-role", await writeTargetPlanPayloadCall(invalidWorkstreamRole)),
+			).rejects.toThrow("workstream role must be a string");
 			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });

@@ -8,7 +8,7 @@ Inputs:
 - Submitted target-plan JSON: {{submissionFile}}
 
 - Target-unit rules: {{targetUnitRules}}
-Evaluate:
+Evaluate only aperture and product-signal fit:
 - Product signal: one concrete product-intention claim becomes truthful through a primary verification signal.
 - Related-work bundling: same-signal callers/contracts/tests/concerns are included; independent-signal work is deferred.
 - Concern cohesion: behavior, contracts, state, errors, security, performance, migration, UX/manual, docs/operator concerns belong together when they can break the same signal.
@@ -21,6 +21,12 @@ Evaluate:
 - Target card: depth matches risk; capability/user surface/known limits/checkpoint evidence are concrete.
 - Target-unit rules: every applicable rule is enforced or explicitly exempted with a safe rationale.
 - Use artifact references from the focused context file; do not expect a full transcript.
+
+Review discipline:
+- Preserve prior accepted aperture unless the current plan changes product signal, scope, authority boundary, or blast radius.
+- Stale/self-contradictory artifacts are freshness findings, not too-broad/too-narrow unless scope changed.
+- Leave execution-detail blockers to execution readiness unless they change same-signal bundling or claimed surface.
+- On rejection, name the exact merge/split/rescope needed; do not repeat accepted scope analysis.
 
 Decision rules:
 - too-narrow implies revisionDecision merge-required or rescope-required.

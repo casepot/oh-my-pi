@@ -383,7 +383,9 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 			product_intention: "Prove the target behavior with direct evidence.",
 			primary_signal_id: primarySignalId,
 			blast_radius: "local",
+			blast_radius_scope: "Single target behavior surface.",
 			confidence_target: "high",
+			confidence_rationale: "High only for the focused target behavior.",
 			layer_rationale: "The target is local and directly observable.",
 			residual_uncertainty: ["Parent completion remains outside this target."],
 			omitted_layers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
@@ -400,6 +402,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 				expected_outcome: "The focused check passes.",
 				required: true,
 				confidence_if_satisfied: "high",
+				confidence_rationale: "Focused verification earns target confidence only.",
 				stale_if: ["Relevant code changes."],
 			},
 		],
@@ -407,12 +410,14 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 			{
 				id: "concern-behavior",
 				kind: "behavior",
+				lens: "focused behavior",
 				why_independent: "Behavior can fail independently of parent completion.",
 				covered_by_signal_ids: [primarySignalId],
 			},
 		],
 		scope_calibration: {
 			right_sizing_basis: "product-signal",
+			right_sizing_rationale: "One product signal closes without claiming parent completion.",
 			why_not_smaller: ["Smaller work would not produce an observable signal."],
 			why_not_larger: ["Larger work would claim parent-level completion."],
 			included_related_work: [
@@ -423,6 +428,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 					item: "Parent completion verification",
 					reason: "different-primary-signal",
 					follow_up_hint: "Checkpoint first.",
+					rationale: "Parent verification needs broader evidence.",
 				},
 			],
 		},
@@ -799,6 +805,8 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(approvedPrompt).toContain(approval.planFilePath);
 		expect(approvedPrompt).toContain(approval.planHash);
 		expect(approvedPrompt).toContain("<approved_target_execution_summary>");
+		expect(approvedPrompt).toContain("approved execution summary supersedes earlier drafts");
+		expect(approvedPrompt).not.toContain("Context preserved. Use conversation history when useful");
 		expect(approvedPrompt).toContain("Run the focused check.");
 		expect(approvedPrompt).toContain("Parent completion");
 		expect(approvedPrompt).not.toContain("## Verification Signal Aperture");
@@ -865,6 +873,14 @@ describe("InteractiveMode goal mode integration", () => {
 			expect(context).toContain('"planMarkdownPath"');
 			expect(context).toContain('"resolvedPlanFile"');
 			expect(context).toContain('"payloadSubmissionFile"');
+			const payloadPathMatch = /"payloadSubmissionFile": "([^"]+)"/.exec(context);
+			if (!payloadPathMatch) throw new Error("expected payload submission file reference");
+			const submittedPayload = await Bun.file(payloadPathMatch[1]).json();
+			const submittedPayloadText = JSON.stringify(submittedPayload);
+			expect(submittedPayload).toHaveProperty("verification_aperture");
+			expect(submittedPayload).not.toHaveProperty("verificationAperture");
+			expect(submittedPayloadText).toContain("primary_signal_id");
+			expect(submittedPayloadText).not.toContain("primarySignalId");
 			expect(context).toContain("## Target-unit rules");
 			expect(context).not.toContain("UNRELATED_TRANSCRIPT_SENTINEL_DO_NOT_INCLUDE");
 		}

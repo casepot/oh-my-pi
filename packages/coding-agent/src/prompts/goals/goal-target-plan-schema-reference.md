@@ -36,6 +36,8 @@ Optional top-level metadata:
 - `primary_signal_id`
 - `blast_radius`
 - `confidence_target`
+- `blast_radius_scope?`
+- `confidence_rationale?`
 - `layer_rationale`
 - `residual_uncertainty: string[]`
 - `omitted_layers: { layer, reason }[]`
@@ -51,25 +53,29 @@ Optional top-level metadata:
 - `expected_outcome`
 - `required: boolean`
 - `confidence_if_satisfied`
+- `confidence_rationale?`
 - `stale_if: string[]`
 
 `concern_checks[]`:
 - `id`
 - `kind`
 - `why_independent`
+- `lens?`
 - `covered_by_signal_ids: string[]`
 
 `scope_calibration`:
 - `right_sizing_basis`
+- `right_sizing_rationale?`
 - `why_not_smaller: string[]`
 - `why_not_larger: string[]`
 - `included_related_work: { item, reason, signal_ids }[]`
-- `deferred_related_work: { item, reason, follow_up_hint? }[]`
+- `deferred_related_work: { item, reason, rationale?, follow_up_hint? }[]`
 - `target_unit_rule_ids?: string[]`
 - `target_unit_exemptions?: { rule_id, rationale }[]`
 
 `branch_evidence[]`:
 - `branch`
+- `row_ids?: string[]`
 - `required: boolean`
 - `planned_signal_ids: string[]`
 - `rationale`
@@ -83,7 +89,7 @@ Optional top-level metadata:
 - `id`
 - `primary_signal_group_id`
 - `rows_in_scope: { id, branch, signal_ids, concern_ids, acceptance, expected_outcome, stale_if }[]`
-- `rows_left_open: { id, branch, reason, follow_up_hint }[]`
+- `rows_left_open: { id, branch, reason, rationale?, follow_up_hint }[]`
 - `splitting_safety: { safe, rationale }`
 - `next_larger_target?: { title, primary_signal_group_id, rows, unblocks_matrix_id? }`
 
@@ -96,7 +102,7 @@ Optional top-level metadata:
 - `policy_deletion_implications?`
 - `user_visible_surface`
 - `acceptance_rows: { closed, open }`
-- `workstreams?: { id, label, kind, files, contract_inputs, contract_outputs }[]`
+- `workstreams?: { id, label, kind, role?, files, contract_inputs, contract_outputs }[]`
 - `shared_contract?`
 - `review_lenses?: string[]`
 - `verification_scenarios: string[]`
@@ -113,6 +119,8 @@ Optional top-level metadata:
 `dry_run`:
 - `status`
 - `checks: { id, passed, rationale }[]`
+
+Enum fields classify. Rationale/role/lens fields preserve product meaning. NEVER delete specific target meaning just to satisfy an enum.
 
 ## Minimal valid payload shape
 
@@ -151,6 +159,7 @@ Optional top-level metadata:
         "id": "ws-main",
         "label": "Main implementation",
         "kind": "main",
+        "role": "primary implementation",
         "files": ["src/example.ts"],
         "contract_inputs": ["Existing caller contract"],
         "contract_outputs": ["Verified happy path"]
@@ -163,7 +172,9 @@ Optional top-level metadata:
     "product_intention": "Prove happy path behavior with direct evidence.",
     "primary_signal_id": "signal-primary",
     "blast_radius": "local",
+    "blast_radius_scope": "Single feature module and its focused test.",
     "confidence_target": "high",
+    "confidence_rationale": "High only for this target's focused behavior.",
     "layer_rationale": "Focused integration evidence covers this target.",
     "residual_uncertainty": ["Parent completion remains unclaimed."],
     "omitted_layers": [{ "layer": "e2e", "reason": "Parent-level e2e belongs to a later target." }]
@@ -180,6 +191,7 @@ Optional top-level metadata:
       "expected_outcome": "The focused check passes.",
       "required": true,
       "confidence_if_satisfied": "high",
+      "confidence_rationale": "High for the target behavior; parent completion remains unclaimed.",
       "stale_if": ["Relevant code changes."]
     }
   ],
@@ -188,18 +200,20 @@ Optional top-level metadata:
       "id": "concern-behavior",
       "kind": "behavior",
       "why_independent": "Behavior can fail independently.",
+      "lens": "happy-path behavior",
       "covered_by_signal_ids": ["signal-primary"]
     }
   ],
   "scope_calibration": {
     "right_sizing_basis": "product-signal",
+    "right_sizing_rationale": "One product signal closes without claiming parent completion.",
     "why_not_smaller": ["Smaller work would not produce the signal."],
     "why_not_larger": ["Larger work would claim parent completion."],
     "included_related_work": [{ "item": "Happy path implementation", "reason": "Needed for the signal.", "signal_ids": ["signal-primary"] }],
-    "deferred_related_work": [{ "item": "Parent completion", "reason": "different-primary-signal", "follow_up_hint": "Checkpoint first." }]
+    "deferred_related_work": [{ "item": "Parent completion", "reason": "different-primary-signal", "rationale": "Parent verification needs broader evidence.", "follow_up_hint": "Checkpoint first." }]
   },
   "branch_evidence": [
-    { "branch": "happy path", "required": true, "planned_signal_ids": ["signal-primary"], "rationale": "Primary signal covers it." }
+    { "branch": "happy path", "row_ids": ["row-happy-path"], "required": true, "planned_signal_ids": ["signal-primary"], "rationale": "Primary signal covers it." }
   ],
   "excluded_work_review": [
     { "item": "Parent completion", "classification": "parent-non-claim", "rationale": "Out of target scope." }
@@ -243,5 +257,9 @@ Use canonical snake_case only:
 - `checkpointEvidence` -> `checkpoint_evidence`
 - `contractInputs` -> `contract_inputs`
 - `contractOutputs` -> `contract_outputs`
+- `blastRadiusScope` -> `blast_radius_scope`
+- `confidenceRationale` -> `confidence_rationale`
+- `rightSizingRationale` -> `right_sizing_rationale`
+- `rowIds` -> `row_ids`
 
 NEVER paste this payload into `goal({op:"submit_target_plan", ...})`. Store JSON in the payload sidecar and submit only `{ "op": "submit_target_plan", "payload_file_path": "..." }`.

@@ -194,6 +194,192 @@ export interface GoalTargetPlanDryRun {
 	checks: Array<{ id: string; passed: boolean; rationale: string }>;
 }
 
+function setIfDefined(target: Record<string, unknown>, key: string, value: unknown): void {
+	if (value !== undefined) target[key] = value;
+}
+
+export function targetPlanPayloadFromSubmitInput(input: GoalSubmitTargetPlanInput): Record<string, unknown> {
+	const payload: Record<string, unknown> = {
+		target_id: input.targetId,
+		target_plan_id: input.targetPlanId,
+		plan_file_path: input.planFilePath,
+		revision: input.revision,
+		verification_aperture: (() => {
+			const aperture: Record<string, unknown> = {
+				product_intention: input.verificationAperture.productIntention,
+				primary_signal_id: input.verificationAperture.primarySignalId,
+				blast_radius: input.verificationAperture.blastRadius,
+				confidence_target: input.verificationAperture.confidenceTarget,
+				layer_rationale: input.verificationAperture.layerRationale,
+				residual_uncertainty: input.verificationAperture.residualUncertainty,
+				omitted_layers: input.verificationAperture.omittedLayers.map(layer => ({
+					layer: layer.layer,
+					reason: layer.reason,
+				})),
+			};
+			setIfDefined(aperture, "blast_radius_scope", input.verificationAperture.blastRadiusScope);
+			setIfDefined(aperture, "confidence_rationale", input.verificationAperture.confidenceRationale);
+			return aperture;
+		})(),
+		verification_signals: input.verificationSignals.map(signal => {
+			const item: Record<string, unknown> = {
+				id: signal.id,
+				role: signal.role,
+				layer: signal.layer,
+				concern_ids: signal.concernIds,
+				claim: signal.claim,
+				observation: signal.observation,
+				method: signal.method,
+				expected_outcome: signal.expectedOutcome,
+				required: signal.required,
+				confidence_if_satisfied: signal.confidenceIfSatisfied,
+				stale_if: signal.staleIf,
+			};
+			setIfDefined(item, "confidence_rationale", signal.confidenceRationale);
+			return item;
+		}),
+		concern_checks: input.concernChecks.map(check => {
+			const item: Record<string, unknown> = {
+				id: check.id,
+				kind: check.kind,
+				why_independent: check.whyIndependent,
+				covered_by_signal_ids: check.coveredBySignalIds,
+			};
+			setIfDefined(item, "lens", check.lens);
+			return item;
+		}),
+		scope_calibration: (() => {
+			const calibration: Record<string, unknown> = {
+				right_sizing_basis: input.scopeCalibration.rightSizingBasis,
+				why_not_smaller: input.scopeCalibration.whyNotSmaller,
+				why_not_larger: input.scopeCalibration.whyNotLarger,
+				included_related_work: input.scopeCalibration.includedRelatedWork.map(item => ({
+					item: item.item,
+					reason: item.reason,
+					signal_ids: item.signalIds,
+				})),
+				deferred_related_work: input.scopeCalibration.deferredRelatedWork.map(item => {
+					const deferred: Record<string, unknown> = { item: item.item, reason: item.reason };
+					setIfDefined(deferred, "rationale", item.rationale);
+					setIfDefined(deferred, "follow_up_hint", item.followUpHint);
+					return deferred;
+				}),
+			};
+			setIfDefined(calibration, "right_sizing_rationale", input.scopeCalibration.rightSizingRationale);
+			setIfDefined(calibration, "target_unit_rule_ids", input.scopeCalibration.targetUnitRuleIds);
+			setIfDefined(
+				calibration,
+				"target_unit_exemptions",
+				input.scopeCalibration.targetUnitExemptions?.map(exemption => ({
+					rule_id: exemption.ruleId,
+					rationale: exemption.rationale,
+				})),
+			);
+			return calibration;
+		})(),
+		branch_evidence: input.branchEvidence.map(branch => {
+			const item: Record<string, unknown> = {
+				branch: branch.branch,
+				required: branch.required,
+				planned_signal_ids: branch.plannedSignalIds,
+				rationale: branch.rationale,
+			};
+			setIfDefined(item, "row_ids", branch.rowIds);
+			return item;
+		}),
+		excluded_work_review: input.excludedWorkReview.map(item => ({
+			item: item.item,
+			classification: item.classification,
+			rationale: item.rationale,
+		})),
+		workflow_review_rounds: input.workflowReviewRounds.map(round => ({
+			lens: round.lens,
+			verdict: round.verdict,
+			summary: round.summary,
+			blockers: round.blockers,
+			revised: round.revised,
+		})),
+		dry_run: {
+			status: input.dryRun.status,
+			checks: input.dryRun.checks.map(check => ({ id: check.id, passed: check.passed, rationale: check.rationale })),
+		},
+	};
+	setIfDefined(payload, "primary_signal_group_id", input.primarySignalGroupId);
+	setIfDefined(payload, "plan_depth", input.planDepth);
+	if (input.scenarioMatrix) {
+		payload.scenario_matrix = {
+			id: input.scenarioMatrix.id,
+			primary_signal_group_id: input.scenarioMatrix.primarySignalGroupId,
+			rows_in_scope: input.scenarioMatrix.rowsInScope.map(row => ({
+				id: row.id,
+				branch: row.branch,
+				signal_ids: row.signalIds,
+				concern_ids: row.concernIds,
+				acceptance: row.acceptance,
+				expected_outcome: row.expectedOutcome,
+				stale_if: row.staleIf,
+			})),
+			rows_left_open: input.scenarioMatrix.rowsLeftOpen.map(row => {
+				const item: Record<string, unknown> = {
+					id: row.id,
+					branch: row.branch,
+					reason: row.reason,
+					follow_up_hint: row.followUpHint,
+				};
+				setIfDefined(item, "rationale", row.rationale);
+				return item;
+			}),
+			splitting_safety: {
+				safe: input.scenarioMatrix.splittingSafety.safe,
+				rationale: input.scenarioMatrix.splittingSafety.rationale,
+			},
+			next_larger_target: input.scenarioMatrix.nextLargerTarget
+				? {
+						title: input.scenarioMatrix.nextLargerTarget.title,
+						primary_signal_group_id: input.scenarioMatrix.nextLargerTarget.primarySignalGroupId,
+						rows: input.scenarioMatrix.nextLargerTarget.rows,
+						unblocks_matrix_id: input.scenarioMatrix.nextLargerTarget.unblocksMatrixId,
+					}
+				: undefined,
+		};
+	}
+	if (input.targetCard) {
+		const card: Record<string, unknown> = {
+			capability_claim: input.targetCard.capabilityClaim,
+			known_limits: input.targetCard.knownLimits,
+			user_visible_surface: input.targetCard.userVisibleSurface,
+			acceptance_rows: input.targetCard.acceptanceRows,
+			verification_scenarios: input.targetCard.verificationScenarios,
+			checkpoint_evidence: input.targetCard.checkpointEvidence,
+		};
+		setIfDefined(card, "trust_privacy_claim", input.targetCard.trustPrivacyClaim);
+		setIfDefined(card, "confidence_earned", input.targetCard.confidenceEarned);
+		setIfDefined(card, "authority_boundary", input.targetCard.authorityBoundary);
+		setIfDefined(card, "policy_deletion_implications", input.targetCard.policyDeletionImplications);
+		setIfDefined(
+			card,
+			"workstreams",
+			input.targetCard.workstreams?.map(workstream => {
+				const item: Record<string, unknown> = {
+					id: workstream.id,
+					label: workstream.label,
+					kind: workstream.kind,
+					files: workstream.files,
+					contract_inputs: workstream.contractInputs,
+					contract_outputs: workstream.contractOutputs,
+				};
+				setIfDefined(item, "role", workstream.role);
+				return item;
+			}),
+		);
+		setIfDefined(card, "shared_contract", input.targetCard.sharedContract);
+		setIfDefined(card, "review_lenses", input.targetCard.reviewLenses);
+		setIfDefined(card, "rollback_cutover", input.targetCard.rollbackCutover);
+		payload.target_card = card;
+	}
+	return payload;
+}
+
 export interface GoalTargetPlanExpectation extends GoalSideAgentExpectation {
 	targetPlanId: string;
 	targetSequence: number;
@@ -834,6 +1020,7 @@ export function buildGoalTargetPlanExecutionSummary(
 		id: workstream.id,
 		label: workstream.label,
 		kind: workstream.kind,
+		role: workstream.role,
 		files: [...workstream.files],
 		contractInputs: [...workstream.contractInputs],
 		contractOutputs: [...workstream.contractOutputs],
@@ -848,6 +1035,7 @@ export function buildGoalTargetPlanExecutionSummary(
 				claim: signal.claim,
 				method: signal.method,
 				expectedOutcome: signal.expectedOutcome,
+				confidenceRationale: signal.confidenceRationale,
 				staleIf: [...signal.staleIf],
 			})) ?? [];
 	return {
@@ -865,6 +1053,38 @@ export function buildGoalTargetPlanExecutionSummary(
 		implementationFanoutRequired: implementationFanoutRequired(plan),
 		implementationFiles: uniqueStrings(workstreams?.flatMap(workstream => workstream.files) ?? []),
 		workstreams,
+		verificationAperture: plan.verificationAperture
+			? {
+					...plan.verificationAperture,
+					residualUncertainty: [...plan.verificationAperture.residualUncertainty],
+					omittedLayers: plan.verificationAperture.omittedLayers.map(layer => ({ ...layer })),
+				}
+			: undefined,
+		concernChecks: plan.concernChecks?.map(check => ({
+			...check,
+			coveredBySignalIds: [...check.coveredBySignalIds],
+		})),
+		scopeCalibration: plan.scopeCalibration
+			? {
+					...plan.scopeCalibration,
+					whyNotSmaller: [...plan.scopeCalibration.whyNotSmaller],
+					whyNotLarger: [...plan.scopeCalibration.whyNotLarger],
+					includedRelatedWork: plan.scopeCalibration.includedRelatedWork.map(item => ({
+						...item,
+						signalIds: [...item.signalIds],
+					})),
+					deferredRelatedWork: plan.scopeCalibration.deferredRelatedWork.map(item => ({ ...item })),
+					targetUnitRuleIds: plan.scopeCalibration.targetUnitRuleIds
+						? [...plan.scopeCalibration.targetUnitRuleIds]
+						: undefined,
+					targetUnitExemptions: plan.scopeCalibration.targetUnitExemptions?.map(exemption => ({ ...exemption })),
+				}
+			: undefined,
+		branchEvidence: plan.branchEvidence?.map(branch => ({
+			...branch,
+			plannedSignalIds: [...branch.plannedSignalIds],
+			rowIds: branch.rowIds ? [...branch.rowIds] : undefined,
+		})),
 		sharedContract: targetCard?.sharedContract,
 		acceptanceRows: targetCard
 			? {
@@ -885,6 +1105,7 @@ export function buildGoalTargetPlanExecutionSummary(
 			id: row.id,
 			branch: row.branch,
 			reason: row.reason,
+			rationale: row.rationale,
 			followUpHint: row.followUpHint,
 		})),
 		excludedWork:
@@ -1224,9 +1445,9 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 			return [
 				'Call goal({op:"lint_target_plan", payload_file_path:...}) before submit_target_plan',
 				'Call goal({op:"submit_target_plan", payload_file_path:...}) or goal({op:"fail_target_plan", ...})',
-				"Edit target plan/payload sidecar in place",
-				"Use read-only task discovery and review",
-				"Create missing target-plan files; edit existing plan and payload sidecar in place",
+				"Edit or eval/bash-transform only the active target plan/payload sidecar",
+				"Use planning-only agent()/task discovery and review",
+				"Create missing target-plan files; patch or structured-transform existing plan and payload sidecar in place",
 			];
 		case "awaiting-checkpoint-resolution":
 			return ['Call goal({op:"resolve_checkpoint", ...}) before ordinary tools'];
@@ -1255,7 +1476,7 @@ function disallowedActsForRunMode(runMode: GoalRunMode): string[] {
 		case "planning-target":
 			return [
 				"Implement code changes",
-				"Run mutating commands",
+				"Run implementation/build/test/repo-mutating commands",
 				"Checkpoint target work",
 				"Call complete",
 				"Shrink the target to pass review",

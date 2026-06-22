@@ -19,7 +19,8 @@ function workstreamSummaryMarkdown(details: GoalTargetPlanMessageDetails): strin
 	return workstreams
 		.map(workstream => {
 			const files = workstream.files.length > 0 ? ` files: ${workstream.files.join(", ")}` : "";
-			return `- ${workstream.id} (${workstream.kind}): ${workstream.label}${files}`;
+			const role = workstream.role ? ` role: ${workstream.role}` : "";
+			return `- ${workstream.id} (${workstream.kind}${role}): ${workstream.label}${files}`;
 		})
 		.join("\n");
 }

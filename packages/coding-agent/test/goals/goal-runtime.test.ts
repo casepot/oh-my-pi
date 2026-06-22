@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildGoalContextSurface,
 	buildGoalContinuationPacket,
+	buildGoalTargetPlanExecutionSummary,
 	escapeXmlText,
 	type GoalPersistenceReason,
 	GoalRuntime,
@@ -232,7 +233,9 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 			productIntention: "Prove the target behavior with direct evidence.",
 			primarySignalId,
 			blastRadius: "local",
+			blastRadiusScope: "Single target behavior surface.",
 			confidenceTarget: "high",
+			confidenceRationale: "High only for the focused target behavior.",
 			layerRationale: "The target is local and directly observable.",
 			residualUncertainty: ["Parent completion remains outside this target."],
 			omittedLayers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
@@ -249,6 +252,7 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 				expectedOutcome: "The focused check passes.",
 				required: true,
 				confidenceIfSatisfied: "high",
+				confidenceRationale: "Focused verification earns target confidence only.",
 				staleIf: ["Relevant code changes."],
 			},
 		],
@@ -256,12 +260,14 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 			{
 				id: "concern-behavior",
 				kind: "behavior",
+				lens: "focused behavior",
 				whyIndependent: "Behavior can fail independently of parent completion.",
 				coveredBySignalIds: [primarySignalId],
 			},
 		],
 		scopeCalibration: {
 			rightSizingBasis: "product-signal",
+			rightSizingRationale: "One product signal closes without claiming parent completion.",
 			whyNotSmaller: ["Smaller work would not produce an observable signal."],
 			whyNotLarger: ["Larger work would claim parent-level completion."],
 			includedRelatedWork: [
@@ -272,6 +278,7 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 					item: "Parent completion verification",
 					reason: "different-primary-signal",
 					followUpHint: "Checkpoint first.",
+					rationale: "Parent verification needs broader evidence.",
 				},
 			],
 		},
@@ -1428,6 +1435,27 @@ describe("goal runtime", () => {
 		expect(approved.goal.currentTargetPlan?.status).toBe("approved");
 		expect(approved.goal.currentTarget?.planId).toBe(approved.goal.currentTargetPlan?.id);
 		expect(approved.goal.currentTarget?.verificationSignals?.[0]?.id).toBe(approval.verificationSignals[0]?.id);
+		expect(approved.goal.currentTarget?.verificationSignals?.[0]?.confidenceRationale).toBe(
+			"Focused verification earns target confidence only.",
+		);
+		const executionSummary = buildGoalTargetPlanExecutionSummary(
+			approved.goal.currentTargetPlan,
+			approved.goal.currentTarget,
+		);
+		expect(executionSummary?.verificationAperture?.blastRadiusScope).toBe("Single target behavior surface.");
+		expect(executionSummary?.verificationAperture?.confidenceRationale).toBe(
+			"High only for the focused target behavior.",
+		);
+		expect(executionSummary?.requiredSignals[0]?.confidenceRationale).toBe(
+			"Focused verification earns target confidence only.",
+		);
+		expect(executionSummary?.concernChecks?.[0]?.lens).toBe("focused behavior");
+		expect(executionSummary?.scopeCalibration?.rightSizingRationale).toBe(
+			"One product signal closes without claiming parent completion.",
+		);
+		expect(executionSummary?.scopeCalibration?.deferredRelatedWork[0]?.rationale).toBe(
+			"Parent verification needs broader evidence.",
+		);
 	});
 
 	it("rejects target plans whose primary signal is not required", async () => {

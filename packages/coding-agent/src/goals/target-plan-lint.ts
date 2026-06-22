@@ -22,8 +22,9 @@ export interface GoalTargetPlanGraphInput {
 	verificationSignals: GoalVerificationSignal[];
 	concernChecks: GoalConcernCheck[];
 	scopeCalibration: {
+		rightSizingRationale?: string;
 		includedRelatedWork: Array<{ signalIds: string[] }>;
-		deferredRelatedWork: Array<{ reason: string }>;
+		deferredRelatedWork: Array<{ reason: string; rationale?: string }>;
 		targetUnitRuleIds?: string[];
 		targetUnitExemptions?: Array<{ ruleId: string; rationale: string }>;
 	};
@@ -292,11 +293,11 @@ function collectTargetCardDiagnostics(
 		if (!reviewLenses.some(lens => lens.includes("security") || lens.includes("behavior"))) {
 			diagnostics.push(
 				lintDiagnostic({
-					severity: "error",
-					code: "target_card.missing_field",
+					severity: "warning",
+					code: "target_card.generic_lens_missing",
 					path: ["target_card", "review_lenses"],
-					message: "trust-heavy review_lenses must include behavior or security",
-					guidance: "Add a behavior/security review lens.",
+					message: "trust-heavy review_lenses should include behavior or security",
+					guidance: "Add a behavior/security lens when no sharper domain-specific lens covers the same risk.",
 					offender: { kind: "target_card", id: "review_lenses" },
 				}),
 			);
@@ -304,11 +305,12 @@ function collectTargetCardDiagnostics(
 		if (!reviewLenses.some(lens => lens.includes("maintainability") || lens.includes("tooling"))) {
 			diagnostics.push(
 				lintDiagnostic({
-					severity: "error",
-					code: "target_card.missing_field",
+					severity: "warning",
+					code: "target_card.generic_lens_missing",
 					path: ["target_card", "review_lenses"],
-					message: "trust-heavy review_lenses must include maintainability or tooling",
-					guidance: "Add a maintainability/tooling review lens.",
+					message: "trust-heavy review_lenses should include maintainability or tooling",
+					guidance:
+						"Add a maintainability/tooling lens when no sharper domain-specific lens covers the same risk.",
 					offender: { kind: "target_card", id: "review_lenses" },
 				}),
 			);
@@ -330,6 +332,64 @@ function collectTargetCardDiagnostics(
 				);
 			}
 		}
+	}
+	const warnMissingSalience = (path: Array<string | number>, message: string, guidance: string): void => {
+		diagnostics.push(
+			lintDiagnostic({
+				severity: "warning",
+				code: "salience.missing_context",
+				path,
+				message,
+				guidance,
+				offender: { kind: "schema", id: path.join("/") },
+			}),
+		);
+	};
+	if (input.verificationAperture.blastRadius !== "local" && !input.verificationAperture.blastRadiusScope?.trim()) {
+		warnMissingSalience(
+			["verification_aperture", "blast_radius_scope"],
+			"blast_radius_scope should name the concrete affected surface",
+			"Keep blast_radius as the enum and put the specific surface in blast_radius_scope.",
+		);
+	}
+	if (depth !== "light" && !input.scopeCalibration.rightSizingRationale?.trim()) {
+		warnMissingSalience(
+			["scope_calibration", "right_sizing_rationale"],
+			"right_sizing_rationale should preserve the target-specific sizing basis",
+			"Keep right_sizing_basis as the enum and put the specific sizing argument in right_sizing_rationale.",
+		);
+	}
+	for (const [index, row] of input.scenarioMatrix?.rowsLeftOpen.entries() ?? []) {
+		if (row.rationale?.trim()) continue;
+		warnMissingSalience(
+			["scenario_matrix", "rows_left_open", index, "rationale"],
+			"rows_left_open rationale should explain the deferred branch boundary",
+			"Keep reason as the enum and put the target-specific boundary in rationale.",
+		);
+	}
+	for (const [index, item] of input.scopeCalibration.deferredRelatedWork.entries()) {
+		if (item.rationale?.trim()) continue;
+		warnMissingSalience(
+			["scope_calibration", "deferred_related_work", index, "rationale"],
+			"deferred_related_work rationale should explain the deferred work boundary",
+			"Keep reason as the enum and put the target-specific boundary in rationale.",
+		);
+	}
+	for (const [index, workstream] of card.workstreams?.entries() ?? []) {
+		if (workstream.kind !== "other" || workstream.role?.trim()) continue;
+		warnMissingSalience(
+			["target_card", "workstreams", index, "role"],
+			"workstream role should preserve the domain role when kind is other",
+			"Keep kind as other and put the specific role in target_card.workstreams[].role.",
+		);
+	}
+	for (const [index, check] of input.concernChecks.entries()) {
+		if ((check.kind !== "contract" && check.kind !== "security") || check.lens?.trim()) continue;
+		warnMissingSalience(
+			["concern_checks", index, "lens"],
+			"concern lens should preserve the domain-specific contract or security risk",
+			"Keep kind as the broad enum and put the specific concern in lens.",
+		);
 	}
 	return diagnostics;
 }
@@ -434,8 +494,10 @@ function collectMatrixDiagnostics(
 	for (const row of matrix.rowsLeftOpen) {
 		representedBranches.set(row.branch, [...(representedBranches.get(row.branch) ?? []), row.id]);
 	}
+	const representedRowIds = new Set([...matrix.rowsInScope, ...matrix.rowsLeftOpen].map(row => row.id));
 	for (const [branchIndex, branch] of input.branchEvidence.entries()) {
 		if (!branch.required) continue;
+		if (branch.rowIds?.some(rowId => representedRowIds.has(rowId))) continue;
 		const represented = representedBranches.get(branch.branch) ?? [];
 		if (represented.length === 1) continue;
 		diagnostics.push(
@@ -486,6 +548,12 @@ function sortedByBranchAndRowId<T extends { branch: string; id: string }>(items:
 	});
 }
 
+function branchLabelsCompatible(evidenceBranch: string, rowBranch: string): boolean {
+	const evidence = evidenceBranch.trim().toLowerCase();
+	const row = rowBranch.trim().toLowerCase();
+	return evidence === row || evidence.includes(row) || row.includes(evidence);
+}
+
 function textMentionsAny(haystack: readonly string[], needles: readonly string[]): boolean {
 	return haystack.some(text => needles.some(needle => needle.length > 0 && text.includes(needle)));
 }
@@ -497,97 +565,149 @@ export function collectScenarioBranchConsistencyDiagnostics(
 	if (!matrix) return [];
 	const diagnostics: GoalTargetPlanLintDiagnostic[] = [];
 	const branchEvidence = input.branchEvidence.map((branch, index) => ({ ...branch, index }));
-	const branchEvidenceByBranch = new Map<string, typeof branchEvidence>();
-	for (const branch of branchEvidence) {
-		branchEvidenceByBranch.set(branch.branch, [...(branchEvidenceByBranch.get(branch.branch) ?? []), branch]);
+	const inScopeRows = matrix.rowsInScope.map(row => ({ ...row, scope: "in-scope" as const }));
+	const leftOpenRows = matrix.rowsLeftOpen.map(row => ({ ...row, scope: "left-open" as const }));
+	const allRows = [...inScopeRows, ...leftOpenRows];
+	const rowById = new Map(allRows.map(row => [row.id, row]));
+	const rowsByBranch = new Map<string, typeof allRows>();
+	for (const row of allRows) {
+		rowsByBranch.set(row.branch, [...(rowsByBranch.get(row.branch) ?? []), row]);
 	}
-	const inScopeRows = matrix.rowsInScope.map((row, index) => ({ ...row, index }));
-	const leftOpenRows = matrix.rowsLeftOpen.map((row, index) => ({ ...row, index }));
-	for (const row of sortedByBranchAndRowId(inScopeRows)) {
-		if (branchEvidenceByBranch.has(row.branch)) continue;
+	const rowLinkedByEvidence = (rowId: string, branch: string): boolean =>
+		branchEvidence.some(evidence => {
+			if (evidence.rowIds?.length) return evidence.rowIds.includes(rowId);
+			const matchingRows = rowsByBranch.get(evidence.branch) ?? [];
+			return evidence.branch === branch && matchingRows.length === 1;
+		});
+	const linkedRowsForEvidence = (evidence: (typeof branchEvidence)[number]): typeof allRows => {
+		if (evidence.rowIds?.length) return evidence.rowIds.flatMap(rowId => rowById.get(rowId) ?? []);
+		return rowsByBranch.get(evidence.branch) ?? [];
+	};
+
+	for (const evidence of branchEvidence) {
+		for (const [rowIdIndex, rowId] of (evidence.rowIds ?? []).entries()) {
+			const row = rowById.get(rowId);
+			if (!row) {
+				diagnostics.push(
+					lintDiagnostic({
+						severity: "error",
+						code: "branch.unknown_row_id",
+						path: ["branch_evidence", evidence.index, "row_ids", rowIdIndex],
+						message: `branch_evidence references unknown scenario row ${rowId}`,
+						guidance: "Use a row id from scenario_matrix.rows_in_scope or rows_left_open.",
+						offender: { kind: "matrix_row", id: rowId },
+					}),
+				);
+				continue;
+			}
+			if (branchLabelsCompatible(evidence.branch, row.branch)) continue;
+			diagnostics.push(
+				lintDiagnostic({
+					severity: "error",
+					code: "branch.row_id_branch_mismatch",
+					path: ["branch_evidence", evidence.index, "row_ids", rowIdIndex],
+					message: `branch_evidence row_id ${rowId} points to branch ${row.branch} but evidence branch is ${evidence.branch}`,
+					guidance:
+						"Use row_ids only for matching or more-specific branch prose; split contradictory branches into separate rows.",
+					offender: { kind: "matrix_row", id: rowId, value: row.branch },
+				}),
+			);
+		}
+	}
+
+	const inScopeRowsWithIndex = matrix.rowsInScope.map((row, index) => ({ ...row, index }));
+	for (const row of sortedByBranchAndRowId(inScopeRowsWithIndex)) {
+		if (rowLinkedByEvidence(row.id, row.branch)) continue;
 		diagnostics.push(
 			lintDiagnostic({
 				severity: "error",
 				code: "matrix.branch_missing_evidence",
 				path: ["scenario_matrix", "rows_in_scope", row.index, "branch"],
-				message: `in-scope matrix branch ${row.branch} must have matching branch_evidence`,
-				guidance: "Add branch_evidence for this in-scope branch or remove the row from scope.",
+				message: `in-scope matrix row ${row.id} must have matching branch_evidence`,
+				guidance: "Add branch_evidence.row_ids for this row or use a unique matching branch label.",
 				offender: { kind: "matrix_row", id: row.id },
 			}),
 		);
 	}
-	const matrixRowsByBranch = new Map<string, Array<{ id: string; path: Array<string | number> }>>();
-	for (const row of inScopeRows) {
-		matrixRowsByBranch.set(row.branch, [
-			...(matrixRowsByBranch.get(row.branch) ?? []),
-			{ id: row.id, path: ["scenario_matrix", "rows_in_scope", row.index] },
+
+	const rowPathsByBranch = new Map<string, Array<{ id: string; path: Array<string | number> }>>();
+	for (const [index, row] of matrix.rowsInScope.entries()) {
+		rowPathsByBranch.set(row.branch, [
+			...(rowPathsByBranch.get(row.branch) ?? []),
+			{ id: row.id, path: ["scenario_matrix", "rows_in_scope", index] },
 		]);
 	}
-	for (const row of leftOpenRows) {
-		matrixRowsByBranch.set(row.branch, [
-			...(matrixRowsByBranch.get(row.branch) ?? []),
-			{ id: row.id, path: ["scenario_matrix", "rows_left_open", row.index] },
+	for (const [index, row] of matrix.rowsLeftOpen.entries()) {
+		rowPathsByBranch.set(row.branch, [
+			...(rowPathsByBranch.get(row.branch) ?? []),
+			{ id: row.id, path: ["scenario_matrix", "rows_left_open", index] },
 		]);
 	}
-	for (const [branch, rows] of [...matrixRowsByBranch.entries()].sort(([left], [right]) =>
-		left.localeCompare(right),
-	)) {
+	for (const [branch, rows] of [...rowPathsByBranch.entries()].sort(([left], [right]) => left.localeCompare(right))) {
 		if (rows.length <= 1) continue;
+		const linkedRowIds = new Set(branchEvidence.flatMap(evidence => evidence.rowIds ?? []));
+		if (rows.every(row => linkedRowIds.has(row.id))) continue;
 		diagnostics.push(
 			lintDiagnostic({
 				severity: "error",
 				code: "matrix.duplicate_branch",
 				path: rows[0]?.path ?? ["scenario_matrix"],
-				message: `matrix branch ${branch} appears in more than one row`,
-				guidance: "Represent each branch exactly once across rows_in_scope and rows_left_open.",
+				message: `matrix branch ${branch} appears in more than one row without row_id disambiguation`,
+				guidance: "Add branch_evidence.row_ids for every row sharing this branch label.",
 				offender: { kind: "matrix_row", id: branch, value: rows.map(row => row.id).sort() },
 			}),
 		);
 	}
-	for (const branch of [...branchEvidence].sort((left, right) => left.branch.localeCompare(right.branch))) {
-		if (!branch.required) continue;
-		const matchingInScopeRows = inScopeRows.filter(row => row.branch === branch.branch);
-		const matchingLeftOpenRows = leftOpenRows.filter(row => row.branch === branch.branch);
-		if (matchingInScopeRows.length === 0 && matchingLeftOpenRows.length > 0) {
+
+	for (const evidence of [...branchEvidence].sort((left, right) => {
+		const branchOrder = left.branch.localeCompare(right.branch);
+		return branchOrder === 0 ? left.index - right.index : branchOrder;
+	})) {
+		if (!evidence.required) continue;
+		const linkedRows = linkedRowsForEvidence(evidence);
+		const linkedInScopeRows = linkedRows.filter(row => row.scope === "in-scope");
+		const linkedLeftOpenRows = linkedRows.filter(row => row.scope === "left-open");
+		if (linkedInScopeRows.length === 0 && linkedLeftOpenRows.length > 0) {
 			diagnostics.push(
 				lintDiagnostic({
 					severity: "error",
 					code: "branch.required_left_open",
-					path: ["branch_evidence", branch.index, "branch"],
-					message: `required branch ${branch.branch} cannot be represented only in rows_left_open`,
+					path: ["branch_evidence", evidence.index, evidence.rowIds?.length ? "row_ids" : "branch"],
+					message: `required branch ${evidence.branch} cannot be represented only in rows_left_open`,
 					guidance: "Move the required branch into rows_in_scope or mark it non-required.",
 					offender: {
 						kind: "matrix_row",
-						id: branch.branch,
-						value: matchingLeftOpenRows.map(row => row.id).sort(),
+						id: evidence.branch,
+						value: linkedLeftOpenRows.map(row => row.id).sort(),
 					},
 				}),
 			);
 			continue;
 		}
-		const row = matchingInScopeRows[0];
-		if (!row) continue;
-		const rowSignalIds = new Set(row.signalIds);
-		for (const [signalIndex, signalId] of branch.plannedSignalIds.entries()) {
-			if (rowSignalIds.has(signalId)) continue;
-			diagnostics.push(
-				lintDiagnostic({
-					severity: "error",
-					code: "branch.signal_mismatch",
-					path: ["branch_evidence", branch.index, "planned_signal_ids", signalIndex],
-					message: `required branch ${branch.branch} plans signal ${signalId} but its in-scope matrix row omits it`,
-					guidance:
-						"Add the signal id to the matching scenario_matrix.rows_in_scope[] row or remove it from branch_evidence.",
-					offender: { kind: "signal", id: signalId },
-				}),
-			);
+		for (const row of linkedInScopeRows) {
+			const rowSignalIds = new Set(row.signalIds);
+			for (const [signalIndex, signalId] of evidence.plannedSignalIds.entries()) {
+				if (rowSignalIds.has(signalId)) continue;
+				diagnostics.push(
+					lintDiagnostic({
+						severity: "error",
+						code: "branch.signal_mismatch",
+						path: ["branch_evidence", evidence.index, "planned_signal_ids", signalIndex],
+						message: `required branch ${evidence.branch} plans signal ${signalId} but row ${row.id} omits it`,
+						guidance:
+							"Add the signal id to the linked scenario_matrix.rows_in_scope[] row or remove it from branch_evidence.",
+						offender: { kind: "signal", id: signalId },
+					}),
+				);
+			}
 		}
 	}
+
 	const card = input.targetCard;
 	if (!card) return diagnostics;
 	const scenarios = card.verificationScenarios;
 	const closedAcceptanceRows = card.acceptanceRows.closed;
-	for (const row of sortedByBranchAndRowId(inScopeRows)) {
+	for (const row of sortedByBranchAndRowId(inScopeRowsWithIndex)) {
 		if (!textMentionsAny(scenarios, [row.id, row.branch])) {
 			diagnostics.push(
 				lintDiagnostic({

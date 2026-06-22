@@ -112,7 +112,7 @@ export interface GoalTargetPlanMessageDetails {
 	primarySignalGroupId?: string;
 	matrixRowCounts?: { inScope: number; leftOpen: number };
 	implementationFanoutRequired?: boolean;
-	workstreamSummary?: Array<Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "files">>;
+	workstreamSummary?: Array<Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "role" | "files">>;
 	targetCard?: GoalTargetCard;
 	recordedAt: number;
 }

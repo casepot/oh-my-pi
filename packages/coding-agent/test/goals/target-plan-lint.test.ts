@@ -298,5 +298,78 @@ describe("target-plan lint rules", () => {
 		);
 
 		expect(missingBranchDiagnostics.map(diagnostic => diagnostic.offender?.id)).toEqual(["row-a", "row-z"]);
+
+		const disambiguated = validScenarioMatrixTargetPlanInput();
+		disambiguated.scenarioMatrix!.rowsLeftOpen = [
+			{
+				id: "row-open",
+				branch: "happy path",
+				reason: "different-primary-signal",
+				followUpHint: "Plan separately.",
+			},
+		];
+		disambiguated.branchEvidence = [
+			{
+				branch: "focused happy path",
+				rowIds: ["row-happy-path"],
+				required: true,
+				plannedSignalIds: ["signal-auth"],
+				rationale: "Required in-scope row.",
+			},
+			{
+				branch: "deferred happy path",
+				rowIds: ["row-open"],
+				required: false,
+				plannedSignalIds: [],
+				rationale: "Deferred left-open row.",
+			},
+		];
+		const disambiguatedCodes = collectTargetPlanGraphDiagnostics(disambiguated, { mode: "submit" }).map(
+			diagnostic => diagnostic.code,
+		);
+		expect(disambiguatedCodes).not.toContain("matrix.duplicate_branch");
+		expect(disambiguatedCodes).not.toContain("matrix.branch_missing_evidence");
+
+		const unknownRow = validScenarioMatrixTargetPlanInput();
+		unknownRow.branchEvidence[0]!.rowIds = ["missing-row"];
+		const unknownRowDiagnostic = collectTargetPlanGraphDiagnostics(unknownRow, { mode: "submit" }).find(
+			diagnostic => diagnostic.code === "branch.unknown_row_id",
+		);
+		expect(unknownRowDiagnostic).toMatchObject({
+			path: "/branch_evidence/0/row_ids/0",
+			offender: { id: "missing-row" },
+		});
+
+		const contradictoryBranch = validScenarioMatrixTargetPlanInput();
+		contradictoryBranch.branchEvidence[0] = {
+			...contradictoryBranch.branchEvidence[0]!,
+			branch: "admin path",
+			rowIds: ["row-happy-path"],
+		};
+		const contradictoryBranchDiagnostic = collectTargetPlanGraphDiagnostics(contradictoryBranch, {
+			mode: "submit",
+		}).find(diagnostic => diagnostic.code === "branch.row_id_branch_mismatch");
+		expect(contradictoryBranchDiagnostic).toMatchObject({
+			path: "/branch_evidence/0/row_ids/0",
+			offender: { id: "row-happy-path", value: "happy path" },
+		});
+
+		const rowLinkedMismatch = validScenarioMatrixTargetPlanInput();
+		rowLinkedMismatch.verificationSignals = [
+			...rowLinkedMismatch.verificationSignals,
+			{ ...rowLinkedMismatch.verificationSignals[0]!, id: "signal-support", role: "supporting" },
+		];
+		rowLinkedMismatch.branchEvidence[0] = {
+			...rowLinkedMismatch.branchEvidence[0]!,
+			rowIds: ["row-happy-path"],
+			plannedSignalIds: ["signal-support"],
+		};
+		const rowLinkedMismatchDiagnostic = collectTargetPlanGraphDiagnostics(rowLinkedMismatch, { mode: "submit" }).find(
+			diagnostic => diagnostic.code === "branch.signal_mismatch",
+		);
+		expect(rowLinkedMismatchDiagnostic).toMatchObject({
+			path: "/branch_evidence/0/planned_signal_ids/0",
+			message: "required branch happy path plans signal signal-support but row row-happy-path omits it",
+		});
 	});
 });

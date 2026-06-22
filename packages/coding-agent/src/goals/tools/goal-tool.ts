@@ -241,6 +241,8 @@ const verificationApertureSchema = z
 		primary_signal_id: z.string(),
 		blast_radius: blastRadiusSchema,
 		confidence_target: signalConfidenceSchema,
+		blast_radius_scope: z.string().optional(),
+		confidence_rationale: z.string().optional(),
 		layer_rationale: z.string(),
 		residual_uncertainty: z.array(z.string()),
 		omitted_layers: z.array(
@@ -266,6 +268,7 @@ const verificationSignalSchema = z
 		expected_outcome: z.string(),
 		required: z.boolean(),
 		confidence_if_satisfied: signalConfidenceSchema,
+		confidence_rationale: z.string().optional(),
 		stale_if: z.array(z.string()),
 	})
 	.strict();
@@ -275,6 +278,7 @@ const concernCheckSchema = z
 		id: z.string(),
 		kind: concernKindSchema,
 		why_independent: z.string(),
+		lens: z.string().optional(),
 		covered_by_signal_ids: z.array(z.string()),
 	})
 	.strict();
@@ -287,6 +291,7 @@ const scopeCalibrationSchema = z
 			"verifier-repair",
 			"external-authority-slice",
 		]),
+		right_sizing_rationale: z.string().optional(),
 		why_not_smaller: z.array(z.string()),
 		why_not_larger: z.array(z.string()),
 		included_related_work: z.array(
@@ -310,6 +315,7 @@ const scopeCalibrationSchema = z
 						"non-goal",
 					]),
 					follow_up_hint: z.string().optional(),
+					rationale: z.string().optional(),
 				})
 				.strict(),
 		),
@@ -323,6 +329,7 @@ const branchEvidenceSchema = z
 		branch: z.string(),
 		required: z.boolean(),
 		planned_signal_ids: z.array(z.string()),
+		row_ids: z.array(z.string()).optional(),
 		rationale: z.string(),
 	})
 	.strict();
@@ -359,6 +366,7 @@ const scenarioMatrixOpenRowSchema = z
 			"non-goal",
 			"unsafe-to-bundle",
 		]),
+		rationale: z.string().optional(),
 		follow_up_hint: z.string(),
 	})
 	.strict();
@@ -387,6 +395,7 @@ const targetWorkstreamSchema = z
 		id: z.string(),
 		label: z.string(),
 		kind: workstreamKindSchema,
+		role: z.string().optional(),
 		files: z.array(z.string()),
 		contract_inputs: z.array(z.string()),
 		contract_outputs: z.array(z.string()),
@@ -638,16 +647,20 @@ const TARGET_PLAN_PAYLOAD_FIELD_ALIASES: Record<string, string> = {
 	dryRun: "dry_run",
 	productIntention: "product_intention",
 	confidenceTarget: "confidence_target",
+	blastRadiusScope: "blast_radius_scope",
+	confidenceRationale: "confidence_rationale",
 	layerRationale: "layer_rationale",
 	residualUncertainty: "residual_uncertainty",
 	omittedLayers: "omitted_layers",
 	whyIndependent: "why_independent",
 	rightSizingBasis: "right_sizing_basis",
+	rightSizingRationale: "right_sizing_rationale",
 	whyNotSmaller: "why_not_smaller",
 	whyNotLarger: "why_not_larger",
 	includedRelatedWork: "included_related_work",
 	deferredRelatedWork: "deferred_related_work",
 	signalIds: "signal_ids",
+	rowIds: "row_ids",
 	followUpHint: "follow_up_hint",
 	targetUnitRuleIds: "target_unit_rule_ids",
 	targetUnitExemptions: "target_unit_exemptions",
@@ -1036,6 +1049,7 @@ function mapScenarioMatrix(params: z.infer<typeof scenarioMatrixSchema>): GoalSu
 			id: row.id,
 			branch: row.branch,
 			reason: row.reason,
+			rationale: row.rationale,
 			followUpHint: row.follow_up_hint,
 		})),
 		splittingSafety: {
@@ -1070,6 +1084,7 @@ function mapTargetCard(params: z.infer<typeof targetCardSchema>): GoalSubmitTarg
 			id: workstream.id,
 			label: workstream.label,
 			kind: workstream.kind,
+			role: workstream.role,
 			files: workstream.files,
 			contractInputs: workstream.contract_inputs,
 			contractOutputs: workstream.contract_outputs,
@@ -1098,7 +1113,9 @@ function mapSubmitTargetPlanInput(
 			productIntention: params.verification_aperture.product_intention,
 			primarySignalId: params.verification_aperture.primary_signal_id,
 			blastRadius: params.verification_aperture.blast_radius,
+			blastRadiusScope: params.verification_aperture.blast_radius_scope,
 			confidenceTarget: params.verification_aperture.confidence_target,
+			confidenceRationale: params.verification_aperture.confidence_rationale,
 			layerRationale: params.verification_aperture.layer_rationale,
 			residualUncertainty: params.verification_aperture.residual_uncertainty,
 			omittedLayers: params.verification_aperture.omitted_layers.map(layer => ({ ...layer })),
@@ -1114,16 +1131,19 @@ function mapSubmitTargetPlanInput(
 			expectedOutcome: signal.expected_outcome,
 			required: signal.required,
 			confidenceIfSatisfied: signal.confidence_if_satisfied,
+			confidenceRationale: signal.confidence_rationale,
 			staleIf: signal.stale_if,
 		})),
 		concernChecks: params.concern_checks.map(check => ({
 			id: check.id,
 			kind: check.kind,
 			whyIndependent: check.why_independent,
+			lens: check.lens,
 			coveredBySignalIds: check.covered_by_signal_ids,
 		})),
 		scopeCalibration: {
 			rightSizingBasis: params.scope_calibration.right_sizing_basis,
+			rightSizingRationale: params.scope_calibration.right_sizing_rationale,
 			whyNotSmaller: params.scope_calibration.why_not_smaller,
 			whyNotLarger: params.scope_calibration.why_not_larger,
 			includedRelatedWork: params.scope_calibration.included_related_work.map(item => ({
@@ -1134,6 +1154,7 @@ function mapSubmitTargetPlanInput(
 			deferredRelatedWork: params.scope_calibration.deferred_related_work.map(item => ({
 				item: item.item,
 				reason: item.reason,
+				rationale: item.rationale,
 				followUpHint: item.follow_up_hint,
 			})),
 			targetUnitRuleIds: params.scope_calibration.target_unit_rule_ids,
@@ -1146,6 +1167,7 @@ function mapSubmitTargetPlanInput(
 			branch: branch.branch,
 			required: branch.required,
 			plannedSignalIds: branch.planned_signal_ids,
+			rowIds: branch.row_ids,
 			rationale: branch.rationale,
 		})),
 		excludedWorkReview: params.excluded_work_review.map(item => ({
@@ -1386,7 +1408,6 @@ function targetPlanPayloadFromRaw(params: unknown): unknown {
 	const { op: _op, payload_file_path: _payloadFilePath, ...payload } = params as Record<string, unknown>;
 	return payload;
 }
-
 function schemaDiagnosticCode(issue: z.ZodError["issues"][number]): string {
 	if (issue.code === "unrecognized_keys") return "schema.unrecognized_key";
 	if (issue.code === "invalid_value") return "schema.invalid_enum";
@@ -1404,11 +1425,24 @@ function schemaDiagnosticGuidance(issue: z.ZodError["issues"][number], params?: 
 		const hint = layerAliasHint(submitted);
 		return `Allowed layer values: ${VERIFICATION_LAYER_VALUES.join(", ")}.${hint}`;
 	}
-	if (path.endsWith("/role")) return `Allowed role values: ${SIGNAL_ROLE_VALUES.join(", ")}.`;
-	if (path.endsWith("/confidence_target")) return `Allowed confidence values: ${SIGNAL_CONFIDENCE_VALUES.join(", ")}.`;
-	if (path.endsWith("/blast_radius")) return `Allowed blast radius values: ${BLAST_RADIUS_VALUES.join(", ")}.`;
+	if (/^target_card\/workstreams\/\d+\/role$/.test(path)) {
+		return "Workstream role must be a string. Keep kind as the enum and put the specific domain role in role.";
+	}
+	if (/^verification_signals\/\d+\/role$/.test(path)) return `Allowed role values: ${SIGNAL_ROLE_VALUES.join(", ")}.`;
+	if (path.endsWith("/confidence_target") || path.endsWith("/confidence_if_satisfied")) {
+		return `Allowed confidence values: ${SIGNAL_CONFIDENCE_VALUES.join(", ")}. Put specific confidence scope in confidence_rationale.`;
+	}
+	if (path.endsWith("/blast_radius")) {
+		return `Allowed blast radius values: ${BLAST_RADIUS_VALUES.join(", ")}. Put the concrete affected surface in blast_radius_scope.`;
+	}
 	if (path.endsWith("/kind")) {
-		return `Allowed concern/workstream kind values: ${CONCERN_KIND_VALUES.join(", ")}; workstream kinds: ${WORKSTREAM_KIND_VALUES.join(", ")}.`;
+		return `Allowed concern/workstream kind values: ${CONCERN_KIND_VALUES.join(", ")}; workstream kinds: ${WORKSTREAM_KIND_VALUES.join(", ")}. Put specific domain meaning in concern_checks[].lens or target_card.workstreams[].role.`;
+	}
+	if (path.endsWith("/right_sizing_basis")) {
+		return "Allowed right_sizing_basis values: product-signal, minimum-domain-unit, verifier-repair, external-authority-slice. Put the specific sizing argument in right_sizing_rationale.";
+	}
+	if (path.endsWith("/reason") && (path.includes("rows_left_open") || path.includes("deferred_related_work"))) {
+		return "Use the enum reason here and preserve the specific boundary in the sibling rationale field.";
 	}
 	if (path.endsWith("/plan_depth")) return `Allowed plan_depth values: ${TARGET_PLAN_DEPTH_VALUES.join(", ")}.`;
 	if (path === "verification_aperture/primary_signal_id") {
@@ -1523,15 +1557,21 @@ function collectTargetPlanMarkdownAgreementDiagnostics(
 		const branchOrder = left.branch.localeCompare(right.branch);
 		return branchOrder === 0 ? left.id.localeCompare(right.id) : branchOrder;
 	});
+	const rowIdsLinkedByPayload = new Set(input.branchEvidence.flatMap(branch => branch.rowIds ?? []));
 	for (const row of rows) {
 		if (markdownMentionsAny(markdown, [row.branch, row.id])) continue;
+		const linkedByRowId = rowIdsLinkedByPayload.has(row.id);
 		diagnostics.push(
 			targetPlanMarkdownDiagnostic({
-				mode,
+				mode: linkedByRowId ? "lint" : mode,
 				code: "plan_markdown.branch_missing",
 				path: ["plan_file_path"],
-				message: `target plan Markdown must mention in-scope branch ${row.branch} or row ${row.id}`,
-				guidance: "Patch Implementation or Verification to name the branch/row the executor must close.",
+				message: linkedByRowId
+					? `target plan Markdown should mention in-scope branch ${row.branch} or row ${row.id}`
+					: `target plan Markdown must mention in-scope branch ${row.branch} or row ${row.id}`,
+				guidance: linkedByRowId
+					? "Payload row_ids preserve graph linkage; patch Markdown only if executor-facing branch prose is missing."
+					: "Patch Markdown with executor-facing branch prose or add branch_evidence.row_ids when the payload intentionally preserves graph linkage.",
 				offender: { kind: "matrix_row", id: row.id },
 			}),
 		);
@@ -1667,17 +1707,26 @@ function formatSubmitTargetPlanSchemaError(error: z.ZodError, params?: unknown):
 		const hint = layerAliasHint(submitted);
 		return `submit_target_plan invalid at ${path}: allowed values are ${VERIFICATION_LAYER_VALUES.join(", ")}.${hint} Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
 	}
-	if (path.endsWith("/role")) {
+	if (/^target_card\/workstreams\/\d+\/role$/.test(path)) {
+		return `submit_target_plan invalid at ${path}: workstream role must be a string; keep kind as the enum and put the specific domain role in role. Call goal({op:"get"}) and reuse the target-plan submit identity.`;
+	}
+	if (/^verification_signals\/\d+\/role$/.test(path)) {
 		return `submit_target_plan invalid at ${path}: allowed values are ${SIGNAL_ROLE_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
 	}
-	if (path.endsWith("/confidence_target")) {
-		return `submit_target_plan invalid at ${path}: allowed values are ${SIGNAL_CONFIDENCE_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	if (path.endsWith("/confidence_target") || path.endsWith("/confidence_if_satisfied")) {
+		return `submit_target_plan invalid at ${path}: allowed values are ${SIGNAL_CONFIDENCE_VALUES.join(", ")}; put specific confidence scope in confidence_rationale. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
 	}
 	if (path.endsWith("/blast_radius")) {
-		return `submit_target_plan invalid at ${path}: allowed values are ${BLAST_RADIUS_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+		return `submit_target_plan invalid at ${path}: allowed values are ${BLAST_RADIUS_VALUES.join(", ")}; put the concrete affected surface in blast_radius_scope. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
 	}
 	if (path.endsWith("/kind")) {
-		return `submit_target_plan invalid at ${path}: allowed values are ${CONCERN_KIND_VALUES.join(", ")}. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+		return `submit_target_plan invalid at ${path}: allowed values are ${CONCERN_KIND_VALUES.join(", ")}; put specific domain meaning in concern_checks[].lens or target_card.workstreams[].role. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.`;
+	}
+	if (path.endsWith("/right_sizing_basis")) {
+		return 'submit_target_plan invalid at scope_calibration/right_sizing_basis: allowed values are product-signal, minimum-domain-unit, verifier-repair, external-authority-slice; put the specific sizing argument in right_sizing_rationale. Call goal({op:"get"}) and reuse the target-plan submit identity.';
+	}
+	if (path.endsWith("/reason") && (path.includes("rows_left_open") || path.includes("deferred_related_work"))) {
+		return `submit_target_plan invalid at ${path}: use the enum reason here and preserve the specific boundary in the sibling rationale field. Call goal({op:"get"}) and reuse the target-plan submit identity.`;
 	}
 	if (path === "verification_aperture/primary_signal_id") {
 		const submitted = getValueAtIssuePath(params, issue.path);

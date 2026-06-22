@@ -75,6 +75,7 @@ export interface GoalScenarioMatrixOpenRow {
 		| "blocked-external"
 		| "non-goal"
 		| "unsafe-to-bundle";
+	rationale?: string;
 	followUpHint: string;
 }
 
@@ -99,6 +100,7 @@ export interface GoalTargetWorkstream {
 	id: string;
 	label: string;
 	kind: "main" | "backend-rust" | "app-ui" | "e2e-harness" | "docs-changelog" | "other";
+	role?: string;
 	files: string[];
 	contractInputs: string[];
 	contractOutputs: string[];
@@ -329,6 +331,7 @@ export interface GoalVerificationSignal {
 	expectedOutcome: string;
 	required: boolean;
 	confidenceIfSatisfied: GoalSignalConfidence;
+	confidenceRationale?: string;
 	staleIf: string[];
 }
 
@@ -336,6 +339,7 @@ export interface GoalConcernCheck {
 	id: string;
 	kind: GoalConcernKind;
 	whyIndependent: string;
+	lens?: string;
 	coveredBySignalIds: string[];
 }
 
@@ -344,13 +348,16 @@ export interface GoalVerificationAperture {
 	primarySignalId: string;
 	blastRadius: GoalBlastRadius;
 	confidenceTarget: GoalSignalConfidence;
+	blastRadiusScope?: string;
 	layerRationale: string;
+	confidenceRationale?: string;
 	residualUncertainty: string[];
 	omittedLayers: Array<{ layer: GoalVerificationLayer; reason: string }>;
 }
 
 export interface GoalScopeCalibration {
 	rightSizingBasis: "product-signal" | "minimum-domain-unit" | "verifier-repair" | "external-authority-slice";
+	rightSizingRationale?: string;
 	whyNotSmaller: string[];
 	whyNotLarger: string[];
 	includedRelatedWork: Array<{ item: string; reason: string; signalIds: string[] }>;
@@ -363,6 +370,7 @@ export interface GoalScopeCalibration {
 			| "blocked-external"
 			| "non-goal";
 		followUpHint?: string;
+		rationale?: string;
 	}>;
 	targetUnitRuleIds?: string[];
 	targetUnitExemptions?: Array<{ ruleId: string; rationale: string }>;
@@ -378,6 +386,7 @@ export interface GoalTargetPlanBranchEvidence {
 	branch: string;
 	required: boolean;
 	plannedSignalIds: string[];
+	rowIds?: string[];
 	rationale: string;
 }
 
@@ -530,6 +539,7 @@ export interface GoalTargetPlanExecutionSignalSummary {
 	claim: string;
 	method: string;
 	expectedOutcome: string;
+	confidenceRationale?: string;
 	staleIf: string[];
 }
 
@@ -546,6 +556,7 @@ export interface GoalTargetPlanExecutionOpenScenarioSummary {
 	id: string;
 	branch: string;
 	reason: GoalScenarioMatrixOpenRow["reason"];
+	rationale?: string;
 	followUpHint: string;
 }
 
@@ -570,10 +581,14 @@ export interface GoalTargetPlanExecutionSummary {
 	implementationFanoutRequired?: boolean;
 	implementationFiles: string[];
 	workstreams?: Array<
-		Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "files" | "contractInputs" | "contractOutputs">
+		Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "role" | "files" | "contractInputs" | "contractOutputs">
 	>;
 	sharedContract?: string;
 	acceptanceRows?: GoalTargetCard["acceptanceRows"];
+	verificationAperture?: GoalVerificationAperture;
+	concernChecks?: GoalConcernCheck[];
+	scopeCalibration?: GoalScopeCalibration;
+	branchEvidence?: GoalTargetPlanBranchEvidence[];
 	requiredSignals: GoalTargetPlanExecutionSignalSummary[];
 	scenarioRowsInScope?: GoalTargetPlanExecutionScenarioSummary[];
 	scenarioRowsLeftOpen?: GoalTargetPlanExecutionOpenScenarioSummary[];
@@ -836,7 +851,7 @@ export interface GoalTargetPlanApprovedDetails {
 	primarySignalGroupId?: string;
 	matrixRowCounts?: { inScope: number; leftOpen: number };
 	implementationFanoutRequired?: boolean;
-	workstreamSummary?: Array<Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "files">>;
+	workstreamSummary?: Array<Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "role" | "files">>;
 	executionSummary?: GoalTargetPlanExecutionSummary;
 }
 
@@ -1488,6 +1503,7 @@ function cloneTargetPlanBranchEvidence(
 	return branches?.map(branch => ({
 		...branch,
 		plannedSignalIds: [...branch.plannedSignalIds],
+		rowIds: branch.rowIds ? [...branch.rowIds] : undefined,
 	}));
 }
 
@@ -1932,6 +1948,7 @@ function normalizeScenarioMatrixOpenRow(value: unknown): GoalScenarioMatrixOpenR
 		id: value.id,
 		branch: value.branch,
 		reason,
+		rationale: optionalString(value.rationale),
 		followUpHint: value.followUpHint,
 	};
 }
@@ -2009,6 +2026,7 @@ function normalizeTargetWorkstream(value: unknown): GoalTargetWorkstream | undef
 		id: value.id,
 		label: value.label,
 		kind,
+		role: optionalString(value.role),
 		files: stringArray(value.files),
 		contractInputs: stringArray(value.contractInputs),
 		contractOutputs: stringArray(value.contractOutputs),
