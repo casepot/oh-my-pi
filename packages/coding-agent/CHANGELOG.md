@@ -22,6 +22,8 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed goal-mode target selection guidance so agents acquire targets from grounded repo evidence and candidate comparisons before calling `start_target` or `next_target`.
+
 - Changed goal-mode blocked recovery to use explicit blocked-state records and `recover_blocked_state` identity handshakes for failed/stale target plans and checkpoint external pauses.
 - Changed goal-mode prompts to render a load-bearing controller surface by run mode, keeping full audit checkpoint state in tool details and side-agent artifacts instead of the always-on context.
 - Changed approved goal target-plan prompts to carry plan references, hashes, and revisions instead of injecting the full plan body by default.

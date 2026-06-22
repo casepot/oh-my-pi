@@ -16,7 +16,7 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - `create`: start a parent goal. Requires `objective`; optional `token_budget` must be a positive integer; optional `parent_frame` seeds claim/gate/boundary/residual/authority state. Use only when no active or paused goal already exists.
 - `get`: inspect current goal state: parent frame, run mode, target history, current target, checkpoints, resolutions, verifier repair, and remaining budget.
 - `resume`: reactivate a paused parent goal without changing its run mode.
-- `start_target`: start a bounded current target. Requires `title`, `desired_future_claim`, and `closure_standard`. Optional: `expected_parent_contribution`, `parent_deliverable_ids`, `baseline_refs`, `gate_refs`, `evidence_expectation`, `non_goals`, `forbidden_claims`, `stale_if`, `linked_verifier_blocker_ids`.
+- `start_target`: commit a grounded bounded target after acquisition. Requires `title`, `desired_future_claim`, and `closure_standard`. Optional: `expected_parent_contribution`, `parent_deliverable_ids`, `baseline_refs`, `gate_refs`, `evidence_expectation`, `non_goals`, `forbidden_claims`, `stale_if`, `linked_verifier_blocker_ids`.
 - `target_plan_schema`: during `planning-target`, return the payload schema/reference text without mutating goal state. Call before drafting the payload, or after schema diagnostics mention unknown keys or invalid object shapes; do not guess aliases, nesting, enum values, or array/object shapes.
 - `submit_target_plan` / `lint_target_plan` / `fail_target_plan`: during `planning-target`, use file-backed `payload_file_path` calls, never inline payload objects. Payload JSON sidecar is canonical for lint/submit; Markdown is executor-facing narrative.
 - `recover_blocked_state`: after user/broader-check/external input resolves an open `blocked_state`, recover using exactly one listed `blocked_state.allowedActions` item and the source identity from `blocked_state`. Target-plan blocks restart planning for the same active target with a fresh target-plan id/revision. Checkpoint-external-pause blocks either start the next target or enter parent-completion verification.
@@ -27,17 +27,17 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 </operations>
 
 <target-aperture>
-Targets are product-meaningful completion units, not process phases or miniature parent goals.
-- Project/domain target rules override generic splitting. If they define a minimum target unit, `start_target` MUST use that unit.
-- NEVER start targets for internal process phases such as planning, implementation, evidence review, record writing, closure, recomposition, or reviewer passes.
-- Absent project-specific rules, start the smallest desired-future claim whose primary verification signal becomes truthful.
-- Same primary signal stays together: callers, contracts, state, errors, tests, docs/operator changes.
-- Split independent primary signals, authority boundaries, blast radii, or unrelated deliverables.
-- Too narrow: plumbing/parser/schema-only work that omits same-signal integration.
-- Too broad: diffuse bundles, parent-sized umbrellas, or closure standards that satisfy nearly all parent completion criteria.
-- Include `parent_deliverable_ids` when the compact deliverable map shows which parent deliverables this target contributes to.
-- Include `non_goals` and `forbidden_claims` only when they prevent target closure from laundering parent completion or unrelated work.
-- At checkpoint resolution, prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence. Use `parent_completion_candidate` only when remaining work is genuinely parent verification, not unresolved implementation, evidence collection, review convergence, or domain closeout.
+Targets are product-meaningful completion units, not discovery notes, process phases, or miniature parent goals.
+- `start_target` commits a grounded target after acquisition, not exploration.
+- Active goal context owns acquisition workflow and candidate comparison.
+- NEVER target process phases: planning, implementation, review, record writing, closure, recomposition.
+- Project/domain rules override generic splitting; never violate their minimum unit.
+- One target = one desired-future claim + one primary verification signal.
+- Same signal stays together; split independent signals, authority boundaries, blast radii, or unrelated deliverables.
+- Reject plumbing/parser-only slices that omit same-signal callers/tests; reject parent-sized cuts.
+- Include `parent_deliverable_ids` when compact deliverables show contribution.
+- Include `non_goals` / `forbidden_claims` only to prevent parent-completion laundering or unrelated work.
+- At checkpoint resolution, use `next_target` for unresolved implementation/evidence/review/domain closeout; use `parent_completion_candidate` only for verifier confirmation.
 </target-aperture>
 
 <target-planning>

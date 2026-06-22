@@ -35,10 +35,15 @@ Run-mode contract:
 
 {{#when runMode "==" "working-target"}}
 Working-target action:
-- Continue the current target. If none exists, start one before substantial implementation.
+- Continue the current target.
+- No current target? Target acquisition precedes `start_target`.
+- Use `controller_surface`; call `goal({op:"get"})` when candidate cuts depend on omitted audit detail.
+- Read repo/test/docs until product signals, same-signal work, split boundaries, and parent deliverable contribution are grounded.
+- Compare candidate cuts against `target_aperture_guidance`, `target_unit_rules`, deliverables, and parent truth.
+- Reject first-plausible, too-small, and parent-sized cuts.
+- Start the smallest product-meaningful/domain-minimum claim whose primary verification signal becomes truthful.
 - Project/domain target rules override generic splitting. If they define a minimum unit, use that unit.
 - NEVER start targets for internal process phases: planning, implementation, evidence review, record writing, closure, recomposition, reviewer passes.
-- Otherwise choose the smallest product-meaningful/domain-minimum desired-future claim whose primary verification signal becomes truthful.
 - Same primary signal stays together: callers, contracts, state, errors, tests, docs/operator changes.
 - Split when work crosses independent primary signals, authority boundaries, blast radii, or unrelated deliverables.
 - Too narrow: plumbing/parser/schema-only work that omits same-signal integration.
@@ -63,6 +68,7 @@ Target-planning action:
 Checkpoint-resolution action:
 - Do not implement. Inspect checkpoint guidance, then call `resolve_checkpoint` before ordinary tools.
 - Prefer `decision:"next_target"` while any parent deliverable lacks accepted current evidence.
+- Before `next_target`, read enough repo evidence and compare candidate cuts; reject first-plausible gaps.
 - The next target must honor project/domain target-unit rules.
 - Use `parent_completion_candidate` only when remaining work is genuinely verifier confirmation.
 - `resolve_checkpoint.next_target` is legal only for `decision:"next_target"`; omit it for `parent_completion_candidate`.
@@ -79,6 +85,7 @@ Parent-completion-candidate action:
 {{#when runMode "==" "awaiting-verification-repair"}}
 Verifier-repair action:
 - The parent goal is not complete. Repair/gather evidence for verifier blockers.
+- Before a repair target, read blocker evidence and repo context; target only the linked blocker signal.
 - If no current target links to the blockers, start a focused repair/evidence target with `linked_verifier_blocker_ids`.
 - Do not retry `complete` until blockers have fresh repair/evidence.
 {{/when}}

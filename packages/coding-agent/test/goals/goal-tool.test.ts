@@ -33,6 +33,8 @@ import {
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import goalContinuationPrompt from "../../src/prompts/goals/goal-continuation.md" with { type: "text" };
+import goalModeActivePrompt from "../../src/prompts/goals/goal-mode-active.md" with { type: "text" };
 import goalTargetExecutionReviewerAssignment from "../../src/prompts/goals/goal-target-execution-reviewer-assignment.md" with {
 	type: "text",
 };
@@ -481,6 +483,32 @@ describe("GoalTool", () => {
 		expect(goalToolPrompt).toContain("do not guess aliases, nesting, enum values, or array/object shapes");
 		expect(goalTargetExecutionReviewerAssignment).toContain("Markdown/payload semantic drift");
 		expect(goalTargetExecutionReviewerAssignment).toContain("camelCase aliases, guessed nesting");
+	});
+
+	it("keeps target acquisition guidance before target creation", () => {
+		expect(goalModeActivePrompt).toContain("Target acquisition precedes `start_target`");
+		expect(goalModeActivePrompt).toContain(
+			'call `goal({op:"get"})` when candidate cuts depend on omitted audit detail',
+		);
+		expect(goalModeActivePrompt).toContain(
+			"Read repo/test/docs until product signals, same-signal work, split boundaries, and parent deliverable contribution are grounded.",
+		);
+		expect(goalModeActivePrompt).toContain(
+			"`target_aperture_guidance`, `target_unit_rules`, deliverables, and parent truth",
+		);
+		expect(goalModeActivePrompt).toContain("Reject first-plausible, too-small, and parent-sized cuts.");
+		expect(goalModeActivePrompt).toContain(
+			"Before `next_target`, read enough repo evidence and compare candidate cuts; reject first-plausible gaps.",
+		);
+		expect(goalContinuationPrompt).toContain(
+			"No target? Apply active goal target-acquisition guidance before `start_target`.",
+		);
+		expect(goalContinuationPrompt).toContain("`next_target` requires target acquisition");
+		expect(goalToolPrompt).toContain("commits a grounded target after acquisition");
+		expect(goalToolPrompt).toContain("Active goal context owns acquisition workflow and candidate comparison");
+		expect(goalToolPrompt).toContain("NEVER target process phases");
+		expect(goalToolPrompt).toContain("Same signal stays together");
+		expect(goalToolPrompt).toContain("Reject plumbing/parser-only slices");
 	});
 
 	it("routes create/get/complete operations and returns completion budget details", async () => {
