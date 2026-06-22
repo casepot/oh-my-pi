@@ -11,6 +11,7 @@ The following controller surface is authoritative for next-action routing. Full 
 
 Compaction policy:
 - `working-target`: preserve and resume the same current target.
+- `planning-target`: recover `plan_file_path` and `payload_file_path`; continue target planning only.
 - `awaiting-checkpoint-resolution`: route to checkpoint guidance and `resolve_checkpoint`.
 - `awaiting-parent-completion`: call `goal({op:"complete"})`; do not resume implementation.
 - `awaiting-verification-repair`: require fresh repair/evidence before another `complete`.

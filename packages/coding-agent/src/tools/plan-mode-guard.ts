@@ -173,8 +173,25 @@ function enforcePlanModeLocalWrite(
 	);
 }
 
+function targetPlanPayloadFilePath(planFilePath: string): string {
+	if (planFilePath.endsWith(".md")) return `${planFilePath.slice(0, -3)}.payload.json`;
+	return `${planFilePath}.payload.json`;
+}
+
+function targetMatchesAnyAllowedPath(
+	session: ToolSession,
+	targetPath: string,
+	allowedPaths: readonly string[],
+): boolean {
+	return allowedPaths.some(allowedPath => targetMatchesAllowedPlanPath(session, targetPath, allowedPath));
+}
+
+function targetPlanGuardPathList(allowedPlanPath: string): string {
+	return `${allowedPlanPath}; ${targetPlanPayloadFilePath(allowedPlanPath)}`;
+}
+
 function targetPlanGuardMessage(allowedPlanPath: string): string {
-	return `Goal target planning: writes are limited to the active target plan file: ${allowedPlanPath}.`;
+	return `Goal target planning: writes are limited to the active target plan file or payload JSON sidecar: ${targetPlanGuardPathList(allowedPlanPath)}.`;
 }
 
 export function enforceReadOnlyPlanningWrite(
@@ -204,7 +221,8 @@ export function enforceReadOnlyPlanningWrite(
 		throw new ToolError(`${targetPlanGuardMessage(allowedPlanPath)} Deleting files is not allowed.`);
 	}
 
-	if (targetMatchesAllowedPlanPath(session, targetPath, allowedPlanPath)) return;
+	const allowedPaths = [allowedPlanPath, targetPlanPayloadFilePath(allowedPlanPath)];
+	if (targetMatchesAnyAllowedPath(session, targetPath, allowedPaths)) return;
 
 	throw new ToolError(targetPlanGuardMessage(allowedPlanPath));
 }
@@ -214,7 +232,8 @@ export function enforceReadOnlyPlanningWrite(
  * plan. Writes and edits to the `local://` artifact sandbox are allowed (that is
  * where the plan and any scratch notes live); anything that would touch the
  * working tree — or rename/delete a file — is rejected. Goal target planning
- * reuses the same call sites but only allows the active target-plan file.
+ * reuses the same call sites but only allows the active target-plan file and
+ * its structured payload JSON sidecar.
  */
 export function enforcePlanModeWrite(
 	session: ToolSession,

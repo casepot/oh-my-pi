@@ -288,6 +288,7 @@ describe("createTools", () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({
 				"goal.enabled": true,
+				"dev.autoqa": true,
 			}),
 			agentRegistry: registry,
 			getAgentId: () => "Main",
@@ -354,6 +355,13 @@ describe("createTools", () => {
 		if (!ircTool) throw new Error("expected irc tool");
 		const ircResult = await ircTool.execute("irc-list", { op: "list" });
 		expect(JSON.stringify(ircResult.content)).not.toContain("Goal target planning is active");
+		const reportTool = tools.find(tool => tool.name === "report_tool_issue");
+		if (!reportTool) throw new Error("expected report_tool_issue tool");
+		const reportResult = await reportTool.execute("report-planning-tool-issue", {
+			tool: "write",
+			report: "planning guard rejected payload sidecar",
+		});
+		expect(JSON.stringify(reportResult.content)).not.toContain("Goal target planning is active");
 		const bashTool = tools.find(tool => tool.name === "bash");
 		if (!bashTool) throw new Error("expected bash tool");
 		let planningError: unknown;
@@ -363,6 +371,7 @@ describe("createTools", () => {
 			planningError = error;
 		}
 		expect(String(planningError)).toContain("Goal target planning is active");
+		expect(String(planningError)).toContain("local://goal-goal-1-target-1-plan.payload.json");
 	});
 
 	it("does not block ordinary tools for paused checkpoint-resolution goals", async () => {

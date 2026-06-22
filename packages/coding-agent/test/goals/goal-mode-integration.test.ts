@@ -889,6 +889,9 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(dispatch?.prompt).toContain("Operator chose equip-completes quest.");
 		expect(dispatch?.prompt).toContain("recoveredFrom");
 		expect(dispatch?.prompt).toContain(reopenedPlan?.id ?? "missing-recovered-plan");
+		expect(dispatch?.prompt).toContain(targetPlanPayloadFilePath(reopenedPlan?.planFilePath ?? "missing-plan.md"));
+		expect(dispatch?.prompt).toContain("`targetPlanSubmitIdentity.payloadFilePath` is the lint/submit authority");
+		expect(dispatch?.prompt).toContain("Schema-only payload fixes MUST NOT cause Markdown churn");
 	});
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");

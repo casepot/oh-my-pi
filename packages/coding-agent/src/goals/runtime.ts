@@ -314,6 +314,10 @@ export interface GoalContinuationPacket {
 	parentFrameVersion?: number;
 	parentFrameKind?: GoalParentFrame["kind"];
 	currentTargetId?: string;
+	currentTargetPlanId?: string;
+	currentTargetPlanRevision?: number;
+	currentTargetPlanFilePath?: string;
+	currentTargetPlanPayloadFilePath?: string;
 	pendingCheckpointId?: string;
 	verificationAttemptId?: string;
 	parentGoalStillActive: boolean;
@@ -796,6 +800,7 @@ function compactTargetPlanForPrompt(plan: GoalTargetPlanRecord | undefined): Goa
 		status: plan.status,
 		revision: plan.revision,
 		planFilePath: plan.planFilePath,
+		payloadFilePath: targetPlanPayloadFilePath(plan.planFilePath),
 		failure: plan.failure,
 		recoveredFrom: plan.recoveredFrom,
 		requiredAction:
@@ -1090,6 +1095,12 @@ export function buildGoalContinuationPacket(
 		parentGoalId: goal.id,
 		parentFrameVersion: state.parentFrameVersion,
 		parentFrameKind: frame?.kind,
+		currentTargetPlanId: goal.currentTargetPlan?.id,
+		currentTargetPlanRevision: goal.currentTargetPlan?.revision,
+		currentTargetPlanFilePath: goal.currentTargetPlan?.planFilePath,
+		currentTargetPlanPayloadFilePath: goal.currentTargetPlan
+			? targetPlanPayloadFilePath(goal.currentTargetPlan.planFilePath)
+			: undefined,
 		currentTargetId: goal.currentTarget?.id,
 		pendingCheckpointId: goal.pendingCheckpointId,
 		verificationAttemptId: goal.verificationRepair?.verificationAttemptId,
@@ -1115,7 +1126,7 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 			return [
 				'Call goal({op:"lint_target_plan", payload_file_path:...}) before submit_target_plan',
 				'Call goal({op:"submit_target_plan", payload_file_path:...}) or goal({op:"fail_target_plan", ...})',
-				"Draft/revise the current target plan",
+				"Edit target plan/payload sidecar in place",
 				"Use read-only task discovery and review",
 				"Create missing target-plan files; edit existing plan and payload sidecar in place",
 			];

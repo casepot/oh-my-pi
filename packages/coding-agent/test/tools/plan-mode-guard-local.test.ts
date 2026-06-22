@@ -207,7 +207,7 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 });
 
 describe("enforceReadOnlyPlanningWrite for goal target planning", () => {
-	it("allows only the active target plan file", () => {
+	it("allows the active target plan file and payload sidecar", () => {
 		const goalMode = createGoalPlanningState("local://goal-goal-1-target-1-plan.md");
 		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", goalMode });
 
@@ -219,11 +219,23 @@ describe("enforceReadOnlyPlanningWrite for goal target planning", () => {
 		).not.toThrow();
 		const absolutePlanPath = resolvePlanPath(session, "local://goal-goal-1-target-1-plan.md");
 		expect(() => enforceReadOnlyPlanningWrite(session, `[${absolutePlanPath}#ABCD]`, { op: "update" })).not.toThrow();
+		expect(() =>
+			enforceReadOnlyPlanningWrite(session, "local://goal-goal-1-target-1-plan.payload.json", { op: "create" }),
+		).not.toThrow();
+		expect(() =>
+			enforceReadOnlyPlanningWrite(session, "[local://goal-goal-1-target-1-plan.payload.json#ABCD]", {
+				op: "update",
+			}),
+		).not.toThrow();
+		const absolutePayloadPath = resolvePlanPath(session, "local://goal-goal-1-target-1-plan.payload.json");
+		expect(() =>
+			enforceReadOnlyPlanningWrite(session, `[${absolutePayloadPath}#ABCD]`, { op: "update" }),
+		).not.toThrow();
 		expect(() => enforceReadOnlyPlanningWrite(session, "local://scratch/notes.md", { op: "update" })).toThrow(
-			/writes are limited to the active target plan file: local:\/\/goal-goal-1-target-1-plan\.md/,
+			/writes are limited to the active target plan file or payload JSON sidecar: local:\/\/goal-goal-1-target-1-plan\.md; local:\/\/goal-goal-1-target-1-plan\.payload\.json/,
 		);
 		expect(() => enforceReadOnlyPlanningWrite(session, "src/foo.ts", { op: "update" })).toThrow(
-			/writes are limited to the active target plan file/,
+			/writes are limited to the active target plan file or payload JSON sidecar/,
 		);
 	});
 

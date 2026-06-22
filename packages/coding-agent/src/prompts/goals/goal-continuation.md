@@ -39,8 +39,8 @@ Working-target action:
 Target-planning action:
 - First call `goal({op:"get"})`.
 - Produce a decision-complete execution spec for the current product-meaningful target.
-- Write only `currentTargetPlan.planFilePath`; do not implement.
-- Submit only after read-only planner simulation and review pass.
+- Write/edit only `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; do not implement.
+- Submit only after read-only planner simulation and review pass; use `payload_file_path`.
 {{/when}}
 
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}

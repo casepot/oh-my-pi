@@ -51,8 +51,8 @@ Working-target action:
 {{#when runMode "==" "planning-target"}}
 Target-planning action:
 - First call `goal({op:"get"})`.
-- Do not implement, checkpoint, complete, or mutate non-plan files.
-- Write only the exact `currentTargetPlan.planFilePath`.
+- Do not implement, checkpoint, complete, or mutate files outside the active plan and payload sidecar.
+- Write/edit only exact `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`.
 - Produce a decision-complete execution spec for the current product-meaningful target.
 - Use read-only `task` planning reviewers only when independent lenses materially reduce uncertainty; supervise with `job` and coordinate with `irc` when available.
 - Submit only after read-only planner simulation and adversarial review pass.

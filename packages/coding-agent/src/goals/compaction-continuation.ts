@@ -31,7 +31,8 @@ function buildGoalContinuationPacketForCompaction(state: GoalModeState): GoalCon
 	let guidance = "Resume the same open target after compaction.";
 	if (state.runMode === "planning-target") {
 		reason = "Context compaction occurred while a target plan is being drafted or reviewed.";
-		guidance = "Resume target planning; do not implement or checkpoint until submit_target_plan is approved.";
+		guidance =
+			'Resume target planning; recover plan_file_path and payload_file_path with goal({op:"get"}); do not implement or checkpoint until submit_target_plan is approved.';
 	} else if (state.runMode === "awaiting-checkpoint-resolution") {
 		transition = "target-checkpoint";
 		reason = "Context compaction occurred while an accepted target checkpoint is awaiting controller resolution.";

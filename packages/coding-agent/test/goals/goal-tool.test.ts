@@ -1332,6 +1332,55 @@ describe("GoalTool", () => {
 		}
 	});
 
+	it("rejects Markdown plan paths as target-plan payload_file_path", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove lint",
+			desiredFutureClaim: "Target-plan lint requires the payload sidecar path.",
+			closureStandard: "Lint output rejects the Markdown plan path as payload_file_path.",
+		});
+		const state = harness.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const localProtocolOptions = createLocalProtocolOptions(tempDir);
+			const payload = buildSubmitTargetPlanParams({
+				targetId: target.id,
+				targetPlanId: plan.id,
+				planFilePath: plan.planFilePath,
+				revision: plan.revision,
+			});
+			await Bun.write(
+				resolvePayloadFilePath(plan.planFilePath, localProtocolOptions),
+				`${JSON.stringify(payload)}\n`,
+			);
+			const tool = new GoalTool(
+				createToolSession({
+					cwd: ".",
+					localProtocolOptions,
+					getGoalRuntime: () => harness.runtime,
+					getGoalModeState: () => harness.getState(),
+				}),
+			);
+
+			const result = await tool.execute("lint-plan-path-as-payload", {
+				op: "lint_target_plan",
+				payload_file_path: plan.planFilePath,
+			});
+
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain(
+				`payload_file_path must equal current target plan sidecar (${targetPlanPayloadFilePath(plan.planFilePath)})`,
+			);
+			expect(text).toContain("Use the payload_file_path from the current target-plan submit identity.");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects invalid target-plan graphs before requesting review", async () => {
 		const base = {
 			targetId: "target-1",

@@ -139,9 +139,9 @@ describe("goal target panel", () => {
 			pendingCheckpointId: "checkpoint-1",
 		});
 		expect(details?.allowedNextActs).toEqual([
-			'Call goal({op:"lint_target_plan", ...}) before submit_target_plan',
-			'Call goal({op:"submit_target_plan", ...}) or goal({op:"fail_target_plan", ...})',
-			"Draft/revise the current target plan",
+			'Call goal({op:"lint_target_plan", payload_file_path:...}) before submit_target_plan',
+			'Call goal({op:"submit_target_plan", payload_file_path:...}) or goal({op:"fail_target_plan", ...})',
+			"Edit target plan/payload sidecar in place",
 		]);
 	});
 
@@ -157,7 +157,9 @@ describe("goal target panel", () => {
 		expect(rendered).toContain(
 			"plan drafting r2 · target-plan-1 · depth standard · signal auth-visible · matrix 1/1 · fanout recommended",
 		);
-		expect(rendered).toContain("next: lint_target_plan → submit_target_plan/fail_target_plan → edit target plan");
+		expect(rendered).toContain(
+			"next: lint_target_plan → submit_target_plan/fail_target_plan → edit target plan/payload",
+		);
 		const renderedLines = rendered.split("\n");
 		expect(renderedLines.every(line => line.trim().length > 0)).toBe(true);
 		expect(renderedLines.length).toBeLessThanOrEqual(4);

@@ -112,7 +112,7 @@ function compactActionFlow(actions: readonly string[]): string | undefined {
 				if (action.includes('op:"submit_target_plan"') && action.includes('op:"fail_target_plan"')) {
 					return "submit_target_plan/fail_target_plan";
 				}
-				if (action === "Draft/revise the current target plan") return "edit target plan";
+				if (action === "Edit target plan/payload sidecar in place") return "edit target plan/payload";
 				return action;
 			})
 			.join(" → "),

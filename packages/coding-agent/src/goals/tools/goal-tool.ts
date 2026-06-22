@@ -1687,7 +1687,7 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 	}
 	if (op === "recover_blocked_state" && response.state?.runMode === "planning-target") {
 		text +=
-			"\n\nBlocked state recovered. Goal mode is planning-target. Write only the new plan_file_path, then submit_target_plan.";
+			"\n\nBlocked state recovered. Goal mode is planning-target. Create missing plan/payload files, then lint and submit with payload_file_path.";
 	} else if (op === "recover_blocked_state" && response.state?.runMode === "awaiting-parent-completion") {
 		text +=
 			'\n\nBlocked state recovered. Next action: call goal({op:"complete"}) for parent completion verification.';

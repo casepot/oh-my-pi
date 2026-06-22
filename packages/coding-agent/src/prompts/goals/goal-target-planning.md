@@ -23,7 +23,7 @@ Tool availability:
 <critical>
 - First action MUST be `goal({op:"get"})`.
 - The plan MUST let a fresh executor complete the current target with zero design decisions.
-- NEVER implement, checkpoint, complete, or mutate non-plan files while planning.
+- NEVER implement, checkpoint, complete, or mutate files outside the active plan and payload sidecar while planning.
 - Create exact `currentTargetPlan.planFilePath` only if missing/empty; otherwise edit it in place.
 - Create exact `targetPlanSubmitIdentity.payloadFilePath` only if missing/empty; otherwise edit it in place.
 - `targetPlanSubmitIdentity.payloadFilePath` is the lint/submit authority.

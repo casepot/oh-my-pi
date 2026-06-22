@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	buildGoalContextSurface,
+	buildGoalContinuationPacket,
 	escapeXmlText,
 	type GoalPersistenceReason,
 	GoalRuntime,
@@ -13,6 +14,7 @@ import {
 	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
 	renderTrustedObjective,
+	targetPlanPayloadFilePath,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type {
 	Goal,
@@ -1325,6 +1327,13 @@ describe("goal runtime", () => {
 		expect(planning.goal.currentTarget?.status).toBe("active");
 		expect(planning.goal.currentTargetPlan?.status).toBe("drafting");
 		expect(planning.goal.currentTargetPlan?.planFilePath).toBe(`local://goal-${planning.goal.id}-target-1-plan.md`);
+		if (!planning.goal.currentTargetPlan) throw new Error("expected current target plan");
+		const surface = renderGoalPromptSurface(planning, planning.goal);
+		expect(surface).toContain(targetPlanPayloadFilePath(planning.goal.currentTargetPlan.planFilePath));
+		const packet = buildGoalContinuationPacket(planning, "context-compaction", "Compaction", "Resume planning");
+		expect(packet.currentTargetPlanPayloadFilePath).toBe(
+			targetPlanPayloadFilePath(planning.goal.currentTargetPlan.planFilePath),
+		);
 		expect(() =>
 			harness.runtime.buildCheckpointCandidate({
 				status: "closed_with_evidence",
@@ -1336,10 +1345,10 @@ describe("goal runtime", () => {
 			}),
 		).toThrow("target planning is pending");
 		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow("target planning is pending");
-		expect(renderGoalPrompt("continuation", planning.goal, planning)).toContain(
-			"Draft/revise the current target plan",
-		);
-		expect(renderGoalPrompt("continuation", planning.goal, planning)).toContain("submit_target_plan");
+		const prompt = renderGoalPrompt("continuation", planning.goal, planning);
+		expect(prompt).toContain("targetPlanSubmitIdentity.payloadFilePath");
+		expect(prompt).toContain("payload_file_path");
+		expect(prompt).toContain("submit_target_plan");
 	});
 
 	it("explains how to recover before checkpointing a paused goal", () => {
