@@ -9,6 +9,21 @@ function previewLine(value: string | undefined): string {
 	return truncateToWidth(normalized, COLLAPSED_PREVIEW_WIDTH);
 }
 
+function listOrNone(items: readonly string[] | undefined): string {
+	return items && items.length > 0 ? items.map(item => `- ${item}`).join("\n") : "(none)";
+}
+
+function workstreamSummaryMarkdown(details: GoalTargetPlanMessageDetails): string {
+	const workstreams = details.workstreamSummary ?? details.targetCard?.workstreams ?? [];
+	if (workstreams.length === 0) return "(none)";
+	return workstreams
+		.map(workstream => {
+			const files = workstream.files.length > 0 ? ` files: ${workstream.files.join(", ")}` : "";
+			return `- ${workstream.id} (${workstream.kind}): ${workstream.label}${files}`;
+		})
+		.join("\n");
+}
+
 export class GoalTargetPlanMessageComponent extends Box {
 	#expanded = false;
 
@@ -49,8 +64,10 @@ export class GoalTargetPlanMessageComponent extends Box {
 		);
 		const planFilePath = previewLine(details?.planFilePath);
 		if (planFilePath) this.addChild(new Text(theme.fg("customMessageText", planFilePath), 0, 1));
+		const claim = previewLine(details?.targetCard?.capabilityClaim);
+		if (claim) this.addChild(new Text(theme.fg("customMessageText", claim), 0, 2));
 		const blocked = this.#blockedPreview(details);
-		if (blocked) this.addChild(new Text(theme.fg("warning", blocked), 0, 2));
+		if (blocked) this.addChild(new Text(theme.fg("warning", blocked), 0, claim ? 3 : 2));
 	}
 
 	#blockedPreview(details: GoalTargetPlanMessageDetails | undefined): string | undefined {
@@ -74,6 +91,16 @@ export class GoalTargetPlanMessageComponent extends Box {
 			)
 			.join("\n");
 		const feedback = details.reviews.map(review => `- ${review.lens}: ${review.feedback}`).join("\n");
+		const card = details.targetCard;
+		const matrix = details.matrixRowCounts
+			? `in_scope: ${details.matrixRowCounts.inScope}\nleft_open: ${details.matrixRowCounts.leftOpen}`
+			: "(none)";
+		const fanout =
+			details.implementationFanoutRequired === undefined
+				? "(unknown)"
+				: details.implementationFanoutRequired
+					? "recommended by workstream/blast-radius metadata; not automatic"
+					: "not required";
 		const sections = [
 			"**Goal target plan**",
 			[
@@ -82,8 +109,14 @@ export class GoalTargetPlanMessageComponent extends Box {
 				`target_plan_id: ${details.targetPlanId}`,
 				`plan_file_path: ${details.planFilePath}`,
 				`revision: ${details.revision}`,
+				`plan_depth: ${details.planDepth ?? "(legacy)"}`,
+				`primary_signal_group_id: ${details.primarySignalGroupId ?? "(unknown)"}`,
 			].join("\n\n"),
 			`**Status**\n\n${details.status}`,
+			`**Target card**\n\n${card ? [`capability: ${card.capabilityClaim}`, `surface: ${card.userVisibleSurface}`, `known limits:\n${listOrNone(card.knownLimits)}`].join("\n\n") : "(none)"}`,
+			`**Scenario matrix**\n\n${matrix}`,
+			`**Workstreams**\n\n${workstreamSummaryMarkdown(details)}`,
+			`**Implementation fanout**\n\n${fanout}`,
 			`**Reviewer statuses**\n\n${reviewerStatuses || "(none)"}`,
 			`**Blocking findings**\n\n${blockingFindings || "(none)"}`,
 			`**Reviewer feedback**\n\n${feedback || "(none)"}`,

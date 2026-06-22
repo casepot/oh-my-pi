@@ -137,6 +137,7 @@ import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
 import type { EvalExecutionComponent } from "./components/eval-execution";
+import { buildGoalTargetPanelDetails, GoalTargetPanelComponent } from "./components/goal-target-panel";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
@@ -449,6 +450,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	omfgContainer: Container;
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
+	goalTargetPanelContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
@@ -528,6 +530,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	#goalTargetPlanningPreviousTools: string[] | undefined;
+	#goalTargetPanel: GoalTargetPanelComponent | undefined;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
@@ -658,6 +661,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.omfgContainer = new Container();
 		this.errorBannerContainer = new Container();
 		this.modelCycleContainer = new Container();
+		this.goalTargetPanelContainer = new Container();
 		this.editor = new CustomEditor(getEditorTheme());
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setAutocompleteMaxVisible(settings.get("autocompleteMaxVisible"));
@@ -686,6 +690,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.hookWidgetContainerBelow = new Container();
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
+		this.#goalTargetPanel = new GoalTargetPanelComponent();
+		this.goalTargetPanelContainer.addChild(this.#goalTargetPanel);
 		this.statusLine = new StatusLineComponent(session);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 
@@ -830,6 +836,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.modelCycleContainer);
 		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
 		this.ui.addChild(this.hookWidgetContainerAbove);
+		this.ui.addChild(this.goalTargetPanelContainer);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.hookWidgetContainerBelow);
 		this.ui.setFocus(this.editor);
@@ -1753,6 +1760,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				? { enabled: this.goalModeEnabled, paused: this.goalModePaused, label }
 				: undefined;
 		this.statusLine.setGoalModeStatus(status);
+		this.#goalTargetPanel?.setDetails(buildGoalTargetPanelDetails(state));
 		this.updateEditorTopBorder();
 		this.ui.requestRender();
 	}

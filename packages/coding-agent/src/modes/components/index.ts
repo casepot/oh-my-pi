@@ -13,6 +13,7 @@ export * from "./footer";
 export * from "./goal-checkpoint-message";
 export * from "./goal-checkpoint-resolution-message";
 export * from "./goal-rubric-message";
+export * from "./goal-target-panel";
 export * from "./goal-target-plan-message";
 export * from "./goal-verification-feedback-message";
 export * from "./hook-editor";
