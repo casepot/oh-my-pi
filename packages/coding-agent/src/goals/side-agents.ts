@@ -38,6 +38,7 @@ import type {
 	GoalCompletionVerifierStructuredOutput,
 	GoalContinuationFocus,
 	GoalDeliverableMapItem,
+	GoalTargetUnitRule,
 	GoalVerificationGap,
 } from "./state";
 
@@ -67,10 +68,32 @@ const deliverableMapItemSchema = {
 	},
 } as const;
 
+const targetUnitRuleSchema = {
+	properties: {
+		id: { type: "string" },
+		kind: {
+			enum: [
+				"complete-acceptance-slice",
+				"scenario-matrix",
+				"gate-prerequisite",
+				"no-process-phase",
+				"same-primary-signal-together",
+				"branch-unblocks-matrix",
+			],
+		},
+		statement: { type: "string" },
+		source: { enum: ["rubric", "checkpoint-guidance", "operator", "built-in"] },
+		enforcement: { enum: ["error", "warning"] },
+	},
+} as const;
+
 const goalRubricOutputSchema = {
 	properties: {
 		rubric: { type: "string" },
 		deliverableMap: { elements: deliverableMapItemSchema },
+	},
+	optionalProperties: {
+		targetUnitRules: { elements: targetUnitRuleSchema },
 	},
 } as const;
 
@@ -283,6 +306,7 @@ export const goalTargetExecutionReviewerAgent = {
 export interface GoalRubricOutput {
 	rubric: string;
 	deliverableMap: GoalDeliverableMapItem[];
+	targetUnitRules?: GoalTargetUnitRule[];
 }
 
 export interface GoalCompletionVerifierOutput extends GoalCompletionVerifierStructuredOutput {
@@ -397,6 +421,7 @@ export function renderGoalCheckpointGuidanceAssignment(input: {
 	goalStateFile: string;
 	goalStateSnapshot: string;
 	checkpointPacket: string;
+	targetUnitRules?: string;
 }): string {
 	return prompt.render(goalCheckpointGuidanceAssignment, input);
 }
@@ -407,6 +432,7 @@ export function renderGoalTargetApertureReviewerAssignment(input: {
 	goalStateSnapshot: string;
 	planFile: string;
 	submissionFile: string;
+	targetUnitRules?: string;
 }): string {
 	return prompt.render(goalTargetApertureReviewerAssignment, input);
 }
@@ -417,6 +443,7 @@ export function renderGoalTargetExecutionReviewerAssignment(input: {
 	goalStateSnapshot: string;
 	planFile: string;
 	submissionFile: string;
+	targetUnitRules?: string;
 }): string {
 	return prompt.render(goalTargetExecutionReviewerAssignment, input);
 }

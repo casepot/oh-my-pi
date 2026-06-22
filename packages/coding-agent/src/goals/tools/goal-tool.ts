@@ -1,13 +1,15 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
-import { formatNumber, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatNumber, isEnoent, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { z } from "zod/v4";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
+import { resolveLocalUrlToPath } from "../../internal-urls";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import goalDescription from "../../prompts/tools/goal.md" with { type: "text" };
 import { formatDuration } from "../../slash-commands/helpers/format";
 import type { ToolSession } from "../../tools";
+import { normalizeLocalScheme, resolveToCwd } from "../../tools/path-utils";
 import { formatErrorDetail, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { renderStatusLine, truncateToWidth } from "../../tui";
@@ -21,8 +23,7 @@ import {
 	type GoalSubmitTargetPlanInput,
 	type GoalTargetPlanFailureInput,
 	remainingTokens,
-	renderTargetPlanSubmitSkeleton,
-	validateTargetPlanSubmissionGraph,
+	targetPlanPayloadFilePath,
 } from "../runtime";
 import type {
 	Goal,
@@ -39,6 +40,8 @@ import type {
 	GoalResidualClassification,
 	GoalStatus,
 	GoalTargetPlanApprovedDetails,
+	GoalTargetPlanLintDiagnostic,
+	GoalTargetPlanLintResult,
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
 	GoalToolDetails,
@@ -204,6 +207,8 @@ const EXCLUDED_WORK_CLASSIFICATION_VALUES = [
 	"essential-related-work",
 	"stale-or-unsupported",
 ] as const;
+const TARGET_PLAN_DEPTH_VALUES = ["light", "standard", "trust-heavy"] as const;
+const WORKSTREAM_KIND_VALUES = ["main", "backend-rust", "app-ui", "e2e-harness", "docs-changelog", "other"] as const;
 
 const verificationLayerSchema = z.enum(VERIFICATION_LAYER_VALUES);
 const signalRoleSchema = z.enum(SIGNAL_ROLE_VALUES);
@@ -211,6 +216,8 @@ const signalConfidenceSchema = z.enum(SIGNAL_CONFIDENCE_VALUES);
 const blastRadiusSchema = z.enum(BLAST_RADIUS_VALUES);
 const concernKindSchema = z.enum(CONCERN_KIND_VALUES);
 const excludedWorkClassificationSchema = z.enum(EXCLUDED_WORK_CLASSIFICATION_VALUES);
+const targetPlanDepthSchema = z.enum(TARGET_PLAN_DEPTH_VALUES);
+const workstreamKindSchema = z.enum(WORKSTREAM_KIND_VALUES);
 type VerificationLayerValue = (typeof VERIFICATION_LAYER_VALUES)[number];
 type ConcernKindValue = (typeof CONCERN_KIND_VALUES)[number];
 
@@ -304,6 +311,8 @@ const scopeCalibrationSchema = z
 				})
 				.strict(),
 		),
+		target_unit_rule_ids: z.array(z.string()).optional(),
+		target_unit_exemptions: z.array(z.object({ rule_id: z.string(), rationale: z.string() }).strict()).optional(),
 	})
 	.strict();
 
@@ -321,6 +330,83 @@ const excludedWorkReviewSchema = z
 		item: z.string(),
 		classification: excludedWorkClassificationSchema,
 		rationale: z.string(),
+	})
+	.strict();
+
+const scenarioMatrixRowSchema = z
+	.object({
+		id: z.string(),
+		branch: z.string(),
+		signal_ids: z.array(z.string()),
+		concern_ids: z.array(z.string()),
+		acceptance: z.string(),
+		expected_outcome: z.string(),
+		stale_if: z.array(z.string()),
+	})
+	.strict();
+
+const scenarioMatrixOpenRowSchema = z
+	.object({
+		id: z.string(),
+		branch: z.string(),
+		reason: z.enum([
+			"different-primary-signal",
+			"different-authority",
+			"different-blast-radius",
+			"blocked-external",
+			"non-goal",
+			"unsafe-to-bundle",
+		]),
+		follow_up_hint: z.string(),
+	})
+	.strict();
+
+const scenarioMatrixSchema = z
+	.object({
+		id: z.string(),
+		primary_signal_group_id: z.string(),
+		rows_in_scope: z.array(scenarioMatrixRowSchema),
+		rows_left_open: z.array(scenarioMatrixOpenRowSchema),
+		splitting_safety: z.object({ safe: z.boolean(), rationale: z.string() }).strict(),
+		next_larger_target: z
+			.object({
+				title: z.string(),
+				primary_signal_group_id: z.string(),
+				rows: z.array(z.string()),
+				unblocks_matrix_id: z.string().optional(),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+
+const targetWorkstreamSchema = z
+	.object({
+		id: z.string(),
+		label: z.string(),
+		kind: workstreamKindSchema,
+		files: z.array(z.string()),
+		contract_inputs: z.array(z.string()),
+		contract_outputs: z.array(z.string()),
+	})
+	.strict();
+
+const targetCardSchema = z
+	.object({
+		capability_claim: z.string(),
+		trust_privacy_claim: z.string().optional(),
+		confidence_earned: z.string().optional(),
+		known_limits: z.array(z.string()),
+		authority_boundary: z.string().optional(),
+		policy_deletion_implications: z.string().optional(),
+		user_visible_surface: z.string(),
+		acceptance_rows: z.object({ closed: z.array(z.string()), open: z.array(z.string()) }).strict(),
+		workstreams: z.array(targetWorkstreamSchema).optional(),
+		shared_contract: z.string().optional(),
+		review_lenses: z.array(z.string()).optional(),
+		verification_scenarios: z.array(z.string()),
+		checkpoint_evidence: z.array(z.string()),
+		rollback_cutover: z.string().optional(),
 	})
 	.strict();
 
@@ -500,41 +586,37 @@ const resolveCheckpointSchema = z
 		},
 	);
 
-const submitTargetPlanSchema = z
+const targetPlanPayloadShape = {
+	target_id: z.string(),
+	target_plan_id: z.string(),
+	plan_file_path: z.string(),
+	revision: z.number().int().min(1),
+	primary_signal_group_id: z.string().optional(),
+	plan_depth: targetPlanDepthSchema.optional(),
+	scenario_matrix: scenarioMatrixSchema.nullable().optional(),
+	target_card: targetCardSchema.optional(),
+	verification_aperture: verificationApertureSchema,
+	verification_signals: z.array(verificationSignalSchema).min(1),
+	concern_checks: z.array(concernCheckSchema).min(1),
+	scope_calibration: scopeCalibrationSchema,
+	branch_evidence: z.array(branchEvidenceSchema).min(1),
+	excluded_work_review: z.array(excludedWorkReviewSchema),
+	workflow_review_rounds: z.array(workflowReviewRoundSchema).min(1),
+	dry_run: targetPlanDryRunSchema,
+};
+const targetPlanPayloadSchema = z.object(targetPlanPayloadShape).strict();
+const submitTargetPlanInlineSchema = z
 	.object({
 		op: z.literal("submit_target_plan"),
-		target_id: z.string(),
-		target_plan_id: z.string(),
-		plan_file_path: z.string(),
-		revision: z.number().int().min(1),
-		verification_aperture: verificationApertureSchema,
-		verification_signals: z.array(verificationSignalSchema).min(1),
-		concern_checks: z.array(concernCheckSchema).min(1),
-		scope_calibration: scopeCalibrationSchema,
-		branch_evidence: z.array(branchEvidenceSchema).min(1),
-		excluded_work_review: z.array(excludedWorkReviewSchema),
-		workflow_review_rounds: z.array(workflowReviewRoundSchema).min(1),
-		dry_run: targetPlanDryRunSchema,
+		...targetPlanPayloadShape,
 	})
-	.strict()
-	.refine(value => value.verification_signals.some(signal => signal.required), {
-		message: "target plan requires at least one required verification signal",
-		path: ["verification_signals"],
-	})
-	.refine(
-		value =>
-			value.verification_signals.some(
-				signal => signal.id === value.verification_aperture.primary_signal_id && signal.required,
-			),
-		{
-			message: "verification_aperture.primary_signal_id must name a required verification signal",
-			path: ["verification_aperture", "primary_signal_id"],
-		},
-	)
-	.refine(value => value.dry_run.status === "passed" && value.dry_run.checks.every(check => check.passed), {
-		message: "target plan dry_run must pass before submission",
-		path: ["dry_run"],
-	});
+	.strict();
+const submitTargetPlanSchema = z
+	.object({ op: z.literal("submit_target_plan"), payload_file_path: z.string().min(1) })
+	.strict();
+const lintTargetPlanSchema = z
+	.object({ op: z.literal("lint_target_plan"), payload_file_path: z.string().min(1) })
+	.strict();
 
 const failTargetPlanSchema = z
 	.object({
@@ -639,6 +721,7 @@ const goalDiscriminatedSchema = z.discriminatedUnion("op", [
 	checkpointSchema,
 	resolveCheckpointSchema,
 	submitTargetPlanSchema,
+	lintTargetPlanSchema,
 	failTargetPlanSchema,
 	recoverBlockedStateSchema,
 ]);
@@ -689,6 +772,7 @@ export function buildGoalToolResponse(
 		targetPlan?: GoalTargetPlanRecord;
 		targetPlanReviews?: GoalTargetPlanReview[];
 		targetPlanApproval?: GoalTargetPlanApprovedDetails;
+		targetPlanLint?: GoalTargetPlanLintResult;
 	},
 ): GoalToolResponse {
 	const resolvedGoal = goal ?? null;
@@ -711,6 +795,7 @@ export function buildGoalToolResponse(
 		targetPlan: options?.targetPlan,
 		targetPlanReviews: options?.targetPlanReviews,
 		targetPlanApproval: options?.targetPlanApproval,
+		targetPlanLint: options?.targetPlanLint,
 	};
 }
 
@@ -868,12 +953,83 @@ function mapResolutionInput(params: z.infer<typeof resolveCheckpointSchema>): Go
 	};
 }
 
-function mapSubmitTargetPlanInput(params: z.infer<typeof submitTargetPlanSchema>): GoalSubmitTargetPlanInput {
+type TargetPlanPayloadParams = z.infer<typeof targetPlanPayloadSchema>;
+
+function mapScenarioMatrix(params: z.infer<typeof scenarioMatrixSchema>): GoalSubmitTargetPlanInput["scenarioMatrix"] {
+	return {
+		id: params.id,
+		primarySignalGroupId: params.primary_signal_group_id,
+		rowsInScope: params.rows_in_scope.map(row => ({
+			id: row.id,
+			branch: row.branch,
+			signalIds: row.signal_ids,
+			concernIds: row.concern_ids,
+			acceptance: row.acceptance,
+			expectedOutcome: row.expected_outcome,
+			staleIf: row.stale_if,
+		})),
+		rowsLeftOpen: params.rows_left_open.map(row => ({
+			id: row.id,
+			branch: row.branch,
+			reason: row.reason,
+			followUpHint: row.follow_up_hint,
+		})),
+		splittingSafety: {
+			safe: params.splitting_safety.safe,
+			rationale: params.splitting_safety.rationale,
+		},
+		nextLargerTarget: params.next_larger_target
+			? {
+					title: params.next_larger_target.title,
+					primarySignalGroupId: params.next_larger_target.primary_signal_group_id,
+					rows: params.next_larger_target.rows,
+					unblocksMatrixId: params.next_larger_target.unblocks_matrix_id,
+				}
+			: undefined,
+	};
+}
+
+function mapTargetCard(params: z.infer<typeof targetCardSchema>): GoalSubmitTargetPlanInput["targetCard"] {
+	return {
+		capabilityClaim: params.capability_claim,
+		trustPrivacyClaim: params.trust_privacy_claim,
+		confidenceEarned: params.confidence_earned,
+		knownLimits: params.known_limits,
+		authorityBoundary: params.authority_boundary,
+		policyDeletionImplications: params.policy_deletion_implications,
+		userVisibleSurface: params.user_visible_surface,
+		acceptanceRows: {
+			closed: params.acceptance_rows.closed,
+			open: params.acceptance_rows.open,
+		},
+		workstreams: params.workstreams?.map(workstream => ({
+			id: workstream.id,
+			label: workstream.label,
+			kind: workstream.kind,
+			files: workstream.files,
+			contractInputs: workstream.contract_inputs,
+			contractOutputs: workstream.contract_outputs,
+		})),
+		sharedContract: params.shared_contract,
+		reviewLenses: params.review_lenses,
+		verificationScenarios: params.verification_scenarios,
+		checkpointEvidence: params.checkpoint_evidence,
+		rollbackCutover: params.rollback_cutover,
+	};
+}
+
+function mapSubmitTargetPlanInput(
+	params: TargetPlanPayloadParams & { op?: "submit_target_plan" },
+): GoalSubmitTargetPlanInput {
 	return {
 		targetId: params.target_id,
 		targetPlanId: params.target_plan_id,
 		planFilePath: params.plan_file_path,
 		revision: params.revision,
+		primarySignalGroupId: params.primary_signal_group_id,
+		planDepth: params.plan_depth,
+		scenarioMatrix: params.scenario_matrix ? mapScenarioMatrix(params.scenario_matrix) : undefined,
+		targetCard: params.target_card ? mapTargetCard(params.target_card) : undefined,
 		verificationAperture: {
 			productIntention: params.verification_aperture.product_intention,
 			primarySignalId: params.verification_aperture.primary_signal_id,
@@ -915,6 +1071,11 @@ function mapSubmitTargetPlanInput(params: z.infer<typeof submitTargetPlanSchema>
 				item: item.item,
 				reason: item.reason,
 				followUpHint: item.follow_up_hint,
+			})),
+			targetUnitRuleIds: params.scope_calibration.target_unit_rule_ids,
+			targetUnitExemptions: params.scope_calibration.target_unit_exemptions?.map(exemption => ({
+				ruleId: exemption.rule_id,
+				rationale: exemption.rationale,
 			})),
 		},
 		branchEvidence: params.branch_evidence.map(branch => ({
@@ -978,10 +1139,14 @@ function normalizeVerificationLayerAlias(value: unknown): VerificationLayerValue
 		: undefined;
 }
 
-function normalizeSubmitTargetPlanLayerAliases(params: unknown): unknown {
-	if (getRecordValue(params, "op") !== "submit_target_plan" || !params || typeof params !== "object") {
-		return params;
-	}
+function isTargetPlanPayloadOperation(op: unknown): op is "submit_target_plan" | "lint_target_plan" {
+	return op === "submit_target_plan" || op === "lint_target_plan";
+}
+
+function normalizeTargetPlanLayerAliases(params: unknown): unknown {
+	if (!params || typeof params !== "object" || Array.isArray(params)) return params;
+	const op = getRecordValue(params, "op");
+	if (op !== undefined && !isTargetPlanPayloadOperation(op)) return params;
 	const signals = getRecordValue(params, "verification_signals");
 	if (!Array.isArray(signals)) return params;
 	let normalizedSignals: unknown[] | undefined;
@@ -1003,11 +1168,159 @@ function layerAliasHint(value: unknown): string {
 	return "";
 }
 
-function parseSubmitTargetPlanToolInput(params: GoalToolInput): GoalSubmitTargetPlanInput {
-	const normalizedParams = normalizeSubmitTargetPlanLayerAliases(params);
-	const parsed = submitTargetPlanSchema.safeParse(normalizedParams);
+function jsonPointerPath(path: readonly PropertyKey[]): string {
+	if (path.length === 0) return "";
+	return `/${path.map(segment => String(segment).replaceAll("~", "~0").replaceAll("/", "~1")).join("/")}`;
+}
+
+function assertCanonicalTargetPlanPayloadPath(payload: unknown, payloadFilePath: string, session: ToolSession): void {
+	const planFilePath = getRecordValue(payload, "plan_file_path");
+	if (typeof planFilePath !== "string" || !planFilePath.trim()) return;
+	const expectedPayloadFilePath = targetPlanPayloadFilePath(planFilePath);
+	const resolvedActual = resolveTargetPlanPayloadPath(payloadFilePath, session);
+	const resolvedExpected = resolveTargetPlanPayloadPath(expectedPayloadFilePath, session);
+	if (resolvedActual !== resolvedExpected) {
+		throw new ToolError(`payload_file_path must equal current target plan sidecar (${expectedPayloadFilePath})`);
+	}
+}
+
+function resolveTargetPlanPayloadPath(filePath: string, session: ToolSession): string {
+	const normalized = normalizeLocalScheme(filePath);
+	if (normalized.startsWith("local:")) {
+		if (!session.localProtocolOptions) throw new ToolError("payload_file_path local:// resolution is unavailable");
+		return resolveLocalUrlToPath(normalized, session.localProtocolOptions);
+	}
+	return resolveToCwd(normalized, session.cwd);
+}
+
+async function targetPlanPayloadFromParams(
+	params: z.infer<typeof submitTargetPlanSchema> | z.infer<typeof lintTargetPlanSchema>,
+	session: ToolSession,
+): Promise<unknown> {
+	const payloadFilePath = params.payload_file_path;
+	const resolved = resolveTargetPlanPayloadPath(payloadFilePath, session);
+	const filePayload = targetPlanPayloadFromRaw(normalizeTargetPlanLayerAliases(await Bun.file(resolved).json()));
+	assertCanonicalTargetPlanPayloadPath(filePayload, payloadFilePath, session);
+	return filePayload;
+}
+
+function targetPlanPayloadFromRaw(params: unknown): unknown {
+	if (!params || typeof params !== "object" || Array.isArray(params)) return params;
+	const { op: _op, payload_file_path: _payloadFilePath, ...payload } = params as Record<string, unknown>;
+	return payload;
+}
+
+function schemaDiagnosticCode(issue: z.ZodError["issues"][number]): string {
+	if (issue.code === "unrecognized_keys") return "schema.unrecognized_key";
+	if (issue.code === "invalid_value") return "schema.invalid_enum";
+	if (issue.code === "invalid_type" && "input" in issue && issue.input === undefined) return "schema.missing_required";
+	if (issue.code === "custom") return "schema.refinement";
+	return `schema.${issue.code}`;
+}
+
+function schemaDiagnosticGuidance(issue: z.ZodError["issues"][number], params?: unknown): string {
+	const path = issue.path.map(segment => String(segment)).join("/");
+	if (path.endsWith("/layer") || /^verification_aperture\/omitted_layers\/\d+\/layer$/.test(path)) {
+		const submitted = getValueAtIssuePath(params, issue.path);
+		const hint = layerAliasHint(submitted);
+		return `Allowed layer values: ${VERIFICATION_LAYER_VALUES.join(", ")}.${hint}`;
+	}
+	if (path.endsWith("/role")) return `Allowed role values: ${SIGNAL_ROLE_VALUES.join(", ")}.`;
+	if (path.endsWith("/confidence_target")) return `Allowed confidence values: ${SIGNAL_CONFIDENCE_VALUES.join(", ")}.`;
+	if (path.endsWith("/blast_radius")) return `Allowed blast radius values: ${BLAST_RADIUS_VALUES.join(", ")}.`;
+	if (path.endsWith("/kind")) {
+		return `Allowed concern/workstream kind values: ${CONCERN_KIND_VALUES.join(", ")}; workstream kinds: ${WORKSTREAM_KIND_VALUES.join(", ")}.`;
+	}
+	if (path.endsWith("/plan_depth")) return `Allowed plan_depth values: ${TARGET_PLAN_DEPTH_VALUES.join(", ")}.`;
+	if (path === "verification_aperture/primary_signal_id") {
+		const requiredIds = requiredVerificationSignalIds(params);
+		return requiredIds.length > 0
+			? `Use one required verification_signals[].id: ${requiredIds.join(", ")}.`
+			: "Use a required verification_signals[].id.";
+	}
+	return 'Fix the payload shape, then rerun goal({op:"lint_target_plan", payload_file_path:"..."}).';
+}
+
+function schemaIssueOffenderValue(issue: z.ZodError["issues"][number], params: unknown): unknown {
+	if (issue.path.length > 0) return getValueAtIssuePath(params, issue.path);
+	if (issue.code === "unrecognized_keys") return { keys: issue.keys };
+	return undefined;
+}
+
+function schemaIssuesToDiagnostics(error: z.ZodError, params: unknown): GoalTargetPlanLintDiagnostic[] {
+	return error.issues.map(issue => ({
+		severity: "error",
+		code: schemaDiagnosticCode(issue),
+		path: jsonPointerPath(issue.path),
+		message: issue.message,
+		guidance: schemaDiagnosticGuidance(issue, params),
+		blocksSubmission: true,
+		offender: {
+			kind: "schema",
+			value: schemaIssueOffenderValue(issue, params),
+		},
+	}));
+}
+
+function payloadFileReadDiagnostic(error: unknown): GoalTargetPlanLintDiagnostic {
+	const missing = isEnoent(error);
+	const toolMessage = error instanceof ToolError ? error.message : undefined;
+	return {
+		severity: "error",
+		code: missing ? "payload_file.missing" : toolMessage ? "payload_file.invalid_path" : "payload_file.invalid_json",
+		path: "/payload_file_path",
+		message: missing
+			? "target plan payload file is missing"
+			: (toolMessage ?? "target plan payload file must contain valid JSON"),
+		guidance: toolMessage
+			? "Use the payload_file_path from the current target-plan submit identity."
+			: missing
+				? "Create the structured target-plan payload JSON sidecar, then rerun lint_target_plan with payload_file_path."
+				: "Fix the payload JSON syntax in place, then rerun lint_target_plan with payload_file_path.",
+		blocksSubmission: true,
+		offender: { kind: "schema", value: error instanceof Error ? error.message : String(error) },
+	};
+}
+
+async function parseTargetPlanPayloadForLint(
+	params: z.infer<typeof lintTargetPlanSchema>,
+	session: ToolSession,
+): Promise<{
+	input?: GoalSubmitTargetPlanInput;
+	diagnostics: GoalTargetPlanLintDiagnostic[];
+}> {
+	let payload: unknown;
+	try {
+		payload = await targetPlanPayloadFromParams(params, session);
+	} catch (error) {
+		return { diagnostics: [payloadFileReadDiagnostic(error)] };
+	}
+	const parsed = targetPlanPayloadSchema.safeParse(payload);
+	if (parsed.success) return { input: mapSubmitTargetPlanInput(parsed.data), diagnostics: [] };
+	return { diagnostics: schemaIssuesToDiagnostics(parsed.error, payload) };
+}
+
+async function parseSubmitTargetPlanToolInput(
+	params: z.infer<typeof submitTargetPlanSchema>,
+	session: ToolSession,
+): Promise<GoalSubmitTargetPlanInput> {
+	let payload: unknown;
+	try {
+		payload = await targetPlanPayloadFromParams(params, session);
+	} catch (error) {
+		throw new ToolError(payloadFileReadDiagnostic(error).message);
+	}
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		throw new ToolError("target plan payload file must contain a JSON object");
+	}
+	const inlinePayload = { ...(payload as Record<string, unknown>), op: "submit_target_plan" as const };
+	const parsed = submitTargetPlanInlineSchema.safeParse(inlinePayload);
 	if (parsed.success) return mapSubmitTargetPlanInput(parsed.data);
-	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error, normalizedParams));
+	throw new ToolError(formatSubmitTargetPlanSchemaError(parsed.error, inlinePayload));
+}
+
+function firstBlockingLintDiagnostic(lint: GoalTargetPlanLintResult): GoalTargetPlanLintDiagnostic | undefined {
+	return lint.diagnostics.find(diagnostic => diagnostic.blocksSubmission || diagnostic.severity === "error");
 }
 
 function formatSubmitTargetPlanSchemaError(error: z.ZodError, params?: unknown): string {
@@ -1127,6 +1440,21 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		if (!runtime) throw new ToolError("Goal mode is not active.");
 
 		const operation = goalOperationSchema.safeParse(args);
+		if (operation.success && operation.data.op === "lint_target_plan") {
+			const lintParams = lintTargetPlanSchema.parse(args);
+			const parsed = await parseTargetPlanPayloadForLint(lintParams, this.#session);
+			const state = this.#session.getGoalModeState?.() ?? null;
+			const lint = runtime.lintCurrentTargetPlanSubmission(parsed.input, parsed.diagnostics, "submit");
+			const response = buildGoalToolResponse(state?.goal ?? null, {
+				state,
+				targetPlan: state?.goal.currentTargetPlan,
+				targetPlanLint: lint,
+			});
+			return {
+				content: [{ type: "text", text: renderGoalToolText(response, "lint_target_plan") }],
+				details: buildGoalToolDetails("lint_target_plan", response),
+			};
+		}
 		const params =
 			operation.success && operation.data.op === "submit_target_plan"
 				? (args as GoalToolInput)
@@ -1170,9 +1498,13 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			if (!goalSession.requestGoalTargetPlanApproval) {
 				throw new ToolError("submit_target_plan requires an AgentSession target-plan review handler");
 			}
-			const input = parseSubmitTargetPlanToolInput(params);
-			validateTargetPlanSubmissionGraph(input);
+			const input = await parseSubmitTargetPlanToolInput(submitTargetPlanSchema.parse(params), this.#session);
+			const lint = runtime.lintCurrentTargetPlanSubmission(input, [], "submit");
+			const blockingDiagnostic = firstBlockingLintDiagnostic(lint);
+			if (blockingDiagnostic) throw new ToolError(blockingDiagnostic.message);
 			response = await goalSession.requestGoalTargetPlanApproval(input, signal);
+		} else if (params.op === "lint_target_plan") {
+			throw new ToolError("lint_target_plan must be handled before goal state mutation.");
 		} else if (params.op === "fail_target_plan") {
 			if (!goalSession.requestGoalTargetPlanFailure) {
 				throw new ToolError("fail_target_plan requires an AgentSession target-plan failure handler");
@@ -1220,6 +1552,38 @@ function shouldRenderPendingCheckpoint(
 	return goal.pendingCheckpointRequiresResolution;
 }
 
+function lintCountsText(lint: GoalTargetPlanLintResult): string {
+	return `${lint.summary.errorCount} error, ${lint.summary.warningCount} warning, ${lint.summary.infoCount} info`;
+}
+
+function renderLintDiagnosticText(diagnostic: GoalTargetPlanLintDiagnostic): string {
+	const path = diagnostic.path || "/";
+	let text = `- ${diagnostic.severity} ${diagnostic.code} ${path}: ${diagnostic.message}`;
+	if (diagnostic.guidance) text += `\n  guidance: ${diagnostic.guidance}`;
+	if (diagnostic.offender?.id) text += `\n  offender: ${diagnostic.offender.kind}:${diagnostic.offender.id}`;
+	return text;
+}
+
+function renderTargetPlanLintText(lint: GoalTargetPlanLintResult): string {
+	let text = `\n\nTarget plan lint: ${lint.ok ? "ok" : "blocked"} (${lintCountsText(lint)})`;
+	if (lint.targetId) text += `\n  target_id: ${lint.targetId}`;
+	if (lint.targetPlanId) text += `\n  target_plan_id: ${lint.targetPlanId}`;
+	if (lint.planFilePath) text += `\n  plan_file_path: ${lint.planFilePath}`;
+	if (lint.revision !== undefined) text += `\n  revision: ${lint.revision}`;
+	if (lint.planDepth) text += `\n  plan_depth: ${lint.planDepth}`;
+	if (lint.primarySignalGroupId) text += `\n  primary_signal_group_id: ${lint.primarySignalGroupId}`;
+	text += `\n  stateVersion: ${lint.stateVersion}`;
+	if (lint.legacy)
+		text += "\n  legacy: matrix/card fields absent; accepted only when depth is light and graph risk is low.";
+	if (lint.diagnostics.length === 0) return text;
+	text += "\nDiagnostics:";
+	for (const diagnostic of lint.diagnostics.slice(0, 8)) {
+		text += `\n${renderLintDiagnosticText(diagnostic)}`;
+	}
+	if (lint.diagnostics.length > 8) text += `\n- ${lint.diagnostics.length - 8} more diagnostics omitted.`;
+	return text;
+}
+
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
 	const goal = response.goal;
 	if (!goal) return "No active goal.";
@@ -1257,10 +1621,14 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\n  target_id: ${identity.targetId}`;
 			text += `\n  target_plan_id: ${identity.targetPlanId}`;
 			text += `\n  plan_file_path: ${identity.planFilePath}`;
+			text += `\n  payload_file_path: ${identity.payloadFilePath}`;
 			text += `\n  revision: ${identity.revision}`;
-			text += `\nNext action: write the plan at plan_file_path, then call goal with this submit_target_plan skeleton:\n${renderTargetPlanSubmitSkeleton(identity, { includeOp: true })}`;
-			text += `\nAllowed verification layer values for verification_signals[].layer and verification_aperture.omitted_layers[].layer: ${VERIFICATION_LAYER_VALUES.join(", ")}.`;
+			text += `\nNext action: create missing plan files if needed; otherwise edit payload_file_path in place and patch plan_file_path only when the payload fix changes executor-visible semantics. Lint with goal({op:"lint_target_plan", payload_file_path:"${identity.payloadFilePath}"}). Submit with goal({op:"submit_target_plan", payload_file_path:"${identity.payloadFilePath}"}).`;
+			text += `\nAllowed verification layer values: ${VERIFICATION_LAYER_VALUES.join(", ")}.`;
 		}
+	}
+	if (op === "lint_target_plan" && response.targetPlanLint) {
+		text += renderTargetPlanLintText(response.targetPlanLint);
 	}
 	const block = goal.currentBlockedState;
 	if (block?.status === "open" && response.state?.runMode === "awaiting-user-input") {
@@ -1361,6 +1729,8 @@ function describeOp(op: string | undefined): string {
 			return "resolve checkpoint";
 		case "submit_target_plan":
 			return "submit target plan";
+		case "lint_target_plan":
+			return "lint target plan";
 		case "fail_target_plan":
 			return "fail target plan";
 		case "recover_blocked_state":
@@ -1443,16 +1813,26 @@ export const goalToolRenderer = {
 		const verificationRejected = verification?.status === "rejected";
 		const checkpointRejected = details?.checkpointReview?.status === "rejected";
 		const targetPlan = details?.targetPlan;
+		const lint = details?.targetPlanLint;
 		const targetPlanBadge =
-			op === "recover_blocked_state" && targetPlan?.status === "drafting"
-				? ({ label: "blocked state recovered", color: "success" } as const)
-				: op === "submit_target_plan" && targetPlan?.status === "revision-required"
-					? ({ label: "target plan rejected", color: "warning" } as const)
-					: targetPlan?.status === "failed"
-						? ({ label: "target plan failed", color: "error" } as const)
-						: targetPlan?.status === "approved"
-							? ({ label: "target plan approved", color: "success" } as const)
-							: undefined;
+			op === "lint_target_plan" && lint
+				? ({
+						label: lint.ok
+							? lint.summary.warningCount > 0
+								? "target plan lint warnings"
+								: "target plan lint ok"
+							: "target plan lint blocked",
+						color: lint.ok ? (lint.summary.warningCount > 0 ? "warning" : "success") : "error",
+					} as const)
+				: op === "recover_blocked_state" && targetPlan?.status === "drafting"
+					? ({ label: "blocked state recovered", color: "success" } as const)
+					: op === "submit_target_plan" && targetPlan?.status === "revision-required"
+						? ({ label: "target plan rejected", color: "warning" } as const)
+						: targetPlan?.status === "failed"
+							? ({ label: "target plan failed", color: "error" } as const)
+							: targetPlan?.status === "approved"
+								? ({ label: "target plan approved", color: "success" } as const)
+								: undefined;
 		const lines: string[] = [];
 		lines.push(
 			renderStatusLine(
@@ -1507,6 +1887,20 @@ export const goalToolRenderer = {
 			}
 			if (targetPlan.status === "approved") {
 				lines.push(`  ${uiTheme.fg("success", "execution unlocked for current target")}`);
+			}
+		}
+		if (lint) {
+			lines.push(
+				`  ${uiTheme.fg(lint.ok ? "muted" : "warning", `lint: ${lint.ok ? "ok" : "blocked"} (${lintCountsText(lint)})`)}`,
+			);
+			if (lint.targetId) lines.push(`  ${uiTheme.fg("muted", `target_id: ${lint.targetId}`)}`);
+			if (lint.targetPlanId) lines.push(`  ${uiTheme.fg("muted", `target_plan_id: ${lint.targetPlanId}`)}`);
+			if (lint.revision !== undefined) lines.push(`  ${uiTheme.fg("muted", `revision: ${lint.revision}`)}`);
+			for (const diagnostic of lint.diagnostics.slice(0, 3)) {
+				const color: ThemeColor = diagnostic.severity === "error" ? "warning" : "muted";
+				lines.push(
+					`  ${uiTheme.fg(color, humanPreview(`${diagnostic.severity} ${diagnostic.code} ${diagnostic.path || "/"}: ${diagnostic.message}`))}`,
+				);
 			}
 		}
 		if (shouldRenderPendingCheckpoint(goal, details?.state)) {

@@ -220,6 +220,7 @@ import {
 	buildGoalContinuationPacket,
 	completionBudgetReport,
 	currentTargetPlanSubmitIdentity,
+	effectiveTargetUnitRules,
 	type GoalCheckpointInput,
 	type GoalCheckpointResolutionInput,
 	type GoalPersistenceReason,
@@ -231,9 +232,7 @@ import {
 	renderGoalPrompt,
 	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
-	renderTargetPlanSubmitSkeleton,
 	sanitizeGoalPlanSlug,
-	validateTargetPlanSubmissionGraph,
 } from "../goals/runtime";
 import {
 	type GoalCheckpointGuidanceOutput,
@@ -275,12 +274,14 @@ import type {
 	GoalTargetPlanApprovedDetails,
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
+	GoalTargetUnitRule,
 	GoalTokenUsage,
 	GoalVerificationDeliverableResult,
 	GoalVerificationEvidenceItem,
 	GoalVerificationGap,
 } from "../goals/state";
 import { parseGoalModeState, serializeGoalModeState } from "../goals/state";
+import { implementationFanoutRequired, matrixRowCounts } from "../goals/tool-details";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
@@ -1066,6 +1067,64 @@ function targetPlanArtifactDetailsMatch(details: unknown, goalId: string, target
 	return details.targetPlanId === targetPlanId;
 }
 
+function cloneGoalTargetCardForMessage(plan: GoalTargetPlanRecord): GoalTargetPlanMessageDetails["targetCard"] {
+	const card = plan.targetCard;
+	if (!card) return undefined;
+	return {
+		...card,
+		knownLimits: [...card.knownLimits],
+		acceptanceRows: {
+			closed: [...card.acceptanceRows.closed],
+			open: [...card.acceptanceRows.open],
+		},
+		workstreams: card.workstreams?.map(workstream => ({
+			...workstream,
+			files: [...workstream.files],
+			contractInputs: [...workstream.contractInputs],
+			contractOutputs: [...workstream.contractOutputs],
+		})),
+		reviewLenses: card.reviewLenses ? [...card.reviewLenses] : undefined,
+		verificationScenarios: [...card.verificationScenarios],
+		checkpointEvidence: [...card.checkpointEvidence],
+	};
+}
+
+function targetPlanWorkstreamSummary(plan: GoalTargetPlanRecord): GoalTargetPlanMessageDetails["workstreamSummary"] {
+	const workstreams = plan.targetCard?.workstreams;
+	if (!workstreams?.length) return undefined;
+	return workstreams.map(workstream => ({
+		id: workstream.id,
+		label: workstream.label,
+		kind: workstream.kind,
+		files: [...workstream.files],
+	}));
+}
+
+function buildGoalTargetPlanMessageDetails(
+	goal: Goal,
+	plan: GoalTargetPlanRecord,
+	reviews: GoalTargetPlanReview[],
+	recordedAt: number,
+): GoalTargetPlanMessageDetails {
+	return {
+		goalId: goal.id,
+		targetId: plan.targetId,
+		targetPlanId: plan.id,
+		planFilePath: plan.planFilePath,
+		revision: plan.revision,
+		status: plan.status,
+		reviews,
+		failure: plan.failure,
+		planDepth: plan.planDepth,
+		primarySignalGroupId: plan.primarySignalGroupId ?? plan.verificationAperture?.primarySignalId,
+		matrixRowCounts: matrixRowCounts(plan),
+		implementationFanoutRequired: implementationFanoutRequired(plan),
+		workstreamSummary: targetPlanWorkstreamSummary(plan),
+		targetCard: cloneGoalTargetCardForMessage(plan),
+		recordedAt,
+	};
+}
+
 function parseStructuredSideAgentOutput(output: string): unknown {
 	const parsed: unknown = JSON.parse(output);
 	if (isStringRecord(parsed) && "data" in parsed) {
@@ -1074,11 +1133,60 @@ function parseStructuredSideAgentOutput(output: string): unknown {
 	return parsed;
 }
 
+function isGoalTargetUnitRuleKind(value: unknown): value is GoalTargetUnitRule["kind"] {
+	return (
+		value === "complete-acceptance-slice" ||
+		value === "scenario-matrix" ||
+		value === "gate-prerequisite" ||
+		value === "no-process-phase" ||
+		value === "same-primary-signal-together" ||
+		value === "branch-unblocks-matrix"
+	);
+}
+
+function isGoalTargetUnitRuleSource(value: unknown): value is GoalTargetUnitRule["source"] {
+	return value === "rubric" || value === "checkpoint-guidance" || value === "operator" || value === "built-in";
+}
+
+function parseGoalTargetUnitRule(
+	value: unknown,
+	defaultSource: GoalTargetUnitRule["source"],
+): GoalTargetUnitRule | undefined {
+	if (!isStringRecord(value)) return undefined;
+	const source = isGoalTargetUnitRuleSource(value.source) ? value.source : defaultSource;
+	const enforcement = value.enforcement === "error" || value.enforcement === "warning" ? value.enforcement : undefined;
+	if (
+		typeof value.id !== "string" ||
+		!isGoalTargetUnitRuleKind(value.kind) ||
+		typeof value.statement !== "string" ||
+		!enforcement
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		kind: value.kind,
+		statement: value.statement,
+		source,
+		enforcement,
+	};
+}
+
+function parseGoalTargetUnitRules(
+	value: unknown,
+	defaultSource: GoalTargetUnitRule["source"],
+): GoalTargetUnitRule[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const parsed = value.flatMap(item => parseGoalTargetUnitRule(item, defaultSource) ?? []);
+	return parsed.length > 0 ? parsed : undefined;
+}
+
 function parseGoalRubricOutput(value: unknown): GoalRubricOutput | undefined {
 	if (!isStringRecord(value) || typeof value.rubric !== "string") return undefined;
 	return {
 		rubric: value.rubric,
 		deliverableMap: parseGoalDeliverableMap(value.deliverableMap ?? value.deliverable_map),
+		targetUnitRules: parseGoalTargetUnitRules(value.targetUnitRules ?? value.target_unit_rules, "rubric"),
 	};
 }
 
@@ -5716,17 +5824,12 @@ export class AgentSession {
 		for (const plan of goal.targetPlans ?? []) {
 			if (this.#hasGoalTargetPlanArtifact(goal.id, plan.id)) continue;
 			const reviews = plan.reviews ?? [];
-			const details: GoalTargetPlanMessageDetails = {
-				goalId: goal.id,
-				targetId: plan.targetId,
-				targetPlanId: plan.id,
-				planFilePath: plan.planFilePath,
-				revision: plan.revision,
-				status: plan.status,
+			const details = buildGoalTargetPlanMessageDetails(
+				goal,
+				plan,
 				reviews,
-				failure: plan.failure,
-				recordedAt: plan.approvedAt ?? plan.failedAt ?? plan.updatedAt,
-			};
+				plan.approvedAt ?? plan.failedAt ?? plan.updatedAt,
+			);
 			this.#appendGoalArtifactMessage({
 				customType: GOAL_TARGET_PLAN_MESSAGE_TYPE,
 				content: this.#renderGoalTargetPlanContent(goal, plan, reviews),
@@ -5802,6 +5905,7 @@ export class AgentSession {
 			state.goal.id,
 			rubricOutput.rubric,
 			rubricOutput.deliverableMap,
+			rubricOutput.targetUnitRules,
 		);
 		const finalState = rubricState ?? state;
 		this.#publishGoalRubricArtifact(finalState.goal);
@@ -5834,6 +5938,7 @@ export class AgentSession {
 			state.goal.id,
 			rubricOutput.rubric,
 			rubricOutput.deliverableMap,
+			rubricOutput.targetUnitRules,
 		);
 		const finalState = rubricState ?? state;
 		this.#publishGoalRubricArtifact(finalState.goal);
@@ -5943,7 +6048,11 @@ export class AgentSession {
 		}
 		const boundaryBefore = buildGoalBoundaryStateRef(state, "target-plan");
 		const currentPlan = this.#goalRuntime.validateCurrentTargetPlanSubmission(input);
-		validateTargetPlanSubmissionGraph(input);
+		const lint = this.#goalRuntime.lintCurrentTargetPlanSubmission(input, [], "submit");
+		const blockingDiagnostic = lint.diagnostics.find(
+			diagnostic => diagnostic.blocksSubmission || diagnostic.severity === "error",
+		);
+		if (blockingDiagnostic) throw new ToolError(blockingDiagnostic.message);
 		const resolvedPlanPath = resolveLocalUrlToPath(
 			normalizeLocalScheme(currentPlan.planFilePath),
 			this.#localProtocolOptions(),
@@ -6079,6 +6188,12 @@ export class AgentSession {
 					planBytes,
 					stateVersionAtApproval: approvedState.stateVersion,
 					parentFrameVersionAtApproval: approvedState.parentFrameVersion,
+					planDepth: approvedPlan.planDepth,
+					primarySignalGroupId:
+						approvedPlan.primarySignalGroupId ?? approvedPlan.verificationAperture?.primarySignalId,
+					matrixRowCounts: matrixRowCounts(approvedPlan),
+					implementationFanoutRequired: implementationFanoutRequired(approvedPlan),
+					workstreamSummary: targetPlanWorkstreamSummary(approvedPlan),
 				}
 			: undefined;
 		if (targetPlanApproval) this.setGoalTargetPlanReference(targetPlanApproval);
@@ -6528,17 +6643,7 @@ export class AgentSession {
 		plan: GoalTargetPlanRecord,
 		reviews: GoalTargetPlanReview[],
 	): Promise<void> {
-		const details: GoalTargetPlanMessageDetails = {
-			goalId: goal.id,
-			targetId: plan.targetId,
-			targetPlanId: plan.id,
-			planFilePath: plan.planFilePath,
-			revision: plan.revision,
-			status: plan.status,
-			reviews,
-			failure: plan.failure,
-			recordedAt: Date.now(),
-		};
+		const details = buildGoalTargetPlanMessageDetails(goal, plan, reviews, Date.now());
 		await this.#sendGoalArtifactMessage<GoalTargetPlanMessageDetails>({
 			customType: GOAL_TARGET_PLAN_MESSAGE_TYPE,
 			content: this.#renderGoalTargetPlanContent(goal, plan, reviews),
@@ -6734,11 +6839,51 @@ export class AgentSession {
 				`target_plan_id: ${plan.id}`,
 				`plan_file_path: ${plan.planFilePath}`,
 				`revision: ${plan.revision}`,
+				`plan_depth: ${plan.planDepth ?? "(legacy)"}`,
+				`primary_signal_group_id: ${plan.primarySignalGroupId ?? plan.verificationAperture?.primarySignalId ?? "(unknown)"}`,
 			].join("\n\n"),
 			`## Status\n\n${plan.status}`,
 		];
 		const aperture = reviews.find(review => review.lens === "aperture")?.apertureClassification;
 		if (aperture) sections.push(`## Aperture classification\n\n${aperture}`);
+		if (plan.targetCard) {
+			const limits = plan.targetCard.knownLimits.map(item => `- ${item}`).join("\n") || "(none)";
+			sections.push(
+				[
+					"## Target card",
+					`capability: ${plan.targetCard.capabilityClaim}`,
+					`surface: ${plan.targetCard.userVisibleSurface}`,
+					`known limits:\n${limits}`,
+				].join("\n\n"),
+			);
+		}
+		if (plan.scenarioMatrix) {
+			sections.push(
+				[
+					"## Scenario matrix",
+					`primary_signal_group_id: ${plan.scenarioMatrix.primarySignalGroupId}`,
+					`rows_in_scope: ${plan.scenarioMatrix.rowsInScope.length}`,
+					`rows_left_open: ${plan.scenarioMatrix.rowsLeftOpen.length}`,
+				].join("\n\n"),
+			);
+		}
+		const workstreams = targetPlanWorkstreamSummary(plan);
+		if (workstreams?.length) {
+			sections.push(
+				`## Workstreams\n\n${workstreams
+					.map(
+						workstream =>
+							`- ${workstream.id} (${workstream.kind}): ${workstream.label} — ${workstream.files.join(", ")}`,
+					)
+					.join("\n")}`,
+			);
+		}
+		const fanout = implementationFanoutRequired(plan);
+		if (fanout !== undefined) {
+			sections.push(
+				`## Implementation fanout\n\n${fanout ? "recommended by workstream/blast-radius metadata; not automatic" : "not required"}`,
+			);
+		}
 		if (reviews.length > 0) {
 			sections.push(
 				`## Reviewer statuses\n\n${reviews.map(review => `- ${review.lens}: ${review.status}`).join("\n")}`,
@@ -6804,7 +6949,7 @@ export class AgentSession {
 			const deliverableMap = output.deliverableMap.length
 				? output.deliverableMap
 				: deriveGoalDeliverableMapFromRubric(rubric);
-			return { rubric, deliverableMap };
+			return { rubric, deliverableMap, targetUnitRules: output.targetUnitRules };
 		});
 	}
 
@@ -6872,11 +7017,12 @@ export class AgentSession {
 			const goalStateFile = await this.#writeGoalStateSnapshotFile("target-plan-review", state, {
 				includeRubric: true,
 			});
+			const goalStateSnapshot = renderGoalStateSnapshot(state, state.goal);
 			const artifactsDir = path.dirname(goalStateFile);
 			const safeGoalId = state.goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
 			const submissionFile = path.join(artifactsDir, `${Date.now()}-${safeGoalId}-target-plan-submission.json`);
 			await Bun.write(submissionFile, `${JSON.stringify(input, null, 2)}\n`);
-			const goalStateSnapshot = renderGoalStateSnapshot(state, state.goal);
+			const targetUnitRules = JSON.stringify(effectiveTargetUnitRules(state.goal), null, 2);
 			const planFile = resolveLocalUrlToPath(normalizeLocalScheme(plan.planFilePath), this.#localProtocolOptions());
 			return await Promise.all([
 				this.#runGoalTargetApertureReview({
@@ -6885,6 +7031,7 @@ export class AgentSession {
 					goalStateSnapshot,
 					planFile,
 					submissionFile,
+					targetUnitRules,
 					signal,
 				}),
 				this.#runGoalTargetExecutionReview({
@@ -6893,6 +7040,7 @@ export class AgentSession {
 					goalStateSnapshot,
 					planFile,
 					submissionFile,
+					targetUnitRules,
 					signal,
 				}),
 			]);
@@ -6905,6 +7053,7 @@ export class AgentSession {
 		goalStateSnapshot: string;
 		planFile: string;
 		submissionFile: string;
+		targetUnitRules?: string;
 		signal?: AbortSignal;
 	}): Promise<GoalTargetPlanReview> {
 		try {
@@ -6938,6 +7087,7 @@ export class AgentSession {
 		goalStateSnapshot: string;
 		planFile: string;
 		submissionFile: string;
+		targetUnitRules?: string;
 		signal?: AbortSignal;
 	}): Promise<GoalTargetPlanReview> {
 		try {
@@ -6983,6 +7133,7 @@ export class AgentSession {
 					contextFile,
 					goalStateFile,
 					goalStateSnapshot,
+					targetUnitRules: JSON.stringify(effectiveTargetUnitRules(state.goal), null, 2),
 					checkpointPacket: JSON.stringify(checkpoint, null, 2),
 				}),
 				description: "Goal checkpoint guidance",
@@ -7035,7 +7186,6 @@ export class AgentSession {
 			goalContextSurface: renderGoalPromptSurface(state, state.goal),
 			currentTargetPlan: JSON.stringify(state.goal.currentTargetPlan ?? null, null, 2),
 			targetPlanSubmitIdentity: JSON.stringify(identity ?? null, null, 2),
-			targetPlanSubmitSkeleton: renderTargetPlanSubmitSkeleton(identity, { includeOp: true }),
 			taskAvailable: this.getToolByName("task") !== undefined,
 			jobAvailable: this.getToolByName("job") !== undefined,
 			ircAvailable: this.getToolByName("irc") !== undefined,
@@ -7288,6 +7438,15 @@ export class AgentSession {
 			planBytes: input.planBytes ?? "unknown",
 			planFilePath: input.planFilePath,
 			contextPreserved: input.contextPreserved === true,
+			planDepth: input.planDepth,
+			primarySignalGroupId: input.primarySignalGroupId,
+			matrixRowCounts: input.matrixRowCounts
+				? `in_scope=${input.matrixRowCounts.inScope}, left_open=${input.matrixRowCounts.leftOpen}`
+				: undefined,
+			implementationFanoutRequired: input.implementationFanoutRequired === true,
+			workstreamSummary: input.workstreamSummary?.length
+				? JSON.stringify(input.workstreamSummary, null, 2)
+				: undefined,
 		});
 	}
 
@@ -7487,6 +7646,12 @@ export class AgentSession {
 			planHash,
 			planBytes,
 			planFilePath: reference.planFilePath,
+			planDepth: reference.planDepth,
+			primarySignalGroupId: reference.primarySignalGroupId,
+			matrixRowCounts: reference.matrixRowCounts
+				? `in_scope=${reference.matrixRowCounts.inScope}, left_open=${reference.matrixRowCounts.leftOpen}`
+				: undefined,
+			implementationFanoutRequired: reference.implementationFanoutRequired === true,
 		});
 		this.#appendGoalBoundaryAudit({
 			kind: "target-plan-reference",

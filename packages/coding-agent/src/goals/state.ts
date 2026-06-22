@@ -13,7 +13,7 @@ export type GoalRunMode =
 	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
 	| "awaiting-user-input";
-export const GOAL_MODE_SCHEMA_VERSION = 4;
+export const GOAL_MODE_SCHEMA_VERSION = 5;
 export type GoalDeliverableStatus = "pending" | "partial" | "satisfied" | "blocked" | "stale";
 
 export type GoalTargetPlanStatus = "drafting" | "reviewing" | "revision-required" | "approved" | "failed" | "stale";
@@ -52,6 +52,93 @@ export type GoalExcludedWorkClassification =
 	| "parent-non-claim"
 	| "essential-related-work"
 	| "stale-or-unsupported";
+
+export type GoalTargetPlanDepth = "light" | "standard" | "trust-heavy";
+
+export interface GoalScenarioMatrixRow {
+	id: string;
+	branch: string;
+	signalIds: string[];
+	concernIds: string[];
+	acceptance: string;
+	expectedOutcome: string;
+	staleIf: string[];
+}
+
+export interface GoalScenarioMatrixOpenRow {
+	id: string;
+	branch: string;
+	reason:
+		| "different-primary-signal"
+		| "different-authority"
+		| "different-blast-radius"
+		| "blocked-external"
+		| "non-goal"
+		| "unsafe-to-bundle";
+	followUpHint: string;
+}
+
+export interface GoalScenarioMatrix {
+	id: string;
+	primarySignalGroupId: string;
+	rowsInScope: GoalScenarioMatrixRow[];
+	rowsLeftOpen: GoalScenarioMatrixOpenRow[];
+	splittingSafety: {
+		safe: boolean;
+		rationale: string;
+	};
+	nextLargerTarget?: {
+		title: string;
+		primarySignalGroupId: string;
+		rows: string[];
+		unblocksMatrixId?: string;
+	};
+}
+
+export interface GoalTargetWorkstream {
+	id: string;
+	label: string;
+	kind: "main" | "backend-rust" | "app-ui" | "e2e-harness" | "docs-changelog" | "other";
+	files: string[];
+	contractInputs: string[];
+	contractOutputs: string[];
+}
+
+export interface GoalTargetCard {
+	capabilityClaim: string;
+	trustPrivacyClaim?: string;
+	confidenceEarned?: string;
+	knownLimits: string[];
+	authorityBoundary?: string;
+	policyDeletionImplications?: string;
+	userVisibleSurface: string;
+	acceptanceRows: {
+		closed: string[];
+		open: string[];
+	};
+	workstreams?: GoalTargetWorkstream[];
+	sharedContract?: string;
+	reviewLenses?: string[];
+	verificationScenarios: string[];
+	checkpointEvidence: string[];
+	rollbackCutover?: string;
+}
+
+export type GoalTargetUnitRuleKind =
+	| "complete-acceptance-slice"
+	| "scenario-matrix"
+	| "gate-prerequisite"
+	| "no-process-phase"
+	| "same-primary-signal-together"
+	| "branch-unblocks-matrix";
+
+export interface GoalTargetUnitRule {
+	id: string;
+	kind: GoalTargetUnitRuleKind;
+	statement: string;
+	source: "rubric" | "checkpoint-guidance" | "operator" | "built-in";
+	enforcement: "error" | "warning";
+}
 
 export interface GoalVerificationEvidenceItem {
 	claim: string;
@@ -277,6 +364,8 @@ export interface GoalScopeCalibration {
 			| "non-goal";
 		followUpHint?: string;
 	}>;
+	targetUnitRuleIds?: string[];
+	targetUnitExemptions?: Array<{ ruleId: string; rationale: string }>;
 }
 
 export interface GoalTargetPlanExcludedWorkReview {
@@ -456,6 +545,10 @@ export interface GoalTargetPlanRecord {
 	scopeCalibration?: GoalScopeCalibration;
 	branchEvidence?: GoalTargetPlanBranchEvidence[];
 	excludedWorkReview?: GoalTargetPlanExcludedWorkReview[];
+	planDepth?: GoalTargetPlanDepth;
+	primarySignalGroupId?: string;
+	scenarioMatrix?: GoalScenarioMatrix;
+	targetCard?: GoalTargetCard;
 	reviews: GoalTargetPlanReview[];
 }
 
@@ -486,6 +579,10 @@ export interface GoalTarget {
 	verificationSignals?: GoalVerificationSignal[];
 	concernChecks?: GoalConcernCheck[];
 	scopeCalibration?: GoalScopeCalibration;
+	planDepth?: GoalTargetPlanDepth;
+	primarySignalGroupId?: string;
+	scenarioMatrix?: GoalScenarioMatrix;
+	targetCard?: GoalTargetCard;
 }
 
 export interface GoalCheckpointEvidenceItem {
@@ -616,6 +713,7 @@ export interface Goal {
 	targets?: GoalTarget[];
 	currentTargetPlan?: GoalTargetPlanRecord;
 	targetPlans?: GoalTargetPlanRecord[];
+	targetUnitRules?: GoalTargetUnitRule[];
 	checkpoints?: GoalCheckpointPacket[];
 	pendingCheckpointId?: string;
 	checkpointResolutions?: GoalCheckpointResolution[];
@@ -671,6 +769,11 @@ export interface GoalTargetPlanApprovedDetails {
 	planBytes?: number;
 	stateVersionAtApproval?: number;
 	parentFrameVersionAtApproval?: number;
+	planDepth?: GoalTargetPlanDepth;
+	primarySignalGroupId?: string;
+	matrixRowCounts?: { inScope: number; leftOpen: number };
+	implementationFanoutRequired?: boolean;
+	workstreamSummary?: Array<Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "files">>;
 }
 
 export interface GoalToolTargetPlanReviewSummary {
@@ -691,6 +794,11 @@ export interface GoalToolTargetPlanSummary {
 	reviews: GoalToolTargetPlanReviewSummary[];
 	failure?: Pick<GoalTargetPlanFailure, "stage" | "reason" | "message" | "blockers">;
 	recoveredFrom?: GoalRecoveryLink;
+	planDepth?: GoalTargetPlanDepth;
+	primarySignalGroupId?: string;
+	matrixRowCounts?: { inScope: number; leftOpen: number };
+	implementationFanoutRequired?: boolean;
+	lintSummary?: { errorCount: number; warningCount: number };
 }
 
 export interface GoalToolTargetSummary {
@@ -753,6 +861,59 @@ export type GoalToolRecoverySummary = Pick<
 	"id" | "blockedStateId" | "kind" | "action" | "reason" | "guidance" | "blockers" | "result" | "at"
 >;
 
+export interface GoalTargetPlanRepairPatch {
+	description: string;
+	operations: Array<{
+		op: "add" | "replace" | "remove";
+		path: string;
+		value?: unknown;
+	}>;
+}
+
+export interface GoalTargetPlanLintDiagnostic {
+	severity: "error" | "warning" | "info";
+	code: string;
+	path: string;
+	message: string;
+	guidance: string;
+	blocksSubmission: boolean;
+	offender?: {
+		kind:
+			| "schema"
+			| "identity"
+			| "signal"
+			| "concern"
+			| "excluded_work"
+			| "matrix_row"
+			| "target_card"
+			| "target_unit_rule"
+			| "history";
+		id?: string;
+		value?: unknown;
+	};
+	repairPatches?: GoalTargetPlanRepairPatch[];
+}
+
+export interface GoalTargetPlanLintResult {
+	ok: boolean;
+	targetId?: string;
+	targetPlanId?: string;
+	planFilePath?: string;
+	revision?: number;
+	stateVersion: number;
+	parentFrameVersion: number;
+	planDepth?: GoalTargetPlanDepth;
+	primarySignalGroupId?: string;
+	legacy: boolean;
+	diagnostics: GoalTargetPlanLintDiagnostic[];
+	summary: {
+		errorCount: number;
+		warningCount: number;
+		infoCount: number;
+		blocksSubmission: boolean;
+	};
+}
+
 export interface GoalToolDetails {
 	op:
 		| "create"
@@ -764,6 +925,7 @@ export interface GoalToolDetails {
 		| "checkpoint"
 		| "resolve_checkpoint"
 		| "submit_target_plan"
+		| "lint_target_plan"
 		| "fail_target_plan"
 		| "recover_blocked_state";
 	goal?: GoalToolGoalSummary | null;
@@ -776,6 +938,7 @@ export interface GoalToolDetails {
 	checkpointResolution?: GoalToolCheckpointResolutionSummary;
 	targetPlanApproval?: GoalTargetPlanApprovedDetails;
 	targetPlan?: GoalToolTargetPlanSummary;
+	targetPlanLint?: GoalTargetPlanLintResult;
 	blockedState?: GoalToolBlockedStateSummary;
 	recovery?: GoalToolRecoverySummary;
 }
@@ -1249,6 +1412,8 @@ function cloneScopeCalibration(calibration: GoalScopeCalibration | undefined): G
 			signalIds: [...item.signalIds],
 		})),
 		deferredRelatedWork: calibration.deferredRelatedWork.map(item => ({ ...item })),
+		targetUnitRuleIds: calibration.targetUnitRuleIds ? [...calibration.targetUnitRuleIds] : undefined,
+		targetUnitExemptions: calibration.targetUnitExemptions?.map(exemption => ({ ...exemption })),
 	};
 }
 
@@ -1265,6 +1430,56 @@ function cloneTargetPlanExcludedWorkReview(
 	reviews: GoalTargetPlanExcludedWorkReview[] | undefined,
 ): GoalTargetPlanExcludedWorkReview[] | undefined {
 	return reviews?.map(review => ({ ...review }));
+}
+
+function cloneScenarioMatrix(matrix: GoalScenarioMatrix | undefined): GoalScenarioMatrix | undefined {
+	if (!matrix) return undefined;
+	return {
+		...matrix,
+		rowsInScope: matrix.rowsInScope.map(row => ({
+			...row,
+			signalIds: [...row.signalIds],
+			concernIds: [...row.concernIds],
+			staleIf: [...row.staleIf],
+		})),
+		rowsLeftOpen: matrix.rowsLeftOpen.map(row => ({ ...row })),
+		splittingSafety: { ...matrix.splittingSafety },
+		nextLargerTarget: matrix.nextLargerTarget
+			? {
+					...matrix.nextLargerTarget,
+					rows: [...matrix.nextLargerTarget.rows],
+				}
+			: undefined,
+	};
+}
+
+function cloneTargetWorkstreams(workstreams: GoalTargetWorkstream[] | undefined): GoalTargetWorkstream[] | undefined {
+	return workstreams?.map(workstream => ({
+		...workstream,
+		files: [...workstream.files],
+		contractInputs: [...workstream.contractInputs],
+		contractOutputs: [...workstream.contractOutputs],
+	}));
+}
+
+function cloneTargetCard(card: GoalTargetCard | undefined): GoalTargetCard | undefined {
+	if (!card) return undefined;
+	return {
+		...card,
+		knownLimits: [...card.knownLimits],
+		acceptanceRows: {
+			closed: [...card.acceptanceRows.closed],
+			open: [...card.acceptanceRows.open],
+		},
+		workstreams: cloneTargetWorkstreams(card.workstreams),
+		reviewLenses: card.reviewLenses ? [...card.reviewLenses] : undefined,
+		verificationScenarios: [...card.verificationScenarios],
+		checkpointEvidence: [...card.checkpointEvidence],
+	};
+}
+
+function cloneTargetUnitRules(rules: GoalTargetUnitRule[] | undefined): GoalTargetUnitRule[] | undefined {
+	return rules?.map(rule => ({ ...rule }));
 }
 
 function cloneTargetPlanFailure(failure: GoalTargetPlanFailure | undefined): GoalTargetPlanFailure | undefined {
@@ -1349,6 +1564,8 @@ export function cloneTargetPlan(plan: GoalTargetPlanRecord | undefined): GoalTar
 		scopeCalibration: cloneScopeCalibration(plan.scopeCalibration),
 		branchEvidence: cloneTargetPlanBranchEvidence(plan.branchEvidence),
 		excludedWorkReview: cloneTargetPlanExcludedWorkReview(plan.excludedWorkReview),
+		scenarioMatrix: cloneScenarioMatrix(plan.scenarioMatrix),
+		targetCard: cloneTargetCard(plan.targetCard),
 		reviews: plan.reviews.map(review => cloneTargetPlanReview(review)),
 	};
 }
@@ -1423,6 +1640,8 @@ export function cloneTarget(target: GoalTarget | undefined): GoalTarget | undefi
 		verificationSignals: cloneVerificationSignals(target.verificationSignals),
 		concernChecks: cloneConcernChecks(target.concernChecks),
 		scopeCalibration: cloneScopeCalibration(target.scopeCalibration),
+		scenarioMatrix: cloneScenarioMatrix(target.scenarioMatrix),
+		targetCard: cloneTargetCard(target.targetCard),
 	};
 }
 
@@ -1526,6 +1745,7 @@ export function cloneGoal(goal: Goal): Goal {
 		targetPlans: goal.targetPlans
 			?.map(plan => cloneTargetPlan(plan))
 			.filter((plan): plan is GoalTargetPlanRecord => plan !== undefined),
+		targetUnitRules: cloneTargetUnitRules(goal.targetUnitRules),
 		checkpoints: goal.checkpoints
 			?.map(packet => cloneCheckpoint(packet))
 			.filter((packet): packet is GoalCheckpointPacket => packet !== undefined),
@@ -1594,9 +1814,257 @@ export function isNonContinuingCheckpointDecision(
 	);
 }
 
+function normalizeTargetPlanDepth(value: unknown): GoalTargetPlanDepth | undefined {
+	return value === "light" || value === "standard" || value === "trust-heavy" ? value : undefined;
+}
+
+function normalizeScenarioOpenReason(value: unknown): GoalScenarioMatrixOpenRow["reason"] | undefined {
+	return value === "different-primary-signal" ||
+		value === "different-authority" ||
+		value === "different-blast-radius" ||
+		value === "blocked-external" ||
+		value === "non-goal" ||
+		value === "unsafe-to-bundle"
+		? value
+		: undefined;
+}
+
+function normalizeScenarioMatrixRow(value: unknown): GoalScenarioMatrixRow | undefined {
+	if (!isRecord(value)) return undefined;
+	if (typeof value.id !== "string" || typeof value.branch !== "string") return undefined;
+	if (
+		typeof value.acceptance !== "string" ||
+		typeof value.expectedOutcome !== "string" ||
+		!Array.isArray(value.signalIds) ||
+		!Array.isArray(value.concernIds) ||
+		!Array.isArray(value.staleIf)
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		branch: value.branch,
+		signalIds: stringArray(value.signalIds),
+		concernIds: stringArray(value.concernIds),
+		acceptance: value.acceptance,
+		expectedOutcome: value.expectedOutcome,
+		staleIf: stringArray(value.staleIf),
+	};
+}
+
+function normalizeScenarioMatrixOpenRow(value: unknown): GoalScenarioMatrixOpenRow | undefined {
+	if (!isRecord(value)) return undefined;
+	const reason = normalizeScenarioOpenReason(value.reason);
+	if (
+		typeof value.id !== "string" ||
+		typeof value.branch !== "string" ||
+		!reason ||
+		typeof value.followUpHint !== "string"
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		branch: value.branch,
+		reason,
+		followUpHint: value.followUpHint,
+	};
+}
+
+function normalizeScenarioMatrix(value: unknown): GoalScenarioMatrix | undefined {
+	if (!isRecord(value)) return undefined;
+	const splittingSafety = value.splittingSafety;
+	if (
+		typeof value.id !== "string" ||
+		typeof value.primarySignalGroupId !== "string" ||
+		!Array.isArray(value.rowsInScope) ||
+		!Array.isArray(value.rowsLeftOpen) ||
+		!isRecord(splittingSafety) ||
+		typeof splittingSafety.safe !== "boolean" ||
+		typeof splittingSafety.rationale !== "string"
+	) {
+		return undefined;
+	}
+	const rowsInScope = value.rowsInScope.flatMap(row => normalizeScenarioMatrixRow(row) ?? []);
+	const rowsLeftOpen = value.rowsLeftOpen.flatMap(row => normalizeScenarioMatrixOpenRow(row) ?? []);
+	if (rowsInScope.length !== value.rowsInScope.length || rowsLeftOpen.length !== value.rowsLeftOpen.length) {
+		return undefined;
+	}
+	const matrix: GoalScenarioMatrix = {
+		id: value.id,
+		primarySignalGroupId: value.primarySignalGroupId,
+		rowsInScope,
+		rowsLeftOpen,
+		splittingSafety: { safe: splittingSafety.safe, rationale: splittingSafety.rationale },
+	};
+	const nextLargerTarget = value.nextLargerTarget;
+	if (isRecord(nextLargerTarget)) {
+		if (
+			typeof nextLargerTarget.title !== "string" ||
+			typeof nextLargerTarget.primarySignalGroupId !== "string" ||
+			!Array.isArray(nextLargerTarget.rows)
+		) {
+			return undefined;
+		}
+		matrix.nextLargerTarget = {
+			title: nextLargerTarget.title,
+			primarySignalGroupId: nextLargerTarget.primarySignalGroupId,
+			rows: stringArray(nextLargerTarget.rows),
+			unblocksMatrixId: optionalString(nextLargerTarget.unblocksMatrixId),
+		};
+	}
+	return matrix;
+}
+
+function normalizeTargetWorkstreamKind(value: unknown): GoalTargetWorkstream["kind"] | undefined {
+	return value === "main" ||
+		value === "backend-rust" ||
+		value === "app-ui" ||
+		value === "e2e-harness" ||
+		value === "docs-changelog" ||
+		value === "other"
+		? value
+		: undefined;
+}
+
+function normalizeTargetWorkstream(value: unknown): GoalTargetWorkstream | undefined {
+	if (!isRecord(value)) return undefined;
+	const kind = normalizeTargetWorkstreamKind(value.kind);
+	if (
+		typeof value.id !== "string" ||
+		typeof value.label !== "string" ||
+		!kind ||
+		!Array.isArray(value.files) ||
+		!Array.isArray(value.contractInputs) ||
+		!Array.isArray(value.contractOutputs)
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		label: value.label,
+		kind,
+		files: stringArray(value.files),
+		contractInputs: stringArray(value.contractInputs),
+		contractOutputs: stringArray(value.contractOutputs),
+	};
+}
+
+function normalizeTargetCard(value: unknown): GoalTargetCard | undefined {
+	if (!isRecord(value)) return undefined;
+	const acceptanceRows = value.acceptanceRows;
+	if (
+		typeof value.capabilityClaim !== "string" ||
+		typeof value.userVisibleSurface !== "string" ||
+		!Array.isArray(value.knownLimits) ||
+		!isRecord(acceptanceRows) ||
+		!Array.isArray(acceptanceRows.closed) ||
+		!Array.isArray(acceptanceRows.open) ||
+		!Array.isArray(value.verificationScenarios) ||
+		!Array.isArray(value.checkpointEvidence)
+	) {
+		return undefined;
+	}
+	const workstreams = Array.isArray(value.workstreams)
+		? value.workstreams.flatMap(workstream => normalizeTargetWorkstream(workstream) ?? [])
+		: undefined;
+	if (Array.isArray(value.workstreams) && workstreams?.length !== value.workstreams.length) return undefined;
+	return {
+		capabilityClaim: value.capabilityClaim,
+		trustPrivacyClaim: optionalString(value.trustPrivacyClaim),
+		confidenceEarned: optionalString(value.confidenceEarned),
+		knownLimits: stringArray(value.knownLimits),
+		authorityBoundary: optionalString(value.authorityBoundary),
+		policyDeletionImplications: optionalString(value.policyDeletionImplications),
+		userVisibleSurface: value.userVisibleSurface,
+		acceptanceRows: {
+			closed: stringArray(acceptanceRows.closed),
+			open: stringArray(acceptanceRows.open),
+		},
+		workstreams,
+		sharedContract: optionalString(value.sharedContract),
+		reviewLenses: Array.isArray(value.reviewLenses) ? stringArray(value.reviewLenses) : undefined,
+		verificationScenarios: stringArray(value.verificationScenarios),
+		checkpointEvidence: stringArray(value.checkpointEvidence),
+		rollbackCutover: optionalString(value.rollbackCutover),
+	};
+}
+
+function normalizeTargetUnitRuleKind(value: unknown): GoalTargetUnitRuleKind | undefined {
+	return value === "complete-acceptance-slice" ||
+		value === "scenario-matrix" ||
+		value === "gate-prerequisite" ||
+		value === "no-process-phase" ||
+		value === "same-primary-signal-together" ||
+		value === "branch-unblocks-matrix"
+		? value
+		: undefined;
+}
+
+function normalizeTargetUnitRule(value: unknown): GoalTargetUnitRule | undefined {
+	if (!isRecord(value)) return undefined;
+	const kind = normalizeTargetUnitRuleKind(value.kind);
+	const source =
+		value.source === "rubric" ||
+		value.source === "checkpoint-guidance" ||
+		value.source === "operator" ||
+		value.source === "built-in"
+			? value.source
+			: undefined;
+	const enforcement = value.enforcement === "warning" || value.enforcement === "error" ? value.enforcement : undefined;
+	if (typeof value.id !== "string" || !kind || typeof value.statement !== "string" || !source || !enforcement) {
+		return undefined;
+	}
+	return { id: value.id, kind, statement: value.statement, source, enforcement };
+}
+
+function normalizeTargetUnitRules(value: unknown): GoalTargetUnitRule[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const rules = value.flatMap(rule => normalizeTargetUnitRule(rule) ?? []);
+	return rules.length ? rules : undefined;
+}
+
+function applyOptionalTargetPlanFields(record: Record<string, unknown>): void {
+	const planDepth = normalizeTargetPlanDepth(record.planDepth);
+	if (planDepth) record.planDepth = planDepth;
+	else delete record.planDepth;
+	const primarySignalGroupId = optionalString(record.primarySignalGroupId);
+	if (primarySignalGroupId) record.primarySignalGroupId = primarySignalGroupId;
+	else delete record.primarySignalGroupId;
+	const scenarioMatrix = normalizeScenarioMatrix(record.scenarioMatrix);
+	if (scenarioMatrix) record.scenarioMatrix = scenarioMatrix;
+	else delete record.scenarioMatrix;
+	const targetCard = normalizeTargetCard(record.targetCard);
+	if (targetCard) record.targetCard = targetCard;
+	else delete record.targetCard;
+	const calibration = record.scopeCalibration;
+	if (isRecord(calibration)) {
+		const targetUnitRuleIds = stringArray(calibration.targetUnitRuleIds);
+		if (targetUnitRuleIds.length > 0) calibration.targetUnitRuleIds = targetUnitRuleIds;
+		else delete calibration.targetUnitRuleIds;
+		const exemptions = Array.isArray(calibration.targetUnitExemptions)
+			? calibration.targetUnitExemptions.flatMap(exemption => {
+					if (!isRecord(exemption)) return [];
+					const ruleId = optionalString(exemption.ruleId);
+					const rationale = optionalString(exemption.rationale);
+					return ruleId && rationale ? [{ ruleId, rationale }] : [];
+				})
+			: undefined;
+		if (exemptions?.length) calibration.targetUnitExemptions = exemptions;
+		else delete calibration.targetUnitExemptions;
+	}
+}
+
+function normalizeTargetRecord(value: unknown): GoalTarget | undefined {
+	if (!isRecord(value)) return undefined;
+	const normalized: Record<string, unknown> = { ...value };
+	applyOptionalTargetPlanFields(normalized);
+	return cloneTarget(normalized as unknown as GoalTarget);
+}
+
 function normalizeTargetPlanRecord(value: unknown): GoalTargetPlanRecord | undefined {
 	if (!isRecord(value)) return undefined;
-	const normalized = { ...value };
+	const normalized: Record<string, unknown> = { ...value };
 	const legacyRecoveryKey = "recoveredFrom" + "Failure";
 	const legacyRecovery = normalized[legacyRecoveryKey];
 	delete normalized[legacyRecoveryKey];
@@ -1613,6 +2081,7 @@ function normalizeTargetPlanRecord(value: unknown): GoalTargetPlanRecord | undef
 			at: optionalNumber(legacyRecovery.at) ?? optionalNumber(normalized.updatedAt) ?? 0,
 		} satisfies GoalRecoveryLink;
 	}
+	applyOptionalTargetPlanFields(normalized);
 	return cloneTargetPlan(normalized as unknown as GoalTargetPlanRecord);
 }
 
@@ -1736,14 +2205,17 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 	};
 	const parentFrame = normalizeParentFrame(value.parentFrame, value.objective);
 	if (parentFrame) goal.parentFrame = parentFrame;
-	if (isRecord(value.currentTarget)) goal.currentTarget = value.currentTarget as unknown as GoalTarget;
-	if (Array.isArray(value.targets)) goal.targets = value.targets as GoalTarget[];
+	if (isRecord(value.currentTarget)) goal.currentTarget = normalizeTargetRecord(value.currentTarget);
+	if (Array.isArray(value.targets)) {
+		goal.targets = value.targets.flatMap(target => normalizeTargetRecord(target) ?? []);
+	}
 	if (isRecord(value.currentTargetPlan)) goal.currentTargetPlan = normalizeTargetPlanRecord(value.currentTargetPlan);
 	if (Array.isArray(value.targetPlans)) {
 		goal.targetPlans = value.targetPlans
 			.map(plan => normalizeTargetPlanRecord(plan))
 			.filter((plan): plan is GoalTargetPlanRecord => plan !== undefined);
 	}
+	goal.targetUnitRules = normalizeTargetUnitRules(value.targetUnitRules);
 	if (Array.isArray(value.checkpoints)) goal.checkpoints = value.checkpoints as GoalCheckpointPacket[];
 	goal.pendingCheckpointId = optionalString(value.pendingCheckpointId);
 	if (Array.isArray(value.checkpointResolutions)) {

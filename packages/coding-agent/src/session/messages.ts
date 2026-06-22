@@ -34,8 +34,11 @@ import type {
 	GoalCheckpointResolution,
 	GoalCheckpointReview,
 	GoalCompletionVerifierStructuredOutput,
+	GoalTargetCard,
+	GoalTargetPlanDepth,
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
+	GoalTargetWorkstream,
 } from "../goals/state";
 import type { OutputMeta } from "../tools/output-meta";
 
@@ -105,6 +108,12 @@ export interface GoalTargetPlanMessageDetails {
 	status: GoalTargetPlanRecord["status"];
 	reviews: GoalTargetPlanReview[];
 	failure?: GoalTargetPlanRecord["failure"];
+	planDepth?: GoalTargetPlanDepth;
+	primarySignalGroupId?: string;
+	matrixRowCounts?: { inScope: number; leftOpen: number };
+	implementationFanoutRequired?: boolean;
+	workstreamSummary?: Array<Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "files">>;
+	targetCard?: GoalTargetCard;
 	recordedAt: number;
 }
 

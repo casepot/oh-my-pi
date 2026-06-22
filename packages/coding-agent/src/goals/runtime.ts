@@ -16,7 +16,6 @@ import type {
 	GoalConcernCheck,
 	GoalDeliverableDelta,
 	GoalDeliverableMapItem,
-	GoalExcludedWorkClassification,
 	GoalModeState,
 	GoalParentFrame,
 	GoalParentStateDelta,
@@ -26,13 +25,19 @@ import type {
 	GoalRef,
 	GoalRunMode,
 	GoalRuntimeEvent,
+	GoalScenarioMatrix,
 	GoalScopeCalibration,
 	GoalTarget,
+	GoalTargetCard,
 	GoalTargetPlanBranchEvidence,
+	GoalTargetPlanDepth,
 	GoalTargetPlanExcludedWorkReview,
 	GoalTargetPlanFailureReason,
+	GoalTargetPlanLintDiagnostic,
+	GoalTargetPlanLintResult,
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
+	GoalTargetUnitRule,
 	GoalTokenUsage,
 	GoalVerificationAperture,
 	GoalVerificationAttempt,
@@ -55,6 +60,7 @@ import {
 	upsertBlockedState,
 	upsertRecoveryRecord,
 } from "./state";
+import { collectTargetPlanGraphDiagnostics, lintDiagnostic } from "./target-plan-lint";
 
 export type GoalPersistenceReason = "semantic" | "terminal" | "recovery" | "budget-limited";
 
@@ -149,11 +155,20 @@ export interface GoalCheckpointInput {
 	retrospectiveTarget?: GoalStartTargetInput;
 }
 
+export function targetPlanPayloadFilePath(planFilePath: string): string {
+	if (planFilePath.endsWith(".md")) return `${planFilePath.slice(0, -3)}.payload.json`;
+	return `${planFilePath}.payload.json`;
+}
+
 export interface GoalSubmitTargetPlanInput {
 	targetId: string;
 	targetPlanId: string;
 	planFilePath: string;
 	revision: number;
+	primarySignalGroupId?: string;
+	planDepth?: GoalTargetPlanDepth;
+	scenarioMatrix?: GoalScenarioMatrix;
+	targetCard?: GoalTargetCard;
 	verificationAperture: GoalVerificationAperture;
 	verificationSignals: GoalVerificationSignal[];
 	concernChecks: GoalConcernCheck[];
@@ -190,6 +205,7 @@ export interface GoalTargetPlanSubmitIdentity {
 	targetId: string;
 	targetPlanId: string;
 	planFilePath: string;
+	payloadFilePath: string;
 	revision: number;
 }
 
@@ -203,83 +219,9 @@ export function currentTargetPlanSubmitIdentity(
 		targetId: target.id,
 		targetPlanId: plan.id,
 		planFilePath: plan.planFilePath,
+		payloadFilePath: targetPlanPayloadFilePath(plan.planFilePath),
 		revision: plan.revision,
 	};
-}
-
-export function renderTargetPlanSubmitSkeleton(
-	identity: GoalTargetPlanSubmitIdentity | undefined,
-	options: { includeOp?: boolean } = {},
-): string {
-	if (!identity) return "null";
-	const body: Record<string, unknown> = {
-		target_id: identity.targetId,
-		target_plan_id: identity.targetPlanId,
-		plan_file_path: identity.planFilePath,
-		revision: identity.revision,
-		verification_aperture: {
-			product_intention: "<observable product intention>",
-			primary_signal_id: "<copy exact id of one required verification_signals[] entry>",
-			blast_radius: "<local|module|workflow|multi-subsystem|external-or-irreversible>",
-			confidence_target: "<low|medium|high>",
-			layer_rationale: "<why these layers are sufficient>",
-			residual_uncertainty: ["<uncertainty left outside this target>"],
-			omitted_layers: [{ layer: "<unit|integration|e2e|manual|product|release-gate>", reason: "<why omitted>" }],
-		},
-		verification_signals: [
-			{
-				id: "<primary signal id copied by verification_aperture.primary_signal_id>",
-				role: "<primary|supporting|guardrail>",
-				layer: "<unit|integration|e2e|manual|product|release-gate only; never concern kind (behavior, contract, state-persistence, error-handling, security, performance, migration, ux-manual, docs-or-operator)>",
-				concern_ids: ["<concern id>"],
-				claim: "<claim this signal proves>",
-				observation: "<observable result>",
-				method: "<how to observe it>",
-				expected_outcome: "<passing outcome>",
-				required: true,
-				confidence_if_satisfied: "<low|medium|high>",
-				stale_if: ["<condition making signal stale>"],
-			},
-		],
-		concern_checks: [
-			{
-				id: "<concern id>",
-				kind: "<behavior|contract|state-persistence|error-handling|security|performance|migration|ux-manual|docs-or-operator; concern taxonomy, not verification layer>",
-				why_independent: "<why this concern can fail independently>",
-				covered_by_signal_ids: ["<signal id>"],
-			},
-		],
-		scope_calibration: {
-			right_sizing_basis: "<product-signal|minimum-domain-unit|verifier-repair|external-authority-slice>",
-			why_not_smaller: ["<why smaller is insufficient>"],
-			why_not_larger: ["<why larger is out of scope>"],
-			included_related_work: [{ item: "<work item>", reason: "<why included>", signal_ids: ["<signal id>"] }],
-			deferred_related_work: [
-				{
-					item: "<work item>",
-					reason:
-						"<different-primary-signal|different-authority|different-blast-radius|blocked-external|non-goal>",
-					follow_up_hint: "<future target hint>",
-				},
-			],
-		},
-		branch_evidence: [
-			{ branch: "<branch name>", required: true, planned_signal_ids: ["<signal id>"], rationale: "<why needed>" },
-		],
-		excluded_work_review: [
-			{
-				item: "<excluded work>",
-				classification: "<valid-boundary|parent-non-claim|essential-related-work|stale-or-unsupported>",
-				rationale: "<why excluded>",
-			},
-		],
-		workflow_review_rounds: [
-			{ lens: "<review lens>", verdict: "accepted", summary: "<summary>", blockers: [], revised: false },
-		],
-		dry_run: { status: "passed", checks: [{ id: "<check id>", passed: true, rationale: "<why pass>" }] },
-	};
-	const payload = options.includeOp ? { op: "submit_target_plan", ...body } : body;
-	return JSON.stringify(payload, null, 2);
 }
 
 export interface GoalTargetPlanRejectionInput {
@@ -345,75 +287,13 @@ export interface GoalCheckpointResolutionInput {
 	nextTarget?: GoalStartTargetInput;
 }
 
-export function validateTargetPlanSubmissionGraph(
-	input: Pick<
-		GoalTargetPlanApprovalInput,
-		| "verificationAperture"
-		| "verificationSignals"
-		| "concernChecks"
-		| "scopeCalibration"
-		| "branchEvidence"
-		| "excludedWorkReview"
-		| "dryRun"
-	>,
-): void {
-	const invalidExcludedClassifications: GoalExcludedWorkClassification[] = [
-		"essential-related-work",
-		"stale-or-unsupported",
-	];
-	if (input.excludedWorkReview.some(review => invalidExcludedClassifications.includes(review.classification))) {
-		throw new Error("target plan excluded work contains essential related or stale work");
-	}
-	const signalIds = new Set(input.verificationSignals.map(signal => signal.id));
-	if (signalIds.size !== input.verificationSignals.length) {
-		throw new Error("target plan verification signal ids must be unique");
-	}
-	const requiredSignalIds = new Set(
-		input.verificationSignals.filter(signal => signal.required).map(signal => signal.id),
-	);
-	const primarySignal = input.verificationSignals.find(
-		signal => signal.id === input.verificationAperture.primarySignalId,
-	);
-	if (!primarySignal) {
-		throw new Error("target plan primary signal must reference a verification signal");
-	}
-	if (!primarySignal.required) {
-		throw new Error("target plan primary signal must be required");
-	}
-	if (requiredSignalIds.size === 0) {
-		throw new Error("target plan requires at least one required verification signal");
-	}
-	const concernIds = new Set(input.concernChecks.map(check => check.id));
-	if (concernIds.size !== input.concernChecks.length) {
-		throw new Error("target plan concern check ids must be unique");
-	}
-	for (const signal of input.verificationSignals) {
-		for (const concernId of signal.concernIds) {
-			if (!concernIds.has(concernId)) throw new Error(`verification signal references unknown concern ${concernId}`);
-		}
-	}
-	for (const check of input.concernChecks) {
-		for (const signalId of check.coveredBySignalIds) {
-			if (!signalIds.has(signalId)) throw new Error(`concern check references unknown signal ${signalId}`);
-		}
-	}
-	for (const item of input.scopeCalibration.includedRelatedWork) {
-		for (const signalId of item.signalIds) {
-			if (!signalIds.has(signalId)) throw new Error(`included related work references unknown signal ${signalId}`);
-		}
-	}
-	for (const branch of input.branchEvidence) {
-		if (branch.required && branch.plannedSignalIds.length === 0) {
-			throw new Error("required branch evidence must reference at least one verification signal");
-		}
-		for (const signalId of branch.plannedSignalIds) {
-			if (!signalIds.has(signalId)) throw new Error(`branch evidence references unknown signal ${signalId}`);
-		}
-	}
-	if (input.dryRun.status !== "passed" || input.dryRun.checks.some(check => !check.passed)) {
-		throw new Error("target plan dry run must pass before approval");
-	}
-}
+export {
+	collectPrimarySignalGroupHistory,
+	collectTargetPlanGraphDiagnostics,
+	effectiveTargetUnitRules,
+	resolvePrimarySignalGroupId,
+	validateTargetPlanSubmissionGraph,
+} from "./target-plan-lint";
 
 export interface GoalSideAgentExpectation {
 	goalId: string;
@@ -732,6 +612,7 @@ export interface GoalContextSurface {
 	deliverables?: GoalPromptObject;
 	parent_truth?: GoalPromptObject;
 	target_aperture_guidance?: GoalPromptObject;
+	target_unit_rules?: GoalPromptObject[];
 	current_target?: GoalPromptObject;
 	target_plan?: GoalPromptObject;
 	checkpoint?: GoalPromptObject;
@@ -924,6 +805,17 @@ function compactTargetPlanForPrompt(plan: GoalTargetPlanRecord | undefined): Goa
 	};
 }
 
+function compactTargetUnitRulesForPrompt(rules: GoalTargetUnitRule[] | undefined): GoalPromptObject[] | undefined {
+	if (!rules?.length) return undefined;
+	return rules.map(rule => ({
+		id: rule.id,
+		kind: rule.kind,
+		statement: rule.statement,
+		source: rule.source,
+		enforcement: rule.enforcement,
+	}));
+}
+
 function compactBlockedStateForPrompt(block: GoalBlockedState | undefined): GoalPromptObject | undefined {
 	if (!block) return undefined;
 	return {
@@ -1042,14 +934,27 @@ function compactVerifierRepairForPrompt(repair: GoalVerificationRepairState | un
 	};
 }
 
+export interface GoalRunModePolicy {
+	allowedNextActs: string[];
+	disallowedNextActs: string[];
+}
+
+export function goalRunModePolicy(runMode: GoalRunMode): GoalRunModePolicy {
+	return {
+		allowedNextActs: allowedActsForRunMode(runMode),
+		disallowedNextActs: disallowedActsForRunMode(runMode),
+	};
+}
+
 function policyForRunMode(runMode: GoalRunMode): GoalPromptObject {
+	const policy = goalRunModePolicy(runMode);
 	return {
 		invariant: [
 			"target closure is not parent completion",
 			"parent truth changes only through goal.resolve_checkpoint.parent_delta",
 		],
-		now: allowedActsForRunMode(runMode),
-		blocked: disallowedActsForRunMode(runMode),
+		now: policy.allowedNextActs,
+		blocked: policy.disallowedNextActs,
 	};
 }
 
@@ -1091,6 +996,7 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 		policy: policyForRunMode(runMode),
 		deliverables: compactDeliverablesForPrompt(goal.deliverableMap, currentTarget),
 		target_aperture_guidance: extractTargetApertureGuidance(goal.rubric),
+		target_unit_rules: compactTargetUnitRulesForPrompt(goal.targetUnitRules),
 		parent_truth: compactParentTruthForPrompt(goal.parentFrame, resolution, goal.deliverableMap, currentTarget),
 		latest_resolution: compactResolutionForPrompt(resolution, currentTarget),
 		refs: {
@@ -1207,10 +1113,11 @@ function allowedActsForRunMode(runMode: GoalRunMode): string[] {
 	switch (runMode) {
 		case "planning-target":
 			return [
+				'Call goal({op:"lint_target_plan", payload_file_path:...}) before submit_target_plan',
+				'Call goal({op:"submit_target_plan", payload_file_path:...}) or goal({op:"fail_target_plan", ...})',
 				"Draft/revise the current target plan",
 				"Use read-only task discovery and review",
-				"Write only the fixed target plan file",
-				'Call goal({op:"submit_target_plan", ...}) or goal({op:"fail_target_plan", ...})',
+				"Create missing target-plan files; edit existing plan and payload sidecar in place",
 			];
 		case "awaiting-checkpoint-resolution":
 			return ['Call goal({op:"resolve_checkpoint", ...}) before ordinary tools'];
@@ -1741,6 +1648,10 @@ export class GoalRuntime {
 			scopeCalibration: input.scopeCalibration,
 			branchEvidence: input.branchEvidence,
 			excludedWorkReview: input.excludedWorkReview,
+			planDepth: input.planDepth,
+			primarySignalGroupId: input.primarySignalGroupId,
+			scenarioMatrix: input.scenarioMatrix,
+			targetCard: input.targetCard,
 		});
 		if (!submitted) throw new Error("target plan submission is invalid");
 		return submitted;
@@ -1785,7 +1696,6 @@ export class GoalRuntime {
 		) {
 			throw new Error("target plan cannot be approved with blocking or important findings");
 		}
-		validateTargetPlanSubmissionGraph(input);
 	}
 
 	#markActiveAccounting(goal: Goal): void {
@@ -1985,6 +1895,7 @@ export class GoalRuntime {
 		goalId: string,
 		rubric: string,
 		deliverableMap?: GoalDeliverableMapItem[],
+		targetUnitRules?: GoalTargetUnitRule[],
 	): Promise<GoalModeState | undefined> {
 		const trimmedRubric = rubric.trim();
 		return await this.#withAccounting(async () => {
@@ -1992,6 +1903,7 @@ export class GoalRuntime {
 			if (!state?.enabled || state.goal.id !== goalId || state.goal.status !== "active") return undefined;
 			state.goal.rubric = trimmedRubric || undefined;
 			state.goal.deliverableMap = deliverableMap?.length ? cloneDeliverableMapForState(deliverableMap) : undefined;
+			state.goal.targetUnitRules = targetUnitRules?.length ? targetUnitRules.map(rule => ({ ...rule })) : undefined;
 			this.#bumpState(state);
 			await this.#commitState(state, { persist: "goal" });
 			return state;
@@ -2754,10 +2666,143 @@ export class GoalRuntime {
 		return this.#validateTargetPlanSubmission(this.#getStateClone(), input);
 	}
 
+	lintCurrentTargetPlanSubmission(
+		input: GoalSubmitTargetPlanInput | undefined,
+		schemaDiagnostics: GoalTargetPlanLintDiagnostic[] = [],
+		mode: "lint" | "submit" = "lint",
+	): GoalTargetPlanLintResult {
+		const state = this.#getStateClone();
+		const diagnostics: GoalTargetPlanLintDiagnostic[] = [...schemaDiagnostics];
+		const identity = currentTargetPlanSubmitIdentity(state);
+		const addIdentityDiagnostic = (
+			path: Array<string | number>,
+			message: string,
+			guidance = 'Call goal({op:"get"}) and reuse the current target-plan submit identity.',
+			value?: unknown,
+		): void => {
+			diagnostics.push(
+				lintDiagnostic({
+					severity: "error",
+					code: "identity.mismatch",
+					path,
+					message,
+					guidance,
+					offender: { kind: "identity", value },
+				}),
+			);
+		};
+		if (!state?.enabled || state.goal.status !== "active") {
+			addIdentityDiagnostic([], "cannot lint target plan because no active parent goal exists");
+		} else if (state.goal.currentTarget?.status !== "active") {
+			addIdentityDiagnostic(["target_id"], "cannot lint target plan without an active target");
+		} else if (
+			!state.goal.currentTargetPlan ||
+			state.goal.currentTargetPlan.targetId !== state.goal.currentTarget.id
+		) {
+			addIdentityDiagnostic(["target_plan_id"], "current target plan is stale");
+		} else if (state.runMode !== "planning-target") {
+			addIdentityDiagnostic(
+				[],
+				"target plan lint is only valid while runMode is planning-target",
+				"Return to target planning before linting or submitting a target plan.",
+				state.runMode,
+			);
+		} else if (
+			state.goal.currentTargetPlan.status !== "drafting" &&
+			state.goal.currentTargetPlan.status !== "revision-required"
+		) {
+			addIdentityDiagnostic(
+				["target_plan_id"],
+				"target plan lint requires a draft or revision-required plan",
+				"Recover or restart target planning before submitting this plan.",
+				state.goal.currentTargetPlan.status,
+			);
+		}
+		if (input && identity) {
+			if (input.targetId !== identity.targetId) {
+				addIdentityDiagnostic(
+					["target_id"],
+					`target_id must equal currentTarget.id (${identity.targetId}); got ${input.targetId}`,
+					undefined,
+					input.targetId,
+				);
+			}
+			if (input.targetPlanId !== identity.targetPlanId) {
+				addIdentityDiagnostic(
+					["target_plan_id"],
+					`target_plan_id must equal currentTargetPlan.id (${identity.targetPlanId}); got ${input.targetPlanId}`,
+					undefined,
+					input.targetPlanId,
+				);
+			}
+			if (input.planFilePath !== identity.planFilePath) {
+				addIdentityDiagnostic(
+					["plan_file_path"],
+					`plan_file_path must equal currentTargetPlan.planFilePath (${identity.planFilePath}); got ${input.planFilePath}`,
+					undefined,
+					input.planFilePath,
+				);
+			}
+			if (input.revision !== identity.revision) {
+				addIdentityDiagnostic(
+					["revision"],
+					`revision must equal currentTargetPlan.revision (${identity.revision}); got ${input.revision}`,
+					undefined,
+					input.revision,
+				);
+			}
+			diagnostics.push(
+				...collectTargetPlanGraphDiagnostics(input, {
+					mode,
+					goal: state?.goal,
+					targetPlanId: input.targetPlanId,
+				}),
+			);
+		}
+		const errorCount = diagnostics.filter(diagnostic => diagnostic.severity === "error").length;
+		const warningCount = diagnostics.filter(diagnostic => diagnostic.severity === "warning").length;
+		const infoCount = diagnostics.filter(diagnostic => diagnostic.severity === "info").length;
+		const currentPlan = state?.goal.currentTargetPlan;
+		const primarySignalGroupId =
+			input?.primarySignalGroupId ??
+			currentPlan?.primarySignalGroupId ??
+			currentPlan?.verificationAperture?.primarySignalId;
+		return {
+			ok: errorCount === 0,
+			targetId: input?.targetId ?? state?.goal.currentTarget?.id,
+			targetPlanId: input?.targetPlanId ?? currentPlan?.id,
+			planFilePath: input?.planFilePath ?? currentPlan?.planFilePath,
+			revision: input?.revision ?? currentPlan?.revision,
+			stateVersion: state?.stateVersion ?? 0,
+			parentFrameVersion: state?.parentFrameVersion ?? 0,
+			planDepth: input?.planDepth ?? currentPlan?.planDepth,
+			primarySignalGroupId,
+			legacy: input
+				? input.primarySignalGroupId === undefined ||
+					input.planDepth === undefined ||
+					input.targetCard === undefined
+				: true,
+			diagnostics,
+			summary: {
+				errorCount,
+				warningCount,
+				infoCount,
+				blocksSubmission: errorCount > 0,
+			},
+		};
+	}
+
 	async approveCurrentTargetPlan(input: GoalTargetPlanApprovalInput): Promise<GoalModeState> {
 		this.#assertTargetPlanApprovalGates(input);
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
+			const lintDiagnostics = collectTargetPlanGraphDiagnostics(input, {
+				mode: "submit",
+				goal: state?.goal,
+				targetPlanId: input.targetPlanId,
+			});
+			const blockingDiagnostic = lintDiagnostics.find(diagnostic => diagnostic.severity === "error");
+			if (blockingDiagnostic) throw new Error(blockingDiagnostic.message);
 			const submittedPlan = this.#validateTargetPlanSubmission(state, input);
 			if (!state?.goal.currentTarget) throw new Error("cannot approve target plan without an active target");
 			const now = this.#now();
@@ -2777,6 +2822,10 @@ export class GoalRuntime {
 				verificationSignals: approvedPlan.verificationSignals,
 				concernChecks: approvedPlan.concernChecks,
 				scopeCalibration: approvedPlan.scopeCalibration,
+				planDepth: approvedPlan.planDepth,
+				primarySignalGroupId: approvedPlan.primarySignalGroupId,
+				scenarioMatrix: approvedPlan.scenarioMatrix,
+				targetCard: approvedPlan.targetCard,
 			};
 			state.goal.currentTarget = target;
 			state.goal.targets = upsertById(state.goal.targets ?? [], [target]);
