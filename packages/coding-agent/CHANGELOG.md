@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added goal target-plan linting, target cards, scenario-matrix metadata, and a live target status panel for goal planning.
 
 - Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
 - Added autonomous goal target planning with verification-aperture review before target execution.
@@ -46,6 +47,7 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Reduced goal target-plan rewrite churn by making file-backed payload edits canonical, limiting Markdown updates to executor-visible semantic changes, and delegating gate-prerequisite target-unit checks to reviewers.
 - Fixed goal target-plan schema failures to normalize concern-kind layer aliases before review and clarify that primary signals must be exact signal IDs while concern kinds are not verification layers.
 - Fixed goal compaction preserve data so stale goal-owned state from older compactions is stripped and refreshed from the latest live goal state.
 - Fixed goal-mode todo error handling so planning/checkpoint run modes do not receive retry reminders for a tool that is currently disallowed.
