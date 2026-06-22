@@ -9,13 +9,14 @@ import { z } from "zod/v4";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { MCPManager } from "../mcp/manager";
+import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import * as taskDiscovery from "../task/discovery";
 import * as taskExecutor from "../task/executor";
 import { AgentOutputManager } from "../task/output-manager";
 import type { AgentDefinition, AgentProgress, SingleResult } from "../task/types";
 import type { ToolSession } from "../tools";
-import { isGoalTargetPlanningActive } from "../tools/plan-mode-guard";
+import { isReadOnlyPlanningActive } from "../tools/plan-mode-guard";
 import { ToolError } from "../tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -30,6 +31,8 @@ export const EVAL_AGENT_MAX_DEPTH = 3;
 
 const DEFAULT_AGENT_TYPE = "task";
 const DEFAULT_AGENT_LABEL = "EvalAgent";
+const PLAN_MODE_AGENT_BASE_TOOLS = ["read", "search", "find", "lsp", "web_search"];
+const PLAN_MODE_AGENT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set(["ast_grep", "report_finding"]);
 
 const agentArgsSchema = z.object({
 	prompt: z.string().min(1, "prompt must be a non-empty string"),
@@ -104,13 +107,19 @@ function assertAgentEnabled(session: ToolSession, agentName: string, agents: Age
 	);
 }
 
-function assertAgentBridgePlanningAllowed(session: ToolSession): void {
-	if (isGoalTargetPlanningActive(session)) {
-		throw new ToolError("agent() is unavailable during target planning.");
-	}
-	if (session.getPlanModeState?.()?.enabled) {
-		throw new ToolError("agent() is unavailable in plan mode.");
-	}
+function restrictAgentForPlanning(agent: AgentDefinition): AgentDefinition {
+	const planModeTools = [
+		...PLAN_MODE_AGENT_BASE_TOOLS,
+		...(agent.tools ?? []).filter(
+			tool => PLAN_MODE_AGENT_TOOL_ALLOWLIST.has(tool) && !PLAN_MODE_AGENT_BASE_TOOLS.includes(tool),
+		),
+	];
+	return {
+		...agent,
+		systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
+		tools: planModeTools,
+		spawns: undefined,
+	};
 }
 
 function renderSubagentPrompt(assignment: string): string {
@@ -196,7 +205,6 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 	const agentName = parsed.agentType ?? DEFAULT_AGENT_TYPE;
 	const structured = Object.hasOwn(parsed, "schema");
 
-	assertAgentBridgePlanningAllowed(options.session);
 	assertDepthAllowed(options.session);
 	assertSpawnAllowed(options.session, agentName);
 
@@ -215,7 +223,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 	}
 	assertAgentEnabled(options.session, agentName, agents);
 
-	const effectiveAgent = agent;
+	const effectiveAgent = isReadOnlyPlanningActive(options.session) ? restrictAgentForPlanning(agent) : agent;
 	const parentActiveModelPattern = options.session.getActiveModelString?.();
 	const agentModelOverrides = options.session.settings.get("task.agentModelOverrides");
 	const modelOverride = resolveAgentModelPatterns({

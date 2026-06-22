@@ -234,6 +234,7 @@ import {
 	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
 	sanitizeGoalPlanSlug,
+	targetPlanPayloadFromSubmitInput,
 } from "../goals/runtime";
 import {
 	type GoalCheckpointGuidanceOutput,
@@ -1097,6 +1098,7 @@ function targetPlanWorkstreamSummary(plan: GoalTargetPlanRecord): GoalTargetPlan
 		id: workstream.id,
 		label: workstream.label,
 		kind: workstream.kind,
+		role: workstream.role,
 		files: [...workstream.files],
 	}));
 }
@@ -3279,7 +3281,7 @@ export class AgentSession {
 	}
 
 	async #ensureGoalTargetPlanningToolsActive(): Promise<void> {
-		const planningTools = ["task", "job", "irc", "write", "edit", "goal"].filter(
+		const planningTools = ["task", "job", "irc", "bash", "eval", "write", "edit", "goal"].filter(
 			toolName => this.getToolByName(toolName) !== undefined,
 		);
 		const activeTools = this.getActiveToolNames();
@@ -7020,7 +7022,7 @@ export class AgentSession {
 			const artifactsDir = path.dirname(goalStateFile);
 			const safeGoalId = state.goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
 			const submissionFile = path.join(artifactsDir, `${Date.now()}-${safeGoalId}-target-plan-submission.json`);
-			await Bun.write(submissionFile, `${JSON.stringify(input, null, 2)}\n`);
+			await Bun.write(submissionFile, `${JSON.stringify(targetPlanPayloadFromSubmitInput(input), null, 2)}\n`);
 			const targetUnitRules = JSON.stringify(effectiveTargetUnitRules(state.goal), null, 2);
 			const planFile = resolveLocalUrlToPath(normalizeLocalScheme(plan.planFilePath), this.#localProtocolOptions());
 			const contextFile = await this.#writeGoalTargetPlanReviewContextFile({
@@ -7197,6 +7199,8 @@ export class AgentSession {
 			taskAvailable: this.getToolByName("task") !== undefined,
 			jobAvailable: this.getToolByName("job") !== undefined,
 			ircAvailable: this.getToolByName("irc") !== undefined,
+			evalAvailable: this.getToolByName("eval") !== undefined,
+			bashAvailable: this.getToolByName("bash") !== undefined,
 			writeAvailable: this.getToolByName("write") !== undefined,
 			editAvailable: this.getToolByName("edit") !== undefined,
 		});

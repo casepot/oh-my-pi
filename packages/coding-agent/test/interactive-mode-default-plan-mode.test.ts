@@ -70,11 +70,19 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		const initialModel = modelOrThrow(registry, "claude-sonnet-4-5");
 		const readTool = makeTool("read");
 		const resolveTool = makeTool("resolve");
-		// AgentSession requires a Map-typed tool registry; the harness needs both
-		// `read` (the initial active tool) and `resolve` (added on plan-mode entry).
+		const evalTool = makeTool("eval");
+		const taskTool = makeTool("task");
+		const jobTool = makeTool("job");
+		const ircTool = makeTool("irc");
+		// AgentSession requires a Map-typed tool registry; the harness needs read
+		// plus the tools plan mode activates for approval and planning fan-out.
 		const toolRegistry = new Map<string, AgentTool>([
 			[readTool.name, readTool],
 			[resolveTool.name, resolveTool],
+			[evalTool.name, evalTool],
+			[taskTool.name, taskTool],
+			[jobTool.name, jobTool],
+			[ircTool.name, ircTool],
 		]);
 		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), `active-${Bun.nanoseconds()}`));
 		const createdSession = new AgentSession({
@@ -104,7 +112,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getPlanModeState()).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
-		expect(session?.getActiveToolNames()).toContain("resolve");
+		expect(session?.getActiveToolNames()).toEqual(expect.arrayContaining(["eval", "task", "job", "irc", "resolve"]));
 	});
 
 	it("does not enter plan mode at startup by default", async () => {

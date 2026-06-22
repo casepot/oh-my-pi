@@ -48,6 +48,9 @@ Working-target action:
 - Split when work crosses independent primary signals, authority boundaries, blast radii, or unrelated deliverables.
 - Too narrow: plumbing/parser/schema-only work that omits same-signal integration.
 - Too broad: diffuse bundles, parent-sized umbrellas, or closure standards that satisfy nearly all parent completion criteria.
+- Code/behavior changes? Run implementation code review after green verification and before commit/checkpoint.
+- Use the active repo's code-review skill/workflow when available; checkpoint review does not count.
+- Fix real findings, rerun affected verification, then commit/checkpoint.
 - Checkpoint only after the full target closure standard is satisfied with current evidence.
 - NEVER checkpoint fatigue, low budget, arbitrary phase boundaries, or partial work.
 - Checkpoints need evidence, checks run, touched artifacts, remaining questions, and explicit `not_claimed`.
@@ -57,9 +60,9 @@ Working-target action:
 Target-planning action:
 - First call `goal({op:"get"})`.
 - Do not implement, checkpoint, complete, or mutate files outside the active plan and payload sidecar.
-- Write/edit only exact `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`.
+- Write/edit/eval/bash-transform only exact `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`.
 - Produce a decision-complete execution spec for the current product-meaningful target.
-- Use read-only `task` planning reviewers only when independent lenses materially reduce uncertainty; supervise with `job` and coordinate with `irc` when available.
+- Use planning-only `agent()`/`task` subagents when independent lenses materially reduce uncertainty; supervise with `job`/`irc`.
 - Submit only after read-only planner simulation and adversarial review pass.
 - Use `fail_target_plan` when the current target cannot yield a valid plan without user/external authority, task availability, or right-sizing repair.
 {{/when}}

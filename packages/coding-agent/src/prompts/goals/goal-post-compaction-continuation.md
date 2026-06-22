@@ -20,6 +20,7 @@ Post-compaction policy:
 
 {{#when runMode "==" "working-target"}}
 - Continue the same current target; do not choose a new target because compaction occurred.
+- Code/behavior changed? Reconfirm green verification, run code review, then commit/checkpoint.
 {{/when}}
 {{#when runMode "==" "planning-target"}}
 - Call `goal({op:"get"})`; recover `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; continue from existing files, edit in place, create only missing files, and update Markdown only for executor-visible semantic changes.

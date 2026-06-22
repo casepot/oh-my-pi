@@ -220,24 +220,35 @@ describe("runEvalAgent", () => {
 		expect(runSpy).not.toHaveBeenCalled();
 	});
 
-	it("throws instead of spawning from plan mode", async () => {
+	it("allows read-only spawning from plan mode", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
-
-		await expect(runEvalAgent({ prompt: "hello" }, { session: makeSession({ planMode: true }) })).rejects.toThrow(
-			"unavailable in plan mode",
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, {
+				output: options.agent.name,
+			}),
 		);
-		expect(runSpy).not.toHaveBeenCalled();
+
+		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession({ planMode: true }) });
+		expect(result.text).toBe("task");
+		expect(runSpy.mock.calls[0]?.[0].agent.systemPrompt).toContain("Plan mode active");
+		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "search", "find", "lsp", "web_search"]);
+		expect(runSpy.mock.calls[0]?.[0].agent.spawns).toBeUndefined();
 	});
 
-	it("throws instead of spawning during goal target planning", async () => {
+	it("allows read-only spawning during goal target planning", async () => {
 		mockAgents();
-		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, {
+				output: options.agent.name,
+			}),
+		);
 
-		await expect(
-			runEvalAgent({ prompt: "hello" }, { session: makeSession({ goalMode: "planning-target" }) }),
-		).rejects.toThrow("unavailable during target planning");
-		expect(runSpy).not.toHaveBeenCalled();
+		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession({ goalMode: "planning-target" }) });
+		expect(result.text).toBe("task");
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(runSpy.mock.calls[0]?.[0].agent.systemPrompt).toContain("Plan mode active");
+		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "search", "find", "lsp", "web_search"]);
+		expect(runSpy.mock.calls[0]?.[0].agent.spawns).toBeUndefined();
 	});
 
 	it("allows spawning after a target-planning goal is paused", async () => {

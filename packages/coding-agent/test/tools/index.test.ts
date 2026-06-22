@@ -275,7 +275,7 @@ describe("createTools", () => {
 		);
 	});
 
-	it("allows planning coordination tools while blocking implementation tools", async () => {
+	it("allows planning coordination tools, bash, and eval while blocking implementation-only tools", async () => {
 		const active = createActiveGoalState();
 		const registry = new AgentRegistry();
 		registry.register({
@@ -328,6 +328,7 @@ describe("createTools", () => {
 			"goal",
 			"resolve",
 			"bash",
+			"eval",
 		]);
 		const names = tools.map(tool => tool.name);
 
@@ -345,6 +346,8 @@ describe("createTools", () => {
 				"edit",
 				"goal",
 				"resolve",
+				"bash",
+				"eval",
 			]),
 		);
 		const jobTool = tools.find(tool => tool.name === "job");
@@ -364,14 +367,14 @@ describe("createTools", () => {
 		expect(JSON.stringify(reportResult.content)).not.toContain("Goal target planning is active");
 		const bashTool = tools.find(tool => tool.name === "bash");
 		if (!bashTool) throw new Error("expected bash tool");
-		let planningError: unknown;
-		try {
-			await bashTool.execute("bash-plan", { command: "true" });
-		} catch (error) {
-			planningError = error;
-		}
-		expect(String(planningError)).toContain("Goal target planning is active");
-		expect(String(planningError)).toContain("local://goal-goal-1-target-1-plan.payload.json");
+		const bashResult = await bashTool.execute("bash-plan", { command: "true", cwd: "/tmp", timeout: 5 });
+		expect(JSON.stringify(bashResult.content)).not.toContain("Goal target planning is active");
+		const evalTool = tools.find(tool => tool.name === "eval");
+		if (!evalTool) throw new Error("expected eval tool");
+		const evalResult = await evalTool.execute("eval-plan", {
+			cells: [{ language: "js", code: "print('plan-transform-ok');", timeout: 10 }],
+		});
+		expect(JSON.stringify(evalResult.content)).not.toContain("Goal target planning is active");
 	});
 
 	it("does not block ordinary tools for paused checkpoint-resolution goals", async () => {

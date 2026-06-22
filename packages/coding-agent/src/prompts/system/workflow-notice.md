@@ -73,7 +73,9 @@ Run the workflow inline with direct tools and eval computation. Use `todo` for p
 - Decompose the surface first; capture it in `todo` when it spans phases.
 - Prefer `schema=` for any agent whose output you branch on.
 - After a fan-out returns, YOU own correctness: read the artifacts, run the gate, verify before acting. Subagents do the legwork; they don't get the last word.
-- Eval file edits are allowed; choose edit/write/eval based on reliability semantics and recovery needs.
+{{#if planningMode}}- Planning mode: agents are for planning/review; eval/bash file transforms stay within the active plan artifacts.
+{{else}}- Eval file edits are allowed; choose edit/write/eval based on reliability semantics and recovery needs.
+{{/if}}
 - Keep going until the task is closed — a returned fan-out is a step, not a stopping point.
 </execution>
 </system-notice>

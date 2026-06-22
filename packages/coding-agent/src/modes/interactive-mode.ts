@@ -1971,9 +1971,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
 		const previousTools = this.session.getActiveToolNames();
-		const hasResolveTool = this.session.getToolByName("resolve") !== undefined;
-		const planTools = hasResolveTool ? [...previousTools, "resolve"] : previousTools;
-		const uniquePlanTools = [...new Set(planTools)];
+		const availablePlanTools = ["eval", "task", "job", "irc", "resolve"].filter(
+			toolName => this.session.getToolByName(toolName) !== undefined,
+		);
+		const uniquePlanTools = [...new Set([...previousTools, ...availablePlanTools])];
 
 		this.#planModePreviousTools = previousTools;
 		this.planModePlanFilePath = planFilePath;
@@ -2032,7 +2033,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #enterGoalTargetPlanningTools(): Promise<void> {
 		if (this.#goalTargetPlanningPreviousTools !== undefined) return;
 		const previousTools = this.session.getActiveToolNames();
-		const availablePlanningTools = ["task", "job", "irc", "write", "edit", "goal"].filter(
+		const availablePlanningTools = ["task", "job", "irc", "bash", "eval", "write", "edit", "goal"].filter(
 			toolName => this.session.getToolByName(toolName) !== undefined,
 		);
 		this.#goalTargetPlanningPreviousTools = previousTools;

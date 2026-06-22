@@ -521,6 +521,8 @@ const GOAL_TARGET_PLANNING_ALLOWED_TOOLS: Record<string, true> = {
 	job: true,
 	irc: true,
 	write: true,
+	bash: true,
+	eval: true,
 	edit: true,
 	resolve: true,
 	report_tool_issue: true,
@@ -541,9 +543,9 @@ function goalRunModeBlockMessage(session: ToolSession, toolName: string): string
 			const payloadFilePath = planFilePath.endsWith(".md")
 				? `${planFilePath.slice(0, -3)}.payload.json`
 				: `${planFilePath}.payload.json`;
-			planHint = ` Write/edit only the active target plan file or payload JSON sidecar: ${planFilePath}; ${payloadFilePath}.`;
+			planHint = ` Write/edit/eval/bash-transform only the active target plan file or payload JSON sidecar: ${planFilePath}; ${payloadFilePath}.`;
 		}
-		return `Goal target planning is active; only read/search/find/lsp/web_search/task/job/irc/goal/write/edit/report_tool_issue/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
+		return `Goal target planning is active; only read/search/find/lsp/web_search/task/job/irc/bash/eval/goal/write/edit/report_tool_issue/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
 	}
 	if (state.runMode === "awaiting-checkpoint-resolution" && state.goal.pendingCheckpointId !== undefined) {
 		const checkpointId = state.goal.pendingCheckpointId;

@@ -33,13 +33,14 @@ Working-target action:
 - NEVER start targets for internal process phases: planning, evidence review, closure, recomposition, reviewer passes.
 - Same primary signal stays together; split independent signals, authority boundaries, blast radii, or unrelated deliverables.
 - Checkpoint only after full target closure evidence.
+- Code/behavior changed? Green verification → code-review → fixes → commit/checkpoint.
 {{/when}}
 
 {{#when runMode "==" "planning-target"}}
 Target-planning action:
 - First call `goal({op:"get"})`.
 - Produce a decision-complete execution spec for the current product-meaningful target.
-- Write/edit only `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; do not implement.
+- Write/edit/eval/bash-transform only `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; do not implement.
 - Submit only after read-only planner simulation and review pass; use `payload_file_path`.
 {{/when}}
 

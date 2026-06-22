@@ -1,6 +1,6 @@
 Goal target plan approved.
 {{#if contextPreserved}}
-- Context preserved. Use conversation history when useful; this approved target plan is authority for this target.
+- Context preserved for raw evidence only. The approved execution summary supersedes earlier drafts, failed payloads, lint diagnostics, reviewer rejections, and payload repairs.
 {{/if}}
 
 <instruction>
@@ -47,6 +47,7 @@ Use target card/matrix summaries as execution guardrails; the plan file remains 
 <critical>
 - Execute only the approved current target.
 - Satisfy every required verification signal before checkpointing.
+- Code/behavior changes require post-green code review before commit/checkpoint.
 - Call `goal({op:"checkpoint"})` only after the closure standard is met with current evidence.
 - NEVER call parent completion because this target plan was approved.
 - Keep going until the target checkpoint is accepted or goal mode asks for another controller action.

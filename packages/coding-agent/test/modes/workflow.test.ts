@@ -117,10 +117,19 @@ describe("workflow notice", () => {
 		expect(notice).not.toContain("agent(prompt");
 	});
 
-	it("does not instruct eval agent fan-out in plan mode", () => {
+	it("allows eval-agent and task fan-out in plan mode", () => {
 		const notice = renderWorkflowNotice({ ...base, planMode: true });
 		expect(notice).toContain("Plan mode is active");
-		expect(notice).toContain("Do not call eval `agent()`");
-		expect(notice).not.toContain("parallel_settled([lambda");
+		expect(notice).toContain("eval agent() and task are available for read-only planning subagents");
+		expect(notice).toContain("Planning mode: agents are for planning/review");
+		expect(notice).not.toContain("Eval file edits are allowed");
+		expect(notice).toContain("parallel_settled([lambda");
+	});
+
+	it("uses planning execution guidance during goal target planning", () => {
+		const notice = renderWorkflowNotice({ ...base, targetPlanningMode: true });
+		expect(notice).toContain("Goal target planning is active");
+		expect(notice).toContain("Planning mode: agents are for planning/review");
+		expect(notice).not.toContain("Eval file edits are allowed");
 	});
 });

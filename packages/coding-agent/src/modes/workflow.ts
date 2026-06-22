@@ -56,17 +56,11 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 	const recursionExhausted = maxDepth >= 0 && depth >= maxDepth;
 	const targetPlanningMode = capabilities.targetPlanningMode === true;
 	const canUseEvalAgents =
-		capabilities.evalAvailable &&
-		!capabilities.planMode &&
-		!targetPlanningMode &&
-		!recursionExhausted &&
-		(wildcardSpawns || concreteSpawns.length > 0);
+		capabilities.evalAvailable && !recursionExhausted && (wildcardSpawns || concreteSpawns.length > 0);
 	const canUseTaskTool =
-		capabilities.taskToolAvailable &&
-		!capabilities.planMode &&
-		!recursionExhausted &&
-		(wildcardSpawns || concreteSpawns.length > 0);
-	const evalNoticeAvailable = capabilities.evalAvailable && !targetPlanningMode;
+		capabilities.taskToolAvailable && !recursionExhausted && (wildcardSpawns || concreteSpawns.length > 0);
+	const evalNoticeAvailable = capabilities.evalAvailable;
+	const targetPlanningEvalClause = capabilities.evalAvailable ? "eval cells may transform plan artifacts; " : "";
 	const preferredAgentType = wildcardSpawns ? (disabledAgents.has("task") ? "" : "task") : (concreteSpawns[0] ?? "");
 	const allowedAgentSummary = wildcardSpawns
 		? disabledAgents.size > 0
@@ -75,12 +69,26 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 		: concreteSpawns.length > 0
 			? concreteSpawns.join(", ")
 			: "none";
+	const targetPlanningSpawnPolicy =
+		canUseEvalAgents && canUseTaskTool
+			? `Goal target planning is active. ${targetPlanningEvalClause}eval agent() and task are available for planning subagents. Allowed spawns now: ${allowedAgentSummary}.`
+			: canUseEvalAgents
+				? `Goal target planning is active. ${targetPlanningEvalClause}eval agent() is available for planning subagents. Task subagents are not currently available from this notice.`
+				: canUseTaskTool
+					? `Goal target planning is active. ${targetPlanningEvalClause}task is available for planning subagents. eval agent() is unavailable from this notice. Allowed task spawns now: ${allowedAgentSummary}.`
+					: `Goal target planning is active. ${targetPlanningEvalClause}subagent spawns are not currently available from this notice.`;
+	const planModeSpawnPolicy =
+		canUseEvalAgents && canUseTaskTool
+			? `Plan mode is active. eval agent() and task are available for read-only planning subagents. Allowed spawns now: ${allowedAgentSummary}.`
+			: canUseEvalAgents
+				? `Plan mode is active. eval agent() is available for read-only planning subagents. Task subagents are not currently available from this notice.`
+				: canUseTaskTool
+					? `Plan mode is active. task is available for read-only planning subagents. eval agent() is unavailable from this notice. Allowed task spawns now: ${allowedAgentSummary}.`
+					: "Plan mode is active. Eval agent() and task subagents are not currently available from this notice.";
 	const spawnPolicy = capabilities.planMode
-		? "Plan mode is active. Do not call eval `agent()` or the task tool from this notice."
+		? planModeSpawnPolicy
 		: targetPlanningMode
-			? canUseTaskTool
-				? `Goal target planning is active. eval agent() is unavailable; use the task tool for read-only planning subagents. Allowed task spawns now: ${allowedAgentSummary}.`
-				: "Goal target planning is active. eval agent() is unavailable and task subagents are not currently available from this notice."
+			? targetPlanningSpawnPolicy
 			: recursionExhausted
 				? `eval agent() recursion depth is exhausted (task.maxRecursionDepth is exhausted at depth ${depth}/${maxDepth}). Do not call eval \`agent()\` or the task tool from this notice.`
 				: canUseEvalAgents || canUseTaskTool
@@ -92,6 +100,7 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 			: 'agent("…")'
 		: "";
 
+	const planningMode = capabilities.planMode || targetPlanningMode;
 	return prompt
 		.render(workflowNotice, {
 			canUseEvalAgents,
@@ -102,6 +111,7 @@ export function renderWorkflowNotice(capabilities: WorkflowNoticeCapabilities): 
 			preferredAgentType,
 			allowedAgentSummary,
 			agentExample,
+			planningMode,
 		})
 		.trim();
 }

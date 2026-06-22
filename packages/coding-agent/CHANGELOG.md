@@ -23,6 +23,12 @@
 
 ### Changed
 - Changed goal-mode target selection guidance so agents acquire targets from grounded repo evidence and candidate comparisons before calling `start_target` or `next_target`.
+- Changed goal target-plan payloads to preserve enum-specific context in explicit rationale/role/lens fields and hand it through approved execution summaries.
+- Changed goal target-planning and reviewer prompts to demand self-contained implementation oracles, complete rejection deltas, and less lint-level review churn.
+- Changed plan and goal target planning to allow eval/task planning agents, with goal target planning also allowing eval/bash plan-payload transforms while implementation stays blocked until plan approval.
+- Changed goal working-target guidance to require post-green implementation code review before commit/checkpoint when code or behavior changed.
+
+
 
 - Changed goal-mode blocked recovery to use explicit blocked-state records and `recover_blocked_state` identity handshakes for failed/stale target plans and checkpoint external pauses.
 - Changed goal-mode prompts to render a load-bearing controller surface by run mode, keeping full audit checkpoint state in tool details and side-agent artifacts instead of the always-on context.
@@ -49,6 +55,8 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed goal target-plan review artifacts to show reviewers canonical snake_case payload JSON instead of internal camelCase submission state.
+
 - Fixed goal target-planning throughput by adding schema-reference lookups, alias-aware lint diagnostics, focused reviewer context, execution-summary handoff, and stricter prompt self-checks.
 
 - Reduced goal target-plan rewrite churn by making file-backed payload edits canonical, limiting Markdown updates to executor-visible semantic changes, and delegating gate-prerequisite target-unit checks to reviewers.
