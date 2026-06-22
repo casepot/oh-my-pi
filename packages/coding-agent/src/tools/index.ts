@@ -543,7 +543,7 @@ function goalRunModeBlockMessage(session: ToolSession, toolName: string): string
 			const payloadFilePath = planFilePath.endsWith(".md")
 				? `${planFilePath.slice(0, -3)}.payload.json`
 				: `${planFilePath}.payload.json`;
-			planHint = ` Write/edit/eval/bash-transform only the active target plan file or payload JSON sidecar: ${planFilePath}; ${payloadFilePath}.`;
+			planHint = ` Use write for missing plan/payload files; edit/eval/bash-transform only these paths: ${planFilePath}; ${payloadFilePath}.`;
 		}
 		return `Goal target planning is active; only read/search/find/lsp/web_search/task/job/irc/bash/eval/goal/write/edit/report_tool_issue/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
 	}

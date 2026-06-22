@@ -26,9 +26,10 @@ Tool availability:
 - First action MUST be `goal({op:"get"})`.
 - The plan MUST let a fresh executor complete the current target with zero design decisions.
 - NEVER implement, checkpoint, complete, or mutate files outside the active plan and payload sidecar while planning.
-- Create exact `currentTargetPlan.planFilePath` only if missing/empty; otherwise patch it in place and preserve still-valid decisions.
-- Create exact `targetPlanSubmitIdentity.payloadFilePath` only if missing/empty; otherwise patch or structured-transform it and preserve still-valid fields.
+- Missing/empty `currentTargetPlan.planFilePath`? Create with `write`; otherwise patch in place and preserve still-valid decisions.
+- Missing/empty `targetPlanSubmitIdentity.payloadFilePath`? Create with `write` as literal JSON; otherwise patch or structured-transform existing JSON and preserve still-valid fields.
 - `targetPlanSubmitIdentity.payloadFilePath` is the lint/submit authority.
+- Initial payload creation MUST use JSON text, not executable Python/JS object literals.
 - Markdown updates are REQUIRED only for executor-visible semantic changes: target claim, scope boundary, branch, workstream, verification scenario, known limit, or implementation step.
 - Schema-only payload fixes MUST NOT cause Markdown churn: ids, ordering, enum normalization, `target_unit_rule_ids`, `workflow_review_rounds`, or lint-only cross-reference repairs.
 - After `submit_target_plan`, stop ordinary work and wait for the result.
@@ -56,8 +57,8 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 6. Spawn planning-only `agent()`/`task` reviewers or decomposers when independent lenses materially reduce uncertainty.
 7. Keep evidence in context; write only decisions needed by the executor.
 8. Patch the Markdown plan only when the change removes an executor decision or changes executor-visible semantics.
-9. Create, patch, or structured-transform the payload JSON at exact `targetPlanSubmitIdentity.payloadFilePath`.
-10. Use `eval` or bash-run `jq`/`python` for whole-file payload rewrites when they preserve identity, pretty formatting, and still-valid content.
+9. Missing/empty plan or payload? Use `write`; payload content is JSON text.
+10. Existing payload changes? Use `edit`, `eval`, or bash-run `jq`/`python`; parse existing JSON and write JSON back.
 11. Trust-heavy/code/behavior/security/privacy/authority/multi-workstream/cross-subsystem targets MUST run a pre-submit planning review before first submit.
    - Use planning-only `agent()`/`task` when available; otherwise local review and record why no subagent was available in `workflow_review_rounds`.
    - Review execution-oracle gaps, branch coverage, schema/lint invariants, and Markdown/payload agreement.

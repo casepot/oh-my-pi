@@ -511,7 +511,7 @@ async function writeTargetPlanPayloadCall(
 
 describe("GoalTool", () => {
 	it("keeps target-planning prompt contracts explicit", () => {
-		expect(goalTargetPlanningPrompt).toContain("patch it in place and preserve still-valid decisions");
+		expect(goalTargetPlanningPrompt).toContain("otherwise patch in place and preserve still-valid decisions");
 		expect(goalTargetPlanningPrompt).toContain("do not guess schema field names, aliases, nesting, enum values");
 		expect(goalTargetPlanningPrompt).toContain("Local self-check before submit MUST confirm");
 		expect(goalTargetPlanningPrompt).toContain("Enum fields classify");
@@ -519,9 +519,10 @@ describe("GoalTool", () => {
 		expect(goalTargetPlanningPrompt).toContain("self-contained; it never depends on prior attempts");
 		expect(goalTargetPlanningPrompt).toContain("implementation oracle");
 		expect(goalTargetPlanningPrompt).toContain("schema citations or self-approval prose are not evidence");
-		expect(goalToolPrompt).toContain("Prefer `eval` or bash-run `jq`/`python` structured transforms");
+		expect(goalToolPrompt).toContain("Use `write` for missing/empty plan Markdown and payload JSON");
+		expect(goalTargetPlanningPrompt).toContain("Initial payload creation MUST use JSON text");
 		expect(goalTargetPlanningPrompt).toContain(
-			"Use `eval` or bash-run `jq`/`python` for whole-file payload rewrites",
+			"Existing payload changes? Use `edit`, `eval`, or bash-run `jq`/`python`",
 		);
 		expect(goalTargetPlanningPrompt).toContain("MUST run a pre-submit planning review");
 		expect(goalTargetPlanningPrompt).toContain("means consolidate from accepted scope plus blockers");
@@ -1107,7 +1108,7 @@ describe("GoalTool", () => {
 		expect(text).toContain(`payload_file_path: ${payloadFilePath}`);
 		expect(text).toContain(`goal({op:"lint_target_plan", payload_file_path:"${payloadFilePath}"})`);
 		expect(text).toContain(`goal({op:"submit_target_plan", payload_file_path:"${payloadFilePath}"})`);
-		expect(text).toContain("edit payload_file_path in place");
+		expect(text).toContain("edit/transform payload_file_path in place");
 		expect(text).toContain("patch plan_file_path only when the payload fix changes executor-visible semantics");
 		expect(text).not.toContain("verification_aperture");
 		expect(text).not.toContain("verification_signals");

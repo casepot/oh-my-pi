@@ -1,6 +1,6 @@
 # Target-plan payload schema reference
 
-Use only during `planning-target`. Write the payload JSON to `targetPlanSubmitIdentity.payloadFilePath`, then call `lint_target_plan` or `submit_target_plan` with `payload_file_path`.
+Use only during `planning-target`. Write missing payload JSON as JSON text to `targetPlanSubmitIdentity.payloadFilePath`; transform existing JSON only after reading/parsing it. Then call `lint_target_plan` or `submit_target_plan` with `payload_file_path`.
 
 ## Required top-level fields
 

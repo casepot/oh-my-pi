@@ -41,9 +41,9 @@ Targets are product-meaningful completion units, not discovery notes, process ph
 </target-aperture>
 
 <target-planning>
-`planning-target` blocks implementation. Use read/discovery tools, eval/bash for plan/payload artifact transforms, planning-only `agent()`/`task` reviewers when they materially reduce uncertainty, `job` supervision, and `irc` coordination when available.
-- Write/edit/eval/bash-transform only the active Markdown plan file and payload JSON sidecar.
-- Prefer `eval` or bash-run `jq`/`python` structured transforms for payload JSON changes; preserve identity, pretty formatting, and rerun lint.
+`planning-target` blocks implementation. Use read/discovery tools, planning-only `agent()`/`task` reviewers, `job` supervision, and `irc` coordination when available.
+- Use `write` for missing/empty plan Markdown and payload JSON.
+- Existing payload JSON changes → `eval`, bash-run `jq`/`python`, or `edit`; parse JSON, preserve identity/format, rerun lint.
 - Payload JSON sidecar is canonical for lint/submit; Markdown is executor-facing narrative.
 - Markdown MUST agree on executor-visible semantics, but SHOULD NOT mirror schema-only payload fixes.
 - `dry_run` is read-only planner simulation, not executed verification.

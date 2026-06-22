@@ -60,7 +60,7 @@ Working-target action:
 Target-planning action:
 - First call `goal({op:"get"})`.
 - Do not implement, checkpoint, complete, or mutate files outside the active plan and payload sidecar.
-- Write/edit/eval/bash-transform only exact `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`.
+- Use `write` for missing plan/payload; edit/eval/bash-transform only exact `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`.
 - Produce a decision-complete execution spec for the current product-meaningful target.
 - Use planning-only `agent()`/`task` subagents when independent lenses materially reduce uncertainty; supervise with `job`/`irc`.
 - Submit only after read-only planner simulation and adversarial review pass.

@@ -2031,7 +2031,7 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\n  plan_file_path: ${identity.planFilePath}`;
 			text += `\n  payload_file_path: ${identity.payloadFilePath}`;
 			text += `\n  revision: ${identity.revision}`;
-			text += `\nNext action: create missing plan files if needed; otherwise edit payload_file_path in place and patch plan_file_path only when the payload fix changes executor-visible semantics. Lint with goal({op:"lint_target_plan", payload_file_path:"${identity.payloadFilePath}"}). Submit with goal({op:"submit_target_plan", payload_file_path:"${identity.payloadFilePath}"}).`;
+			text += `\nNext action: create missing plan/payload files with write (payload as JSON text); otherwise edit/transform payload_file_path in place and patch plan_file_path only when the payload fix changes executor-visible semantics. Lint with goal({op:"lint_target_plan", payload_file_path:"${identity.payloadFilePath}"}). Submit with goal({op:"submit_target_plan", payload_file_path:"${identity.payloadFilePath}"}).`;
 			text += `\n${renderTargetPlanEnumReminder()}`;
 		}
 	}

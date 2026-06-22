@@ -40,7 +40,7 @@ Working-target action:
 Target-planning action:
 - First call `goal({op:"get"})`.
 - Produce a decision-complete execution spec for the current product-meaningful target.
-- Write/edit/eval/bash-transform only `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; do not implement.
+- Use `write` for missing plan/payload; edit/eval/bash-transform only `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; do not implement.
 - Submit only after read-only planner simulation and review pass; use `payload_file_path`.
 {{/when}}
 

@@ -22,6 +22,7 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed goal target-planning prompts to use `write` for first plan/payload creation while reserving eval/bash/JQ/Python for existing payload transforms.
 - Changed goal-mode target selection guidance so agents acquire targets from grounded repo evidence and candidate comparisons before calling `start_target` or `next_target`.
 - Changed goal target-plan payloads to preserve enum-specific context in explicit rationale/role/lens fields and hand it through approved execution summaries.
 - Changed goal target-planning and reviewer prompts to demand self-contained implementation oracles, complete rejection deltas, and less lint-level review churn.
