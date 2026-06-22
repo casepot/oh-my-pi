@@ -122,6 +122,29 @@ Optional top-level metadata:
 
 Enum fields classify. Rationale/role/lens fields preserve product meaning. NEVER delete specific target meaning just to satisfy an enum.
 
+## Allowed enum values
+
+- `plan_depth`: `light`, `standard`, `trust-heavy`
+- `verification_signals[].role`: `primary`, `supporting`, `guardrail`
+- `verification_signals[].layer` and `verification_aperture.omitted_layers[].layer`: `unit`, `integration`, `e2e`, `manual`, `product`, `release-gate`
+- `verification_signals[].confidence_if_satisfied` and `verification_aperture.confidence_target`: `low`, `medium`, `high`
+- `verification_aperture.blast_radius`: `local`, `module`, `workflow`, `multi-subsystem`, `external-or-irreversible`
+- `concern_checks[].kind`: `behavior`, `contract`, `state-persistence`, `error-handling`, `security`, `performance`, `migration`, `ux-manual`, `docs-or-operator`
+- `scope_calibration.deferred_related_work[].reason`: `different-primary-signal`, `different-authority`, `different-blast-radius`, `blocked-external`, `non-goal`
+- `scenario_matrix.rows_left_open[].reason`: `different-primary-signal`, `different-authority`, `different-blast-radius`, `blocked-external`, `non-goal`, `unsafe-to-bundle`
+- `excluded_work_review[].classification`: `valid-boundary`, `parent-non-claim`, `essential-related-work`, `stale-or-unsupported`
+- `target_card.workstreams[].kind`: `main`, `backend-rust`, `app-ui`, `e2e-harness`, `docs-changelog`, `other`
+- `workflow_review_rounds[].verdict`: `accepted`, `revision-required`
+- `dry_run.status`: `passed`, `failed`
+
+## Graph lint invariants
+
+- Every `scenario_matrix.rows_in_scope[].id` needs matching `branch_evidence[].row_ids` or one unique matching branch.
+- Every in-scope row id or branch appears in `target_card.verification_scenarios`.
+- Every in-scope row id, branch, or signal id appears in `target_card.acceptance_rows.closed`.
+- Shared branch labels require explicit `branch_evidence.row_ids` disambiguation.
+- `dry_run` is observed evidence only; future-tense or self-approval prose is invalid evidence.
+
 ## Minimal valid payload shape
 
 ```json

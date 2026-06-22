@@ -193,7 +193,10 @@ function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTarge
 	};
 }
 
-function rejectedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
+function rejectedTargetPlanReview(
+	lens: GoalTargetPlanReview["lens"],
+	overrides: Partial<GoalTargetPlanReview> = {},
+): GoalTargetPlanReview {
 	return {
 		...acceptedTargetPlanReview(lens),
 		status: "rejected",
@@ -206,6 +209,7 @@ function rejectedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTarge
 				requiredRevision: "Revise the target aperture.",
 			},
 		],
+		...overrides,
 	};
 }
 
@@ -1442,6 +1446,9 @@ describe("goal runtime", () => {
 			approved.goal.currentTargetPlan,
 			approved.goal.currentTarget,
 		);
+		expect(executionSummary?.payloadFilePath).toBe(
+			targetPlanPayloadFilePath(approved.goal.currentTargetPlan?.planFilePath ?? "missing-plan.md"),
+		);
 		expect(executionSummary?.verificationAperture?.blastRadiusScope).toBe("Single target behavior surface.");
 		expect(executionSummary?.verificationAperture?.confidenceRationale).toBe(
 			"High only for the focused target behavior.",
@@ -1517,7 +1524,72 @@ describe("goal runtime", () => {
 		).toThrow("target plan is approved");
 	});
 
-	it("recovers failed target-plan blocks with a fresh plan attempt", async () => {
+	it("auto-consolidates review rejection caps without user input", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
+		let state = await harness.runtime.startTarget({
+			title: "Complete Warden's Spark",
+			desiredFutureClaim: "Warden's Spark can be completed with the chosen equipment.",
+			closureStandard: "Current evidence proves the quest completes with the chosen equipment.",
+		});
+		const targetId = state.goal.currentTarget?.id;
+		let cappedPlanId: string | undefined;
+
+		for (let index = 0; index < 3; index += 1) {
+			const plan = state.goal.currentTargetPlan;
+			if (!plan) throw new Error("expected target plan");
+			cappedPlanId = plan.id;
+			state = await harness.runtime.rejectCurrentTargetPlan({
+				targetPlanId: plan.id,
+				revision: plan.revision,
+				reviews: [rejectedTargetPlanReview("execution-readiness")],
+				message: "target plan reviewer rejected the submission",
+				stage: "review",
+			});
+		}
+
+		const recoveredTarget = state.goal.currentTarget;
+		const recoveredPlan = state.goal.currentTargetPlan;
+		if (!targetId || !cappedPlanId || !recoveredTarget || !recoveredPlan)
+			throw new Error("expected recovered target-plan attempt");
+		const cappedPlan = state.goal.targetPlans?.find(plan => plan.id === cappedPlanId);
+		const recovery = state.goal.recoveryHistory?.find(record => record.result.targetPlanId === recoveredPlan.id);
+
+		expect(state.runMode).toBe("planning-target");
+		expect(state.goal.currentBlockedState).toBeUndefined();
+		expect(cappedPlan?.status).toBe("failed");
+		expect(cappedPlan?.revision).toBe(3);
+		expect(cappedPlan?.failure?.reason).toBe("review-rejection-cap");
+		expect(cappedPlan?.failure?.blockers).toContain(
+			"execution-readiness:RIGHT_SIZE_BLOCKER: Revise the target aperture.",
+		);
+		expect(recoveredTarget.id).toBe(targetId);
+		expect(recoveredTarget.status).toBe("active");
+		expect(recoveredTarget.planId).toBe(recoveredPlan.id);
+		expect(recoveredPlan.id).toBe(`${targetId}-plan-attempt-2`);
+		expect(recoveredPlan.planFilePath.endsWith("-plan-attempt-2.md")).toBe(true);
+		expect(recoveredPlan.status).toBe("drafting");
+		expect(recoveredPlan.revision).toBe(1);
+		expect(recoveredPlan.recoveredFrom?.blockedStateId).toBe(`${cappedPlanId}-auto-consolidation`);
+		expect(recoveredPlan.recoveredFrom?.reason).toBe("state-refresh");
+		expect(recoveredPlan.recoveredFrom?.guidance).toContain("execution-readiness:RIGHT_SIZE_BLOCKER");
+		if (!recovery) throw new Error("expected target-plan recovery record");
+		if (!("targetPlanId" in recovery.source)) throw new Error("expected target-plan recovery source");
+		expect(recovery.source.targetPlanId).toBe(cappedPlanId);
+		expect(recovery?.result.runMode).toBe("planning-target");
+		expect(recoveredPlan.failure).toBeUndefined();
+		expect(recoveredPlan.failedAt).toBeUndefined();
+		expect(recoveredPlan.approvedAt).toBeUndefined();
+		expect(recoveredPlan.verificationAperture).toBeUndefined();
+		expect(recoveredPlan.verificationSignals).toBeUndefined();
+		expect(recoveredPlan.concernChecks).toBeUndefined();
+		expect(recoveredPlan.scopeCalibration).toBeUndefined();
+		expect(recoveredPlan.branchEvidence).toBeUndefined();
+		expect(recoveredPlan.excludedWorkReview).toBeUndefined();
+		expect(recoveredPlan.reviews).toEqual([]);
+	});
+
+	it("auto-consolidates actionable aperture rejection caps", async () => {
 		const harness = createHarness();
 		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
 		let state = await harness.runtime.startTarget({
@@ -1532,7 +1604,156 @@ describe("goal runtime", () => {
 			state = await harness.runtime.rejectCurrentTargetPlan({
 				targetPlanId: plan.id,
 				revision: plan.revision,
-				reviews: [rejectedTargetPlanReview("execution-readiness")],
+				reviews: [rejectedTargetPlanReview("aperture", { revisionDecision: "split-required" })],
+				message: "target plan reviewer rejected the submission",
+				stage: "review",
+			});
+		}
+
+		const recoveredPlan = state.goal.currentTargetPlan;
+		if (!recoveredPlan) throw new Error("expected recovered target-plan attempt");
+		expect(state.runMode).toBe("planning-target");
+		expect(state.goal.currentBlockedState).toBeUndefined();
+		expect(recoveredPlan.status).toBe("drafting");
+		expect(recoveredPlan.recoveredFrom?.guidance).toContain("aperture:RIGHT_SIZE_BLOCKER");
+	});
+
+	it("uses current review batch for cap recovery guidance", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
+		let state = await harness.runtime.startTarget({
+			title: "Complete Warden's Spark",
+			desiredFutureClaim: "Warden's Spark can be completed with the chosen equipment.",
+			closureStandard: "Current evidence proves the quest completes with the chosen equipment.",
+		});
+
+		let plan = state.goal.currentTargetPlan;
+		if (!plan) throw new Error("expected target plan");
+		state = await harness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reviews: [rejectedTargetPlanReview("aperture", { revisionDecision: "needs-user-input" })],
+			message: "target plan reviewer rejected the submission",
+			stage: "review",
+		});
+		plan = state.goal.currentTargetPlan;
+		if (!plan) throw new Error("expected target plan");
+		state = await harness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reviews: [rejectedTargetPlanReview("execution-readiness")],
+			message: "target plan reviewer rejected the submission",
+			stage: "review",
+		});
+		plan = state.goal.currentTargetPlan;
+		if (!plan) throw new Error("expected target plan");
+		const cappedPlanId = plan.id;
+		state = await harness.runtime.rejectCurrentTargetPlan({
+			targetPlanId: plan.id,
+			revision: plan.revision,
+			reviews: [rejectedTargetPlanReview("execution-readiness")],
+			message: "target plan reviewer rejected the submission",
+			stage: "review",
+		});
+
+		const failedPlan = state.goal.targetPlans?.find(candidate => candidate.id === cappedPlanId);
+		const recoveredPlan = state.goal.currentTargetPlan;
+		if (!recoveredPlan) throw new Error("expected recovered target-plan attempt");
+		expect(state.runMode).toBe("planning-target");
+		expect(state.goal.currentBlockedState).toBeUndefined();
+		expect(failedPlan?.failure?.blockers).toEqual([
+			"execution-readiness:RIGHT_SIZE_BLOCKER: Revise the target aperture.",
+		]);
+		expect(recoveredPlan.recoveredFrom?.guidance).toContain("execution-readiness:RIGHT_SIZE_BLOCKER");
+		expect(recoveredPlan.recoveredFrom?.guidance).not.toContain("aperture:RIGHT_SIZE_BLOCKER");
+	});
+
+	it("blocks review rejection caps without concrete blockers", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
+		let state = await harness.runtime.startTarget({
+			title: "Complete Warden's Spark",
+			desiredFutureClaim: "Warden's Spark can be completed with the chosen equipment.",
+			closureStandard: "Current evidence proves the quest completes with the chosen equipment.",
+		});
+
+		for (let index = 0; index < 3; index += 1) {
+			const plan = state.goal.currentTargetPlan;
+			if (!plan) throw new Error("expected target plan");
+			state = await harness.runtime.rejectCurrentTargetPlan({
+				targetPlanId: plan.id,
+				revision: plan.revision,
+				reviews: [rejectedTargetPlanReview("execution-readiness", { findings: [] })],
+				message: "target plan reviewer rejected the submission",
+				stage: "review",
+			});
+		}
+
+		const block = state.goal.currentBlockedState;
+		if (block?.kind !== "target-plan") throw new Error("expected blocked target-plan state");
+		expect(state.runMode).toBe("awaiting-user-input");
+		expect(state.goal.currentTargetPlan?.status).toBe("failed");
+		expect(block.blockers).toEqual(["target plan reviewer rejected the submission"]);
+	});
+
+	it("blocks review rejection caps when the reviewer failed", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
+		let state = await harness.runtime.startTarget({
+			title: "Complete Warden's Spark",
+			desiredFutureClaim: "Warden's Spark can be completed with the chosen equipment.",
+			closureStandard: "Current evidence proves the quest completes with the chosen equipment.",
+		});
+
+		for (let index = 0; index < 3; index += 1) {
+			const plan = state.goal.currentTargetPlan;
+			if (!plan) throw new Error("expected target plan");
+			state = await harness.runtime.rejectCurrentTargetPlan({
+				targetPlanId: plan.id,
+				revision: plan.revision,
+				reviews: [
+					rejectedTargetPlanReview("execution-readiness", {
+						status: "failed",
+						feedback: "Execution reviewer failed.",
+						findings: [
+							{
+								id: "TARGET_PLAN_REVIEWER_FAILED",
+								severity: "blocking",
+								problem: "Execution reviewer failed.",
+								requiredRevision: "Fix or rerun the target-plan reviewer.",
+							},
+						],
+					}),
+				],
+				message: "target plan reviewer rejected the submission",
+				stage: "review",
+			});
+		}
+
+		const block = state.goal.currentBlockedState;
+		if (block?.kind !== "target-plan") throw new Error("expected blocked target-plan state");
+		expect(state.runMode).toBe("awaiting-user-input");
+		expect(block.blockers).toEqual([
+			"execution-readiness:TARGET_PLAN_REVIEWER_FAILED: Fix or rerun the target-plan reviewer.",
+		]);
+	});
+
+	it("blocks review rejection caps that need user input", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve quest reliability" });
+		let state = await harness.runtime.startTarget({
+			title: "Complete Warden's Spark",
+			desiredFutureClaim: "Warden's Spark can be completed with the chosen equipment.",
+			closureStandard: "Current evidence proves the quest completes with the chosen equipment.",
+		});
+
+		for (let index = 0; index < 3; index += 1) {
+			const plan = state.goal.currentTargetPlan;
+			if (!plan) throw new Error("expected target plan");
+			state = await harness.runtime.rejectCurrentTargetPlan({
+				targetPlanId: plan.id,
+				revision: plan.revision,
+				reviews: [rejectedTargetPlanReview("aperture", { revisionDecision: "needs-user-input" })],
 				message: "target plan reviewer rejected the submission",
 				stage: "review",
 			});
@@ -1588,16 +1809,6 @@ describe("goal runtime", () => {
 		expect(recovered.goal.targetPlans?.find(plan => plan.id === failedPlan.id)?.status).toBe("failed");
 		expect(recovered.goal.currentBlockedState).toBeUndefined();
 		expect(recovered.goal.recoveryHistory?.some(record => record.blockedStateId === block.id)).toBe(true);
-		expect(recoveredPlan.failure).toBeUndefined();
-		expect(recoveredPlan.failedAt).toBeUndefined();
-		expect(recoveredPlan.approvedAt).toBeUndefined();
-		expect(recoveredPlan.verificationAperture).toBeUndefined();
-		expect(recoveredPlan.verificationSignals).toBeUndefined();
-		expect(recoveredPlan.concernChecks).toBeUndefined();
-		expect(recoveredPlan.scopeCalibration).toBeUndefined();
-		expect(recoveredPlan.branchEvidence).toBeUndefined();
-		expect(recoveredPlan.excludedWorkReview).toBeUndefined();
-		expect(recoveredPlan.reviews).toEqual([]);
 
 		const newSubmission = buildTargetPlanApprovalInput(recovered);
 		expect(() =>

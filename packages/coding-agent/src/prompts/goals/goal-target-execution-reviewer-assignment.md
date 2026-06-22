@@ -27,6 +27,9 @@ Accept only if the submitted plan is a self-contained implementation oracle:
 Feedback discipline:
 - On rejection, return the complete acceptance delta visible from current artifacts; NEVER drip-feed one blocker per round.
 - Each blocker MUST name missing decision category, plan/payload location, and concrete satisfying shape.
+- Return one finding per missing decision category; never emit a general blocker and a duplicate missing-detail blocker for the same issue.
+- Use stable finding IDs such as `api-contract`, `state-machine`, `caller-branch-oracle`, `response-literals`, `verification-command`, `dry-run-evidence`; reuse the same ID when the same category remains unresolved.
+- Complete acceptance delta does not mean duplicated blockers.
 - Do not repeat a prior blocker unless it remains present; say what is still missing.
 - Do not reject for lint-owned presentation/schema issues unless submitted JSON actually violates schema or Markdown/payload semantics drift.
 - Schema citations, self-approval prose, or future-tense dry runs are not evidence.

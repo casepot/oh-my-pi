@@ -33,6 +33,7 @@ import type {
 	GoalTargetPlanDepth,
 	GoalTargetPlanExcludedWorkReview,
 	GoalTargetPlanExecutionSummary,
+	GoalTargetPlanFailure,
 	GoalTargetPlanFailureReason,
 	GoalTargetPlanLintDiagnostic,
 	GoalTargetPlanLintResult,
@@ -1042,6 +1043,7 @@ export function buildGoalTargetPlanExecutionSummary(
 		targetId: plan.targetId,
 		targetPlanId: plan.id,
 		planFilePath: plan.planFilePath,
+		payloadFilePath: targetPlanPayloadFilePath(plan.planFilePath),
 		revision: plan.revision,
 		targetTitle: target?.title,
 		desiredFutureClaim: target?.desiredFutureClaim,
@@ -1620,12 +1622,27 @@ export function nextTargetPlanAttempt(goal: Goal, target: GoalTarget): number {
 
 function recoveryBlockersForTargetPlan(plan: GoalTargetPlanRecord): string[] {
 	if (plan.failure?.blockers.length) return [...plan.failure.blockers];
-	const blockers = plan.reviews.flatMap(review =>
-		review.findings
-			.filter(finding => finding.severity === "blocking" || finding.severity === "important")
-			.map(finding => `${review.lens}:${finding.id}: ${finding.requiredRevision}`),
-	);
+	const blockers = targetPlanRecoveryBlockersFromReviews(plan.reviews);
 	return blockers.length ? blockers : [`target plan is ${plan.status}`];
+}
+
+function targetPlanReviewNeedsUserInput(reviews: GoalTargetPlanReview[]): boolean {
+	return reviews.some(review => review.status === "rejected" && review.revisionDecision === "needs-user-input");
+}
+
+function targetPlanRecoveryBlockersFromReviews(reviews: GoalTargetPlanReview[]): string[] {
+	const blockers: string[] = [];
+	const seen = new Set<string>();
+	for (const review of reviews) {
+		for (const finding of review.findings) {
+			if (finding.severity !== "blocking" && finding.severity !== "important") continue;
+			const blocker = `${review.lens}:${finding.id}: ${finding.requiredRevision}`;
+			if (seen.has(blocker)) continue;
+			seen.add(blocker);
+			blockers.push(blocker);
+		}
+	}
+	return blockers;
 }
 
 function nextRecoverySequence(goal: Goal): number {
@@ -3202,6 +3219,7 @@ export class GoalRuntime {
 			const now = this.#now();
 			const reviews = this.#mergeTargetPlanReviews(currentPlan, input.reviews);
 			let nextPlan: GoalTargetPlanRecord;
+			let autoTargetPlanRecovery: { reason: GoalRecoveryReason; guidance: string; blockers: string[] } | undefined;
 			if (input.stage === "stale" && (input.revision === undefined || input.revision === currentPlan.revision)) {
 				nextPlan = {
 					...currentPlan,
@@ -3211,30 +3229,45 @@ export class GoalRuntime {
 				};
 				state.runMode = "awaiting-user-input";
 			} else if (currentPlan.revision >= TARGET_PLAN_REJECTION_CAP) {
-				const reviewerBlockers = reviews.flatMap(review =>
-					review.findings
-						.filter(finding => finding.severity === "blocking" || finding.severity === "important")
-						.map(finding => `${review.lens}:${finding.id}: ${finding.requiredRevision}`),
-				);
+				const capReviews = input.reviews.length ? input.reviews : reviews;
+				const hasReviewerFailure = capReviews.some(review => review.status === "failed");
+				const rejectedCapReviews = capReviews.filter(review => review.status === "rejected");
+				const reviewerBlockers = targetPlanRecoveryBlockersFromReviews(capReviews);
+				const actionableBlockers = targetPlanRecoveryBlockersFromReviews(rejectedCapReviews);
+				const failure: GoalTargetPlanFailure = {
+					stage: input.stage,
+					reason: "review-rejection-cap",
+					message: input.message,
+					blockers: reviewerBlockers.length ? reviewerBlockers : [input.message],
+					suggestedQuestions: [
+						"Clarify the right-sized product signal for this target.",
+						"Identify which related same-signal work must be included before execution.",
+					],
+					at: now,
+				};
 				nextPlan = {
 					...currentPlan,
 					status: "failed",
 					updatedAt: now,
 					failedAt: now,
-					failure: {
-						stage: input.stage,
-						reason: "review-rejection-cap",
-						message: input.message,
-						blockers: reviewerBlockers.length ? reviewerBlockers : [input.message],
-						suggestedQuestions: [
-							"Clarify the right-sized product signal for this target.",
-							"Identify which related same-signal work must be included before execution.",
-						],
-						at: now,
-					},
+					failure,
 					reviews,
 				};
-				state.runMode = "awaiting-user-input";
+				if (
+					input.stage === "review" &&
+					!hasReviewerFailure &&
+					actionableBlockers.length > 0 &&
+					!targetPlanReviewNeedsUserInput(rejectedCapReviews)
+				) {
+					autoTargetPlanRecovery = {
+						reason: "state-refresh",
+						guidance: actionableBlockers.join("\n"),
+						blockers: actionableBlockers,
+					};
+					state.runMode = "planning-target";
+				} else {
+					state.runMode = "awaiting-user-input";
+				}
 			} else {
 				nextPlan = {
 					...currentPlan,
@@ -3247,7 +3280,27 @@ export class GoalRuntime {
 			}
 			const stored = this.#upsertTargetPlan(state, nextPlan);
 			if (state.goal.currentTarget) state.goal.currentTarget.planId = stored.id;
-			if (
+			if (autoTargetPlanRecovery && state.goal.currentTarget?.status === "active") {
+				const target = state.goal.currentTarget;
+				const recovery = this.#startRecoveredTargetPlanAttempt(state, {
+					target,
+					now,
+					blockedStateId: `${stored.id}-auto-consolidation`,
+					reason: autoTargetPlanRecovery.reason,
+					guidance: autoTargetPlanRecovery.guidance,
+					blockers: autoTargetPlanRecovery.blockers,
+					source: {
+						targetId: target.id,
+						targetSequence: target.sequence,
+						targetPlanId: stored.id,
+						revision: stored.revision,
+						status: "failed",
+						planFilePath: stored.planFilePath,
+					},
+				});
+				state.goal.recoveryHistory = upsertRecoveryRecord(state.goal.recoveryHistory, recovery);
+				state.runMode = "planning-target";
+			} else if (
 				(stored.status === "failed" || stored.status === "stale") &&
 				state.goal.currentTarget?.status === "active"
 			) {
@@ -3282,6 +3335,72 @@ export class GoalRuntime {
 			return state;
 		});
 	}
+	#startRecoveredTargetPlanAttempt(
+		state: GoalModeState,
+		input: {
+			target: GoalTarget;
+			now: number;
+			blockedStateId: string;
+			reason: GoalRecoveryReason;
+			guidance: string;
+			blockers: string[];
+			source: GoalRecoveryRecord["source"];
+		},
+	): GoalRecoveryRecord {
+		const sequence = nextRecoverySequence(state.goal);
+		const recoveryId = `${state.goal.id}-recovery-${sequence}`;
+		const attempt = nextTargetPlanAttempt(state.goal, input.target);
+		const planId = `${input.target.id}-plan-attempt-${attempt}`;
+		const planFilePath = `local://goal-${sanitizeGoalPlanSlug(state.goal.id)}-target-${input.target.sequence}-plan-attempt-${attempt}.md`;
+		const recoveryLink: GoalRecoveryLink = {
+			recoveryId,
+			blockedStateId: input.blockedStateId,
+			kind: "target-plan",
+			action: "restart_target_planning",
+			reason: input.reason,
+			guidance: input.guidance,
+			blockers: [...input.blockers],
+			at: input.now,
+		};
+		const recoveredPlan: GoalTargetPlanRecord = {
+			id: planId,
+			goalId: state.goal.id,
+			targetId: input.target.id,
+			targetSequence: input.target.sequence,
+			planFilePath,
+			status: "drafting",
+			revision: 1,
+			stateVersionAtStart: state.stateVersion,
+			parentFrameVersionAtStart: input.target.parentFrameVersion ?? state.parentFrameVersion,
+			createdAt: input.now,
+			updatedAt: input.now,
+			recoveredFrom: recoveryLink,
+			reviews: [],
+		};
+		this.#upsertTargetPlan(state, recoveredPlan);
+		const recoveredTarget = { ...input.target, planId: recoveredPlan.id };
+		state.goal.currentTarget = recoveredTarget;
+		state.goal.targets = upsertById(state.goal.targets ?? [], [recoveredTarget]);
+		return {
+			id: recoveryId,
+			sequence,
+			blockedStateId: input.blockedStateId,
+			kind: "target-plan",
+			action: "restart_target_planning",
+			reason: input.reason,
+			guidance: input.guidance,
+			blockers: [...input.blockers],
+			source: input.source,
+			result: {
+				runMode: "planning-target",
+				targetId: input.target.id,
+				targetPlanId: recoveredPlan.id,
+				planFilePath: recoveredPlan.planFilePath,
+			},
+			at: input.now,
+		};
+	}
+
 	#restartTargetPlanningFromBlockedState(
 		state: GoalModeState | undefined,
 		input: Extract<GoalRecoverBlockedStateInput, { kind: "target-plan" }>,
@@ -3324,58 +3443,15 @@ export class GoalRuntime {
 		}
 		const guidance = input.guidance.trim();
 		if (!guidance) throw new Error("recover_blocked_state guidance must be non-empty");
-		const sequence = nextRecoverySequence(state.goal);
-		const recoveryId = `${state.goal.id}-recovery-${sequence}`;
-		const attempt = nextTargetPlanAttempt(state.goal, target);
-		const planId = `${target.id}-plan-attempt-${attempt}`;
-		const planFilePath = `local://goal-${sanitizeGoalPlanSlug(state.goal.id)}-target-${target.sequence}-plan-attempt-${attempt}.md`;
-		const recoveryLink: GoalRecoveryLink = {
-			recoveryId,
+		const recovery = this.#startRecoveredTargetPlanAttempt(state, {
+			target,
+			now,
 			blockedStateId: block.id,
-			kind: block.kind,
-			action: input.action,
-			reason: input.reason,
-			guidance,
-			blockers: [...block.blockers],
-			at: now,
-		};
-		const recoveredPlan: GoalTargetPlanRecord = {
-			id: planId,
-			goalId: state.goal.id,
-			targetId: target.id,
-			targetSequence: target.sequence,
-			planFilePath,
-			status: "drafting",
-			revision: 1,
-			stateVersionAtStart: state.stateVersion,
-			parentFrameVersionAtStart: target.parentFrameVersion ?? state.parentFrameVersion,
-			createdAt: now,
-			updatedAt: now,
-			recoveredFrom: recoveryLink,
-			reviews: [],
-		};
-		this.#upsertTargetPlan(state, recoveredPlan);
-		const recoveredTarget = { ...target, planId: recoveredPlan.id };
-		state.goal.currentTarget = recoveredTarget;
-		state.goal.targets = upsertById(state.goal.targets ?? [], [recoveredTarget]);
-		const recovery: GoalRecoveryRecord = {
-			id: recoveryId,
-			sequence,
-			blockedStateId: block.id,
-			kind: block.kind,
-			action: input.action,
 			reason: input.reason,
 			guidance,
 			blockers: [...block.blockers],
 			source: { ...block.source },
-			result: {
-				runMode: "planning-target",
-				targetId: target.id,
-				targetPlanId: recoveredPlan.id,
-				planFilePath: recoveredPlan.planFilePath,
-			},
-			at: now,
-		};
+		});
 		this.#resolveBlockedState(state, block, recovery);
 		state.runMode = "planning-target";
 		return recovery;

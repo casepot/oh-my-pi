@@ -15,6 +15,7 @@ If the summary lacks exact sequencing, read the plan file and initialize todos f
 {{/has}}
 Start from the approved execution summary. The plan file is a detail/recovery artifact:
 - path: `{{planFilePath}}`
+- payload: `{{payloadFilePath}}`
 - hash: `{{planHash}}`
 - bytes: `{{planBytes}}`
 Read the plan only if exact file/symbol/command/recovery detail is missing from the summary.
@@ -42,7 +43,7 @@ Read the plan only if exact file/symbol/command/recovery detail is missing from 
 Use target card/matrix summaries as execution guardrails; the plan file remains authority for exact details only when needed.
 </instruction>
 
-<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
+<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
 
 <critical>
 - Execute only the approved current target.

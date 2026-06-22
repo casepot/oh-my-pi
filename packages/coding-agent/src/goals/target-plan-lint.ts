@@ -830,13 +830,14 @@ function collectTargetUnitDiagnostics(
 				);
 			}
 		} else if (rule.kind === "gate-prerequisite") {
+			const guidance = `${rule.statement} No payload edit is required for this informational lint entry.`;
 			diagnostics.push(
 				lintDiagnostic({
-					severity: "warning",
+					severity: "info",
 					code: "target_unit.reviewer_required",
 					path: ["workflow_review_rounds"],
-					message: "target unit rule is enforced by target-plan reviewers",
-					guidance: rule.statement,
+					message: "target unit rule is checked by target-plan reviewers",
+					guidance,
 					offender: { kind: "target_unit_rule", id: rule.id },
 				}),
 			);

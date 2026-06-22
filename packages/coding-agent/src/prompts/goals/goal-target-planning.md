@@ -58,12 +58,17 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 8. Patch the Markdown plan only when the change removes an executor decision or changes executor-visible semantics.
 9. Create, patch, or structured-transform the payload JSON at exact `targetPlanSubmitIdentity.payloadFilePath`.
 10. Use `eval` or bash-run `jq`/`python` for whole-file payload rewrites when they preserve identity, pretty formatting, and still-valid content.
-11. Run an adversarial planner review: subagent review for cross-cutting/unclear targets, otherwise local self-review using the aperture/execution bars. Check the whole plan, not the first visible flaw.
-12. Revise until the complete acceptance delta is closed; preserve accepted aperture and still-valid decisions.
-13. If no valid plan exists, call `fail_target_plan` with exact reason: `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`.
-14. Lint with `goal({op:"lint_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
-15. Fix diagnostics by patching addressed payload fields first.
-16. Patch Markdown only when the fix changes executor-visible semantics.
+11. Trust-heavy/code/behavior/security/privacy/authority/multi-workstream/cross-subsystem targets MUST run a pre-submit planning review before first submit.
+   - Use planning-only `agent()`/`task` when available; otherwise local review and record why no subagent was available in `workflow_review_rounds`.
+   - Review execution-oracle gaps, branch coverage, schema/lint invariants, and Markdown/payload agreement.
+12. Run an adversarial planner review for all other targets: subagent review when cross-cutting/unclear, otherwise local self-review using aperture/execution bars.
+13. Broad execution-readiness rejection with ≥3 missing decision categories, or a second rejection from the same lens, means consolidate from accepted scope plus blockers; do not accrete patches.
+14. Narrow rejection with 1-2 concrete missing details means patch only those details.
+15. Revise until the complete acceptance delta is closed; preserve accepted aperture and still-valid decisions.
+16. If no valid plan exists, call `fail_target_plan` with exact reason: `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`.
+17. Lint with `goal({op:"lint_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
+18. Fix diagnostics by patching addressed payload fields first.
+19. Patch Markdown only when the fix changes executor-visible semantics.
 
 Local self-check before submit MUST confirm:
 - No guessed schema keys remain; every payload key is from `target_plan_schema` or accepted lint diagnostics.
@@ -75,7 +80,7 @@ Local self-check before submit MUST confirm:
 - No row says `same as above`, `etc.`, `TBD`, `use prior attempt`, or names a schema/helper without exact values.
 - `dry_run` records observed checks for this exact plan/payload; schema citations or self-approval prose are not evidence.
 - Code/behavior targets schedule post-green code review before commit/checkpoint.
-17. Submit with `goal({op:"submit_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
+20. Submit with `goal({op:"submit_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
 
 ## Plan file
 

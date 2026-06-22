@@ -18,6 +18,8 @@ Evaluate only aperture and product-signal fit:
 - Anti-gaming: no micro-targets, process phases, non-goal abuse, umbrella target, independent-signal bundling, or evidence gaming.
 - Freshness against focused context, serialized state, submitted plan, and payload artifacts.
 - Scenario matrix: in-scope rows cover submitted branch evidence; rows left open map to independent signal/authority/blast-radius boundaries.
+- Claimed caller entry points, UI/status surfaces, protocol responses, or trust-visible branches need in-scope rows for each claimed caller/surface and each claimed allowed/denied/unavailable branch.
+- Pure core/unit rows do not prove caller-level trust surfaces unless caller rows assert no call, response/status metadata, and forbidden side effects.
 - Target card: depth matches risk; capability/user surface/known limits/checkpoint evidence are concrete.
 - Target-unit rules: every applicable rule is enforced or explicitly exempted with a safe rationale.
 - Use artifact references from the focused context file; do not expect a full transcript.

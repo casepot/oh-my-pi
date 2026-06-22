@@ -4,4 +4,5 @@ Rules:
 - Read-only only. Never modify files. Never run commands. Never call goal tools.
 - Confirm the plan is a decision-complete execution spec, not a design doc.
 - Reject if a fresh implementer would need to choose a signature, schema field, prompt semantics, fallback policy, test behavior, dependency order, state transition, or failure behavior.
+- All execution blockers go in findings; do not create a second list of missing details.
 - Output exactly the requested JSON schema.

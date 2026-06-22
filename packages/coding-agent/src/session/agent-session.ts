@@ -234,6 +234,7 @@ import {
 	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
 	sanitizeGoalPlanSlug,
+	targetPlanPayloadFilePath,
 	targetPlanPayloadFromSubmitInput,
 } from "../goals/runtime";
 import {
@@ -1442,7 +1443,6 @@ function parseGoalTargetExecutionReviewerOutput(value: unknown): GoalTargetExecu
 		status: value.status,
 		feedback: value.feedback,
 		findings: parseTargetPlanReviewFindings(value.findings),
-		missingExecutionDetails: stringArray(value.missingExecutionDetails),
 	};
 }
 
@@ -6109,8 +6109,10 @@ export class AgentSession {
 				message: "target plan reviewer rejected the submission",
 				stage: "review",
 			});
+			const reviewedPlan =
+				rejected.goal.targetPlans?.find(plan => plan.id === input.targetPlanId) ?? rejected.goal.currentTargetPlan;
+			if (reviewedPlan) await this.#publishGoalTargetPlanArtifact(rejected.goal, reviewedPlan, reviews);
 			const rejectedPlan = rejected.goal.currentTargetPlan;
-			if (rejectedPlan) await this.#publishGoalTargetPlanArtifact(rejected.goal, rejectedPlan, reviews);
 			this.#appendGoalBoundaryAudit({
 				kind: "target-plan-approval",
 				before: boundaryBefore,
@@ -6185,6 +6187,7 @@ export class AgentSession {
 					targetId: approvedPlan.targetId,
 					targetPlanId: approvedPlan.id,
 					planFilePath: approvedPlan.planFilePath,
+					payloadFilePath: targetPlanPayloadFilePath(approvedPlan.planFilePath),
 					title: `goal-${sanitizeGoalPlanSlug(approvedPlan.goalId)}-target-${approvedPlan.targetSequence}`,
 					revision: approvedPlan.revision,
 					planHash,
@@ -6214,7 +6217,15 @@ export class AgentSession {
 					targetPlanRevision: approvedPlan?.revision,
 				}),
 			],
-			preservedFields: ["targetId", "targetPlanId", "revision", "planFilePath", "planHash", "planBytes"],
+			preservedFields: [
+				"targetId",
+				"targetPlanId",
+				"revision",
+				"planFilePath",
+				"payloadFilePath",
+				"planHash",
+				"planBytes",
+			],
 			staleFields: [],
 			omittedFields: ["fullPlanContent"],
 			recoveryInstruction: "Read the plan file only if exact execution details are needed.",
@@ -7109,18 +7120,12 @@ export class AgentSession {
 				parse: parseGoalTargetExecutionReviewerOutput,
 				signal: input.signal,
 			});
-			const missingFindings = output.missingExecutionDetails.map((detail, index) => ({
-				id: `MISSING_EXECUTION_DETAIL_${index + 1}`,
-				severity: "important" as const,
-				problem: detail,
-				requiredRevision: "Specify this execution detail in the target plan.",
-			}));
 			return {
 				id: `target-plan-execution-review-${Date.now()}`,
 				lens: "execution-readiness",
 				status: output.status,
 				feedback: output.feedback,
-				findings: [...output.findings, ...missingFindings],
+				findings: output.findings,
 				reviewedAt: Date.now(),
 			};
 		} catch (error) {
@@ -7564,6 +7569,7 @@ export class AgentSession {
 			planHash: input.planHash ?? "unknown",
 			planBytes: input.planBytes ?? "unknown",
 			planFilePath: input.planFilePath,
+			payloadFilePath: input.payloadFilePath,
 			contextPreserved: input.contextPreserved === true,
 			planDepth: input.planDepth,
 			primarySignalGroupId: input.primarySignalGroupId,
@@ -7776,6 +7782,7 @@ export class AgentSession {
 			planHash,
 			planBytes,
 			planFilePath: reference.planFilePath,
+			payloadFilePath: reference.payloadFilePath,
 			planDepth: reference.planDepth,
 			primarySignalGroupId: reference.primarySignalGroupId,
 			matrixRowCounts: reference.matrixRowCounts

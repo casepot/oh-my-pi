@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -68,6 +68,14 @@ type GoalSideAgentMock = {
 	checkpointReviewStatus: "accepted" | "rejected";
 	checkpointReviewFeedback: string;
 	checkpointGuidance: string;
+	targetExecutionReviewStatus: "accepted" | "rejected";
+	targetExecutionReviewFeedback: string;
+	targetExecutionReviewFindings: Array<{
+		id: string;
+		severity: "blocking" | "important" | "polish";
+		problem: string;
+		requiredRevision: string;
+	}>;
 };
 
 let goalSideAgentMock: GoalSideAgentMock;
@@ -108,6 +116,16 @@ function installGoalSideAgentMock(): void {
 		checkpointReviewStatus: "accepted",
 		checkpointReviewFeedback: "Checkpoint target is locally closed and bounded.",
 		checkpointGuidance: "Controller must resolve the checkpoint before local work resumes.",
+		targetExecutionReviewStatus: "accepted",
+		targetExecutionReviewFeedback: "Execution plan is complete.",
+		targetExecutionReviewFindings: [
+			{
+				id: "verification-command",
+				severity: "polish",
+				problem: "Verification command could be more explicit.",
+				requiredRevision: "Name the behavior proved by the command.",
+			},
+		],
 	};
 	goalSideAgentCalls = [];
 	vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
@@ -207,10 +225,9 @@ function installGoalSideAgentMock(): void {
 		}
 		if (options.agent.name === "goal-target-execution-reviewer") {
 			return createSideAgentResult(options, {
-				status: "accepted",
-				feedback: "Execution plan is complete.",
-				findings: [],
-				missingExecutionDetails: [],
+				status: goalSideAgentMock.targetExecutionReviewStatus,
+				feedback: goalSideAgentMock.targetExecutionReviewFeedback,
+				findings: goalSideAgentMock.targetExecutionReviewFindings,
 			});
 		}
 		if (options.agent.name === "goal-checkpoint-guidance") {
@@ -335,7 +352,7 @@ async function activeGoalTool(harness: GoalHarness): Promise<Tool> {
 	return goalTool;
 }
 
-async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: Tool): Promise<void> {
+async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: Tool): Promise<AgentToolResult> {
 	const state = harness.session.getGoalModeState();
 	const target = state?.goal.currentTarget;
 	const plan = state?.goal.currentTargetPlan;
@@ -447,7 +464,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 		resolveLocalUrlToPath(payloadFilePath, localProtocolOptions),
 		`${JSON.stringify(payload, null, 2)}\n`,
 	);
-	await goalTool.execute(`submit-${plan.id}`, {
+	return await goalTool.execute(`submit-${plan.id}`, {
 		op: "submit_target_plan",
 		payload_file_path: payloadFilePath,
 	});
@@ -803,6 +820,9 @@ describe("InteractiveMode goal mode integration", () => {
 		if (!approval.planHash) throw new Error("expected target plan hash");
 		expect(approvedPrompt).toContain("<approved_target_plan_ref");
 		expect(approvedPrompt).toContain(approval.planFilePath);
+		expect(approval.payloadFilePath).toBe(targetPlanPayloadFilePath(approval.planFilePath));
+		expect(approvedPrompt).toContain(approval.payloadFilePath);
+		expect(approvedPrompt).toContain(`payload_path="${approval.payloadFilePath}"`);
 		expect(approvedPrompt).toContain(approval.planHash);
 		expect(approvedPrompt).toContain("<approved_target_execution_summary>");
 		expect(approvedPrompt).toContain("approved execution summary supersedes earlier drafts");
@@ -828,6 +848,46 @@ describe("InteractiveMode goal mode integration", () => {
 		).not.toThrow("no active parent");
 	});
 
+	it("returns the recovered draft after auto-consolidated target-plan submit caps", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		goalSideAgentMock.targetExecutionReviewStatus = "rejected";
+		goalSideAgentMock.targetExecutionReviewFeedback = "Execution plan is missing the verification command.";
+		goalSideAgentMock.targetExecutionReviewFindings = [
+			{
+				id: "verification-command",
+				severity: "blocking",
+				problem: "Verification command is missing.",
+				requiredRevision: "Name the exact command and behavior it proves.",
+			},
+		];
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+		});
+
+		let result: AgentToolResult | undefined;
+		for (let index = 0; index < 3; index += 1) {
+			result = await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+		}
+
+		expect(result?.details?.state?.runMode).toBe("planning-target");
+		expect(result?.details?.targetPlan?.status).toBe("drafting");
+		expect(result?.details?.targetPlan?.recoveredFrom?.reason).toBe("state-refresh");
+		expect(result?.details?.targetPlan?.reviews).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					lens: "execution-readiness",
+					status: "rejected",
+					feedback: "Execution plan is missing the verification command.",
+					blockingFindingCount: 1,
+				}),
+			]),
+		);
+	});
+
 	it("reviews target plans from focused context artifacts", async () => {
 		await harness.mode.handleGoalModeCommand("Improve release reliability");
 		harness.session.sessionManager.appendMessage({
@@ -848,6 +908,13 @@ describe("InteractiveMode goal mode integration", () => {
 		if (!targetId || !targetPlanId) throw new Error("expected target and target plan ids");
 
 		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+		const storedExecutionReview = harness.session
+			.getGoalModeState()
+			?.goal.currentTargetPlan?.reviews.find(review => review.lens === "execution-readiness");
+		expect(storedExecutionReview?.findings.map(finding => finding.id)).toEqual(["verification-command"]);
+		expect(storedExecutionReview?.findings.some(finding => finding.id.startsWith("MISSING_EXECUTION_DETAIL_"))).toBe(
+			false,
+		);
 
 		const reviewerCalls = goalSideAgentCalls.filter(call =>
 			["goal-target-aperture-reviewer", "goal-target-execution-reviewer"].includes(call.agent.name),

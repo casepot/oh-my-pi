@@ -135,12 +135,13 @@ describe("target-plan lint rules", () => {
 		const diagnostic = diagnostics.find(item => item.code === "target_unit.reviewer_required");
 
 		expect(diagnostic).toMatchObject({
-			severity: "warning",
+			severity: "info",
 			blocksSubmission: false,
 			path: "/workflow_review_rounds",
-			message: "target unit rule is enforced by target-plan reviewers",
-			guidance: customRule.statement,
+			message: "target unit rule is checked by target-plan reviewers",
 		});
+		expect(diagnostic?.guidance).toContain(customRule.statement);
+		expect(diagnostic?.guidance).toContain("No payload edit is required");
 		expect(diagnostic?.offender?.id).toBe("release-gate-before-cutover");
 	});
 
@@ -157,12 +158,13 @@ describe("target-plan lint rules", () => {
 		expect(diagnostics.some(diagnostic => diagnostic.code === "target_unit.unknown_rule")).toBe(false);
 		const diagnostic = diagnostics.find(item => item.code === "target_unit.reviewer_required");
 		expect(diagnostic).toMatchObject({
-			severity: "warning",
+			severity: "info",
 			blocksSubmission: false,
 			path: "/workflow_review_rounds",
-			message: "target unit rule is enforced by target-plan reviewers",
-			guidance: customRule.statement,
+			message: "target unit rule is checked by target-plan reviewers",
 		});
+		expect(diagnostic?.guidance).toContain(customRule.statement);
+		expect(diagnostic?.guidance).toContain("No payload edit is required");
 		expect(diagnostic?.offender?.id).toBe("release-gate-before-cutover");
 	});
 

@@ -570,6 +570,7 @@ export interface GoalTargetPlanExecutionSummary {
 	targetId: string;
 	targetPlanId: string;
 	planFilePath: string;
+	payloadFilePath: string;
 	revision: number;
 	targetTitle?: string;
 	desiredFutureClaim?: string;
@@ -841,6 +842,7 @@ export interface GoalTargetPlanApprovedDetails {
 	targetId: string;
 	targetPlanId: string;
 	planFilePath: string;
+	payloadFilePath: string;
 	title: string;
 	revision?: number;
 	planHash?: string;

@@ -211,6 +211,14 @@ const EXCLUDED_WORK_CLASSIFICATION_VALUES = [
 ] as const;
 const TARGET_PLAN_DEPTH_VALUES = ["light", "standard", "trust-heavy"] as const;
 const WORKSTREAM_KIND_VALUES = ["main", "backend-rust", "app-ui", "e2e-harness", "docs-changelog", "other"] as const;
+const DEFERRED_RELATED_WORK_REASON_VALUES = [
+	"different-primary-signal",
+	"different-authority",
+	"different-blast-radius",
+	"blocked-external",
+	"non-goal",
+] as const;
+const SCENARIO_MATRIX_OPEN_ROW_REASON_VALUES = [...DEFERRED_RELATED_WORK_REASON_VALUES, "unsafe-to-bundle"] as const;
 
 const verificationLayerSchema = z.enum(VERIFICATION_LAYER_VALUES);
 const signalRoleSchema = z.enum(SIGNAL_ROLE_VALUES);
@@ -307,13 +315,7 @@ const scopeCalibrationSchema = z
 			z
 				.object({
 					item: z.string(),
-					reason: z.enum([
-						"different-primary-signal",
-						"different-authority",
-						"different-blast-radius",
-						"blocked-external",
-						"non-goal",
-					]),
+					reason: z.enum(DEFERRED_RELATED_WORK_REASON_VALUES),
 					follow_up_hint: z.string().optional(),
 					rationale: z.string().optional(),
 				})
@@ -358,14 +360,7 @@ const scenarioMatrixOpenRowSchema = z
 	.object({
 		id: z.string(),
 		branch: z.string(),
-		reason: z.enum([
-			"different-primary-signal",
-			"different-authority",
-			"different-blast-radius",
-			"blocked-external",
-			"non-goal",
-			"unsafe-to-bundle",
-		]),
+		reason: z.enum(SCENARIO_MATRIX_OPEN_ROW_REASON_VALUES),
 		rationale: z.string().optional(),
 		follow_up_hint: z.string(),
 	})
@@ -1980,6 +1975,23 @@ function renderTargetPlanLintText(lint: GoalTargetPlanLintResult): string {
 	return text;
 }
 
+function renderTargetPlanEnumReminder(): string {
+	return [
+		"Allowed target-plan enum values:",
+		`  plan_depth: ${TARGET_PLAN_DEPTH_VALUES.join(", ")}`,
+		`  verification layer: ${VERIFICATION_LAYER_VALUES.join(", ")}`,
+		`  signal role: ${SIGNAL_ROLE_VALUES.join(", ")}`,
+		`  confidence: ${SIGNAL_CONFIDENCE_VALUES.join(", ")}`,
+		`  blast_radius: ${BLAST_RADIUS_VALUES.join(", ")}`,
+		`  concern kind: ${CONCERN_KIND_VALUES.join(", ")}`,
+		`  rows_left_open.reason: ${SCENARIO_MATRIX_OPEN_ROW_REASON_VALUES.join(", ")}`,
+		`  excluded_work_review.classification: ${EXCLUDED_WORK_CLASSIFICATION_VALUES.join(", ")}`,
+		`  workstream kind: ${WORKSTREAM_KIND_VALUES.join(", ")}`,
+		"  workflow_review_rounds[].verdict: accepted, revision-required",
+		"  dry_run.status: passed, failed",
+	].join("\n");
+}
+
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
 	const goal = response.goal;
 	if (!goal) return "No active goal.";
@@ -2020,7 +2032,7 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\n  payload_file_path: ${identity.payloadFilePath}`;
 			text += `\n  revision: ${identity.revision}`;
 			text += `\nNext action: create missing plan files if needed; otherwise edit payload_file_path in place and patch plan_file_path only when the payload fix changes executor-visible semantics. Lint with goal({op:"lint_target_plan", payload_file_path:"${identity.payloadFilePath}"}). Submit with goal({op:"submit_target_plan", payload_file_path:"${identity.payloadFilePath}"}).`;
-			text += `\nAllowed verification layer values: ${VERIFICATION_LAYER_VALUES.join(", ")}.`;
+			text += `\n${renderTargetPlanEnumReminder()}`;
 		}
 	}
 	if (op === "lint_target_plan" && response.targetPlanLint) {

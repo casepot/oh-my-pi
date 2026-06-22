@@ -236,7 +236,6 @@ const goalTargetExecutionReviewOutputSchema = {
 		status: { enum: ["accepted", "rejected"] },
 		feedback: { type: "string" },
 		findings: { elements: targetPlanReviewFindingSchema },
-		missingExecutionDetails: { elements: { type: "string" } },
 	},
 } as const;
 
@@ -374,7 +373,6 @@ export interface GoalTargetExecutionReviewerOutput {
 	status: "accepted" | "rejected";
 	feedback: string;
 	findings: GoalTargetPlanReviewerFindingOutput[];
-	missingExecutionDetails: string[];
 }
 
 export function renderGoalRubricAssignment(input: { objective: string; contextFile: string }): string {

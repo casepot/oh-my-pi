@@ -27,6 +27,8 @@
 - Changed goal target-planning and reviewer prompts to demand self-contained implementation oracles, complete rejection deltas, and less lint-level review churn.
 - Changed plan and goal target planning to allow eval/task planning agents, with goal target planning also allowing eval/bash plan-payload transforms while implementation stays blocked until plan approval.
 - Changed goal working-target guidance to require post-green implementation code review before commit/checkpoint when code or behavior changed.
+- Changed goal target-plan prompts and schema guidance to surface enum values, graph invariants, caller/surface review rows, and consolidation-vs-patch rules before submission.
+- Changed approved target-plan handoffs to include the payload sidecar path in approval details and execution summaries.
 
 
 
@@ -56,6 +58,8 @@
 
 ### Fixed
 - Fixed goal target-plan review artifacts to show reviewers canonical snake_case payload JSON instead of internal camelCase submission state.
+- Fixed goal target-plan rejection caps to auto-open a recovered planning attempt when reviewer feedback is actionable and no user authority is needed.
+- Fixed target-unit gate-prerequisite diagnostics to render as informational reviewer reminders instead of payload-edit warnings.
 
 - Fixed goal target-planning throughput by adding schema-reference lookups, alias-aware lint diagnostics, focused reviewer context, execution-summary handoff, and stricter prompt self-checks.
 

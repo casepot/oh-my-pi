@@ -156,6 +156,7 @@ describe("task agent capability descriptions", () => {
 				targetId: "target-1",
 				targetPlanId: "target-plan-1",
 				planFilePath: "local://goal-goal-1-target-1-plan.md",
+				payloadFilePath: "local://goal-goal-1-target-1-plan.payload.json",
 				title: "goal-goal-1-target-1",
 			}),
 		} as ToolSession;
@@ -187,6 +188,7 @@ describe("task agent capability descriptions", () => {
 		const tempDir = TempDir.createSync("@pi-task-target-plan-");
 		try {
 			const planFilePath = "local://goal-goal-1-target-1-plan.md";
+			const payloadFilePath = "local://goal-goal-1-target-1-plan.payload.json";
 			const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 				getArtifactsDir: () => tempDir.path(),
 				getSessionId: () => "session-1",
@@ -201,12 +203,14 @@ describe("task agent capability descriptions", () => {
 					targetId: "target-1",
 					targetPlanId: "target-plan-1",
 					planFilePath,
+					payloadFilePath,
 					title: "goal-goal-1-target-1",
 					revision: 1,
 					executionSummary: {
 						targetId: "target-1",
 						targetPlanId: "target-plan-1",
 						planFilePath,
+						payloadFilePath,
 						revision: 1,
 						targetTitle: "Prove target behavior",
 						closureStandard: "Target behavior is observed.",
