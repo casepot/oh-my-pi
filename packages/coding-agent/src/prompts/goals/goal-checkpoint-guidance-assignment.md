@@ -18,6 +18,10 @@ Write a compact controller-turn handoff. The checkpoint closed one target; name 
 {{checkpointPacket}}
 </checkpoint_packet>
 
+<target_unit_rules>
+{{targetUnitRules}}
+</target_unit_rules>
+
 Use read/search/find only. NEVER modify files. NEVER run tests/checks/linters/formatters/project-wide commands.
 
 Analyze enough transcript/repo context to produce real guidance. You MAY inspect repeated rereads, review churn, record/code ratio, missing reviews, stale evidence, user corrections, target-aperture alignment, and code/evidence focus. Deep analysis is allowed; verbose output is not.

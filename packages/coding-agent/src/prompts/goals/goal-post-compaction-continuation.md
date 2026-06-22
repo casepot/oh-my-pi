@@ -22,7 +22,7 @@ Post-compaction policy:
 - Continue the same current target; do not choose a new target because compaction occurred.
 {{/when}}
 {{#when runMode "==" "planning-target"}}
-- Continue the current target plan; write only `currentTargetPlan.planFilePath` and keep it decision-complete.
+- Call `goal({op:"get"})`; recover `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; continue from existing files, edit in place, create only missing files, and update Markdown only for executor-visible semantic changes.
 {{/when}}
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}
 - Wait for checkpoint guidance, then call `resolve_checkpoint` before ordinary tools.

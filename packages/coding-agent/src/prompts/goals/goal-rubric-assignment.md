@@ -18,10 +18,12 @@ Read transcript/repo context only when it materially improves the rubric. The ru
 
 - Make deliverable boundaries decomposition-friendly: when the objective spans multiple subsystems, evidence classes, or user-visible outcomes, express those as separate deliverables rather than one umbrella item.
 - Include a short `Target aperture guidance` section: first/right-sized target, minimum product-signal evidence unit, same-signal work that must stay bundled, why-not-smaller/larger. Warn against serial micro-targets that do not reduce parent uncertainty.
+- Emit `targetUnitRules` only for durable decomposition rules this goal needs beyond built-ins. Use ids stable enough for `scope_calibration.target_unit_rule_ids`.
 
 Return:
 - `rubric`: one concise but stringent verifier-only rubric.
 - `deliverableMap`: compact main-agent-facing deliverables.
+- `targetUnitRules`: optional array of `{id, kind, statement, source:"rubric", enforcement}`.
 
 The rubric MUST include:
 - Durable deliverables required by strongest good-faith objective interpretation.
@@ -38,5 +40,7 @@ The rubric MUST include:
 - `evidenceRefs`: empty unless current durable refs are already authoritative.
 - `blockedBy`: empty unless a known blocker exists.
 - `nextRelevantTarget`: optional first target hint.
+
+`targetUnitRules` kinds: `complete-acceptance-slice`, `scenario-matrix`, `gate-prerequisite`, `no-process-phase`, `same-primary-signal-together`, `branch-unblocks-matrix`. Use `enforcement:"error"` only for rules that must block target-plan submission.
 
 The rubric is a verification aid; NEVER narrow or rewrite the objective.

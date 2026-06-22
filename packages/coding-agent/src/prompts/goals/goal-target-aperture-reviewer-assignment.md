@@ -7,6 +7,7 @@ Inputs:
 - Proposed plan file: {{planFile}}
 - Submitted target-plan JSON: {{submissionFile}}
 
+- Target-unit rules: {{targetUnitRules}}
 Evaluate:
 - Product signal: one concrete product-intention claim becomes truthful through a primary verification signal.
 - Related-work bundling: same-signal callers/contracts/tests/concerns are included; independent-signal work is deferred.
@@ -16,6 +17,9 @@ Evaluate:
 - Parent uncertainty reduction: target closes a meaningful uncertainty in the parent frame.
 - Anti-gaming: no micro-targets, process phases, non-goal abuse, umbrella target, independent-signal bundling, or evidence gaming.
 - Freshness against transcript and serialized state.
+- Scenario matrix: in-scope rows cover submitted branch evidence; rows left open map to independent signal/authority/blast-radius boundaries.
+- Target card: depth matches risk; capability/user surface/known limits/checkpoint evidence are concrete.
+- Target-unit rules: every applicable rule is enforced or explicitly exempted with a safe rationale.
 
 Decision rules:
 - too-narrow implies revisionDecision merge-required or rescope-required.

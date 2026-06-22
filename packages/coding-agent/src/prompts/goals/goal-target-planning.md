@@ -12,9 +12,6 @@ Goal target planning is active. Produce a decision-complete execution spec for t
 {{targetPlanSubmitIdentity}}
 </target_plan_submit_identity>
 
-<target_plan_submit_skeleton>
-{{targetPlanSubmitSkeleton}}
-</target_plan_submit_skeleton>
 
 Tool availability:
 - task: {{taskAvailable}}
@@ -27,8 +24,11 @@ Tool availability:
 - First action MUST be `goal({op:"get"})`.
 - The plan MUST let a fresh executor complete the current target with zero design decisions.
 - NEVER implement, checkpoint, complete, or mutate non-plan files while planning.
-- Write the plan to exact `currentTargetPlan.planFilePath`.
-- `dry_run` means read-only planner simulation, not executed verification.
+- Create exact `currentTargetPlan.planFilePath` only if missing/empty; otherwise edit it in place.
+- Create exact `targetPlanSubmitIdentity.payloadFilePath` only if missing/empty; otherwise edit it in place.
+- `targetPlanSubmitIdentity.payloadFilePath` is the lint/submit authority.
+- Markdown updates are REQUIRED only for executor-visible semantic changes: target claim, scope boundary, branch, workstream, verification scenario, known limit, or implementation step.
+- Schema-only payload fixes MUST NOT cause Markdown churn: ids, ordering, enum normalization, `target_unit_rule_ids`, `workflow_review_rounds`, or lint-only cross-reference repairs.
 - After `submit_target_plan`, stop ordinary work and wait for the result.
 </critical>
 
@@ -51,11 +51,17 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 4. Use required discovery lenses: architecture/data flow, callsites/contracts, tests/verification.
 5. Use docs/external lens only when repo evidence cannot answer.
 6. Spawn read-only `task` reviewers/decomposers only when an independent lens materially reduces uncertainty.
-7. Draft/update the plan at exact `currentTargetPlan.planFilePath`; write findings as you learn them.
-8. Run an adversarial planner review: task review for cross-cutting/unclear targets, otherwise local self-review using the aperture/execution bars.
-9. Revise until blocking findings and unresolved executor choices are gone.
-10. If no valid plan exists, call `fail_target_plan` with exact reason: `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`.
-11. Submit only the final simulation-passed plan with `goal({op:"submit_target_plan", ...})`.
+7. Keep evidence in context; write only decisions needed by the executor.
+8. Patch the Markdown plan only when the change removes an executor decision or changes executor-visible semantics.
+9. Create or patch the structured payload JSON at exact `targetPlanSubmitIdentity.payloadFilePath`.
+10. Whole-file `write` is allowed only for initial creation or deliberate plan overhaul where line-level preservation is harder than replacement; preserve all still-valid content.
+11. Run an adversarial planner review: task review for cross-cutting/unclear targets, otherwise local self-review using the aperture/execution bars.
+12. Revise until blocking findings and unresolved executor choices are gone.
+13. If no valid plan exists, call `fail_target_plan` with exact reason: `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`.
+14. Lint with `goal({op:"lint_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
+15. Fix diagnostics by patching addressed payload fields first.
+16. Patch Markdown only when the fix changes executor-visible semantics.
+17. Submit with `goal({op:"submit_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
 
 ## Plan file
 
@@ -69,11 +75,21 @@ Plan MUST answer:
 
 NEVER pad with decision-free Non-Goals, Alternatives, Risks, Future Work, or review theater. If a section would not change execution, cut it.
 
-## Submit payload
+## Submit payload file
 
-Derive `submit_target_plan` from the plan and skeleton. Use strict tool-schema field names:
-- Top-level: `op`, `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `workflow_review_rounds`, `dry_run`.
+Markdown plan and payload JSON are sibling artifacts. Payload JSON is the machine contract. Markdown is the executor spec.
+
+They MUST agree on executor-visible semantics: target claim, scope boundaries, branches, workstreams, verification scenarios, and known limits. They do not need mirrored schema bookkeeping prose.
+
+Write the payload object to `targetPlanSubmitIdentity.payloadFilePath`; do NOT paste the full object into `goal` tool calls. Lint/submit via `payload_file_path`. Use strict tool-schema field names:
+- Top-level JSON fields: `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `primary_signal_group_id`, `plan_depth`, `scenario_matrix`, `target_card`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `workflow_review_rounds`, `dry_run`.
 - Identity mapping: `currentTarget.id` / `targetPlanSubmitIdentity.targetId` -> `target_id`; `currentTargetPlan.id` / `targetPlanSubmitIdentity.targetPlanId` -> `target_plan_id`; `currentTargetPlan.planFilePath` / `targetPlanSubmitIdentity.planFilePath` -> `plan_file_path`; `currentTargetPlan.revision` / `targetPlanSubmitIdentity.revision` -> `revision`.
+- `plan_depth` = `light` only for low-risk local/doc work; `standard` by default; `trust-heavy` for security, external/irreversible, product/e2e, migration, or multi-subsystem work.
+- `primary_signal_group_id` MUST name the stable product-signal group. Reusing a prior group requires matrix/card justification.
+- `scenario_matrix` is REQUIRED unless lint accepts a low-risk light plan. It MUST cover in-scope branches and explicitly leave independent rows open.
+- `target_card` is REQUIRED unless lint accepts a low-risk light plan. It MUST summarize capability claim, user-visible surface, known limits, closed/open rows, verification scenarios, checkpoint evidence, and needed workstreams.
+- `target_card.workstreams` SHOULD split implementation contracts for independent file/subsystem lanes. It does not authorize automatic `task` fanout.
+- `scope_calibration.target_unit_rule_ids` SHOULD list applicable target-unit rules from goal context; `target_unit_exemptions` MUST justify any skipped rule.
 - `verification_aperture.product_intention` MUST name the product signal made truthful.
 - `verification_aperture.primary_signal_id` MUST copy one required `verification_signals[].id` exactly; do not invent a product-intention label unless a required signal with that exact id exists.
 - `verification_signals[].layer` and `verification_aperture.omitted_layers[].layer` MUST use one of: `unit`, `integration`, `e2e`, `manual`, `product`, `release-gate`.

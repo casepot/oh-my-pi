@@ -18,6 +18,22 @@ The plan file is authority when exact steps are needed:
 - hash: `{{planHash}}`
 - bytes: `{{planBytes}}`
 Read the plan only if recovery or execution needs exact file/symbol/verification detail.
+{{#if planDepth}}
+- plan_depth: `{{planDepth}}`
+{{/if}}
+{{#if primarySignalGroupId}}
+- primary_signal_group_id: `{{primarySignalGroupId}}`
+{{/if}}
+{{#if matrixRowCounts}}
+- scenario_matrix: {{matrixRowCounts}}
+{{/if}}
+{{#if workstreamSummary}}
+- workstreams: {{workstreamSummary}}
+{{/if}}
+{{#if implementationFanoutRequired}}
+- Implementation fanout is recommended by plan metadata only if `task` remains allowed after you read the approved plan and can split by workstream contract. NEVER spawn tasks automatically from this notice.
+{{/if}}
+Use target card/matrix summaries as orientation only; the plan file remains authority for exact steps.
 </instruction>
 
 <approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
