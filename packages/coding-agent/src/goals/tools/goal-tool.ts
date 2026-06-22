@@ -1577,10 +1577,9 @@ function renderTargetPlanLintText(lint: GoalTargetPlanLintResult): string {
 		text += "\n  legacy: matrix/card fields absent; accepted only when depth is light and graph risk is low.";
 	if (lint.diagnostics.length === 0) return text;
 	text += "\nDiagnostics:";
-	for (const diagnostic of lint.diagnostics.slice(0, 8)) {
+	for (const diagnostic of lint.diagnostics) {
 		text += `\n${renderLintDiagnosticText(diagnostic)}`;
 	}
-	if (lint.diagnostics.length > 8) text += `\n- ${lint.diagnostics.length - 8} more diagnostics omitted.`;
 	return text;
 }
 

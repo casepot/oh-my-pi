@@ -1291,6 +1291,42 @@ describe("GoalTool", () => {
 		}
 	});
 
+	it("renders every lint diagnostic in tool text", async () => {
+		const diagnostics: GoalTargetPlanLintDiagnostic[] = Array.from({ length: 10 }, (_, index) => ({
+			severity: "error",
+			code: `schema.invalid_type.${index}`,
+			path: `/payload/field_${index}`,
+			message: `diagnostic ${index}`,
+			guidance: `fix field ${index}`,
+			blocksSubmission: true,
+		}));
+		const runtime = {
+			flushUsage: vi.fn(async () => {}),
+			lintCurrentTargetPlanSubmission: vi.fn(() => targetPlanLintResult(undefined, diagnostics)),
+		} as unknown as GoalRuntime;
+		const tool = new GoalTool(
+			createToolSession({
+				cwd: ".",
+				getGoalRuntime: () => runtime,
+				getGoalModeState: () =>
+					createGoalModeState({
+						goal: createGoal(),
+						runMode: "planning-target",
+					}),
+			}),
+		);
+
+		const result = await tool.execute("lint-all-diagnostics", {
+			op: "lint_target_plan",
+			payload_file_path: "missing.payload.json",
+		});
+
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("/payload/field_0");
+		expect(text).toContain("/payload/field_9");
+		expect(text).not.toContain("more diagnostics omitted");
+	});
+
 	it("renders payload-file read guidance for missing and invalid JSON", async () => {
 		const harness = createRuntimeHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });

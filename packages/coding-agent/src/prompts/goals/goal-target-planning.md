@@ -83,6 +83,17 @@ They MUST agree on executor-visible semantics: target claim, scope boundaries, b
 
 Write the payload object to `targetPlanSubmitIdentity.payloadFilePath`; do NOT paste the full object into `goal` tool calls. Lint/submit via `payload_file_path`. Use strict tool-schema field names:
 - Top-level JSON fields: `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `primary_signal_group_id`, `plan_depth`, `scenario_matrix`, `target_card`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `workflow_review_rounds`, `dry_run`.
+- Required object shapes:
+  - `verification_aperture`: `product_intention`, `primary_signal_id`, `blast_radius`, `confidence_target`, `layer_rationale`, `residual_uncertainty: string[]`, `omitted_layers: {layer, reason}[]`.
+  - `verification_signals[]`: `id`, `role`, `layer`, `concern_ids: string[]`, `claim`, `observation`, `method`, `expected_outcome`, `required: boolean`, `confidence_if_satisfied`, `stale_if: string[]`.
+  - `concern_checks[]`: `id`, `kind`, `why_independent`, `covered_by_signal_ids: string[]`.
+  - `scope_calibration`: `right_sizing_basis`, `why_not_smaller: string[]`, `why_not_larger: string[]`, `included_related_work: {item, reason, signal_ids}[]`, `deferred_related_work: {item, reason, follow_up_hint?}[]`, optional `target_unit_rule_ids`, `target_unit_exemptions`.
+  - `branch_evidence[]`: `branch`, `required: boolean`, `planned_signal_ids: string[]`, `rationale`.
+  - `excluded_work_review[]`: `item`, `classification`, `rationale`.
+  - `workflow_review_rounds[]`: `lens`, `verdict`, `summary`, `blockers: string[]`, `revised: boolean`.
+  - `dry_run`: `status`, `checks: {id, passed, rationale}[]`.
+  - `scenario_matrix`: `id`, `primary_signal_group_id`, `rows_in_scope: {id, branch, signal_ids, concern_ids, acceptance, expected_outcome, stale_if}[]`, `rows_left_open: {id, branch, reason, follow_up_hint}[]`, `splitting_safety: {safe, rationale}`, optional `next_larger_target`.
+  - `target_card`: `capability_claim`, `known_limits: string[]`, `user_visible_surface`, `acceptance_rows: {closed, open}`, `verification_scenarios: string[]`, `checkpoint_evidence: string[]`; standard/trust-heavy also need `workstreams: {id, label, kind, files, contract_inputs, contract_outputs}[]` and `review_lenses: string[]`; trust-heavy also needs `confidence_earned`, `rollback_cutover`, `trust_privacy_claim`, `authority_boundary`, `policy_deletion_implications`.
 - Identity mapping: `currentTarget.id` / `targetPlanSubmitIdentity.targetId` -> `target_id`; `currentTargetPlan.id` / `targetPlanSubmitIdentity.targetPlanId` -> `target_plan_id`; `currentTargetPlan.planFilePath` / `targetPlanSubmitIdentity.planFilePath` -> `plan_file_path`; `currentTargetPlan.revision` / `targetPlanSubmitIdentity.revision` -> `revision`.
 - `plan_depth` = `light` only for low-risk local/doc work; `standard` by default; `trust-heavy` for security, external/irreversible, product/e2e, migration, or multi-subsystem work.
 - `primary_signal_group_id` MUST name the stable product-signal group. Reusing a prior group requires matrix/card justification.

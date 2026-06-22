@@ -49,6 +49,7 @@
 ### Fixed
 - Reduced goal target-plan rewrite churn by making file-backed payload edits canonical, limiting Markdown updates to executor-visible semantic changes, and delegating gate-prerequisite target-unit checks to reviewers.
 - Fixed goal target-planning write guards, continuation/compaction guidance, and tool-issue reporting so the active payload JSON sidecar is writable and visible alongside the Markdown plan.
+- Fixed goal target-plan lint treadmill behavior by showing every lint diagnostic and documenting nested payload object shapes in the target-planning prompt.
 - Fixed goal target-plan schema failures to normalize concern-kind layer aliases before review and clarify that primary signals must be exact signal IDs while concern kinds are not verification layers.
 - Fixed goal compaction preserve data so stale goal-owned state from older compactions is stripped and refreshed from the latest live goal state.
 - Fixed goal-mode todo error handling so planning/checkpoint run modes do not receive retry reminders for a tool that is currently disallowed.
