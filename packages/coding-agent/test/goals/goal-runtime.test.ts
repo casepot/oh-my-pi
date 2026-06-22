@@ -210,14 +210,25 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 	const target = state.goal.currentTarget;
 	const plan = state.goal.currentTargetPlan;
 	if (!target || !plan) throw new Error("expected current target plan");
+	const primarySignalId = `signal-${target.id}`;
 	return {
 		targetId: target.id,
 		targetPlanId: plan.id,
 		planFilePath: plan.planFilePath,
 		revision: plan.revision,
+		primarySignalGroupId: primarySignalId,
+		planDepth: "light",
+		targetCard: {
+			capabilityClaim: "Target behavior is directly verified.",
+			knownLimits: ["Parent completion remains outside this target."],
+			userVisibleSurface: "Target behavior",
+			acceptanceRows: { closed: ["happy path"], open: [] },
+			verificationScenarios: [`happy path ${primarySignalId}`],
+			checkpointEvidence: ["Focused check passes."],
+		},
 		verificationAperture: {
 			productIntention: "Prove the target behavior with direct evidence.",
-			primarySignalId: "signal-primary",
+			primarySignalId,
 			blastRadius: "local",
 			confidenceTarget: "high",
 			layerRationale: "The target is local and directly observable.",
@@ -226,7 +237,7 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 		},
 		verificationSignals: [
 			{
-				id: "signal-primary",
+				id: primarySignalId,
 				role: "primary",
 				layer: "integration",
 				concernIds: ["concern-behavior"],
@@ -244,7 +255,7 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 				id: "concern-behavior",
 				kind: "behavior",
 				whyIndependent: "Behavior can fail independently of parent completion.",
-				coveredBySignalIds: ["signal-primary"],
+				coveredBySignalIds: [primarySignalId],
 			},
 		],
 		scopeCalibration: {
@@ -252,7 +263,7 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 			whyNotSmaller: ["Smaller work would not produce an observable signal."],
 			whyNotLarger: ["Larger work would claim parent-level completion."],
 			includedRelatedWork: [
-				{ item: "Focused target work", reason: "Needed for primary signal.", signalIds: ["signal-primary"] },
+				{ item: "Focused target work", reason: "Needed for primary signal.", signalIds: [primarySignalId] },
 			],
 			deferredRelatedWork: [
 				{
@@ -263,7 +274,7 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 			],
 		},
 		branchEvidence: [
-			{ branch: "happy path", required: true, plannedSignalIds: ["signal-primary"], rationale: "Primary signal." },
+			{ branch: "happy path", required: true, plannedSignalIds: [primarySignalId], rationale: "Primary signal." },
 		],
 		excludedWorkReview: [
 			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
@@ -1090,6 +1101,127 @@ describe("goal runtime", () => {
 		expect(restored?.goal.parentFrame?.desiredFuture).toBe("Legacy objective stays active.");
 	});
 
+	it("restores legacy matrixless target-plan records", () => {
+		const legacyTarget = {
+			id: "target-legacy",
+			sequence: 1,
+			status: "active",
+			title: "Legacy target",
+			desiredFutureClaim: "Legacy target behavior is proven.",
+			closureStandard: "Focused evidence exists.",
+			baselineRefs: [],
+			gateRefs: [],
+			evidenceExpectation: [],
+			nonGoals: [],
+			forbiddenClaims: [],
+			staleIf: [],
+			createdAt: 1,
+			createdBy: "initial",
+			planId: "target-plan-legacy",
+		};
+		const legacyPlan = {
+			id: "target-plan-legacy",
+			goalId: "goal-1",
+			targetId: legacyTarget.id,
+			targetSequence: legacyTarget.sequence,
+			planFilePath: "local://goal-goal-1-target-legacy-plan.md",
+			status: "drafting",
+			revision: 1,
+			stateVersionAtStart: 2,
+			parentFrameVersionAtStart: 0,
+			createdAt: 1,
+			updatedAt: 1,
+			verificationAperture: {
+				productIntention: "Prove the target behavior with direct evidence.",
+				primarySignalId: "signal-primary",
+				blastRadius: "local",
+				confidenceTarget: "high",
+				layerRationale: "The target is local and directly observable.",
+				residualUncertainty: ["Parent completion remains outside this target."],
+				omittedLayers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
+			},
+			verificationSignals: [
+				{
+					id: "signal-primary",
+					role: "primary",
+					layer: "integration",
+					concernIds: ["concern-behavior"],
+					claim: "Target behavior is verified.",
+					observation: "Focused evidence is observed.",
+					method: "Run the focused check.",
+					expectedOutcome: "The focused check passes.",
+					required: true,
+					confidenceIfSatisfied: "high",
+					staleIf: ["Relevant code changes."],
+				},
+			],
+			concernChecks: [
+				{
+					id: "concern-behavior",
+					kind: "behavior",
+					whyIndependent: "Behavior can fail independently of parent completion.",
+					coveredBySignalIds: ["signal-primary"],
+				},
+			],
+			scopeCalibration: {
+				rightSizingBasis: "product-signal",
+				whyNotSmaller: ["Smaller work would not produce an observable signal."],
+				whyNotLarger: ["Larger work would claim parent-level completion."],
+				includedRelatedWork: [
+					{ item: "Focused target work", reason: "Needed for primary signal.", signalIds: ["signal-primary"] },
+				],
+				deferredRelatedWork: [
+					{
+						item: "Parent completion verification",
+						reason: "different-primary-signal",
+						followUpHint: "Checkpoint first.",
+					},
+				],
+			},
+			branchEvidence: [
+				{
+					branch: "happy path",
+					required: true,
+					plannedSignalIds: ["signal-primary"],
+					rationale: "Primary signal.",
+				},
+			],
+			excludedWorkReview: [
+				{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
+			],
+			reviews: [],
+		};
+
+		const restored = parseGoalModeState(
+			{
+				enabled: true,
+				mode: "active",
+				runMode: "planning-target",
+				stateVersion: 3,
+				parentFrameVersion: 0,
+				goal: {
+					...createGoal({ objective: "Legacy matrixless target plan" }),
+					currentTarget: legacyTarget,
+					currentTargetPlan: legacyPlan,
+					targets: [legacyTarget],
+					targetPlans: [legacyPlan],
+				},
+			},
+			true,
+		);
+		if (!restored) throw new Error("expected restored goal mode state");
+
+		expect(restored.runMode).toBe("planning-target");
+		expect(restored.goal.currentTargetPlan?.id).toBe("target-plan-legacy");
+		expect(restored.goal.currentTargetPlan?.planDepth).toBeUndefined();
+		expect(restored.goal.currentTargetPlan?.primarySignalGroupId).toBeUndefined();
+		expect(restored.goal.currentTargetPlan?.scenarioMatrix).toBeUndefined();
+		expect(restored.goal.currentTargetPlan?.targetCard).toBeUndefined();
+		const roundTrip = parseGoalModeState(serializeGoalModeState(restored), true);
+		expect(roundTrip?.goal.currentTargetPlan?.scenarioMatrix).toBeUndefined();
+		expect(roundTrip?.goal.currentTargetPlan?.targetCard).toBeUndefined();
+	});
+
 	it("clears legacy resolved pending checkpoint outside checkpoint-resolution mode", () => {
 		const restored = parseGoalModeState(
 			{
@@ -1276,7 +1408,7 @@ describe("goal runtime", () => {
 		expect(approved.runMode).toBe("working-target");
 		expect(approved.goal.currentTargetPlan?.status).toBe("approved");
 		expect(approved.goal.currentTarget?.planId).toBe(approved.goal.currentTargetPlan?.id);
-		expect(approved.goal.currentTarget?.verificationSignals?.[0]?.id).toBe("signal-primary");
+		expect(approved.goal.currentTarget?.verificationSignals?.[0]?.id).toBe(approval.verificationSignals[0]?.id);
 	});
 
 	it("rejects target plans whose primary signal is not required", async () => {

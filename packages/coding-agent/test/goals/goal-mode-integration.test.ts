@@ -6,6 +6,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { targetPlanPayloadFilePath } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import {
 	type GoalContinuationFocus,
 	parseGoalModeState,
@@ -287,7 +288,12 @@ async function createGoalHarness(
 		extensionRunner: options.extensionRunner,
 	});
 	const mode = new InteractiveMode(session, "test");
+	const localProtocolOptions = {
+		getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+		getSessionId: () => session.sessionManager.getSessionId(),
+	};
 	const toolSession = createToolSession(tempDir.path(), settings, {
+		localProtocolOptions,
 		getGoalModeState: () => session.getGoalModeState(),
 		getGoalRuntime: () => session.goalRuntime,
 		createGoalWithRubric: (input, signal) => session.createGoalWithRubric(input, signal),
@@ -334,10 +340,12 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 	const target = state?.goal.currentTarget;
 	const plan = state?.goal.currentTargetPlan;
 	if (!state?.enabled || !target || !plan) throw new Error("expected active target plan");
-	const resolvedPlanPath = resolveLocalUrlToPath(plan.planFilePath, {
+	const primarySignalId = `signal-${target.id}`;
+	const localProtocolOptions = {
 		getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
 		getSessionId: () => harness.session.sessionManager.getSessionId(),
-	});
+	};
+	const resolvedPlanPath = resolveLocalUrlToPath(plan.planFilePath, localProtocolOptions);
 	await Bun.write(
 		resolvedPlanPath,
 		[
@@ -349,15 +357,25 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 			"- Parent completion remains outside this target.",
 		].join("\n"),
 	);
-	await goalTool.execute(`submit-${plan.id}`, {
-		op: "submit_target_plan",
+	const payloadFilePath = targetPlanPayloadFilePath(plan.planFilePath);
+	const payload = {
 		target_id: target.id,
 		target_plan_id: plan.id,
 		plan_file_path: plan.planFilePath,
 		revision: plan.revision,
+		primary_signal_group_id: primarySignalId,
+		plan_depth: "light",
+		target_card: {
+			capability_claim: "Target behavior is directly verified.",
+			known_limits: ["Parent completion remains outside this target."],
+			user_visible_surface: "Target behavior",
+			acceptance_rows: { closed: ["happy path"], open: [] },
+			verification_scenarios: [`happy path ${primarySignalId}`],
+			checkpoint_evidence: ["Focused check passes."],
+		},
 		verification_aperture: {
 			product_intention: "Prove the target behavior with direct evidence.",
-			primary_signal_id: "signal-primary",
+			primary_signal_id: primarySignalId,
 			blast_radius: "local",
 			confidence_target: "high",
 			layer_rationale: "The target is local and directly observable.",
@@ -366,7 +384,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 		},
 		verification_signals: [
 			{
-				id: "signal-primary",
+				id: primarySignalId,
 				role: "primary",
 				layer: "integration",
 				concern_ids: ["concern-behavior"],
@@ -384,7 +402,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 				id: "concern-behavior",
 				kind: "behavior",
 				why_independent: "Behavior can fail independently of parent completion.",
-				covered_by_signal_ids: ["signal-primary"],
+				covered_by_signal_ids: [primarySignalId],
 			},
 		],
 		scope_calibration: {
@@ -392,7 +410,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 			why_not_smaller: ["Smaller work would not produce an observable signal."],
 			why_not_larger: ["Larger work would claim parent-level completion."],
 			included_related_work: [
-				{ item: "Focused target work", reason: "Needed for primary signal.", signal_ids: ["signal-primary"] },
+				{ item: "Focused target work", reason: "Needed for primary signal.", signal_ids: [primarySignalId] },
 			],
 			deferred_related_work: [
 				{
@@ -403,7 +421,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 			],
 		},
 		branch_evidence: [
-			{ branch: "happy path", required: true, planned_signal_ids: ["signal-primary"], rationale: "Primary signal." },
+			{ branch: "happy path", required: true, planned_signal_ids: [primarySignalId], rationale: "Primary signal." },
 		],
 		excluded_work_review: [
 			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
@@ -412,6 +430,14 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
 		],
 		dry_run: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
+	};
+	await Bun.write(
+		resolveLocalUrlToPath(payloadFilePath, localProtocolOptions),
+		`${JSON.stringify(payload, null, 2)}\n`,
+	);
+	await goalTool.execute(`submit-${plan.id}`, {
+		op: "submit_target_plan",
+		payload_file_path: payloadFilePath,
 	});
 }
 

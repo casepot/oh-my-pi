@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import {
@@ -8,21 +11,26 @@ import {
 	type GoalTargetPlanApprovalInput,
 	type GoalTargetPlanFailureInput,
 	type GoalUsagePersistenceEvent,
+	targetPlanPayloadFilePath,
 } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type {
 	Goal,
 	GoalModeState,
+	GoalTargetPlanLintDiagnostic,
+	GoalTargetPlanLintResult,
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
 	GoalTokenUsage,
 } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { cloneGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { collectTargetPlanGraphDiagnostics } from "@oh-my-pi/pi-coding-agent/goals/target-plan-lint";
 import {
 	buildGoalToolResponse,
 	GoalTool,
 	type GoalToolInput,
 	goalToolRenderer,
 } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -100,6 +108,45 @@ function createRuntimeHarness(initialState?: TestGoalModeStateInput) {
 	};
 }
 
+function targetPlanLintResult(
+	input: GoalSubmitTargetPlanInput | undefined,
+	diagnostics = input ? collectTargetPlanGraphDiagnostics(input, { mode: "submit" }) : [],
+): GoalTargetPlanLintResult {
+	const errorCount = diagnostics.filter(diagnostic => diagnostic.severity === "error").length;
+	const warningCount = diagnostics.filter(diagnostic => diagnostic.severity === "warning").length;
+	const infoCount = diagnostics.filter(diagnostic => diagnostic.severity === "info").length;
+	return {
+		ok: errorCount === 0,
+		targetId: input?.targetId,
+		targetPlanId: input?.targetPlanId,
+		planFilePath: input?.planFilePath,
+		revision: input?.revision,
+		stateVersion: 0,
+		parentFrameVersion: 0,
+		planDepth: input?.planDepth,
+		primarySignalGroupId: input?.primarySignalGroupId ?? input?.verificationAperture.primarySignalId,
+		legacy: input
+			? input.primarySignalGroupId === undefined || input.planDepth === undefined || input.targetCard === undefined
+			: true,
+		diagnostics,
+		summary: {
+			errorCount,
+			warningCount,
+			infoCount,
+			blocksSubmission: errorCount > 0,
+		},
+	};
+}
+
+function createSubmitLintRuntime(): GoalRuntime {
+	return {
+		flushUsage: vi.fn(async () => {}),
+		lintCurrentTargetPlanSubmission: vi.fn((input: GoalSubmitTargetPlanInput | undefined) =>
+			targetPlanLintResult(input),
+		),
+	} as unknown as GoalRuntime;
+}
+
 function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
 	return {
 		id: `review-${lens}`,
@@ -134,6 +181,16 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 		targetPlanId: plan.id,
 		planFilePath: plan.planFilePath,
 		revision: plan.revision,
+		primarySignalGroupId: "signal-primary",
+		planDepth: "light",
+		targetCard: {
+			capabilityClaim: "Target behavior is directly verified.",
+			knownLimits: ["Parent completion remains outside this target."],
+			userVisibleSurface: "Target behavior",
+			acceptanceRows: { closed: ["happy path"], open: [] },
+			verificationScenarios: ["happy path signal-primary"],
+			checkpointEvidence: ["Focused check passes."],
+		},
 		verificationAperture: {
 			productIntention: "Prove the target behavior with direct evidence.",
 			primarySignalId: "signal-primary",
@@ -204,18 +261,91 @@ async function approveCurrentTargetPlan(harness: {
 	await harness.runtime.approveCurrentTargetPlan(buildTargetPlanApprovalInput(state));
 }
 
+type SubmitTargetPlanParams = {
+	op: "submit_target_plan";
+	target_id: string;
+	target_plan_id: string;
+	plan_file_path: string;
+	revision: number;
+	primary_signal_group_id: string;
+	plan_depth: string;
+	target_card: {
+		capability_claim: string;
+		known_limits: string[];
+		user_visible_surface: string;
+		acceptance_rows: { closed: string[]; open: string[] };
+		verification_scenarios: string[];
+		checkpoint_evidence: string[];
+	};
+	verification_aperture: {
+		product_intention: string;
+		primary_signal_id: string;
+		blast_radius: string;
+		confidence_target: string;
+		layer_rationale: string;
+		residual_uncertainty: string[];
+		omitted_layers: Array<{ layer: string; reason: string }>;
+	};
+	verification_signals: Array<{
+		id: string;
+		role: string;
+		layer: string;
+		concern_ids: string[];
+		claim: string;
+		observation: string;
+		method: string;
+		expected_outcome: string;
+		required: boolean;
+		confidence_if_satisfied: string;
+		stale_if: string[];
+	}>;
+	concern_checks: Array<{
+		id: string;
+		kind: string;
+		why_independent: string;
+		covered_by_signal_ids: string[];
+	}>;
+	scope_calibration: {
+		right_sizing_basis: string;
+		why_not_smaller: string[];
+		why_not_larger: string[];
+		included_related_work: Array<{ item: string; reason: string; signal_ids: string[] }>;
+		deferred_related_work: Array<{ item: string; reason: string; follow_up_hint: string }>;
+	};
+	branch_evidence: Array<{ branch: string; required: boolean; planned_signal_ids: string[]; rationale: string }>;
+	excluded_work_review: Array<{ item: string; classification: string; rationale: string }>;
+	workflow_review_rounds: Array<{
+		lens: string;
+		verdict: string;
+		summary: string;
+		blockers: string[];
+		revised: boolean;
+	}>;
+	dry_run: { status: string; checks: Array<{ id: string; passed: boolean; rationale: string }> };
+};
+
 function buildSubmitTargetPlanParams(source: {
 	targetId: string;
 	targetPlanId: string;
 	planFilePath: string;
 	revision: number;
-}): Extract<GoalToolInput, { op: "submit_target_plan" }> {
+}): SubmitTargetPlanParams {
 	return {
 		op: "submit_target_plan",
 		target_id: source.targetId,
 		target_plan_id: source.targetPlanId,
 		plan_file_path: source.planFilePath,
 		revision: source.revision,
+		primary_signal_group_id: "signal-primary",
+		plan_depth: "light",
+		target_card: {
+			capability_claim: "Target behavior is directly verified.",
+			known_limits: ["Parent completion remains outside this target."],
+			user_visible_surface: "Target behavior",
+			acceptance_rows: { closed: ["happy path"], open: [] },
+			verification_scenarios: ["happy path signal-primary"],
+			checkpoint_evidence: ["Focused check passes."],
+		},
 		verification_aperture: {
 			product_intention: "Prove the target behavior with direct evidence.",
 			primary_signal_id: "signal-primary",
@@ -274,6 +404,45 @@ function buildSubmitTargetPlanParams(source: {
 		],
 		dry_run: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
 	};
+}
+
+type TargetPlanPayloadCall =
+	| { op: "submit_target_plan"; payload_file_path: string }
+	| { op: "lint_target_plan"; payload_file_path: string };
+
+function createLocalProtocolOptions(root: string): NonNullable<ToolSession["localProtocolOptions"]> {
+	return {
+		getArtifactsDir: () => root,
+		getSessionId: () => "session-1",
+	};
+}
+
+function resolvePayloadFilePath(
+	payloadFilePath: string,
+	localProtocolOptions?: NonNullable<ToolSession["localProtocolOptions"]>,
+): string {
+	if (!payloadFilePath.startsWith("local:")) return payloadFilePath;
+	if (!localProtocolOptions) throw new Error("local payload path requires local protocol options");
+	return resolveLocalUrlToPath(payloadFilePath, localProtocolOptions);
+}
+
+async function writeTargetPlanPayloadCall(
+	params: SubmitTargetPlanParams,
+	options: {
+		op?: TargetPlanPayloadCall["op"];
+		localProtocolOptions?: NonNullable<ToolSession["localProtocolOptions"]>;
+		mutatePayload?: (payload: Record<string, unknown>) => void;
+	} = {},
+): Promise<TargetPlanPayloadCall> {
+	const payloadFilePath = targetPlanPayloadFilePath(params.plan_file_path);
+	const { op: _op, ...payloadFields } = params;
+	const payload: Record<string, unknown> = { ...payloadFields };
+	options.mutatePayload?.(payload);
+	await Bun.write(
+		resolvePayloadFilePath(payloadFilePath, options.localProtocolOptions),
+		`${JSON.stringify(payload, null, 2)}\n`,
+	);
+	return { op: options.op ?? "submit_target_plan", payload_file_path: payloadFilePath } as TargetPlanPayloadCall;
 }
 
 describe("GoalTool", () => {
@@ -578,27 +747,26 @@ describe("GoalTool", () => {
 				closure_standard: "Current smoke output exists.",
 			}).success,
 		).toBe(true);
-		const validTargetPlanSubmission = buildSubmitTargetPlanParams({
-			targetId: "target-1",
-			targetPlanId: "target-plan-1",
-			planFilePath: "local://goal-goal-1-target-1-plan.md",
-			revision: 1,
-		});
+		const validTargetPlanSubmission = {
+			op: "submit_target_plan",
+			payload_file_path: "local://goal-goal-1-target-1-plan.payload.json",
+		};
 		expect(tool.parameters.safeParse(validTargetPlanSubmission).success).toBe(true);
 		expect(
 			tool.parameters.safeParse({
-				...validTargetPlanSubmission,
-				verification_signals: validTargetPlanSubmission.verification_signals.map(signal => ({
-					...signal,
-					required: false,
-				})),
+				op: "lint_target_plan",
+				payload_file_path: "local://goal-goal-1-target-1-plan.payload.json",
 			}).success,
-		).toBe(false);
+		).toBe(true);
 		expect(
-			tool.parameters.safeParse({
-				...validTargetPlanSubmission,
-				dry_run: { status: "failed", checks: [{ id: "dry-run", passed: false, rationale: "Plan is incomplete." }] },
-			}).success,
+			tool.parameters.safeParse(
+				buildSubmitTargetPlanParams({
+					targetId: "target-1",
+					targetPlanId: "target-plan-1",
+					planFilePath: "local://goal-goal-1-target-1-plan.md",
+					revision: 1,
+				}),
+			).success,
 		).toBe(false);
 		expect(
 			tool.parameters.safeParse({
@@ -802,12 +970,16 @@ describe("GoalTool", () => {
 		expect(text).toContain(`target_plan_id: ${plan.id}`);
 		expect(text).toContain(`plan_file_path: ${plan.planFilePath}`);
 		expect(text).toContain(`revision: ${plan.revision}`);
-		expect(text).toContain('"op": "submit_target_plan"');
-		expect(text).toContain('"verification_aperture"');
+		const payloadFilePath = plan.planFilePath.replace(/\.md$/, ".payload.json");
+		expect(text).toContain(`payload_file_path: ${payloadFilePath}`);
+		expect(text).toContain(`goal({op:"lint_target_plan", payload_file_path:"${payloadFilePath}"})`);
+		expect(text).toContain(`goal({op:"submit_target_plan", payload_file_path:"${payloadFilePath}"})`);
+		expect(text).toContain("edit payload_file_path in place");
+		expect(text).toContain("patch plan_file_path only when the payload fix changes executor-visible semantics");
+		expect(text).not.toContain("verification_aperture");
+		expect(text).not.toContain("verification_signals");
+		expect(text).not.toContain("target_card");
 		expect(text).toContain("unit, integration, e2e, manual, product, release-gate");
-		expect(text).toContain('"primary_signal_id": "<copy exact id of one required verification_signals[] entry>"');
-		expect(text).toContain("never concern kind");
-		expect(text).toContain("concern taxonomy, not verification layer");
 	});
 
 	it("renders and executes failed target-plan recovery", async () => {
@@ -865,63 +1037,299 @@ describe("GoalTool", () => {
 		expect(recovered.details?.targetPlan?.revision).toBe(1);
 		expect(recovered.details?.recovery?.blockedStateId).toBe(block.id);
 		expect(recoveredText).toContain("Blocked state recovered");
-		expect(recoveredText).toContain('"op": "submit_target_plan"');
+		expect(recoveredText).toContain("payload_file_path:");
 	});
 
 	it("routes target-plan submit and failure operations to session handlers", async () => {
 		let submittedInput: GoalSubmitTargetPlanInput | undefined;
 		let failedInput: GoalTargetPlanFailureInput | undefined;
-		const harness = createRuntimeHarness();
+		const runtime = createSubmitLintRuntime();
 		const goal = createGoal();
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const planFilePath = path.join(tempDir, "target-plan.md");
+			const tool = new GoalTool(
+				createToolSession({
+					getGoalRuntime: () => runtime,
+					requestGoalTargetPlanApproval: async input => {
+						submittedInput = input;
+						return buildGoalToolResponse(goal, {
+							targetPlanApproval: {
+								goalId: goal.id,
+								targetId: input.targetId,
+								targetPlanId: input.targetPlanId,
+								planFilePath: input.planFilePath,
+								title: "goal-goal-1-target-1",
+							},
+						});
+					},
+					requestGoalTargetPlanFailure: async input => {
+						failedInput = input;
+						return buildGoalToolResponse(goal);
+					},
+				}),
+			);
+
+			const submitted = await tool.execute(
+				"submit-plan",
+				await writeTargetPlanPayloadCall(
+					buildSubmitTargetPlanParams({
+						targetId: "target-1",
+						targetPlanId: "target-plan-1",
+						planFilePath,
+						revision: 1,
+					}),
+				),
+			);
+			expect(submittedInput?.targetId).toBe("target-1");
+			expect(submittedInput?.verificationAperture.primarySignalId).toBe("signal-primary");
+			expect(submittedInput?.verificationSignals[0]?.confidenceIfSatisfied).toBe("high");
+			expect(submitted.details?.targetPlanApproval?.targetPlanId).toBe("target-plan-1");
+
+			await tool.execute("fail-plan", {
+				op: "fail_target_plan",
+				target_id: "target-1",
+				target_plan_id: "target-plan-1",
+				revision: 1,
+				reason: "needs-user-input",
+				message: "Cannot choose the right target without operator input.",
+				blockers: ["Missing operator choice."],
+				suggested_questions: ["Which gate should be targeted first?"],
+			});
+			expect(failedInput?.targetPlanId).toBe("target-plan-1");
+			expect(failedInput?.reason).toBe("needs-user-input");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("loads target-plan submit payloads from editable JSON files", async () => {
+		let submittedInput: GoalSubmitTargetPlanInput | undefined;
+		const runtime = createSubmitLintRuntime();
+		const goal = createGoal();
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const planFilePath = path.join(tempDir, "target-plan.md");
+			const call = await writeTargetPlanPayloadCall(
+				buildSubmitTargetPlanParams({
+					targetId: "target-1",
+					targetPlanId: "target-plan-1",
+					planFilePath,
+					revision: 1,
+				}),
+			);
+			expect(call.payload_file_path).toBe(path.join(tempDir, "target-plan.payload.json"));
+			const tool = new GoalTool(
+				createToolSession({
+					cwd: ".",
+					getGoalRuntime: () => runtime,
+					requestGoalTargetPlanApproval: async input => {
+						submittedInput = input;
+						return buildGoalToolResponse(goal);
+					},
+				}),
+			);
+
+			await tool.execute("submit-plan-file", call);
+
+			expect(submittedInput?.targetPlanId).toBe("target-plan-1");
+			expect(submittedInput?.verificationAperture.primarySignalId).toBe("signal-primary");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("loads target-plan lint payloads from editable JSON files", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove lint",
+			desiredFutureClaim: "Target-plan lint reports payload-file issues.",
+			closureStandard: "Lint output lists blocking diagnostics from the payload file.",
+		});
+		const state = harness.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const localProtocolOptions = createLocalProtocolOptions(tempDir);
+			const call = await writeTargetPlanPayloadCall(
+				buildSubmitTargetPlanParams({
+					targetId: target.id,
+					targetPlanId: plan.id,
+					planFilePath: plan.planFilePath,
+					revision: plan.revision,
+				}),
+				{
+					op: "lint_target_plan",
+					localProtocolOptions,
+					mutatePayload: payload => {
+						delete payload.target_card;
+					},
+				},
+			);
+			const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+			const tool = new GoalTool(
+				createToolSession({
+					cwd: ".",
+					localProtocolOptions,
+					getGoalRuntime: () => harness.runtime,
+					getGoalModeState: () => harness.getState(),
+					requestGoalTargetPlanApproval,
+				}),
+			);
+
+			const result = await tool.execute("lint-plan-file", call);
+
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+			expect(result.details?.targetPlanLint?.summary.blocksSubmission).toBe(true);
+			expect(
+				result.details?.targetPlanLint?.diagnostics.some(diagnostic => diagnostic.path === "/target_card"),
+			).toBe(true);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("lints target-plan payloads without submitting or flushing usage", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove lint",
+			desiredFutureClaim: "Target-plan lint reports payload issues.",
+			closureStandard: "Lint output lists blocking diagnostics.",
+		});
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.setUsage(createUsage({ input: 7 }));
+		const state = harness.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const localProtocolOptions = createLocalProtocolOptions(tempDir);
+			const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+			const tool = new GoalTool(
+				createToolSession({
+					localProtocolOptions,
+					getGoalRuntime: () => harness.runtime,
+					getGoalModeState: () => harness.getState(),
+					requestGoalTargetPlanApproval,
+				}),
+			);
+			const lintParams = await writeTargetPlanPayloadCall(
+				buildSubmitTargetPlanParams({
+					targetId: target.id,
+					targetPlanId: plan.id,
+					planFilePath: plan.planFilePath,
+					revision: plan.revision,
+				}),
+				{
+					op: "lint_target_plan",
+					localProtocolOptions,
+					mutatePayload: payload => {
+						delete payload.target_card;
+					},
+				},
+			);
+
+			const result = await tool.execute("lint-plan", lintParams);
+
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+			expect(harness.usagePersists).toHaveLength(0);
+			expect(result.details?.op).toBe("lint_target_plan");
+			expect(result.details?.targetPlanLint?.summary.blocksSubmission).toBe(true);
+			expect(
+				result.details?.targetPlanLint?.diagnostics.some(diagnostic => diagnostic.path === "/target_card"),
+			).toBe(true);
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("Target plan lint");
+			expect(text).toContain("target plan must include target_card");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("renders target-unit offender ids in lint diagnostics", async () => {
+		const diagnostic: GoalTargetPlanLintDiagnostic = {
+			severity: "warning",
+			code: "target_unit.reviewer_required",
+			path: "/workflow_review_rounds",
+			message: "target unit rule is enforced by target-plan reviewers",
+			guidance: "Release gate evidence must exist before cutover targets.",
+			blocksSubmission: false,
+			offender: { kind: "target_unit_rule", id: "release-gate-before-cutover" },
+		};
+		const runtime = {
+			flushUsage: vi.fn(async () => {}),
+			lintCurrentTargetPlanSubmission: vi.fn(() => targetPlanLintResult(undefined, [diagnostic])),
+		} as unknown as GoalRuntime;
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const tool = new GoalTool(
+				createToolSession({
+					cwd: ".",
+					getGoalRuntime: () => runtime,
+					getGoalModeState: () =>
+						createGoalModeState({
+							goal: createGoal(),
+							runMode: "planning-target",
+						}),
+				}),
+			);
+
+			const result = await tool.execute("lint-offender", {
+				op: "lint_target_plan",
+				payload_file_path: path.join(tempDir, "missing.payload.json"),
+			});
+
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("offender: target_unit_rule:release-gate-before-cutover");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("renders payload-file read guidance for missing and invalid JSON", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove lint",
+			desiredFutureClaim: "Target-plan lint reports payload-file read issues.",
+			closureStandard: "Lint output gives repair guidance for unreadable payload sidecars.",
+		});
 		const tool = new GoalTool(
 			createToolSession({
+				cwd: ".",
 				getGoalRuntime: () => harness.runtime,
 				getGoalModeState: () => harness.getState(),
-				requestGoalTargetPlanApproval: async input => {
-					submittedInput = input;
-					return buildGoalToolResponse(goal, {
-						targetPlanApproval: {
-							goalId: goal.id,
-							targetId: input.targetId,
-							targetPlanId: input.targetPlanId,
-							planFilePath: input.planFilePath,
-							title: "goal-goal-1-target-1",
-						},
-					});
-				},
-				requestGoalTargetPlanFailure: async input => {
-					failedInput = input;
-					return buildGoalToolResponse(goal);
-				},
 			}),
 		);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const missingResult = await tool.execute("lint-missing-payload", {
+				op: "lint_target_plan",
+				payload_file_path: path.join(tempDir, "missing.payload.json"),
+			});
+			const missingText = missingResult.content[0]?.type === "text" ? missingResult.content[0].text : "";
+			expect(missingText).toContain(
+				"Create the structured target-plan payload JSON sidecar, then rerun lint_target_plan with payload_file_path.",
+			);
 
-		const submitted = await tool.execute(
-			"submit-plan",
-			buildSubmitTargetPlanParams({
-				targetId: "target-1",
-				targetPlanId: "target-plan-1",
-				planFilePath: "local://goal-goal-1-target-1-plan.md",
-				revision: 1,
-			}),
-		);
-		expect(submittedInput?.targetId).toBe("target-1");
-		expect(submittedInput?.verificationAperture.primarySignalId).toBe("signal-primary");
-		expect(submittedInput?.verificationSignals[0]?.confidenceIfSatisfied).toBe("high");
-		expect(submitted.details?.targetPlanApproval?.targetPlanId).toBe("target-plan-1");
-
-		await tool.execute("fail-plan", {
-			op: "fail_target_plan",
-			target_id: "target-1",
-			target_plan_id: "target-plan-1",
-			revision: 1,
-			reason: "needs-user-input",
-			message: "Cannot choose the right target without operator input.",
-			blockers: ["Missing operator choice."],
-			suggested_questions: ["Which gate should be targeted first?"],
-		});
-		expect(failedInput?.targetPlanId).toBe("target-plan-1");
-		expect(failedInput?.reason).toBe("needs-user-input");
+			const invalidPath = path.join(tempDir, "invalid.payload.json");
+			await Bun.write(invalidPath, "{");
+			const invalidResult = await tool.execute("lint-invalid-payload", {
+				op: "lint_target_plan",
+				payload_file_path: invalidPath,
+			});
+			const invalidText = invalidResult.content[0]?.type === "text" ? invalidResult.content[0].text : "";
+			expect(invalidText).toContain(
+				"Fix the payload JSON syntax in place, then rerun lint_target_plan with payload_file_path.",
+			);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects invalid target-plan graphs before requesting review", async () => {
@@ -934,7 +1342,7 @@ describe("GoalTool", () => {
 		const cases: Array<{
 			name: string;
 			message: string;
-			mutate: (params: Extract<GoalToolInput, { op: "submit_target_plan" }>) => void;
+			mutate: (params: SubmitTargetPlanParams) => void;
 		}> = [
 			{
 				name: "unknown concern",
@@ -979,7 +1387,7 @@ describe("GoalTool", () => {
 			},
 			{
 				name: "failed dry run",
-				message: "target plan dry_run must pass before submission",
+				message: "target plan dry run must pass before approval",
 				mutate: params => {
 					params.dry_run = {
 						status: "failed",
@@ -989,19 +1397,29 @@ describe("GoalTool", () => {
 			},
 		];
 
-		for (const item of cases) {
-			const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
-			const tool = new GoalTool(
-				createToolSession({
-					getGoalRuntime: () => createRuntimeHarness().runtime,
-					requestGoalTargetPlanApproval,
-				}),
-			);
-			const params = buildSubmitTargetPlanParams(base);
-			item.mutate(params);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			for (const item of cases) {
+				const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+				const tool = new GoalTool(
+					createToolSession({
+						getGoalRuntime: () => createSubmitLintRuntime(),
+						requestGoalTargetPlanApproval,
+					}),
+				);
+				const params = buildSubmitTargetPlanParams({
+					...base,
+					planFilePath: path.join(tempDir, `${item.name}.md`),
+				});
+				item.mutate(params);
 
-			await expect(tool.execute(`submit-${item.name}`, params)).rejects.toThrow(item.message);
-			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+				await expect(tool.execute(`submit-${item.name}`, await writeTargetPlanPayloadCall(params))).rejects.toThrow(
+					item.message,
+				);
+				expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 
@@ -1009,40 +1427,49 @@ describe("GoalTool", () => {
 		const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
 		const tool = new GoalTool(
 			createToolSession({
-				getGoalRuntime: () => createRuntimeHarness().runtime,
+				getGoalRuntime: () => createSubmitLintRuntime(),
 				requestGoalTargetPlanApproval,
 			}),
 		);
-		const base = {
-			targetId: "target-1",
-			targetPlanId: "target-plan-1",
-			planFilePath: "local://goal-goal-1-target-1-plan.md",
-			revision: 1,
-		};
-		const layerParams = buildSubmitTargetPlanParams(base);
-		layerParams.verification_signals = [
-			...layerParams.verification_signals,
-			{ ...layerParams.verification_signals[0]!, id: "signal-supporting-1", role: "supporting" },
-			{ ...layerParams.verification_signals[0]!, id: "signal-supporting-2", role: "supporting" },
-			{ ...layerParams.verification_signals[0]!, id: "signal-supporting-3", role: "supporting" },
-		];
-		(layerParams.verification_signals[3] as { layer: string }).layer = "browser";
-		await expect(tool.execute("invalid-signal-layer", layerParams)).rejects.toThrow(
-			'submit_target_plan invalid at verification_signals/3/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
-		);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const base = {
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: path.join(tempDir, "target-plan.md"),
+				revision: 1,
+			};
+			const layerParams = buildSubmitTargetPlanParams(base);
+			layerParams.verification_signals = [
+				...layerParams.verification_signals,
+				{ ...layerParams.verification_signals[0]!, id: "signal-supporting-1", role: "supporting" },
+				{ ...layerParams.verification_signals[0]!, id: "signal-supporting-2", role: "supporting" },
+				{ ...layerParams.verification_signals[0]!, id: "signal-supporting-3", role: "supporting" },
+			];
+			(layerParams.verification_signals[3] as { layer: string }).layer = "browser";
+			await expect(
+				tool.execute("invalid-signal-layer", await writeTargetPlanPayloadCall(layerParams)),
+			).rejects.toThrow(
+				'submit_target_plan invalid at verification_signals/3/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
+			);
 
-		const omittedParams = buildSubmitTargetPlanParams(base);
-		(omittedParams.verification_aperture.omitted_layers[0] as { layer: string }).layer = "browser";
-		await expect(tool.execute("invalid-omitted-layer", omittedParams)).rejects.toThrow(
-			'submit_target_plan invalid at verification_aperture/omitted_layers/0/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
-		);
+			const omittedParams = buildSubmitTargetPlanParams(base);
+			(omittedParams.verification_aperture.omitted_layers[0] as { layer: string }).layer = "browser";
+			await expect(
+				tool.execute("invalid-omitted-layer", await writeTargetPlanPayloadCall(omittedParams)),
+			).rejects.toThrow(
+				'submit_target_plan invalid at verification_aperture/omitted_layers/0/layer: allowed values are unit, integration, e2e, manual, product, release-gate. Call goal({op:"get"}) and reuse the current target_id, target_plan_id, plan_file_path, and revision.',
+			);
 
-		const primaryParams = buildSubmitTargetPlanParams(base);
-		primaryParams.verification_aperture.primary_signal_id = "truthful-default-surfaces";
-		await expect(tool.execute("invalid-primary-signal-id", primaryParams)).rejects.toThrow(
-			'primary_signal_id must exactly match one required verification_signals[].id. Received "truthful-default-surfaces". Required signal ids: signal-primary.',
-		);
-		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+			const primaryParams = buildSubmitTargetPlanParams(base);
+			primaryParams.verification_aperture.primary_signal_id = "truthful-default-surfaces";
+			await expect(
+				tool.execute("invalid-primary-signal-id", await writeTargetPlanPayloadCall(primaryParams)),
+			).rejects.toThrow("target plan primary signal must reference a verification signal");
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("normalizes concern-kind layer aliases before target-plan review", async () => {
@@ -1051,58 +1478,65 @@ describe("GoalTool", () => {
 			submittedInput = input;
 			return buildGoalToolResponse(createGoal());
 		});
-		const tool = new GoalTool(
-			createToolSession({
-				getGoalRuntime: () => createRuntimeHarness().runtime,
-				requestGoalTargetPlanApproval,
-			}),
-		);
-		const params = buildSubmitTargetPlanParams({
-			targetId: "target-1",
-			targetPlanId: "target-plan-1",
-			planFilePath: "local://goal-goal-1-target-1-plan.md",
-			revision: 1,
-		});
-		(params.verification_signals[0] as { layer: string }).layer = "contract";
-
-		let effectiveArgs: Record<string, unknown>;
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
 		try {
-			effectiveArgs = validateToolArguments(tool, {
+			const tool = new GoalTool(
+				createToolSession({
+					getGoalRuntime: () => createSubmitLintRuntime(),
+					requestGoalTargetPlanApproval,
+				}),
+			);
+			const params = buildSubmitTargetPlanParams({
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: path.join(tempDir, "target-plan.md"),
+				revision: 1,
+			});
+			(params.verification_signals[0] as { layer: string }).layer = "contract";
+			const call = await writeTargetPlanPayloadCall(params);
+
+			const effectiveArgs = validateToolArguments(tool, {
 				type: "toolCall",
 				id: "call-invalid-layer",
 				name: "goal",
-				arguments: params,
-			}) as Record<string, unknown>;
-		} catch (error) {
-			expect(String(error)).toContain('Validation failed for tool "goal"');
-			if (!tool.lenientArgValidation) throw error;
-			effectiveArgs = params;
-		}
+				arguments: call,
+			}) as GoalToolInput;
 
-		await tool.execute("call-invalid-layer", effectiveArgs as GoalToolInput);
-		expect(requestGoalTargetPlanApproval).toHaveBeenCalledTimes(1);
-		expect(submittedInput?.verificationSignals[0]?.layer).toBe("integration");
+			await tool.execute("call-invalid-layer", effectiveArgs);
+			expect(requestGoalTargetPlanApproval).toHaveBeenCalledTimes(1);
+			expect(submittedInput?.verificationSignals[0]?.layer).toBe("integration");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("returns concise recovery text for invalid target-plan non-enum fields", async () => {
 		const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
 		const tool = new GoalTool(
 			createToolSession({
-				getGoalRuntime: () => createRuntimeHarness().runtime,
+				getGoalRuntime: () => createSubmitLintRuntime(),
 				requestGoalTargetPlanApproval,
 			}),
 		);
-		const params = buildSubmitTargetPlanParams({
-			targetId: "target-1",
-			targetPlanId: "target-plan-1",
-			planFilePath: "local://goal-goal-1-target-1-plan.md",
-			revision: 1,
-		});
-		(params as { revision: number }).revision = 0;
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const params = buildSubmitTargetPlanParams({
+				targetId: "target-1",
+				targetPlanId: "target-plan-1",
+				planFilePath: path.join(tempDir, "target-plan.md"),
+				revision: 1,
+			});
+			params.revision = 0;
+			const call = await writeTargetPlanPayloadCall(params);
 
-		await expect(tool.execute("invalid-revision", params)).rejects.toThrow("submit_target_plan invalid at revision:");
-		await expect(tool.execute("invalid-revision-repeat", params)).rejects.toThrow('Call goal({op:"get"})');
-		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+			await expect(tool.execute("invalid-revision", call)).rejects.toThrow(
+				"submit_target_plan invalid at revision:",
+			);
+			await expect(tool.execute("invalid-revision-repeat", call)).rejects.toThrow('Call goal({op:"get"})');
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("renders failed target-plan submissions as awaiting user input", async () => {
@@ -1123,33 +1557,43 @@ describe("GoalTool", () => {
 		};
 		const failedGoal = createGoal({ currentTargetPlan: failedPlan });
 		const failedState = createGoalModeState({ goal: failedGoal, runMode: "awaiting-user-input" });
-		const tool = new GoalTool(
-			createToolSession({
-				getGoalRuntime: () => createRuntimeHarness().runtime,
-				getGoalModeState: () => failedState,
-				requestGoalTargetPlanApproval: async () =>
-					buildGoalToolResponse(failedGoal, {
-						state: failedState,
-						targetPlan: failedPlan,
-						targetPlanReviews: [],
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const localProtocolOptions = createLocalProtocolOptions(tempDir);
+			const tool = new GoalTool(
+				createToolSession({
+					localProtocolOptions,
+					getGoalRuntime: () => createSubmitLintRuntime(),
+					getGoalModeState: () => failedState,
+					requestGoalTargetPlanApproval: async () =>
+						buildGoalToolResponse(failedGoal, {
+							state: failedState,
+							targetPlan: failedPlan,
+							targetPlanReviews: [],
+						}),
+				}),
+			);
+
+			const result = await tool.execute(
+				"failed-submit",
+				await writeTargetPlanPayloadCall(
+					buildSubmitTargetPlanParams({
+						targetId: "target-1",
+						targetPlanId: "target-plan-1",
+						planFilePath: failedPlan.planFilePath,
+						revision: 3,
 					}),
-			}),
-		);
+					{ localProtocolOptions },
+				),
+			);
 
-		const result = await tool.execute(
-			"failed-submit",
-			buildSubmitTargetPlanParams({
-				targetId: "target-1",
-				targetPlanId: "target-plan-1",
-				planFilePath: "local://goal-goal-1-target-1-plan.md",
-				revision: 3,
-			}),
-		);
-
-		const text = result.content.find(part => part.type === "text")?.text ?? "";
-		expect(text).toContain("Target plan failed");
-		expect(text).toContain("awaiting user/external input");
-		expect(text).not.toContain("Run mode remains planning-target");
+			const text = result.content.find(part => part.type === "text")?.text ?? "";
+			expect(text).toContain("Target plan failed");
+			expect(text).toContain("awaiting user/external input");
+			expect(text).not.toContain("Run mode remains planning-target");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("renders rejected target-plan results with actionable identity", async () => {
@@ -1237,49 +1681,59 @@ describe("GoalTool", () => {
 			currentTargetPlan: rejectedPlan,
 		});
 		const state = createGoalModeState({ goal, runMode: "planning-target" });
-		const tool = new GoalTool(
-			createToolSession({
-				getGoalRuntime: () => createRuntimeHarness().runtime,
-				getGoalModeState: () => state,
-				requestGoalTargetPlanApproval: async () =>
-					buildGoalToolResponse(goal, { state, targetPlan: rejectedPlan, targetPlanReviews: [review] }),
-			}),
-		);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		const localProtocolOptions = createLocalProtocolOptions(tempDir);
+		try {
+			const tool = new GoalTool(
+				createToolSession({
+					localProtocolOptions,
+					getGoalRuntime: () => createSubmitLintRuntime(),
+					getGoalModeState: () => state,
+					requestGoalTargetPlanApproval: async () =>
+						buildGoalToolResponse(goal, { state, targetPlan: rejectedPlan, targetPlanReviews: [review] }),
+				}),
+			);
 
-		const result = await tool.execute(
-			"submit-rejected",
-			buildSubmitTargetPlanParams({
-				targetId: "target-1",
-				targetPlanId: "target-plan-1",
-				planFilePath: "local://goal-goal-1-target-1-plan.md",
-				revision: 2,
-			}),
-		);
-		const uiTheme = await getThemeByName("dark");
-		if (!uiTheme) throw new Error("expected dark theme");
-		const rendered = Bun.stripANSI(
-			goalToolRenderer
-				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { op: "submit_target_plan" })
-				.render(140)
-				.join("\n"),
-		);
-		expect(rendered).toContain("target plan rejected");
-		expect(rendered).toContain("target_id: target-1");
-		expect(rendered).toContain("target_plan_id: target-plan-1");
-		expect(rendered).toContain("plan_file_path: local://goal-goal-1-target-1-plan.md");
-		expect(rendered).toContain("target plan: revision-required r2");
-		expect(rendered).toContain("aperture: Plan bundles unrelated release-gate work.");
-		const detailsJson = JSON.stringify(result.details);
-		expect(detailsJson).toContain("targetPlan");
-		expect(detailsJson).toContain("targetPlanId");
-		expect(detailsJson).toContain("planFilePath");
-		expect(detailsJson).toContain("aperture");
-		expect(detailsJson).toContain("rejected");
-		expect(detailsJson).toContain("blockingFindingCount");
-		expect(detailsJson).not.toContain("verificationSignals");
-		expect(detailsJson).not.toContain("verificationAperture");
-		expect(detailsJson).not.toContain("concernChecks");
-		expect(detailsJson).not.toContain("Goal target plan");
+			const result = await tool.execute(
+				"submit-rejected",
+				await writeTargetPlanPayloadCall(
+					buildSubmitTargetPlanParams({
+						targetId: "target-1",
+						targetPlanId: "target-plan-1",
+						planFilePath: rejectedPlan.planFilePath,
+						revision: 2,
+					}),
+					{ localProtocolOptions },
+				),
+			);
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("expected dark theme");
+			const rendered = Bun.stripANSI(
+				goalToolRenderer
+					.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { op: "submit_target_plan" })
+					.render(140)
+					.join("\n"),
+			);
+			expect(rendered).toContain("target plan rejected");
+			expect(rendered).toContain("target_id: target-1");
+			expect(rendered).toContain("target_plan_id: target-plan-1");
+			expect(rendered).toContain("plan_file_path: local://goal-goal-1-target-1-plan.md");
+			expect(rendered).toContain("target plan: revision-required r2");
+			expect(rendered).toContain("aperture: Plan bundles unrelated release-gate work.");
+			const detailsJson = JSON.stringify(result.details);
+			expect(detailsJson).toContain("targetPlan");
+			expect(detailsJson).toContain("targetPlanId");
+			expect(detailsJson).toContain("planFilePath");
+			expect(detailsJson).toContain("aperture");
+			expect(detailsJson).toContain("rejected");
+			expect(detailsJson).toContain("blockingFindingCount");
+			expect(detailsJson).not.toContain("verificationSignals");
+			expect(detailsJson).not.toContain("verificationAperture");
+			expect(detailsJson).not.toContain("concernChecks");
+			expect(detailsJson).not.toContain("Goal target plan");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("renders approved target-plan results as execution unlocked", async () => {
@@ -1319,38 +1773,48 @@ describe("GoalTool", () => {
 			currentTargetPlan: approvedPlan,
 		});
 		const state = createGoalModeState({ goal, runMode: "working-target" });
-		const tool = new GoalTool(
-			createToolSession({
-				getGoalRuntime: () => createRuntimeHarness().runtime,
-				getGoalModeState: () => state,
-				requestGoalTargetPlanApproval: async () =>
-					buildGoalToolResponse(goal, {
-						state,
-						targetPlan: approvedPlan,
-						targetPlanReviews: approvedPlan.reviews,
-					}),
-			}),
-		);
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		const localProtocolOptions = createLocalProtocolOptions(tempDir);
+		try {
+			const tool = new GoalTool(
+				createToolSession({
+					localProtocolOptions,
+					getGoalRuntime: () => createSubmitLintRuntime(),
+					getGoalModeState: () => state,
+					requestGoalTargetPlanApproval: async () =>
+						buildGoalToolResponse(goal, {
+							state,
+							targetPlan: approvedPlan,
+							targetPlanReviews: approvedPlan.reviews,
+						}),
+				}),
+			);
 
-		const result = await tool.execute(
-			"submit-approved",
-			buildSubmitTargetPlanParams({
-				targetId: "target-approved",
-				targetPlanId: "target-plan-approved",
-				planFilePath: "local://goal-goal-1-target-approved-plan.md",
-				revision: 1,
-			}),
-		);
-		const uiTheme = await getThemeByName("dark");
-		if (!uiTheme) throw new Error("expected dark theme");
-		const rendered = Bun.stripANSI(
-			goalToolRenderer
-				.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { op: "submit_target_plan" })
-				.render(140)
-				.join("\n"),
-		);
-		expect(rendered).toContain("target plan approved");
-		expect(rendered).toContain("execution unlocked for current target");
+			const result = await tool.execute(
+				"submit-approved",
+				await writeTargetPlanPayloadCall(
+					buildSubmitTargetPlanParams({
+						targetId: "target-approved",
+						targetPlanId: "target-plan-approved",
+						planFilePath: approvedPlan.planFilePath,
+						revision: 1,
+					}),
+					{ localProtocolOptions },
+				),
+			);
+			const uiTheme = await getThemeByName("dark");
+			if (!uiTheme) throw new Error("expected dark theme");
+			const rendered = Bun.stripANSI(
+				goalToolRenderer
+					.renderResult(result, { expanded: false, isPartial: false }, uiTheme, { op: "submit_target_plan" })
+					.render(140)
+					.join("\n"),
+			);
+			expect(rendered).toContain("target plan approved");
+			expect(rendered).toContain("execution unlocked for current target");
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects checkpoint when the session review handler is unavailable", async () => {
