@@ -1563,6 +1563,40 @@ interface MaterializedProviderContextEstimate {
 
 type AutoCompactionReason = "overflow" | "threshold" | "idle" | "incomplete";
 
+interface GoalTargetPlanReviewHistoryEntry {
+	id: string;
+	status: GoalTargetPlanRecord["status"];
+	revision: number;
+	planFilePath: string;
+	isCurrent: boolean;
+	recoveredFrom?: {
+		action: string;
+		reason: string;
+		guidance: string;
+		blockers: string[];
+	};
+	failure?: {
+		stage: string;
+		reason: string;
+		message: string;
+		blockers: string[];
+	};
+	reviews: Array<{
+		lens: GoalTargetPlanReview["lens"];
+		status: GoalTargetPlanReview["status"];
+		feedback: string;
+		apertureClassification?: GoalTargetPlanReview["apertureClassification"];
+		revisionDecision?: GoalTargetPlanReview["revisionDecision"];
+		findings: Array<{
+			id: string;
+			severity: string;
+			problem: string;
+			requiredRevision: string;
+			supportingEvidence?: string;
+		}>;
+	}>;
+}
+
 interface AutoCompactionOptions {
 	autoContinue?: boolean;
 	forceAction?: "context-full";
@@ -7334,6 +7368,60 @@ export class AgentSession {
 		return await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-goal-side-agents-"));
 	}
 
+	#goalTargetPlanReviewHistory(goal: Goal, currentPlan: GoalTargetPlanRecord): GoalTargetPlanReviewHistoryEntry[] {
+		const plansById = new Map<string, GoalTargetPlanRecord>();
+		for (const plan of goal.targetPlans ?? []) {
+			if (plan.targetId === currentPlan.targetId) plansById.set(plan.id, plan);
+		}
+		plansById.set(currentPlan.id, currentPlan);
+		return [...plansById.values()]
+			.filter(
+				plan =>
+					plan.id === currentPlan.id ||
+					plan.reviews.length > 0 ||
+					plan.failure !== undefined ||
+					plan.recoveredFrom !== undefined,
+			)
+			.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+			.map(plan => ({
+				id: plan.id,
+				status: plan.status,
+				revision: plan.revision,
+				planFilePath: plan.planFilePath,
+				isCurrent: plan.id === currentPlan.id,
+				recoveredFrom: plan.recoveredFrom
+					? {
+							action: plan.recoveredFrom.action,
+							reason: plan.recoveredFrom.reason,
+							guidance: plan.recoveredFrom.guidance,
+							blockers: [...plan.recoveredFrom.blockers],
+						}
+					: undefined,
+				failure: plan.failure
+					? {
+							stage: plan.failure.stage,
+							reason: plan.failure.reason,
+							message: plan.failure.message,
+							blockers: [...plan.failure.blockers],
+						}
+					: undefined,
+				reviews: plan.reviews.map(review => ({
+					lens: review.lens,
+					status: review.status,
+					feedback: review.feedback,
+					apertureClassification: review.apertureClassification,
+					revisionDecision: review.revisionDecision,
+					findings: review.findings.map(finding => ({
+						id: finding.id,
+						severity: finding.severity,
+						problem: finding.problem,
+						requiredRevision: finding.requiredRevision,
+						supportingEvidence: finding.supportingEvidence,
+					})),
+				})),
+			}));
+	}
+
 	async #writeGoalTargetPlanReviewContextFile(input: {
 		state: GoalModeState;
 		plan: GoalTargetPlanRecord;
@@ -7418,6 +7506,9 @@ export class AgentSession {
 				null,
 				2,
 			),
+			"",
+			"## Prior target-plan review history",
+			JSON.stringify(this.#goalTargetPlanReviewHistory(goal, input.plan), null, 2),
 			"",
 			"## Artifact references",
 			JSON.stringify(

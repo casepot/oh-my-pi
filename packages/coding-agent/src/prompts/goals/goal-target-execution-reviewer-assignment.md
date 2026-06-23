@@ -8,6 +8,7 @@ Inputs:
 - Submitted target-plan JSON: {{submissionFile}}
 - Target-unit rules: {{targetUnitRules}}
 - Use artifact references from the focused context file; do not expect a full transcript.
+- Use prior target-plan review history from the focused context to assess deltas; do not repeat resolved blockers.
 
 Accept when the submitted plan is decision-complete for product truth:
 - No unresolved product behavior, public/external contract, schema/persistence, policy/authority, state/failure/stale-result, dependency-order, or verification decision.

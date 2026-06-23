@@ -23,6 +23,7 @@ Evaluate only aperture and product-signal fit:
 - Target card: depth matches risk; capability/user surface/known limits/checkpoint evidence are concrete.
 - Target-unit rules: every applicable rule is enforced or explicitly exempted with a safe rationale.
 - Use artifact references from the focused context file; do not expect a full transcript.
+- Use prior target-plan review history from the focused context to assess deltas; do not rediscover or re-litigate accepted aperture.
 
 Review discipline:
 - Preserve prior accepted aperture unless the current plan changes product signal, scope, authority boundary, or blast radius.

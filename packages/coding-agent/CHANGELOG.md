@@ -23,6 +23,7 @@
 
 ### Changed
 - Changed goal target-planning reviewers to require contract/verification literals while avoiding source-code-volume planning.
+- Changed goal target-plan review context to summarize prior plan reviews so fresh reviewers can assess deltas without rediscovery.
 - Changed goal target-planning prompts to use `write` for first plan/payload creation while reserving eval/bash/JQ/Python for existing payload transforms.
 - Changed goal-mode target selection guidance so agents acquire targets from grounded repo evidence and candidate comparisons before calling `start_target` or `next_target`.
 - Changed goal target-plan payloads to preserve enum-specific context in explicit rationale/role/lens fields and hand it through approved execution summaries.

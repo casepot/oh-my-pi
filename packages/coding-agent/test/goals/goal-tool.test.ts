@@ -517,7 +517,7 @@ describe("GoalTool", () => {
 		expect(goalTargetPlanningPrompt).toContain("Enum fields classify");
 		expect(goalTargetPlanningPrompt).toContain("Use `branch_evidence[].row_ids` to link scenario rows");
 		expect(goalTargetPlanningPrompt).toContain("self-contained; it never depends on prior attempts");
-		expect(goalTargetPlanningPrompt).toContain("implementation oracle");
+		expect(goalTargetPlanningPrompt).toContain("decision-complete execution spec");
 		expect(goalTargetPlanningPrompt).toContain("schema citations or self-approval prose are not evidence");
 		expect(goalToolPrompt).toContain("Use `write` for missing/empty plan Markdown and payload JSON");
 		expect(goalTargetPlanningPrompt).toContain("Initial payload creation MUST use JSON text");
@@ -525,7 +525,7 @@ describe("GoalTool", () => {
 			"Existing payload changes? Use `edit`, `eval`, or bash-run `jq`/`python`",
 		);
 		expect(goalTargetPlanningPrompt).toContain("MUST run a pre-submit planning review");
-		expect(goalTargetPlanningPrompt).toContain("means consolidate from accepted scope plus blockers");
+		expect(goalTargetPlanningPrompt).toContain("rewrite one fresh authoritative plan");
 		expect(goalToolPrompt).toContain("do not guess aliases, nesting, enum values, or array/object shapes");
 		expect(goalTargetExecutionReviewerAssignment).toContain("Markdown/payload semantic drift");
 		expect(goalTargetExecutionReviewerAssignment).toContain("camelCase aliases, guessed nesting");
@@ -533,6 +533,7 @@ describe("GoalTool", () => {
 		expect(goalTargetExecutionReviewerAssignment).toContain("context artifacts use internal camelCase");
 		expect(goalTargetExecutionReviewerAssignment).toContain("complete acceptance delta");
 		expect(goalTargetExecutionReviewerAssignment).toContain("NEVER drip-feed one blocker per round");
+		expect(goalTargetExecutionReviewerAssignment).toContain("Use prior target-plan review history");
 		expect(goalTargetExecutionReviewerAssignment).toContain("one finding per missing decision category");
 		expect(goalTargetExecutionReviewerAssignment).toContain("api-contract");
 		expect(goalTargetExecutionReviewerAssignment).toContain(
@@ -540,7 +541,8 @@ describe("GoalTool", () => {
 		);
 		expect(goalTargetExecutionReviewerAssignment).toContain("Submitted target-plan JSON uses exact schema keys");
 		expect(goalTargetApertureReviewerAssignment).toContain("Preserve prior accepted aperture");
-		expect(goalTargetApertureReviewerAssignment).toContain("Leave execution-detail blockers to execution readiness");
+		expect(goalTargetApertureReviewerAssignment).toContain("Do not convert execution-detail gaps");
+		expect(goalTargetApertureReviewerAssignment).toContain("Use prior target-plan review history");
 		expect(goalTargetApertureReviewerAssignment).toContain("claimed caller/surface");
 		expect(goalTargetApertureReviewerAssignment).toContain(
 			"Pure core/unit rows do not prove caller-level trust surfaces",
@@ -1144,14 +1146,14 @@ describe("GoalTool", () => {
 		expect(text).toContain("# Target-plan payload schema reference");
 		expect(text).toContain("## Minimal valid payload shape");
 		expect(text).toContain('"target_id"');
-		expect(text).toContain("`targetId` -> `target_id`");
+		expect(text).toContain("`targetId` → `target_id`");
 		expect(text).toContain("## Allowed enum values");
 		expect(text).toContain("scenario_matrix.rows_left_open[].reason");
 		expect(text).toContain("workflow_review_rounds[].verdict");
 		expect(text).toContain("## Graph lint invariants");
 		expect(text).toContain("Enum fields classify");
-		expect(text).toContain("`blastRadiusScope` -> `blast_radius_scope`");
-		expect(text).toContain("`rowIds` -> `row_ids`");
+		expect(text).toContain("`blastRadiusScope` → `blast_radius_scope`");
+		expect(text).toContain("`rowIds` → `row_ids`");
 		expect(result.details?.op).toBe("target_plan_schema");
 		expect(result.details?.state?.runMode).toBe("planning-target");
 		expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();

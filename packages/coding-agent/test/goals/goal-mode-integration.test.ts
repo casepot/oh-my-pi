@@ -953,6 +953,48 @@ describe("InteractiveMode goal mode integration", () => {
 		}
 	});
 
+	it("summarizes prior target-plan reviews for fresh reviewer runs", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+		});
+
+		goalSideAgentMock.targetExecutionReviewStatus = "rejected";
+		goalSideAgentMock.targetExecutionReviewFeedback = "Execution plan is missing the branch oracle.";
+		goalSideAgentMock.targetExecutionReviewFindings = [
+			{
+				id: "branch-oracle",
+				severity: "blocking",
+				problem: "No branch oracle says what the source-link smoke row proves.",
+				requiredRevision: "Add an observable branch oracle for the source-link smoke row.",
+			},
+		];
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+
+		goalSideAgentMock.targetExecutionReviewStatus = "accepted";
+		goalSideAgentMock.targetExecutionReviewFeedback = "Execution plan is complete.";
+		goalSideAgentMock.targetExecutionReviewFindings = [];
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+
+		const executionReviewerCalls = goalSideAgentCalls.filter(
+			call => call.agent.name === "goal-target-execution-reviewer",
+		);
+		expect(executionReviewerCalls).toHaveLength(2);
+		const secondContextFile = executionReviewerCalls[1]?.contextFile;
+		if (!secondContextFile) throw new Error("expected second reviewer context file");
+		const secondContext = await Bun.file(secondContextFile).text();
+		expect(secondContext).toContain("## Prior target-plan review history");
+		expect(secondContext).toContain("branch-oracle");
+		expect(secondContext).toContain("Execution plan is missing the branch oracle.");
+		expect(secondContext).toContain("Add an observable branch oracle for the source-link smoke row.");
+		expect(secondContext).toContain('"isCurrent": true');
+		expect(secondContext).toContain('"revision": 2');
+	});
+
 	it("rejects parent completion while a target plan is still drafting", async () => {
 		await harness.mode.handleGoalModeCommand("Improve release reliability");
 		const goalTool = await activeGoalTool(harness);
@@ -1033,7 +1075,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(dispatch?.prompt).toContain(reopenedPlan?.id ?? "missing-recovered-plan");
 		expect(dispatch?.prompt).toContain(targetPlanPayloadFilePath(reopenedPlan?.planFilePath ?? "missing-plan.md"));
 		expect(dispatch?.prompt).toContain("`targetPlanSubmitIdentity.payloadFilePath` is the lint/submit authority");
-		expect(dispatch?.prompt).toContain("Schema-only payload fixes MUST NOT cause Markdown churn");
+		expect(dispatch?.prompt).toContain("Schema-only payload fixes NEVER cause Markdown churn");
 	});
 	it("refuses /goal while plan mode is active", async () => {
 		const showWarning = vi.spyOn(harness.mode, "showWarning");
