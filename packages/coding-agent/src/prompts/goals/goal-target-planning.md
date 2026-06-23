@@ -4,9 +4,6 @@ Goal target planning is active. Produce a decision-complete execution spec for t
 {{goalContextSurface}}
 </goal_context_surface>
 
-<current_target_plan>
-{{currentTargetPlan}}
-</current_target_plan>
 
 <target_plan_submit_identity>
 {{targetPlanSubmitIdentity}}
@@ -110,37 +107,18 @@ Markdown plan and payload JSON are sibling artifacts. Payload JSON is the machin
 
 They MUST agree on executor-visible semantics: target claim, scope boundaries, branches, workstreams, verification scenarios, and known limits. They do not need mirrored schema bookkeeping prose.
 
-Write the payload object to `targetPlanSubmitIdentity.payloadFilePath`; do NOT paste the full object into `goal` tool calls. Lint/submit via `payload_file_path`. Use strict tool-schema field names:
-- Top-level JSON fields: `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `primary_signal_group_id`, `plan_depth`, `scenario_matrix`, `target_card`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `target_plan_reviews`, `dry_run`.
-- Required object shapes:
-  - `verification_aperture`: `product_intention`, `primary_signal_id`, `blast_radius`, optional `blast_radius_scope`, `confidence_target`, optional `confidence_rationale`, `layer_rationale`, `residual_uncertainty: string[]`, `omitted_layers: {layer, reason}[]`.
-  - `verification_signals[]`: `id`, `role`, `layer`, `concern_ids: string[]`, `claim`, `observation`, `method`, `expected_outcome`, `required: boolean`, `confidence_if_satisfied`, optional `confidence_rationale`, `stale_if: string[]`.
-  - `concern_checks[]`: `id`, `kind`, optional `lens`, `why_independent`, `covered_by_signal_ids: string[]`.
-  - `scope_calibration`: `right_sizing_basis`, optional `right_sizing_rationale`, `why_not_smaller: string[]`, `why_not_larger: string[]`, `included_related_work: {item, reason, signal_ids}[]`, `deferred_related_work: {item, reason, rationale?, follow_up_hint?}[]`, optional `target_unit_rule_ids`, `target_unit_exemptions`.
-  - `branch_evidence[]`: `branch`, optional `row_ids: string[]`, `required: boolean`, `planned_signal_ids: string[]`, `rationale`.
-  - `excluded_work_review[]`: `item`, `classification`, `rationale`.
-  - `target_plan_reviews[]`: `id`, `lens`, `status`, `feedback`, aperture-only `aperture_classification`, `revision_decision`, `scores`, `findings: {id, severity, problem, required_revision, supporting_evidence?}[]`, `reviewed_target_plan_id`, `reviewed_revision`, `source`, `revised_after_review`.
-  - `dry_run`: `status`, `checks: {id, passed, rationale}[]`.
-  - `scenario_matrix`: `id`, `primary_signal_group_id`, `rows_in_scope: {id, branch, signal_ids, concern_ids, acceptance, expected_outcome, stale_if}[]`, `rows_left_open: {id, branch, reason, rationale?, follow_up_hint}[]`, `splitting_safety: {safe, rationale}`, optional `next_larger_target`.
-  - `target_card`: `capability_claim`, `known_limits: string[]`, `user_visible_surface`, `acceptance_rows: {closed, open}`, `verification_scenarios: string[]`, `checkpoint_evidence: string[]`; standard/trust-heavy also need `workstreams: {id, label, kind, role?, files, contract_inputs, contract_outputs}[]` and `review_lenses: string[]`; trust-heavy also needs `confidence_earned`, `rollback_cutover`, `trust_privacy_claim`, `authority_boundary`, `policy_deletion_implications`.
-- Identity mapping: `currentTarget.id` / `targetPlanSubmitIdentity.targetId` → `target_id`; `currentTargetPlan.id` / `targetPlanSubmitIdentity.targetPlanId` → `target_plan_id`; `currentTargetPlan.planFilePath` / `targetPlanSubmitIdentity.planFilePath` → `plan_file_path`; `currentTargetPlan.revision` / `targetPlanSubmitIdentity.revision` → `revision`.
-- `plan_depth` = `light` only for low-risk local/doc work; `standard` by default; `trust-heavy` for security, external/irreversible, product/e2e, migration, or multi-subsystem work.
-- `primary_signal_group_id` MUST name the stable product-signal group. Reusing a prior group requires matrix/card justification.
-- `scenario_matrix` is REQUIRED unless lint accepts a low-risk light plan. It MUST cover in-scope branches and explicitly leave independent rows open.
-- `target_card` is REQUIRED unless lint accepts a low-risk light plan. It MUST summarize capability claim, user-visible surface, known limits, closed/open rows, verification scenarios, checkpoint evidence, and needed workstreams.
-- `target_card.workstreams` SHOULD split implementation contracts for independent file/subsystem lanes. It does not authorize automatic `task` fanout.
-- `scope_calibration.target_unit_rule_ids` SHOULD list applicable target-unit rules from goal context; `target_unit_exemptions` MUST justify any skipped rule.
-- `verification_aperture.product_intention` MUST name the product signal made truthful.
-- `verification_aperture.primary_signal_id` MUST copy one required `verification_signals[].id` exactly; do not invent a product-intention label unless a required signal with that exact id exists.
-- `verification_signals[].layer` and `verification_aperture.omitted_layers[].layer` MUST use one of: `unit`, `integration`, `e2e`, `manual`, `product`, `release-gate`.
-- Concern kinds are NOT layers. NEVER put `behavior`, `contract`, `state-persistence`, `error-handling`, `security`, `performance`, `migration`, `ux-manual`, or `docs-or-operator` in `verification_signals[].layer`.
-- Enum fields classify. Preserve specific product meaning in sibling `rationale`, `role`, or `lens` fields; NEVER delete it to satisfy an enum.
+Write the payload object to `targetPlanSubmitIdentity.payloadFilePath`; do NOT paste the full object into `goal` tool calls. Lint/submit via `payload_file_path`.
+
+Schema authority:
+- Before drafting or repairing payload JSON, call `goal({op:"target_plan_schema"})`.
+- That schema reference is the only prompt-grounded source for strict tool-schema field names, required object shapes, enum values, alias repairs, graph lint invariants, and minimal valid examples.
+- Preserve identity from `targetPlanSubmitIdentity` exactly: `target_id`, `target_plan_id`, `plan_file_path`, `payload_file_path`, and `revision`.
+- Enum fields classify. Preserve specific product meaning in sibling rationale/role/lens fields instead of widening enum values.
 - Use `branch_evidence[].row_ids` to link scenario rows, especially repeated branch labels. Markdown needs executor branch meaning, not schema-only ID echoes.
-- `verification_signals[].concern_ids`, `concern_checks[].covered_by_signal_ids`, `scope_calibration.included_related_work[].signal_ids`, and `branch_evidence[].planned_signal_ids` MUST reference submitted IDs.
-- `scope_calibration.why_not_smaller` MUST reject micro-targets; `why_not_larger` MUST name the independent signal/boundary that splits.
-- `excluded_work_review` includes only load-bearing exclusions; classify essential same-signal exclusions as unsafe and revise/fail.
 - `target_plan_reviews` MUST record explicit planning review evidence. Required gate lenses: `aperture` and `execution-readiness`. NEVER fabricate reviewers, artifacts, validation replies, or schema citations as review.
 - `dry_run.status` MUST be `"passed"` and every `dry_run.checks[]` item MUST have `passed: true`; failed or unobserved simulation means revise or `fail_target_plan`.
+
+The Markdown plan changes only for executor-visible semantic changes. Schema-only payload fixes NEVER cause Markdown churn.
 
 <critical>
 Approved plan required before execution. Keep planning until the target plan is decision-complete or formally failed.

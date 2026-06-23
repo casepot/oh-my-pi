@@ -497,7 +497,7 @@ compaction:
   strategy: context-full     # context-full, handoff, shake, snapcompact, off
   thresholdPercent: -1       # -1 = default reserve-based behavior
   thresholdTokens: -1        # fixed token limit when > 0
-  remoteEnabled: true
+  remoteEnabled: false       # opt in to provider/native remote compaction
 
 memory:
   backend: off               # off, local, hindsight, mnemopi
@@ -512,7 +512,8 @@ memory:
 | `compaction.thresholdTokens` | number | `-1` | Fixed token trigger when `> 0`. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for the next turn. |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens always preserved. |
-| `compaction.remoteEnabled` | boolean | `true` | Allow remote compaction service. |
+| `compaction.remoteEnabled` | boolean | `false` | Opt in to remote/native compaction before local summarization. |
+| `compaction.remoteTimeoutMs` | number | `30000` | Maximum opt-in remote/native compaction wait before local fallback. |
 | `compaction.autoContinue` | boolean | `true` | Continue automatically after compaction. |
 | `memory.backend` | enum | `off` | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys. |
 | `autolearn.enabled` | boolean | `false` | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |

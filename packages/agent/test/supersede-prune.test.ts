@@ -8,6 +8,7 @@ import {
 	readToolSupersedeKey,
 	SUPERSEDED_NOTICE,
 	type SupersedePruneConfig,
+	staleToolSupersedeKey,
 	USELESS_NOTICE,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ProtectedToolContext } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
@@ -51,6 +52,23 @@ function toolResultMessage(toolName: string, toolCallId: string, text: string, t
 		isError: false,
 		timestamp,
 	};
+}
+
+function toolPair(
+	toolName: string,
+	args: Record<string, unknown>,
+	text: string,
+	timestamp: number,
+	extra: Partial<ToolResultMessage> = {},
+): [SessionMessageEntry, SessionMessageEntry] {
+	const callId = `call-${idCounter++}`;
+	return [
+		messageEntry(
+			assistantMessage([{ type: "toolCall", id: callId, name: toolName, arguments: args }], timestamp),
+			timestamp,
+		),
+		messageEntry({ ...toolResultMessage(toolName, callId, text, timestamp), ...extra }, timestamp),
+	];
 }
 
 /** Assistant toolCall entry + paired toolResult entry for one read. */
@@ -132,6 +150,52 @@ describe("readToolSupersedeKey", () => {
 	});
 });
 
+describe("staleToolSupersedeKey", () => {
+	test("includes read keys with tool namespace while keeping selector parent semantics", () => {
+		expect(staleToolSupersedeKey("read", { path: "src/foo.ts" })).toBe("read:src/foo.ts");
+		expect(staleToolSupersedeKey("read", { path: "src/foo.ts:50-200" })).toBe("read:src/foo.ts\u000050-200");
+		expect(staleToolSupersedeKey("read", { path: "skill://react" })).toBeUndefined();
+	});
+
+	test("keys search by exact material arguments with root-path defaulting", () => {
+		const base = staleToolSupersedeKey("search", { pattern: "needle" });
+		expect(base).toBe(
+			staleToolSupersedeKey("search", {
+				pattern: "needle",
+				paths: [],
+				i: false,
+				gitignore: true,
+				skip: 0,
+			}),
+		);
+		expect(staleToolSupersedeKey("search", { pattern: "different" })).not.toBe(base);
+		expect(staleToolSupersedeKey("search", { pattern: "needle", paths: ["src"] })).not.toBe(base);
+		expect(staleToolSupersedeKey("search", { pattern: "needle", i: true })).not.toBe(base);
+		expect(staleToolSupersedeKey("search", { pattern: "needle", gitignore: false })).not.toBe(base);
+		expect(staleToolSupersedeKey("search", { pattern: "needle", skip: 1 })).not.toBe(base);
+		expect(staleToolSupersedeKey("search", { pattern: 42 })).toBeUndefined();
+	});
+
+	test("keys find by exact material arguments including timeout", () => {
+		const base = staleToolSupersedeKey("find", { paths: ["src/**/*.ts"] });
+		expect(base).toBe(
+			staleToolSupersedeKey("find", {
+				paths: ["src/**/*.ts"],
+				hidden: true,
+				gitignore: true,
+				limit: 200,
+				timeout: 5,
+			}),
+		);
+		expect(staleToolSupersedeKey("find", { paths: ["test/**/*.ts"] })).not.toBe(base);
+		expect(staleToolSupersedeKey("find", { paths: ["src/**/*.ts"], hidden: false })).not.toBe(base);
+		expect(staleToolSupersedeKey("find", { paths: ["src/**/*.ts"], gitignore: false })).not.toBe(base);
+		expect(staleToolSupersedeKey("find", { paths: ["src/**/*.ts"], limit: 50 })).not.toBe(base);
+		expect(staleToolSupersedeKey("find", { paths: ["src/**/*.ts"], timeout: 10 })).not.toBe(base);
+		expect(staleToolSupersedeKey("find", { paths: [] })).toBeUndefined();
+	});
+});
+
 describe("pruneSupersededToolResults — tail case", () => {
 	test("(a) older identical-path read pruned with exact placeholder when suffix small", () => {
 		const [call1, result1] = readPair("src/foo.ts", FILE_CONTENT, T0);
@@ -142,7 +206,7 @@ describe("pruneSupersededToolResults — tail case", () => {
 
 		expect(result.prunedCount).toBe(1);
 		expect(result.tokensSaved).toBeGreaterThan(0);
-		expect(resultText(result1)).toBe("[Superseded by a newer read of this file]");
+		expect(resultText(result1)).toBe("[Superseded by a newer matching tool result]");
 		expect(resultText(result1)).toBe(SUPERSEDED_NOTICE);
 		expect(resultMessage(result1).prunedAt).toBeDefined();
 		// Latest read untouched.
@@ -196,6 +260,79 @@ describe("pruneSupersededToolResults — tail case", () => {
 			entries,
 			cfg({ suffixTokenLimit: 0, idleFlushMs: 30 * 60_000, now: T0 + 2_000 + 29 * 60_000 }),
 		);
+
+		expect(result.prunedCount).toBe(0);
+		expect(resultText(result1)).toBe(FILE_CONTENT);
+		expect(resultText(result2)).toBe(FILE_CONTENT);
+	});
+});
+
+describe("pruneSupersededToolResults — exact search/find calls", () => {
+	const searchArgs = { pattern: "needle", paths: ["src"], i: false, gitignore: true, skip: 0 };
+	const staleCfg = (over: Partial<SupersedePruneConfig> = {}): SupersedePruneConfig =>
+		cfg({ supersedeKey: staleToolSupersedeKey, ...over });
+
+	test("identical search calls supersede older output and keep the newest anchors", () => {
+		const [call1, result1] = toolPair("search", searchArgs, FILE_CONTENT, T0);
+		const [call2, result2] = toolPair("search", searchArgs, FILE_CONTENT, T0 + 1_000);
+		const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+		const result = pruneSupersededToolResults(entries, staleCfg({ now: T0 + 1_000 }));
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(result1)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(result2)).toBe(FILE_CONTENT);
+		expect(resultMessage(result2).prunedAt).toBeUndefined();
+	});
+
+	test("search pattern, paths, i, gitignore, and skip differences do not supersede", () => {
+		const variants: Array<Record<string, unknown>> = [
+			{ ...searchArgs, pattern: "other" },
+			{ ...searchArgs, paths: ["test"] },
+			{ ...searchArgs, i: true },
+			{ ...searchArgs, gitignore: false },
+			{ ...searchArgs, skip: 1 },
+		];
+		for (const variant of variants) {
+			const [call1, result1] = toolPair("search", searchArgs, FILE_CONTENT, T0);
+			const [call2, result2] = toolPair("search", variant, FILE_CONTENT, T0 + 1_000);
+			const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+			const result = pruneSupersededToolResults(entries, staleCfg({ now: T0 + 1_000 }));
+
+			expect(result.prunedCount).toBe(0);
+			expect(resultText(result1)).toBe(FILE_CONTENT);
+			expect(resultText(result2)).toBe(FILE_CONTENT);
+		}
+	});
+
+	test("identical find calls supersede but timeout differences do not", () => {
+		const args = { paths: ["src/**/*.ts"], hidden: true, gitignore: true, limit: 200, timeout: 5 };
+		const [call1, result1] = toolPair("find", args, FILE_CONTENT, T0);
+		const [call2, result2] = toolPair("find", args, FILE_CONTENT, T0 + 1_000);
+		const [call3, result3] = toolPair("find", { ...args, timeout: 10 }, FILE_CONTENT, T0 + 2_000);
+		let entries: SessionEntry[] = [call1, result1, call2, result2];
+
+		let result = pruneSupersededToolResults(entries, staleCfg({ now: T0 + 1_000 }));
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(result1)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(result2)).toBe(FILE_CONTENT);
+
+		entries = [call2, result2, call3, result3];
+		result = pruneSupersededToolResults(entries, staleCfg({ now: T0 + 2_000 }));
+
+		expect(result.prunedCount).toBe(0);
+		expect(resultText(result2)).toBe(FILE_CONTENT);
+		expect(resultText(result3)).toBe(FILE_CONTENT);
+	});
+
+	test("error tool results are never superseded", () => {
+		const [call1, result1] = toolPair("search", searchArgs, FILE_CONTENT, T0, { isError: true });
+		const [call2, result2] = toolPair("search", searchArgs, FILE_CONTENT, T0 + 1_000);
+		const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+		const result = pruneSupersededToolResults(entries, staleCfg({ now: T0 + 1_000 }));
 
 		expect(result.prunedCount).toBe(0);
 		expect(resultText(result1)).toBe(FILE_CONTENT);
@@ -315,6 +452,24 @@ describe("pruneToolOutputs — supersede priority fold", () => {
 			minimumSavings: 0,
 			protectedTools: [],
 			supersedeKey: readToolSupersedeKey,
+		});
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(result1)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(result2)).toBe(FILE_CONTENT);
+	});
+
+	test("with staleToolSupersedeKey, exact repeated search results bypass the protect window", () => {
+		const args = { pattern: "needle", paths: ["src"], i: false, gitignore: true, skip: 0 };
+		const [call1, result1] = toolPair("search", args, FILE_CONTENT, T0);
+		const [call2, result2] = toolPair("search", args, FILE_CONTENT, T0 + 1_000);
+		const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+		const result = pruneToolOutputs(entries, {
+			protectTokens: 1_000_000,
+			minimumSavings: 0,
+			protectedTools: [],
+			supersedeKey: staleToolSupersedeKey,
 		});
 
 		expect(result.prunedCount).toBe(1);

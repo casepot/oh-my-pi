@@ -1655,12 +1655,13 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteEnabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Remote Compaction",
-			description: "Use remote compaction endpoints when available instead of local summarization",
+			description:
+				"Preserve OpenAI native history with provider remote compaction before local summarization; opt in only when the extra network wait is acceptable",
 		},
 	},
 
@@ -1674,12 +1675,12 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteTimeoutMs": {
 		type: "number",
-		default: 180_000,
+		default: 30_000,
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Remote Compaction Timeout",
-			description: "Maximum time to wait for remote compaction before falling back to local summarization",
+			description: "Maximum time to wait for opt-in remote compaction before falling back to local summarization",
 		},
 	},
 
@@ -1742,8 +1743,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "context",
 			group: "Compaction",
-			label: "Supersede Stale Reads",
-			description: "Prune older read results when the same file is read again (cache-aware, runs every turn)",
+			label: "Supersede Stale Tool Results",
+			description:
+				"Prune older read/search/find results when a newer exact-match call supersedes them (cache-aware, runs every turn)",
 		},
 	},
 

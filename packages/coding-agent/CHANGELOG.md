@@ -23,6 +23,8 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed goal target-planning context to stop repeating full target-plan JSON, schema shapes, and enum catalogs; planners now use `target_plan_schema` as the single schema authority while target-plan artifacts stay UI/storage-only.
+- Changed oversized failed bash results to keep compact head/tail diagnostics inline with exit details and a full raw-output artifact pointer.
 - Changed goal target-plan approval to consume submitted `target_plan_reviews` evidence, including target-plan id, revision, source, and stale-after-review checks, instead of hidden reviewer subprocesses.
 - Changed approved goal target-plan execution context to start from the approved plan and use compact execution guardrails instead of duplicating full goal summaries.
 - Changed goal target-plan approval to reset execution context around the approved plan while preserving goal state and session history.
@@ -96,8 +98,9 @@
 - Fixed auto-compaction scheduling so concurrent checks coalesce around active work, idle maintenance cannot abort recovery, recovery can supersede idle work, and inline provider-call maintenance keeps continuation scheduling disabled.
 - Fixed remote compaction cancellation handling with a configurable timeout so caller aborts stop maintenance, while timeout and live remote failures fall back locally with structured diagnostics.
 - Fixed provider-call context maintenance branch-race errors to report stale compaction explicitly instead of the ambiguous "no compaction was appended" fallback.
-- Increased the default remote compaction timeout to 180s so large Codex compactions get the same request budget as the remote compaction hard ceiling.
+- Fixed compaction latency defaults by making remote compaction opt-in, reducing the opt-in remote timeout to 30s, and honoring `compaction.model` including explicit thinking selectors for manual and automatic compaction.
 - Fixed goal-mode compaction preserve-data merging so current live goal state wins over stale preserved state from earlier compactions.
+- Fixed disabled goal-mode compaction state so stale goal preserve data is stripped instead of blocking context maintenance with a `present-without-active-goal` error.
 - Fixed goal side-agent transcript artifacts so UI-only/no-context rubric artifacts are omitted from non-verifier checkpoint and continuation agents.
 
 - Fixed goal-mode todo reminders so pending checkpoint/controller states do not auto-continue into blocked ordinary `todo` calls.

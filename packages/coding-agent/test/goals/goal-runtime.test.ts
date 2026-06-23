@@ -27,6 +27,7 @@ import type {
 	GoalTokenUsage,
 } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { cloneGoalModeState, parseGoalModeState, serializeGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { buildGoalCompactionContext } from "../../src/goals/compaction-continuation";
 import systemPromptTemplate from "../../src/prompts/system/system-prompt.md" with { type: "text" };
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
@@ -344,6 +345,17 @@ describe("goal runtime", () => {
 				createUsage({ input: 10, output: 4, cacheRead: 1, cacheWrite: 5 }),
 			),
 		).toBe(8);
+	});
+
+	it("omits compaction goal preserve data when goal mode is disabled", () => {
+		const context = buildGoalCompactionContext(
+			createGoalModeState({
+				enabled: false,
+				goal: createGoal(),
+			}),
+		);
+
+		expect(context).toBeUndefined();
 	});
 
 	it("clamps token deltas at zero across usage resets", () => {

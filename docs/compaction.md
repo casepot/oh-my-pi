@@ -247,10 +247,10 @@ Prompt selection:
 
 Remote summarization modes:
 
-- If `compaction.remoteEndpoint` is set and remote compaction is enabled, local summary generation POSTs:
+- If `compaction.remoteEndpoint` is set and remote compaction is explicitly enabled, local summary generation POSTs:
   - `{ systemPrompt, prompt }`
 - Expects JSON containing at least `{ summary }`.
-- For OpenAI/OpenAI Codex models, compaction first tries the provider-native `/responses/compact` endpoint when remote compaction is enabled. It preserves provider replacement history in `preserveData.openaiRemoteCompaction` and falls back to local summarization if that native request fails.
+- For OpenAI/OpenAI Codex models, opt-in remote compaction first tries the provider-native `/responses/compact` endpoint. It preserves provider replacement history in `preserveData.openaiRemoteCompaction` and falls back to local summarization if that native request fails or times out.
 
 ### Handoff generation
 
@@ -417,8 +417,9 @@ From `settings-schema.ts`:
 - `compaction.reserveTokens` = `16384`
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`
-- `compaction.remoteEnabled` = `true`
+- `compaction.remoteEnabled` = `false`
 - `compaction.remoteEndpoint` = `undefined`
+- `compaction.remoteTimeoutMs` = `30000`
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`
 - `compaction.idleEnabled` = `false`
 - `compaction.idleThresholdTokens` = `200000`

@@ -43,7 +43,7 @@ export const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
  * (frozen "Auto context-full maintenance…" spinner, manual /compact queueing
  * behind it). On timeout the caller falls back to local summarization.
  */
-export const REMOTE_COMPACTION_TIMEOUT_MS = 180_000;
+export const REMOTE_COMPACTION_TIMEOUT_MS = 30_000;
 
 export type OpenAiRemoteCompactionItem = {
 	type: "compaction" | "compaction_summary";

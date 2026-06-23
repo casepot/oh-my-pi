@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-// Audit gate for the compaction-effort fix. The plan calls out three
-// production call sites in `agent-session.ts` that MUST thread
-// `thinkingLevel: this.thinkingLevel` into the compaction LLM options:
+// Audit gate for compaction-effort threading. Production LLM compaction call
+// sites must pass a thinkingLevel option instead of falling back to
+// compaction's historical Effort.High default. The value may come from an
+// explicit maintenance-model selector (`candidate.thinkingLevel`) but must
+// still fall back to the active session selection (`this.thinkingLevel`):
 //
 //   - `compact(...)` at the manual `/compact` site (`#compactWithFallbackModel`)
 //   - `compact(...)` at the auto-compaction site (the most-fired path)
@@ -10,9 +12,7 @@ import { describe, expect, test } from "bun:test";
 //
 // `SummaryOptions.thinkingLevel` is optional, so a future contributor adding
 // a new `compact(...)` or `generateHandoff(...)` call without threading it
-// would silently fall back to the historical `Effort.High` default — exactly
-// the regression Codex caught during plan review (auto-compaction was
-// initially missed). The typecheck won't catch this; this test does.
+// would silently fall back to the historical `Effort.High` default.
 
 const AGENT_SESSION_PATH = `${import.meta.dir}/../src/session/agent-session.ts`;
 
@@ -138,18 +138,18 @@ function expressionThreadsThinkingLevel(callExpression: string): boolean {
 }
 
 describe("agent-session.ts compaction threading (audit gate)", () => {
-	test("every direct compact()/generateHandoff() call threads thinkingLevel: this.thinkingLevel", async () => {
+	test("every direct compact()/generateHandoff() call threads an explicit thinkingLevel fallback", async () => {
 		const src = await Bun.file(AGENT_SESSION_PATH).text();
 		const sites = findCompactionCallSites(src);
 		const offenders = sites.filter(s => !expressionThreadsThinkingLevel(s.callExpression));
 
 		expect(
 			offenders,
-			`Found ${offenders.length} compaction call site(s) missing 'thinkingLevel: this.thinkingLevel':\n${offenders
+			`Found ${offenders.length} compaction call site(s) missing a thinkingLevel fallback to this.thinkingLevel:\n${offenders
 				.map(o => `  agent-session.ts:${o.line} — ${o.headerLine}`)
 				.join(
 					"\n",
-				)}\n\nFix: add 'thinkingLevel: this.thinkingLevel' to the options object on every direct compact()/generateHandoff() call. The historical Effort.High default lives in resolveCompactionEffort (packages/agent/src/compaction/compaction.ts) and applies when thinkingLevel is undefined.`,
+				)}\n\nFix: add 'thinkingLevel: <explicit override> ?? this.thinkingLevel' to the options object on every direct compact()/generateHandoff() call. The historical Effort.High default lives in resolveCompactionEffort (packages/agent/src/compaction/compaction.ts) and applies when thinkingLevel is undefined.`,
 		).toEqual([]);
 	});
 

@@ -71,7 +71,7 @@ import {
 	DEFAULT_PRUNE_CONFIG,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
-	readToolSupersedeKey,
+	staleToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
@@ -670,6 +670,11 @@ export interface ResolvedRoleModel {
 export interface RoleModelCycle {
 	models: ResolvedRoleModel[];
 	currentIndex: number;
+}
+
+interface CompactionModelCandidate {
+	model: Model;
+	thinkingLevel: ThinkingLevel | undefined;
 }
 
 /** Session statistics for /session command */
@@ -2311,8 +2316,9 @@ export class AgentSession {
 		let lastError: unknown;
 
 		for (const candidate of candidates) {
+			const candidateModel = candidate.model;
 			const apiKey = await this.#modelRegistry.getApiKey(
-				candidate,
+				candidateModel,
 				this.sessionId ? `${this.sessionId}-advisor` : undefined,
 			);
 			if (!apiKey) continue;
@@ -2320,8 +2326,8 @@ export class AgentSession {
 			try {
 				compactResult = await compact(
 					preparation,
-					candidate,
-					this.#modelRegistry.resolver(candidate, this.sessionId ? `${this.sessionId}-advisor` : undefined),
+					candidateModel,
+					this.#modelRegistry.resolver(candidateModel, this.sessionId ? `${this.sessionId}-advisor` : undefined),
 					undefined,
 					undefined,
 					{
@@ -5757,6 +5763,7 @@ export class AgentSession {
 				display: true,
 				details,
 				attribution: "agent",
+				includeInContext: false,
 			});
 		}
 		for (const checkpoint of goal.checkpoints ?? []) {
@@ -6583,6 +6590,7 @@ export class AgentSession {
 			display: true,
 			details,
 			attribution: "agent",
+			includeInContext: false,
 		});
 	}
 
@@ -6604,7 +6612,10 @@ export class AgentSession {
 	}
 
 	async #sendGoalArtifactMessage<T>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<
+			CustomMessage<T>,
+			"customType" | "content" | "display" | "details" | "attribution" | "includeInContext"
+		>,
 	): Promise<void> {
 		if (this.isStreaming) {
 			this.#pendingGoalArtifactMessages.push(message);
@@ -7002,7 +7013,6 @@ export class AgentSession {
 		const identity = currentTargetPlanSubmitIdentity(state);
 		return prompt.render(goalTargetPlanningPrompt, {
 			goalContextSurface: renderGoalPromptSurface(state, state.goal),
-			currentTargetPlan: JSON.stringify(state.goal.currentTargetPlan ?? null, null, 2),
 			targetPlanSubmitIdentity: JSON.stringify(identity ?? null, null, 2),
 			taskAvailable: this.getToolByName("task") !== undefined,
 			jobAvailable: this.getToolByName("job") !== undefined,
@@ -8404,7 +8414,10 @@ export class AgentSession {
 	 * use this to avoid acting on a turn that never ran.
 	 */
 	async sendCustomMessage<T = unknown>(
-		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+		message: Pick<
+			CustomMessage<T>,
+			"customType" | "content" | "display" | "details" | "attribution" | "includeInContext"
+		>,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; queueChipText?: string },
 	): Promise<boolean> {
 		const details =
@@ -8424,6 +8437,7 @@ export class AgentSession {
 			display: message.display,
 			details,
 			attribution: message.attribution ?? "agent",
+			includeInContext: message.includeInContext,
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
@@ -8458,6 +8472,7 @@ export class AgentSession {
 				message.display,
 				message.details,
 				message.attribution ?? "agent",
+				message.includeInContext ?? true,
 			);
 			return false;
 		}
@@ -8478,6 +8493,7 @@ export class AgentSession {
 			message.display,
 			message.details,
 			message.attribution ?? "agent",
+			message.includeInContext ?? true,
 		);
 		return false;
 	}
@@ -9351,12 +9367,14 @@ export class AgentSession {
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		const { supersedeReads, dropUseless } = this.settings.getGroup("compaction");
 		const branchEntries = this.sessionManager.getBranch();
 		const result = pruneToolOutputs(
 			branchEntries,
 			this.#withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
-				pruneUseless: this.settings.getGroup("compaction").dropUseless,
+				pruneUseless: dropUseless,
+				supersedeKey: supersedeReads ? staleToolSupersedeKey : undefined,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -9373,8 +9391,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Per-turn stale-result pass: prune older `read` results that a newer read
-	 * of the same file has made stale, plus results their tool flagged
+	 * Per-turn stale-result pass: prune older read/search/find results that a
+	 * newer exact-match tool call has made stale, plus results their tool flagged
 	 * contextually useless. Cache-aware (only fires when the suffix after a
 	 * candidate is small or the session has been idle long enough that the
 	 * provider prompt cache is cold), so it is cheap to run every turn. Gated
@@ -9387,7 +9405,7 @@ export class AgentSession {
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.#withPlanProtection({
-				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
+				supersedeKey: supersedeReads ? staleToolSupersedeKey : undefined,
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
 			}),
@@ -10960,28 +10978,51 @@ export class AgentSession {
 		});
 	}
 
-	#getCompactionModelCandidates(availableModels: Model[]): Model[] {
+	#getCompactionModelCandidates(availableModels: Model[]): CompactionModelCandidate[] {
+		const configuredModel = this.settings.get("compaction.model")?.trim();
+		if (configuredModel) {
+			const resolved = resolveModelRoleValue(configuredModel, availableModels, {
+				settings: this.settings,
+				matchPreferences: getModelMatchPreferences(this.settings),
+				modelRegistry: this.#modelRegistry,
+			});
+			if (resolved.warning) {
+				logger.warn("Compaction model setting warning", {
+					value: configuredModel,
+					warning: resolved.warning,
+				});
+			}
+			if (resolved.model) {
+				return this.#resolveCompactionModelCandidates(resolved.model, availableModels, resolved.thinkingLevel);
+			}
+		}
+
 		return this.#resolveCompactionModelCandidates(this.model, availableModels);
 	}
 
-	#resolveCompactionModelCandidates(preferredModel: Model | null | undefined, availableModels: Model[]): Model[] {
-		const candidates: Model[] = [];
+	#resolveCompactionModelCandidates(
+		preferredModel: Model | null | undefined,
+		availableModels: Model[],
+		preferredThinkingLevel?: ThinkingLevel,
+	): CompactionModelCandidate[] {
+		const candidates: CompactionModelCandidate[] = [];
 		const seen = new Set<string>();
 
-		const addCandidate = (model: Model | undefined): void => {
+		const addCandidate = (model: Model | undefined, thinkingLevel?: ThinkingLevel): void => {
 			if (!model) return;
 			const key = this.#getModelKey(model);
 			if (seen.has(key)) return;
 			seen.add(key);
-			candidates.push(model);
+			candidates.push({ model, thinkingLevel });
 		};
 
-		addCandidate(preferredModel ?? undefined);
+		addCandidate(preferredModel ?? undefined, preferredThinkingLevel);
 		if (!this.settings.get("compaction.allowModelFallbacks")) {
 			return candidates;
 		}
 		for (const role of MODEL_ROLE_IDS) {
-			addCandidate(this.#resolveRoleModelFull(role, availableModels, preferredModel ?? undefined).model);
+			const resolved = this.#resolveRoleModelFull(role, availableModels, preferredModel ?? undefined);
+			addCandidate(resolved.model, resolved.thinkingLevel);
 		}
 
 		const sortedByContext = [...availableModels].sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0));
@@ -11030,26 +11071,23 @@ export class AgentSession {
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 
 		for (const candidate of candidates) {
-			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+			const candidateModel = candidate.model;
+			const apiKey = await this.#modelRegistry.getApiKey(candidateModel, this.sessionId);
 			if (!apiKey) continue;
 
 			try {
 				return await compact(
 					this.#obfuscatePreparationForProvider(preparation),
-					candidate,
-					this.#modelRegistry.resolver(candidate, this.sessionId),
+					candidateModel,
+					this.#modelRegistry.resolver(candidateModel, this.sessionId),
 					this.#obfuscateTextForProvider(customInstructions),
 					signal,
 					{
 						...options,
-						metadata: this.agent.metadataForProvider(candidate.provider),
+						metadata: this.agent.metadataForProvider(candidateModel.provider),
 						convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 						telemetry,
-						// Honor the user's /model thinking selection (incl. `off`) on
-						// the manual `/compact` path. Clamped per-model inside compact()
-						// via resolveCompactionEffort so unsupported-effort models
-						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
-						thinkingLevel: this.thinkingLevel,
+						thinkingLevel: candidate.thinkingLevel ?? this.thinkingLevel,
 					},
 				);
 			} catch (error) {
@@ -11582,7 +11620,8 @@ export class AgentSession {
 				let lastError: unknown;
 
 				for (const candidate of candidates) {
-					const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+					const candidateModel = candidate.model;
+					const apiKey = await this.#modelRegistry.getApiKey(candidateModel, this.sessionId);
 					if (!apiKey) continue;
 
 					let attempt = 0;
@@ -11590,23 +11629,19 @@ export class AgentSession {
 						try {
 							compactResult = await compact(
 								this.#obfuscatePreparationForProvider(preparation),
-								candidate,
-								this.#modelRegistry.resolver(candidate, this.sessionId),
+								candidateModel,
+								this.#modelRegistry.resolver(candidateModel, this.sessionId),
 								undefined,
 								autoCompactionSignal,
 								{
 									promptOverride: this.#obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: this.#obfuscateForProvider(compactionPrep.hookContext),
 									remoteInstructions: this.#obfuscateForProvider(this.#baseSystemPrompt.join("\n\n")),
-									metadata: this.agent.metadataForProvider(candidate.provider),
+									metadata: this.agent.metadataForProvider(candidateModel.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 									telemetry,
-									// Honor the user's /model thinking selection on the
-									// auto-compaction path — the most-fired compaction
-									// site. Clamped per-model inside compact() via
-									// resolveCompactionEffort.
-									thinkingLevel: this.thinkingLevel,
+									thinkingLevel: candidate.thinkingLevel ?? this.thinkingLevel,
 								},
 							);
 							break;
@@ -11644,7 +11679,7 @@ export class AgentSession {
 										delayMs,
 										retryAfterMs,
 										error: message,
-										model: `${candidate.provider}/${candidate.id}`,
+										model: `${candidateModel.provider}/${candidateModel.id}`,
 									});
 									lastError = error;
 									break; // Exit retry loop, continue to next candidate
@@ -11659,7 +11694,7 @@ export class AgentSession {
 								delayMs,
 								retryAfterMs,
 								error: message,
-								model: `${candidate.provider}/${candidate.id}`,
+								model: `${candidateModel.provider}/${candidateModel.id}`,
 							});
 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
 						}

@@ -287,6 +287,8 @@ function formatExitCodeNotice(exitCode: number): string {
 	return `Command exited with code ${exitCode}`;
 }
 
+const FAILED_BASH_INLINE_MAX_BYTES = 12 * 1024;
+
 const RAW_OUTPUT_ARTIFACT_PREFIX = "[raw output: artifact://";
 const RAW_OUTPUT_ARTIFACT_SUFFIX = "]";
 
@@ -478,9 +480,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		// Final defense at the tool-result boundary: no bash path (client bridge,
 		// head-retention spill, minimizer miss) may emit more than
-		// ~DEFAULT_MAX_BYTES inline. No-op for already-bounded output.
+		// ~DEFAULT_MAX_BYTES inline. Failed commands use a smaller inline budget
+		// so the model sees the first diagnostic window, tail, exit/wall-time
+		// notices, and a raw artifact pointer instead of tens of KB of failure text.
 		const cappedOutputText = await enforceInlineByteCap(outputText, {
-			label: "bash output",
+			label: failedExit ? "bash failure output" : "bash output",
+			maxBytes: failedExit ? FAILED_BASH_INLINE_MAX_BYTES : undefined,
 			saveArtifact: full => saveBashOriginalArtifact(this.session, full),
 		});
 

@@ -2083,24 +2083,8 @@ function renderTargetPlanLintText(lint: GoalTargetPlanLintResult): string {
 	return text;
 }
 
-function renderTargetPlanEnumReminder(): string {
-	return [
-		"Allowed target-plan enum values:",
-		`  plan_depth: ${TARGET_PLAN_DEPTH_VALUES.join(", ")}`,
-		`  verification layer: ${VERIFICATION_LAYER_VALUES.join(", ")}`,
-		`  signal role: ${SIGNAL_ROLE_VALUES.join(", ")}`,
-		`  confidence: ${SIGNAL_CONFIDENCE_VALUES.join(", ")}`,
-		`  blast_radius: ${BLAST_RADIUS_VALUES.join(", ")}`,
-		`  concern kind: ${CONCERN_KIND_VALUES.join(", ")}`,
-		`  rows_left_open.reason: ${SCENARIO_MATRIX_OPEN_ROW_REASON_VALUES.join(", ")}`,
-		`  excluded_work_review.classification: ${EXCLUDED_WORK_CLASSIFICATION_VALUES.join(", ")}`,
-		`  workstream kind: ${WORKSTREAM_KIND_VALUES.join(", ")}`,
-		`  target_plan_reviews[].lens: ${TARGET_PLAN_REVIEW_LENS_VALUES.join(", ")}`,
-		`  target_plan_reviews[].status: ${TARGET_PLAN_REVIEW_STATUS_VALUES.join(", ")}`,
-		`  target_plan_reviews[].aperture_classification: ${TARGET_PLAN_APERTURE_CLASSIFICATION_VALUES.join(", ")}`,
-		`  target_plan_reviews[].revision_decision: ${TARGET_PLAN_REVISION_DECISION_VALUES.join(", ")}`,
-		"  dry_run.status: passed, failed",
-	].join("\n");
+function renderTargetPlanSchemaPointer(): string {
+	return 'Schema/enum source: call goal({op:"target_plan_schema"}); lint diagnostics include allowed values and alias repairs. Do not guess enum values from memory.';
 }
 
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
@@ -2143,7 +2127,7 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			text += `\n  payload_file_path: ${identity.payloadFilePath}`;
 			text += `\n  revision: ${identity.revision}`;
 			text += `\nNext action: create missing plan/payload files with write (payload as JSON text); otherwise edit/transform payload_file_path in place and patch plan_file_path only when the payload fix changes executor-visible semantics. Lint with goal({op:"lint_target_plan", payload_file_path:"${identity.payloadFilePath}"}). Submit with goal({op:"submit_target_plan", payload_file_path:"${identity.payloadFilePath}"}).`;
-			text += `\n${renderTargetPlanEnumReminder()}`;
+			text += `\n${renderTargetPlanSchemaPointer()}`;
 		}
 	}
 	if (op === "lint_target_plan" && response.targetPlanLint) {

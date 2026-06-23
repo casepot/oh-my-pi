@@ -166,7 +166,7 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
 	autoContinue: true,
-	remoteEnabled: true,
+	remoteEnabled: false,
 	remoteTimeoutMs: DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS,
 };
 
@@ -1054,7 +1054,7 @@ export async function compact(
 	const summaryOptions: SummaryOptions = {
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
-		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
+		remoteEndpoint: settings.remoteEnabled === true ? settings.remoteEndpoint : undefined,
 		remoteTimeoutMs: settings.remoteTimeoutMs,
 		remoteInstructions: options?.remoteInstructions,
 		initiatorOverride: options?.initiatorOverride,
@@ -1071,7 +1071,7 @@ export async function compact(
 	};
 
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
-	if (settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(model)) {
+	if (settings.remoteEnabled === true && shouldUseOpenAiRemoteCompaction(model)) {
 		const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
 		const remoteMessages = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages];
 		const previousReplacementHistory =

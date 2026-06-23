@@ -924,6 +924,12 @@ describe("InteractiveMode goal mode integration", () => {
 		await writeAndSubmitApprovedTargetPlan(harness, goalTool, {
 			planSentinel: "APPROVED_PLAN_SENTINEL_REACHES_EXECUTION_CONTEXT",
 		});
+		const targetPlanArtifacts = harness.session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "custom_message" && entry.customType === GOAL_TARGET_PLAN_MESSAGE_TYPE);
+		const targetPlanArtifact = targetPlanArtifacts[targetPlanArtifacts.length - 1];
+		if (targetPlanArtifact?.type !== "custom_message") throw new Error("expected target-plan artifact");
+		expect(targetPlanArtifact.includeInContext).toBe(false);
 		const approval = harness.session.getGoalTargetPlanReference();
 		if (!approval) throw new Error("expected target-plan approval details");
 
@@ -1684,10 +1690,13 @@ describe("InteractiveMode goal mode integration", () => {
 			expect(resolutionEntries).toHaveLength(1);
 			const rubricEntry = rubricEntries[0];
 			if (rubricEntry?.type !== "custom_message") throw new Error("expected rubric artifact");
+			const targetPlanEntry = targetPlanEntries[0];
+			if (targetPlanEntry?.type !== "custom_message") throw new Error("expected target-plan artifact");
 			const targetPlanDetails = targetPlanEntries[0]?.details as GoalTargetPlanMessageDetails | undefined;
 			const checkpointDetails = checkpointEntries[0]?.details as GoalCheckpointMessageDetails | undefined;
 			const resolutionDetails = resolutionEntries[0]?.details as GoalCheckpointResolutionMessageDetails | undefined;
 			expect(rubricEntry.includeInContext).toBe(false);
+			expect(targetPlanEntry.includeInContext).toBe(false);
 			expect(targetPlanDetails?.status).toBe("approved");
 			expect(targetPlanDetails?.targetPlanId).toBe(restoredState.goal.targetPlans?.[0]?.id);
 			expect(targetPlanDetails?.revision).toBe(restoredState.goal.targetPlans?.[0]?.revision);

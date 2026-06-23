@@ -478,9 +478,10 @@ describe("compact remote fallback classification", () => {
 });
 
 describe("remote compaction settings", () => {
-	test("uses the remote request hard ceiling as the default compaction timeout", () => {
+	test("disables remote compaction by default and caps opt-in remote waits", () => {
+		expect(DEFAULT_COMPACTION_SETTINGS.remoteEnabled).toBe(false);
 		expect(DEFAULT_COMPACTION_SETTINGS.remoteTimeoutMs).toBe(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS);
-		expect(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS).toBe(180_000);
+		expect(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS).toBe(30_000);
 	});
 });
 
@@ -539,7 +540,7 @@ describe("compact() remote compaction failure handling", () => {
 			isSplitTurn: false,
 			tokensBefore: 100_000,
 			fileOps: createFileOps(),
-			settings: { ...DEFAULT_COMPACTION_SETTINGS },
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: true },
 		};
 	}
 

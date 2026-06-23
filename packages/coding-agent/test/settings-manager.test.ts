@@ -61,10 +61,11 @@ describe("Settings", () => {
 		testDir = "";
 	});
 	describe("defaults", () => {
-		it("keeps eight inline images live by default", async () => {
+		it("keeps fast compaction defaults", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
-			expect(settings.get("compaction.remoteTimeoutMs")).toBe(180_000);
+			expect(settings.get("compaction.remoteEnabled")).toBe(false);
+			expect(settings.get("compaction.remoteTimeoutMs")).toBe(30_000);
 		});
 
 		it("exposes all tool calling mode options", () => {

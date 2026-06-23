@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -34,6 +34,7 @@ describe("issue #986 compaction auth fallback", () => {
 		fallbackModelRole?: string;
 		configureFallbackAuth?: boolean;
 		allowModelFallbacks?: boolean;
+		compactionModel?: string;
 	}) {
 		const currentModel = getBundledModel("openai-codex", "gpt-5.4-mini");
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -47,6 +48,9 @@ describe("issue #986 compaction auth fallback", () => {
 		});
 		if (options?.fallbackModelRole) {
 			settings.setModelRole(options.fallbackModelRole, `${fallbackModel.provider}/${fallbackModel.id}`);
+		}
+		if (options?.compactionModel) {
+			settings.set("compaction.model", options.compactionModel);
 		}
 
 		const agent = new Agent({
@@ -87,6 +91,43 @@ describe("issue #986 compaction auth fallback", () => {
 
 		return { currentModel, fallbackModel };
 	}
+
+	it("uses the configured compaction model and explicit thinking selector", async () => {
+		const { currentModel, fallbackModel } = await createSession({
+			compactionModel: "anthropic/claude-sonnet-4-5:medium",
+		});
+		const compactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockImplementation(async (preparation, model, _apiKey, _customInstructions, _signal, options) => {
+				if (model.provider === currentModel.provider && model.id === currentModel.id) {
+					throw new Error("Current session model should not be used when compaction.model resolves");
+				}
+				if (model.provider !== fallbackModel.provider || model.id !== fallbackModel.id) {
+					throw new Error(`Unexpected compaction model ${model.provider}/${model.id}`);
+				}
+				return {
+					summary: "configured summary",
+					shortSummary: "configured short summary",
+					firstKeptEntryId: preparation.firstKeptEntryId,
+					tokensBefore: 42,
+					details: { thinkingLevel: options?.thinkingLevel },
+				};
+			});
+		vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async model => {
+			if (model.provider === currentModel.provider && model.id === currentModel.id) return "codex-token";
+			if (model.provider === fallbackModel.provider && model.id === fallbackModel.id) return "anthropic-token";
+			return undefined;
+		});
+
+		const result = await session.compact();
+
+		expect(result.summary).toBe("configured summary");
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(compactSpy.mock.calls.map(([, model]) => `${model.provider}/${model.id}`)).toEqual([
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(compactSpy.mock.calls[0]?.[5]?.thinkingLevel).toBe(ThinkingLevel.Medium);
+	});
 
 	it("uses an authenticated role model when compaction model fallbacks are enabled", async () => {
 		const { currentModel, fallbackModel } = await createSession({

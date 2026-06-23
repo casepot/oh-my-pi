@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 
-function makeSession(): ToolSession {
+function makeSession(options: { artifactDir?: string } = {}): ToolSession {
+	let artifactCounter = 0;
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -25,6 +29,13 @@ function makeSession(): ToolSession {
 				return [];
 			},
 		},
+		allocateOutputArtifact: options.artifactDir
+			? async (toolType: string) => {
+					await fs.mkdir(options.artifactDir!, { recursive: true });
+					const id = `bash-failure-${++artifactCounter}`;
+					return { id, path: path.join(options.artifactDir!, `${id}.${toolType}.log`) };
+				}
+			: undefined,
 		getClientBridge: () => undefined,
 	} as unknown as ToolSession;
 }
@@ -44,6 +55,37 @@ describe("BashTool non-zero exit", () => {
 		// The LLM-facing text still states the exit code verbatim.
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("Command exited with code 3");
+	});
+
+	it("compacts oversized failing output while preserving the raw artifact", async () => {
+		const artifactDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-failure-"));
+		try {
+			const tool = new BashTool(makeSession({ artifactDir }));
+			const result = await tool.execute("call-large-fail", {
+				command:
+					'for i in {1..2500}; do printf "failure-marker-%04d repeated diagnostic detail line\\n" "$i"; done; exit 7',
+			});
+
+			expect(result.isError).toBe(true);
+			expect(result.details?.exitCode).toBe(7);
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+			expect(Buffer.byteLength(text, "utf-8")).toBeLessThan(14 * 1024);
+			expect(text).toContain("failure-marker-0001");
+			expect(text).toContain("failure-marker-2500");
+			expect(text).toContain("Command exited with code 7");
+			const artifactMatch = text.match(/\[raw output: artifact:\/\/(bash-failure-\d+)\]$/);
+			expect(artifactMatch).not.toBeNull();
+			expect(text).toMatch(/\[… elided \d+ bytes of bash failure output …\]/);
+
+			const artifactId = artifactMatch?.[1];
+			if (!artifactId) throw new Error("expected raw output artifact footer");
+			const artifactText = await Bun.file(path.join(artifactDir, `${artifactId}.bash-original.log`)).text();
+			expect(artifactText).toContain("failure-marker-0001");
+			expect(artifactText).toContain("failure-marker-2500");
+			expect(artifactText).toContain("Command exited with code 7");
+		} finally {
+			await fs.rm(artifactDir, { recursive: true, force: true });
+		}
 	});
 
 	it("returns a success result with no exit-code detail for a zero exit", async () => {

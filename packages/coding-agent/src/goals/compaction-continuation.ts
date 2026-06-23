@@ -84,7 +84,7 @@ export function consumeGoalPostCompactionContinuation(
 }
 
 export function buildGoalCompactionContext(state: GoalModeState | undefined): GoalCompactionContext | undefined {
-	if (!state?.goal) return undefined;
+	if (!state?.enabled || !state.goal) return undefined;
 	if (state.goal.status === "complete" || state.goal.status === "dropped") return undefined;
 	const continuationPacket = buildGoalContinuationPacketForCompaction(state);
 	const serializedState = serializeGoalModeState(state);

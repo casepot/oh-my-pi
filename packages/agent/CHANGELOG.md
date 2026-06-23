@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Changed
+- Changed stale tool-output pruning to cover exact repeated search/find calls, skip error results, and use the same supersede key during overflow pruning while preserving the newest anchors.
 - Changed custom session/compaction messages to support `includeInContext: false` for UI artifacts that should not enter LLM context.
 
 
@@ -12,7 +13,7 @@
 
 - Added provider-call maintenance hooks, materialized-context preflight/rematerialization, abort guards, event-consumption acknowledgements, and a visible `ContextMaintenanceError` lifecycle so embedders can fail closed before sending an unsafe continuation request.
 - Fixed remote compaction to classify caller cancellation separately from timeout, HTTP, malformed-response, and transport failures, preserving cancellation while allowing live remote failures to fall back locally with structured diagnostics.
-- Fixed remote compaction defaults to use the 180s remote request hard ceiling instead of the 30s fallback timeout, reducing unnecessary local summarization on large Codex compactions.
+- Fixed remote compaction defaults to be opt-in with a 30s request ceiling, avoiding repeated 180s waits before local summarization on slow or unavailable provider-native compact endpoints.
 
 ## [16.0.1] - 2026-06-15
 

@@ -582,6 +582,12 @@ describe("GoalTool", () => {
 	it("keeps target-planning prompt contracts explicit", () => {
 		expect(goalTargetPlanningPrompt).toContain("otherwise patch in place and preserve still-valid decisions");
 		expect(goalTargetPlanningPrompt).toContain("do not guess schema field names, aliases, nesting, enum values");
+		expect(goalTargetPlanningPrompt).toContain('goal({op:"target_plan_schema"})');
+		expect(goalTargetPlanningPrompt).toContain("targetPlanSubmitIdentity.payloadFilePath");
+		expect(goalTargetPlanningPrompt).toContain("payload_file_path");
+		expect(goalTargetPlanningPrompt).toContain("Schema-only payload fixes NEVER cause Markdown churn");
+		expect(goalTargetPlanningPrompt).toContain("target_plan_reviews");
+		expect(goalTargetPlanningPrompt).toContain("dry_run");
 		expect(goalTargetPlanningPrompt).toContain("Local self-check before submit MUST confirm");
 		expect(goalTargetPlanningPrompt).toContain("Enum fields classify");
 		expect(goalTargetPlanningPrompt).toContain("Use `branch_evidence[].row_ids` to link scenario rows");
@@ -609,6 +615,11 @@ describe("GoalTool", () => {
 			"Accepted gate reviews have `revised_after_review:false`; plan edits after review require original-reviewer IRC validation or a fresh review",
 		);
 		expect(goalTargetPlanningPrompt).toContain("`target_plan_reviews` MUST record explicit planning review evidence");
+		expect(goalTargetPlanningPrompt).not.toContain("<current_target_plan>");
+		expect(goalTargetPlanningPrompt).not.toContain("Required object shapes");
+		expect(goalTargetPlanningPrompt).not.toContain("verification_signals[]:");
+		expect(goalTargetPlanningPrompt).not.toContain("target_card.workstreams");
+		expect(goalTargetPlanningPrompt).not.toContain("Allowed enum values");
 	});
 
 	it("keeps target acquisition guidance before target creation", () => {
@@ -1177,10 +1188,11 @@ describe("GoalTool", () => {
 		expect(text).not.toContain("verification_aperture");
 		expect(text).not.toContain("verification_signals");
 		expect(text).not.toContain("target_card");
-		expect(text).toContain("Allowed target-plan enum values:");
-		expect(text).toContain("plan_depth: light, standard, trust-heavy");
-		expect(text).toContain("rows_left_open.reason: different-primary-signal");
-		expect(text).toContain("target_plan_reviews[].status: accepted, rejected, failed, stale");
+		expect(text).toContain(
+			'Schema/enum source: call goal({op:"target_plan_schema"}); lint diagnostics include allowed values and alias repairs. Do not guess enum values from memory.',
+		);
+		expect(text).not.toContain("Allowed target-plan enum values:");
+		expect(text).not.toContain("plan_depth: light, standard, trust-heavy");
 	});
 
 	it("returns target-plan schema reference only while planning", async () => {

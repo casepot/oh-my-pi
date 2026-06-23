@@ -45,7 +45,7 @@ export interface PruneResult {
 }
 
 /** Exact placeholder written over a superseded tool result. */
-export const SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]";
+export const SUPERSEDED_NOTICE = "[Superseded by a newer matching tool result]";
 
 /** Exact placeholder written over an elided useless tool result. */
 export const USELESS_NOTICE = "[Uneventful result elided]";
@@ -130,7 +130,7 @@ function collectSupersededResults(
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
-		if (!message || message.prunedAt !== undefined) continue;
+		if (!message || message.prunedAt !== undefined || message.isError === true) continue;
 		const toolCall = toolCallsById.get(message.toolCallId);
 		if (!toolCall) continue;
 		if (isProtectedToolResult(message, toolCall, protectedTools)) continue;
@@ -339,4 +339,62 @@ export function readToolSupersedeKey(toolName: string, args: Record<string, unkn
 	if (path.includes("://")) return undefined;
 	const { path: base, sel } = splitReadSelector(path);
 	return sel === undefined ? base : `${base}\u0000${sel}`;
+}
+
+function normalizedPathList(value: unknown, fallback: readonly string[] | undefined): string[] | undefined {
+	if (value === undefined || value === null) return fallback ? [...fallback] : undefined;
+	if (typeof value === "string") return [value];
+	if (!Array.isArray(value)) return undefined;
+	if (value.length === 0) return fallback ? [...fallback] : [];
+	if (!value.every(item => typeof item === "string")) return undefined;
+	return [...value];
+}
+
+function booleanArg(args: Record<string, unknown>, name: string, fallback: boolean): boolean | undefined {
+	const value = args[name];
+	if (value === undefined || value === null) return fallback;
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function numberArg(args: Record<string, unknown>, name: string, fallback: number): number | undefined {
+	const value = args[name];
+	if (value === undefined || value === null) return fallback;
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function exactSearchSupersedeKey(toolName: string, args: Record<string, unknown>): string | undefined {
+	if (toolName !== "search") return undefined;
+	const pattern = args.pattern;
+	if (typeof pattern !== "string") return undefined;
+	const paths = normalizedPathList(args.paths, ["."]);
+	const i = booleanArg(args, "i", false);
+	const gitignore = booleanArg(args, "gitignore", true);
+	const skip = numberArg(args, "skip", 0);
+	if (paths === undefined || i === undefined || gitignore === undefined || skip === undefined) return undefined;
+	return `search:${JSON.stringify({ pattern, paths, i, gitignore, skip })}`;
+}
+
+function exactFindSupersedeKey(toolName: string, args: Record<string, unknown>): string | undefined {
+	if (toolName !== "find") return undefined;
+	const paths = normalizedPathList(args.paths, undefined);
+	if (paths === undefined || paths.length === 0) return undefined;
+	const hidden = booleanArg(args, "hidden", true);
+	const gitignore = booleanArg(args, "gitignore", true);
+	const limit = numberArg(args, "limit", 200);
+	const timeout = numberArg(args, "timeout", 5);
+	if (hidden === undefined || gitignore === undefined || limit === undefined || timeout === undefined) {
+		return undefined;
+	}
+	return `find:${JSON.stringify({ paths, hidden, gitignore, limit, timeout })}`;
+}
+
+/**
+ * Supersede key for stale context-heavy tool output. Includes read semantics
+ * plus exact-match search/find calls only; it never infers broader/narrower
+ * search or glob coverage.
+ */
+export function staleToolSupersedeKey(toolName: string, args: Record<string, unknown>): string | undefined {
+	const readKey = readToolSupersedeKey(toolName, args);
+	if (readKey !== undefined) return `read:${readKey}`;
+	return exactSearchSupersedeKey(toolName, args) ?? exactFindSupersedeKey(toolName, args);
 }
