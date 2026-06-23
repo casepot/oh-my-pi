@@ -67,6 +67,7 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed provider-context rebuilds to prune zero-token context-maintenance failure clusters and adjacent synthetic continuation noise without removing persisted transcript entries.
 - Fixed goal target-plan review artifacts to show reviewers canonical snake_case payload JSON instead of internal camelCase submission state.
 - Fixed goal target-plan rejection caps to auto-open a recovered planning attempt when reviewer feedback is actionable and no user authority is needed.
 - Fixed target-unit gate-prerequisite diagnostics to render as informational reviewer reminders instead of payload-edit warnings.

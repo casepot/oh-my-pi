@@ -2,6 +2,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ProviderPayload, ServiceTier } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { parseGoalModeState, serializeGoalModeState } from "../goals/state";
+import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
+import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages";
 import {
 	type CompactionEntry,
@@ -93,6 +95,94 @@ export interface BuildSessionContextOptions {
 	 * result to a provider.
 	 */
 	transcript?: boolean;
+}
+
+const TRIMMED_AUTO_CONTINUE_PROMPT = autoContinuePrompt.trim();
+const TRIMMED_MANUAL_CONTINUE_PROMPT = manualContinuePrompt.trim();
+
+function isZeroTokenMaintenanceFailure(message: AgentMessage): boolean {
+	if (message.role !== "assistant") return false;
+	if (message.stopReason !== "error") return false;
+	if (
+		!message.errorMessage?.startsWith("Context maintenance failed before provider call:") &&
+		!message.errorMessage?.startsWith("Context maintenance aborted before provider call")
+	) {
+		return false;
+	}
+	if (
+		message.usage.input !== 0 ||
+		message.usage.output !== 0 ||
+		message.usage.cacheRead !== 0 ||
+		message.usage.cacheWrite !== 0 ||
+		message.usage.totalTokens !== 0
+	) {
+		return false;
+	}
+	for (const block of message.content) {
+		if (block.type !== "text") return false;
+		if (block.text.trim().length > 0) return false;
+	}
+	return true;
+}
+
+type TextContentInput = string | Array<{ type: string; text?: string }>;
+
+function textContent(content: TextContentInput): string | undefined {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+	let firstText: string | undefined;
+	let textParts: string[] | undefined;
+	for (const block of content) {
+		if (block.type !== "text" || typeof block.text !== "string") return undefined;
+		if (firstText === undefined) {
+			firstText = block.text;
+			continue;
+		}
+		if (textParts === undefined) textParts = [firstText];
+		textParts.push(block.text);
+	}
+	return textParts === undefined ? (firstText ?? "") : textParts.join("\n");
+}
+
+function isSyntheticContinue(message: AgentMessage): boolean {
+	if (message.role !== "developer") return false;
+	if (message.attribution !== "agent") return false;
+	const text = textContent(message.content);
+	if (text === undefined) return false;
+	const trimmed = text.trim();
+	return trimmed === TRIMMED_AUTO_CONTINUE_PROMPT || trimmed === TRIMMED_MANUAL_CONTINUE_PROMPT;
+}
+
+function isGoalModeContextNoise(message: AgentMessage): boolean {
+	return (
+		message.role === "custom" &&
+		message.customType === "goal-mode-context" &&
+		message.display === false &&
+		message.attribution === "agent"
+	);
+}
+
+function pruneContextMaintenanceNoise(messages: AgentMessage[]): void {
+	let remove: Set<number> | undefined;
+	for (let i = 0; i < messages.length; i++) {
+		if (!isZeroTokenMaintenanceFailure(messages[i])) continue;
+		remove ??= new Set<number>();
+		remove.add(i);
+		for (let j = i - 1; j >= 0; j--) {
+			const message = messages[j];
+			if (!isSyntheticContinue(message) && !isGoalModeContextNoise(message)) break;
+			remove.add(j);
+		}
+		for (let j = i + 1; j < messages.length; j++) {
+			const message = messages[j];
+			if (!isSyntheticContinue(message) && !isGoalModeContextNoise(message)) break;
+			remove.add(j);
+		}
+	}
+	if (!remove) return;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (remove.has(i)) messages.splice(i, 1);
+	}
 }
 
 /**
@@ -368,6 +458,8 @@ export function buildSessionContext(
 			appendMessage(entry);
 		}
 	}
+
+	if (!options?.transcript) pruneContextMaintenanceNoise(messages);
 
 	// Strip dangling tool_use blocks — a tool_use with no matching tool_result on the
 	// resolved leaf→root path — from ANY assistant turn, not just the trailing one.

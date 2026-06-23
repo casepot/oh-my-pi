@@ -9,10 +9,12 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	type CompactionDetails,
 	type CompactionPreparation,
 	compact,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
+	estimateTokens,
 	generateBranchSummary,
 	generateHandoff,
 	generateSummary,
@@ -24,6 +26,7 @@ import {
 	PiGenAIAttr,
 	resolveTelemetry,
 } from "@oh-my-pi/pi-agent-core/telemetry";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -162,6 +165,66 @@ describe("compaction oneshot telemetry", () => {
 		expect(spansByOneshotKind(chats, "compaction_summary")).toHaveLength(1);
 		expect(spansByOneshotKind(chats, "compaction_turn_prefix")).toHaveLength(1);
 		expect(spansByOneshotKind(chats, "compaction_short_summary")).toHaveLength(1);
+	});
+
+	it("persists compaction run metrics on compact() details", async () => {
+		const historySummaryText = "history summary text";
+		const turnPrefixSummaryText = "turn prefix summary text";
+		const shortSummaryText = "short summary text";
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(makeAssistantMessage(historySummaryText))
+			.mockResolvedValueOnce(makeAssistantMessage(turnPrefixSummaryText))
+			.mockResolvedValueOnce(makeAssistantMessage(shortSummaryText));
+
+		const turnPrefixMessages = [makeUserMessage("Inline mid-turn instruction")];
+		const preparation = makePreparation({ isSplitTurn: true, turnPrefixMessages });
+		const telemetry = resolveTelemetry(makeTelemetryConfig(), "session-metrics");
+		const result = await compact(preparation, MODEL, "test-api-key", undefined, undefined, {
+			telemetry,
+			thinkingLevel: ThinkingLevel.Medium,
+		});
+		const metrics = (result.details as CompactionDetails | undefined)?.metrics;
+		if (!metrics) throw new Error("expected compaction metrics");
+
+		expect(metrics.model).toBe("mock/mock-model");
+		expect(metrics.thinkingLevel).toBe(ThinkingLevel.Medium);
+		expect(metrics.durationMs).toBeGreaterThanOrEqual(0);
+		expect(metrics.tokensBefore).toBe(12345);
+		expect(metrics.messagesSummarized).toBe(preparation.messagesToSummarize.length);
+		expect(metrics.turnPrefixMessages).toBe(preparation.turnPrefixMessages.length);
+		expect(metrics.recentMessages).toBe(preparation.recentMessages.length);
+		expect(metrics.splitTurn).toBe(true);
+		expect(metrics.estimatedSummarizedTokens).toBe(
+			[...preparation.messagesToSummarize, ...preparation.turnPrefixMessages].reduce(
+				(total, message) => total + estimateTokens(message),
+				0,
+			),
+		);
+		expect(metrics.estimatedKeptTokens).toBe(
+			preparation.recentMessages.reduce((total, message) => total + estimateTokens(message), 0),
+		);
+		expect(metrics.summaryChars).toBe(result.summary.length);
+		expect(metrics.shortSummaryChars).toBe(shortSummaryText.length);
+		expect(metrics.openAiRemoteEnabled).toBe(false);
+		expect(metrics.openAiRemoteAttempted).toBe(false);
+		expect(metrics.openAiRemoteSucceeded).toBe(false);
+	});
+
+	it("keeps read-only files in details without adding them to visible summaries", async () => {
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(makeAssistantMessage("operational summary"))
+			.mockResolvedValueOnce(makeAssistantMessage("short summary"));
+		const fileOps = createFileOps();
+		fileOps.read.add("src/read-only.ts");
+		fileOps.read.add("src/modified.ts");
+		fileOps.edited.add("src/modified.ts");
+
+		const result = await compact(makePreparation({ fileOps }), MODEL, "test-api-key");
+		const details = result.details as CompactionDetails | undefined;
+
+		expect(result.summary).toContain("modified.ts (RW)");
+		expect(result.summary).not.toContain("src/read-only.ts");
+		expect(details?.readFiles).toEqual(["src/read-only.ts"]);
 	});
 
 	it("emits no spans when telemetry is undefined", async () => {

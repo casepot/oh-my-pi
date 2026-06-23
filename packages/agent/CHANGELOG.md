@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added persisted compaction run metrics and structured lifecycle logs for model, thinking, token, timing, summary-size, and remote-compaction diagnostics.
+
+
 ### Changed
+- Changed compaction summaries to use operational handoff prompts, tighter summary budgets, and modified-file-only visible file inventory while preserving read-only files in compaction details.
 - Changed stale tool-output pruning to cover exact repeated search/find calls, skip error results, and use the same supersede key during overflow pruning while preserving the newest anchors.
 - Changed custom session/compaction messages to support `includeInContext: false` for UI artifacts that should not enter LLM context.
 

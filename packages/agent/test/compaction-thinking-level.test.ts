@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
+	type CompactionDetails,
 	type CompactionPreparation,
 	compact,
 	createFileOps,
@@ -210,11 +211,14 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 			.spyOn(ai, "completeSimple")
 			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
 
-		await compact(makePreparation(), getAnthropicModel(), "test-key", undefined, undefined, {
+		const result = await compact(makePreparation(), getAnthropicModel(), "test-key", undefined, undefined, {
 			thinkingLevel: ThinkingLevel.Low,
 		});
+		const metrics = (result.details as CompactionDetails | undefined)?.metrics;
+		if (!metrics) throw new Error("expected compaction metrics");
 
 		expect(spy).toHaveBeenCalledTimes(3);
+		expect(metrics.resolvedEffort).toBe(ai.Effort.Low);
 		for (const [, , opts] of spy.mock.calls) {
 			expect(opts?.reasoning).toBe(ai.Effort.Low);
 		}

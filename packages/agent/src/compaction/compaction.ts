@@ -65,6 +65,28 @@ import {
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	metrics?: CompactionRunMetrics;
+}
+
+export interface CompactionRunMetrics {
+	model: string;
+	thinkingLevel?: string;
+	resolvedEffort?: string;
+	durationMs: number;
+	tokensBefore: number;
+	estimatedSummarizedTokens: number;
+	estimatedKeptTokens: number;
+	messagesSummarized: number;
+	turnPrefixMessages: number;
+	recentMessages: number;
+	splitTurn: boolean;
+	openAiRemoteEnabled: boolean;
+	openAiRemoteAttempted: boolean;
+	openAiRemoteSucceeded: boolean;
+	genericRemoteEndpoint?: string;
+	remoteTimeoutMs?: number;
+	summaryChars: number;
+	shortSummaryChars: number;
 }
 
 /**
@@ -369,6 +391,12 @@ export function estimateTokens(message: AgentMessage): number {
 	return extra + countTokens(fragments);
 }
 
+function estimateMessageListTokens(messages: AgentMessage[]): number {
+	let total = 0;
+	for (const message of messages) total += estimateTokens(message);
+	return total;
+}
+
 function estimateEntriesTokens(entries: SessionEntry[], startIndex: number, endIndex: number): number {
 	let total = 0;
 	for (let i = startIndex; i < endIndex; i++) {
@@ -545,6 +573,12 @@ const UPDATE_SUMMARIZATION_PROMPT = prompt.render(compactionUpdateSummaryPrompt)
 
 const SHORT_SUMMARY_PROMPT = prompt.render(compactionShortSummaryPrompt);
 
+const SUMMARY_MAX_TOKENS = 4096;
+
+const TURN_PREFIX_SUMMARY_MAX_TOKENS = 2048;
+
+const SHORT_SUMMARY_MAX_TOKENS = 512;
+
 const HANDOFF_DOCUMENT_PROMPT = prompt.render(handoffDocumentPrompt);
 
 export const AUTO_HANDOFF_THRESHOLD_FOCUS = prompt.render(autoHandoffThresholdFocusPrompt);
@@ -659,7 +693,7 @@ export async function generateSummary(
 	previousSummary?: string,
 	options?: SummaryOptions,
 ): Promise<string> {
-	const maxTokens = Math.floor(0.8 * reserveTokens);
+	const maxTokens = Math.min(SUMMARY_MAX_TOKENS, Math.floor(0.5 * reserveTokens));
 
 	// Use update prompt if we have a previous summary, otherwise initial prompt
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
@@ -829,7 +863,7 @@ async function generateShortSummary(
 	signal?: AbortSignal,
 	options?: SummaryOptions,
 ): Promise<string> {
-	const maxTokens = Math.min(512, Math.floor(0.2 * reserveTokens));
+	const maxTokens = Math.min(SHORT_SUMMARY_MAX_TOKENS, Math.floor(0.2 * reserveTokens));
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(recentMessages);
 	const conversationText = serializeConversation(llmMessages, preferredDialect(model.id));
 
@@ -1070,130 +1104,206 @@ export async function compact(
 		fetch: options?.fetch,
 	};
 
-	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
-	if (settings.remoteEnabled === true && shouldUseOpenAiRemoteCompaction(model)) {
-		const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
-		const remoteMessages = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages];
-		const previousReplacementHistory =
-			previousRemoteCompaction?.provider === model.provider
-				? previousRemoteCompaction.replacementHistory
-				: undefined;
-		const remoteHistory = buildOpenAiNativeHistory(
-			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			model,
-			previousReplacementHistory,
-		);
-		if (remoteHistory.length > 0) {
-			try {
-				const remote = await withAuth(
-					apiKey,
-					key =>
-						requestOpenAiRemoteCompaction(
-							model,
-							key,
-							remoteHistory,
-							summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
-							signal,
-							{ fetch: summaryOptions.fetch, timeoutMs: summaryOptions.remoteTimeoutMs },
-						),
-					{ signal },
-				);
-				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
-			} catch (err) {
-				// A user/session abort is a cancellation, not a remote failure —
-				// swallowing it here would downgrade Esc into "fall back to local
-				// summarization" and keep compaction running on an aborted signal.
-				if (isCompactionCancelled(err, signal)) {
-					throw toCompactionCancelledError(err);
+	const startedAt = Date.now();
+	const modelName = `${model.provider}/${model.id}`;
+	const requestedThinkingLevel = options?.thinkingLevel;
+	const resolvedEffort = resolveCompactionEffort(model, requestedThinkingLevel);
+	const estimatedSummarizedTokens =
+		estimateMessageListTokens(messagesToSummarize) + estimateMessageListTokens(turnPrefixMessages);
+	const estimatedKeptTokens = estimateMessageListTokens(recentMessages);
+	const openAiRemoteEnabled = settings.remoteEnabled === true && shouldUseOpenAiRemoteCompaction(model);
+	let openAiRemoteAttempted = false;
+	let openAiRemoteSucceeded = false;
+
+	logger.debug("Compaction started", {
+		model: modelName,
+		thinkingLevel: requestedThinkingLevel,
+		resolvedEffort,
+		tokensBefore,
+		estimatedSummarizedTokens,
+		estimatedKeptTokens,
+		messagesSummarized: messagesToSummarize.length,
+		turnPrefixMessages: turnPrefixMessages.length,
+		recentMessages: recentMessages.length,
+		splitTurn: isSplitTurn,
+		openAiRemoteEnabled,
+		genericRemoteEndpoint: summaryOptions.remoteEndpoint,
+		remoteTimeoutMs: summaryOptions.remoteTimeoutMs,
+	});
+
+	try {
+		let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
+		if (openAiRemoteEnabled) {
+			const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
+			const remoteMessages = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages];
+			const previousReplacementHistory =
+				previousRemoteCompaction?.provider === model.provider
+					? previousRemoteCompaction.replacementHistory
+					: undefined;
+			const remoteHistory = buildOpenAiNativeHistory(
+				(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
+				model,
+				previousReplacementHistory,
+			);
+			if (remoteHistory.length > 0) {
+				try {
+					const remote = await withAuth(
+						apiKey,
+						key => {
+							openAiRemoteAttempted = true;
+							return requestOpenAiRemoteCompaction(
+								model,
+								key,
+								remoteHistory,
+								summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
+								signal,
+								{ fetch: summaryOptions.fetch, timeoutMs: summaryOptions.remoteTimeoutMs },
+							);
+						},
+						{ signal },
+					);
+					preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
+					openAiRemoteSucceeded = true;
+				} catch (err) {
+					// A user/session abort is a cancellation, not a remote failure —
+					// swallowing it here would downgrade Esc into "fall back to local
+					// summarization" and keep compaction running on an aborted signal.
+					if (isCompactionCancelled(err, signal)) {
+						throw toCompactionCancelledError(err);
+					}
+					logger.warn("OpenAI remote compaction failed, falling back to local summarization", {
+						...getRemoteCompactionDiagnosticFields(err),
+						model: model.id,
+						provider: model.provider,
+					});
 				}
-				logger.warn("OpenAI remote compaction failed, falling back to local summarization", {
-					...getRemoteCompactionDiagnosticFields(err),
-					model: model.id,
-					provider: model.provider,
-				});
 			}
 		}
-	}
 
-	// Generate summaries (can be parallel if both needed) and merge into one
-	let summary: string;
+		// Generate summaries (can be parallel if both needed) and merge into one
+		let summary: string;
 
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
-		const [historyResult, turnPrefixResult] = await Promise.all([
-			messagesToSummarize.length > 0
-				? generateSummary(
-						messagesToSummarize,
-						model,
-						settings.reserveTokens,
-						apiKey,
-						signal,
-						customInstructions,
-						previousSummary,
-						summaryOptions,
-					)
-				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal, summaryOptions),
-		]);
-		// Merge into single summary
-		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
-	} else if (messagesToSummarize.length > 0) {
-		// Generate history summary from messages to summarize
-		summary = await generateSummary(
-			messagesToSummarize,
+		if (isSplitTurn && turnPrefixMessages.length > 0) {
+			// Generate both summaries in parallel
+			const [historyResult, turnPrefixResult] = await Promise.all([
+				messagesToSummarize.length > 0
+					? generateSummary(
+							messagesToSummarize,
+							model,
+							settings.reserveTokens,
+							apiKey,
+							signal,
+							customInstructions,
+							previousSummary,
+							summaryOptions,
+						)
+					: Promise.resolve("No prior history."),
+				generateTurnPrefixSummary(
+					turnPrefixMessages,
+					model,
+					settings.reserveTokens,
+					apiKey,
+					signal,
+					summaryOptions,
+				),
+			]);
+			// Merge into single summary
+			summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
+		} else if (messagesToSummarize.length > 0) {
+			// Generate history summary from messages to summarize
+			summary = await generateSummary(
+				messagesToSummarize,
+				model,
+				settings.reserveTokens,
+				apiKey,
+				signal,
+				customInstructions,
+				previousSummary,
+				summaryOptions,
+			);
+		} else if (previousSummary) {
+			// No new messages to summarize, preserve previous summary
+			summary = previousSummary;
+		} else {
+			// No messages and no previous summary
+			summary = "No prior history.";
+		}
+
+		const shortSummary = await generateShortSummary(
+			recentMessages,
+			summary,
 			model,
 			settings.reserveTokens,
 			apiKey,
 			signal,
-			customInstructions,
-			previousSummary,
-			summaryOptions,
+			{
+				extraContext: options?.extraContext,
+				remoteEndpoint: summaryOptions.remoteEndpoint,
+				remoteTimeoutMs: summaryOptions.remoteTimeoutMs,
+				initiatorOverride: summaryOptions.initiatorOverride,
+				metadata: summaryOptions.metadata,
+				telemetry: summaryOptions.telemetry,
+				// Same propagation as summaryOptions above — generateShortSummary
+				// resolves its own reasoning via resolveCompactionEffort.
+				thinkingLevel: options?.thinkingLevel,
+				fetch: summaryOptions.fetch,
+			},
 		);
-	} else if (previousSummary) {
-		// No new messages to summarize, preserve previous summary
-		summary = previousSummary;
-	} else {
-		// No messages and no previous summary
-		summary = "No prior history.";
-	}
 
-	const shortSummary = await generateShortSummary(
-		recentMessages,
-		summary,
-		model,
-		settings.reserveTokens,
-		apiKey,
-		signal,
-		{
-			extraContext: options?.extraContext,
-			remoteEndpoint: summaryOptions.remoteEndpoint,
+		// Compute file lists and append to summary
+		const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+		summary = upsertFileOperations(summary, [], modifiedFiles, fileOps.read);
+
+		if (!firstKeptEntryId) {
+			throw new Error("First kept entry has no ID - session may need migration");
+		}
+
+		const metrics: CompactionRunMetrics = {
+			model: modelName,
+			thinkingLevel: requestedThinkingLevel,
+			resolvedEffort,
+			durationMs: Date.now() - startedAt,
+			tokensBefore,
+			estimatedSummarizedTokens,
+			estimatedKeptTokens,
+			messagesSummarized: messagesToSummarize.length,
+			turnPrefixMessages: turnPrefixMessages.length,
+			recentMessages: recentMessages.length,
+			splitTurn: isSplitTurn,
+			openAiRemoteEnabled,
+			openAiRemoteAttempted,
+			openAiRemoteSucceeded,
+			genericRemoteEndpoint: summaryOptions.remoteEndpoint,
 			remoteTimeoutMs: summaryOptions.remoteTimeoutMs,
-			initiatorOverride: summaryOptions.initiatorOverride,
-			metadata: summaryOptions.metadata,
-			telemetry: summaryOptions.telemetry,
-			// Same propagation as summaryOptions above — generateShortSummary
-			// resolves its own reasoning via resolveCompactionEffort.
-			thinkingLevel: options?.thinkingLevel,
-			fetch: summaryOptions.fetch,
-		},
-	);
+			summaryChars: summary.length,
+			shortSummaryChars: shortSummary.length,
+		};
+		logger.debug("Compaction finished", { ...metrics });
 
-	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary = upsertFileOperations(summary, readFiles, modifiedFiles, fileOps.read);
-
-	if (!firstKeptEntryId) {
-		throw new Error("First kept entry has no ID - session may need migration");
+		return {
+			summary,
+			shortSummary,
+			firstKeptEntryId,
+			tokensBefore,
+			details: { readFiles, modifiedFiles, metrics } satisfies CompactionDetails,
+			preserveData,
+		};
+	} catch (err) {
+		const fields = {
+			model: modelName,
+			thinkingLevel: requestedThinkingLevel,
+			resolvedEffort,
+			durationMs: Date.now() - startedAt,
+			aborted: signal?.aborted === true,
+			error: err instanceof Error ? err.message : String(err),
+		};
+		if (err instanceof CompactionCancelledError || signal?.aborted === true) {
+			logger.debug("Compaction failed", fields);
+		} else {
+			logger.warn("Compaction failed", fields);
+		}
+		throw err;
 	}
-
-	return {
-		summary,
-		shortSummary,
-		firstKeptEntryId,
-		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
-		preserveData,
-	};
 }
 
 /**
@@ -1207,7 +1317,7 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	options?: SummaryOptions,
 ): Promise<string> {
-	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
+	const maxTokens = Math.min(TURN_PREFIX_SUMMARY_MAX_TOKENS, Math.floor(0.25 * reserveTokens));
 
 	const llmMessages = (options?.convertToLlm ?? defaultConvertToLlm)(messages);
 	const conversationText = serializeConversation(llmMessages, preferredDialect(model.id));

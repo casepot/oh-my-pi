@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	CompactionCancelledError,
+	type CompactionDetails,
 	type CompactionPreparation,
 	compact,
 	createFileOps,
@@ -344,6 +345,25 @@ describe("requestOpenAiRemoteCompaction abort", () => {
 });
 
 describe("compact remote fallback classification", () => {
+	test("records successful OpenAI remote compaction metrics", async () => {
+		mockLocalSummaries();
+		const fetchMock: FetchImpl = async () =>
+			Response.json({
+				output: [{ type: "compaction_summary", summary: "remote compact" }],
+			});
+
+		const result = await compact(makePreparation(), makeOpenAiModel(), "test-key", undefined, undefined, {
+			fetch: fetchMock,
+		});
+		const metrics = (result.details as CompactionDetails | undefined)?.metrics;
+		if (!metrics) throw new Error("expected compaction metrics");
+
+		expect(metrics.openAiRemoteEnabled).toBe(true);
+		expect(metrics.openAiRemoteAttempted).toBe(true);
+		expect(metrics.openAiRemoteSucceeded).toBe(true);
+		expect(metrics.remoteTimeoutMs).toBe(5);
+	});
+
 	test("does not fall back to local summarization when caller aborts remote compaction", async () => {
 		const controller = new AbortController();
 		const completeSpy = mockLocalSummaries();

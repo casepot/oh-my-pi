@@ -1,38 +1,36 @@
-You MUST summarize the conversation above into a structured handoff summary for another LLM to resume the task.
+You MUST summarize only state needed for another LLM to resume work.
 
-IMPORTANT: If the conversation ends with an unanswered question or a request awaiting user response (e.g., "Please run command and paste output"), you MUST preserve that exact question/request.
+Operationally relevant means needed to choose, edit, verify, or explain the next step.
 
-You MUST use this format (sections can be omitted if not applicable):
+Preserve exact file paths, symbols, commands, observed outputs, errors, user constraints/preferences, pending decisions, and branch/staged/uncommitted state ONLY when operationally relevant.
+NEVER present inferred or unverified work as completed.
+NEVER include chronological narrative, completed ceremony, read-only file inventories, "I looked at" history, repeated tool logs, stale Done checklists, or generic notes.
 
-## Goal
-[User goals; list multiple if session covers different tasks.]
+Use this format. Omit empty sections.
 
-## Constraints & Preferences
-- [Constraints or requirements mentioned]
+## Active Objective
+[Current user-visible task and desired end state.]
 
-## Progress
+## Non-Negotiables
+- [User constraints, repo rules, required verification, forbidden claims.]
 
-### Done
-- [x] [Completed tasks/changes]
+## Current State
+- [Unfinished work, applied changes affecting next work, branch/staged/uncommitted state, and live blockers.]
 
-### In Progress
-- [ ] [Current work]
+## Working Set
+- [Modified/RW files and exact symbols/contracts needed next; NEVER list read-only files unless the next action depends on them.]
 
-### Blocked
-- [Issues preventing progress]
+## Verification State
+- Observed: [Commands/scenarios run and result.]
+- Unverified: [Claims, behavior, or changes not yet checked.]
 
-## Key Decisions
-- **[Decision]**: [Brief rationale]
+## Decisions Still Relevant
+- [Decision]: [Reason it still affects implementation.]
 
-## Next Steps
-1. [Ordered list of next actions]
+## Pending User Ask / Blocker
+- [Only unanswered user request or blocker; omit when none.]
 
-## Critical Context
-- [Important data, pending questions, references]
+## Next Action
+1. [The next concrete action.]
 
-## Additional Notes
-[Anything else important not covered above]
-
-You MUST output only the structured summary; you NEVER include extra text.
-
-Sections MUST be kept concise. You MUST preserve exact file paths, function names, error messages, and relevant tool outputs or command results. You MUST include repository state changes (branch, uncommitted changes) if mentioned.
+You MUST output only the structured summary.

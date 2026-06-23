@@ -13,6 +13,7 @@ import type {
 	SessionMessageEntry,
 	ThinkingLevelChangeEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import manualContinuePrompt from "../../src/prompts/system/manual-continue.md" with { type: "text" };
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
 	const base = { type: "message" as const, id, parentId, timestamp: "2025-01-01T00:00:00Z" };
@@ -50,6 +51,73 @@ function compaction(id: string, parentId: string | null, summary: string, firstK
 		summary,
 		firstKeptEntryId,
 		tokensBefore: 1000,
+	};
+}
+
+const ZERO_USAGE = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+function assistantError(
+	id: string,
+	parentId: string | null,
+	errorMessage: string,
+	text = "",
+	usage = ZERO_USAGE,
+): SessionMessageEntry {
+	return {
+		type: "message",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-test",
+			usage,
+			stopReason: "error",
+			errorMessage,
+			timestamp: 1,
+		},
+	};
+}
+
+function developerMessage(
+	id: string,
+	parentId: string | null,
+	content: string,
+	attribution: "agent" | "user" = "agent",
+): SessionMessageEntry {
+	return {
+		type: "message",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		message: { role: "developer", content, attribution, timestamp: 1 },
+	};
+}
+
+function goalContextMessage(
+	id: string,
+	parentId: string | null,
+	attribution: "agent" | "user" = "agent",
+): SessionEntry {
+	return {
+		type: "custom_message",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		customType: "goal-mode-context",
+		content: "hidden goal context",
+		display: false,
+		attribution,
 	};
 }
 
@@ -303,6 +371,64 @@ describe("buildSessionContext", () => {
 				],
 			});
 			expect((ctx.messages[1] as { content: string }).content).toBe("after compact");
+		});
+
+		it("prunes zero-token maintenance failure clusters from provider context", () => {
+			const entries: SessionEntry[] = [
+				compaction("1", null, "Compacted operational state", "kept"),
+				assistantError("2", "1", "Context maintenance failed before provider call: cancelled"),
+				goalContextMessage("3", "2"),
+				developerMessage("4", "3", manualContinuePrompt),
+				msg("5", "4", "user", "real user request"),
+			];
+			const ctx = buildSessionContext(entries);
+
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "user"]);
+			expect(ctx.messages[0]?.role).toBe("compactionSummary");
+			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary");
+			expect(ctx.messages[0].summary).toContain("Compacted operational state");
+			expect(ctx.messages[1]).toMatchObject({ role: "user", content: "real user request" });
+		});
+
+		it("preserves visible or token-bearing assistant errors", () => {
+			const entries: SessionEntry[] = [
+				compaction("1", null, "Compacted operational state", "kept"),
+				assistantError("2", "1", "Context maintenance failed before provider call: visible", "visible error", {
+					...ZERO_USAGE,
+					input: 1,
+					totalTokens: 1,
+				}),
+				msg("3", "2", "user", "real user request"),
+			];
+			const ctx = buildSessionContext(entries);
+
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "assistant", "user"]);
+			expect(ctx.messages[1]).toMatchObject({ role: "assistant", errorMessage: expect.stringContaining("visible") });
+		});
+
+		it("preserves non-synthetic developer messages adjacent to maintenance failures", () => {
+			const entries: SessionEntry[] = [
+				compaction("1", null, "Compacted operational state", "kept"),
+				developerMessage("2", "1", "not a continuation prompt", "user"),
+				assistantError("3", "2", "Context maintenance aborted before provider call"),
+				msg("4", "3", "user", "real user request"),
+			];
+			const ctx = buildSessionContext(entries);
+
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "developer", "user"]);
+			expect(ctx.messages[1]).toMatchObject({ role: "developer", content: "not a continuation prompt" });
+		});
+
+		it("preserves hidden goal context outside maintenance failure clusters", () => {
+			const entries: SessionEntry[] = [
+				compaction("1", null, "Compacted operational state", "kept"),
+				goalContextMessage("2", "1"),
+				msg("3", "2", "user", "real user request"),
+			];
+			const ctx = buildSessionContext(entries);
+
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "custom", "user"]);
+			expect(ctx.messages[1]).toMatchObject({ role: "custom", customType: "goal-mode-context", display: false });
 		});
 
 		it("multiple compactions uses latest", () => {
