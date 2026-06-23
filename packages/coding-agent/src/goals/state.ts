@@ -536,9 +536,12 @@ export interface GoalTargetPlanExecutionSignalSummary {
 	id: string;
 	role: GoalSignalRole;
 	layer: GoalVerificationLayer;
+	concernIds: string[];
 	claim: string;
+	observation: string;
 	method: string;
 	expectedOutcome: string;
+	confidenceIfSatisfied: GoalSignalConfidence;
 	confidenceRationale?: string;
 	staleIf: string[];
 }
@@ -587,6 +590,7 @@ export interface GoalTargetPlanExecutionSummary {
 	sharedContract?: string;
 	acceptanceRows?: GoalTargetCard["acceptanceRows"];
 	verificationAperture?: GoalVerificationAperture;
+	reviewLenses?: string[];
 	concernChecks?: GoalConcernCheck[];
 	scopeCalibration?: GoalScopeCalibration;
 	branchEvidence?: GoalTargetPlanBranchEvidence[];

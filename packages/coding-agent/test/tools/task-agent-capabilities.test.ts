@@ -193,7 +193,7 @@ describe("task agent capability descriptions", () => {
 				getArtifactsDir: () => tempDir.path(),
 				getSessionId: () => "session-1",
 			});
-			await Bun.write(resolvedPlanPath, "# Approved target plan\n\nFULL_PLAN_CONTENT_SHOULD_NOT_INLINE");
+			await Bun.write(resolvedPlanPath, "# Approved target plan\n\nFULL_PLAN_CONTENT_SHOULD_INLINE");
 			const session = {
 				...createSession({ "async.enabled": false }),
 				getArtifactsDir: () => tempDir.path(),
@@ -215,14 +215,18 @@ describe("task agent capability descriptions", () => {
 						targetTitle: "Prove target behavior",
 						closureStandard: "Target behavior is observed.",
 						implementationFiles: ["src/release.ts"],
+						reviewLenses: ["implementation code review lens"],
 						requiredSignals: [
 							{
 								id: "signal-target-1",
 								role: "primary",
 								layer: "integration",
+								concernIds: ["concern-behavior"],
 								claim: "Target behavior is verified.",
+								observation: "Focused evidence is observed.",
 								method: "Run the focused check.",
 								expectedOutcome: "The focused check passes.",
+								confidenceIfSatisfied: "high",
 								staleIf: ["Relevant code changes."],
 							},
 						],
@@ -242,8 +246,11 @@ describe("task agent capability descriptions", () => {
 
 			const options = runSpy.mock.calls[0]?.[0];
 			expect(options?.targetPlanReference?.path).toBe(planFilePath);
+			expect(options?.targetPlanReference?.content).toContain("FULL_PLAN_CONTENT_SHOULD_INLINE");
 			expect(options?.targetPlanReference?.content).toContain("Target behavior is verified.");
-			expect(options?.targetPlanReference?.content).not.toContain("FULL_PLAN_CONTENT_SHOULD_NOT_INLINE");
+			expect(options?.targetPlanReference?.content).toContain("Focused evidence is observed.");
+			expect(options?.targetPlanReference?.content).toContain('"confidenceIfSatisfied": "high"');
+			expect(options?.targetPlanReference?.content).toContain("implementation code review lens");
 		} finally {
 			tempDir.removeSync();
 		}

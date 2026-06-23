@@ -29,7 +29,7 @@ This session is executing an approved plan. Your assignment above is one part of
 GOAL TARGET PLAN
 ===================================
 
-This session is executing an approved goal target plan. Your assignment is within that target only. Use the execution summary below for closure standard, allowed scope, excluded work, and verification signals. Where the summary and your assignment conflict, ask the main agent; NEVER widen the target silently. The target plan file is not inlined; read it only when exact file/symbol/command/recovery detail is missing from the summary.
+This session is executing an approved goal target plan. Your assignment is within that target only. Use the inlined approved plan as authority for scope, sequencing, and verification. Use the execution summary as a structured guardrail for closure standard, allowed scope, excluded work, fanout, and verification signals. Where the plan, summary, and assignment conflict, ask the main agent; NEVER widen the target silently.
 
 <target_plan path="{{targetPlanReferencePath}}">
 {{targetPlanReference}}

@@ -808,7 +808,7 @@ export interface GoalContextSurface {
 	target_unit_rules?: GoalPromptObject[];
 	current_target?: GoalPromptObject;
 	target_plan?: GoalPromptObject;
-	target_execution_summary?: GoalTargetPlanExecutionSummary;
+	target_execution_guardrails?: Record<string, unknown>;
 	checkpoint?: GoalPromptObject;
 	latest_resolution?: GoalPromptObject;
 	parent_completion?: GoalPromptObject;
@@ -1033,9 +1033,12 @@ export function buildGoalTargetPlanExecutionSummary(
 				id: signal.id,
 				role: signal.role,
 				layer: signal.layer,
+				concernIds: [...signal.concernIds],
 				claim: signal.claim,
+				observation: signal.observation,
 				method: signal.method,
 				expectedOutcome: signal.expectedOutcome,
+				confidenceIfSatisfied: signal.confidenceIfSatisfied,
 				confidenceRationale: signal.confidenceRationale,
 				staleIf: [...signal.staleIf],
 			})) ?? [];
@@ -1062,6 +1065,7 @@ export function buildGoalTargetPlanExecutionSummary(
 					omittedLayers: plan.verificationAperture.omittedLayers.map(layer => ({ ...layer })),
 				}
 			: undefined,
+		reviewLenses: targetCard?.reviewLenses ? [...targetCard.reviewLenses] : undefined,
 		concernChecks: plan.concernChecks?.map(check => ({
 			...check,
 			coveredBySignalIds: [...check.coveredBySignalIds],
@@ -1128,6 +1132,66 @@ export function buildGoalTargetPlanExecutionSummary(
 		readPlanFileWhen:
 			"Exact edit order, file/symbol details, command text, or recovery detail is missing from this summary.",
 	};
+}
+
+export function buildGoalTargetPlanExecutionGuardrails(
+	summary: GoalTargetPlanExecutionSummary | undefined,
+): Record<string, unknown> | undefined {
+	if (!summary) return undefined;
+
+	const guardrails: Record<string, unknown> = {};
+	const setIfPresent = (key: string, value: unknown) => {
+		if (value === undefined || value === null) return;
+		if (typeof value === "string" && value.length === 0) return;
+		if (Array.isArray(value) && value.length === 0) return;
+		guardrails[key] = value;
+	};
+
+	setIfPresent("targetId", summary.targetId);
+	setIfPresent("targetPlanId", summary.targetPlanId);
+	setIfPresent("planFilePath", summary.planFilePath);
+	setIfPresent("payloadFilePath", summary.payloadFilePath);
+	setIfPresent("revision", summary.revision);
+	setIfPresent("targetTitle", summary.targetTitle);
+	setIfPresent("closureStandard", summary.closureStandard);
+	setIfPresent("planDepth", summary.planDepth);
+	setIfPresent("primarySignalGroupId", summary.primarySignalGroupId);
+	setIfPresent("implementationFanoutRequired", summary.implementationFanoutRequired);
+	setIfPresent("implementationFiles", summary.implementationFiles);
+	setIfPresent(
+		"workstreams",
+		summary.workstreams?.map(workstream => ({
+			id: workstream.id,
+			label: workstream.label,
+			kind: workstream.kind,
+			role: workstream.role,
+			files: [...workstream.files],
+		})),
+	);
+	setIfPresent(
+		"requiredSignals",
+		summary.requiredSignals.map(signal => ({
+			id: signal.id,
+			role: signal.role,
+			layer: signal.layer,
+			claim: signal.claim,
+			method: signal.method,
+			expectedOutcome: signal.expectedOutcome,
+			confidenceIfSatisfied: signal.confidenceIfSatisfied,
+			staleIf: [...signal.staleIf],
+		})),
+	);
+	setIfPresent("reviewLenses", summary.reviewLenses);
+	setIfPresent("excludedWork", summary.excludedWork);
+	setIfPresent("nonGoals", summary.nonGoals);
+	setIfPresent("forbiddenClaims", summary.forbiddenClaims);
+	setIfPresent("knownLimits", summary.knownLimits);
+	setIfPresent("checkpointEvidence", summary.checkpointEvidence);
+	setIfPresent(
+		"readPayloadFileWhen",
+		"Approved Markdown plan lacks exact command, contract, matrix, or recovery detail; read the payload sidecar.",
+	);
+	return guardrails;
 }
 
 function compactTargetUnitRulesForPrompt(rules: GoalTargetUnitRule[] | undefined): GoalPromptObject[] | undefined {
@@ -1331,7 +1395,8 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 	};
 	if (runMode === "working-target") {
 		surface.current_target = compactTargetForPrompt(currentTarget);
-		surface.target_execution_summary = buildGoalTargetPlanExecutionSummary(goal.currentTargetPlan, currentTarget);
+		const executionSummary = buildGoalTargetPlanExecutionSummary(goal.currentTargetPlan, currentTarget);
+		surface.target_execution_guardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
 	} else if (runMode === "planning-target") {
 		surface.current_target = compactTargetForPrompt(currentTarget);
 		surface.target_plan = compactTargetPlanForPrompt(goal.currentTargetPlan);

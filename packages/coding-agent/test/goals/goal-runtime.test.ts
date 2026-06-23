@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildGoalContextSurface,
 	buildGoalContinuationPacket,
+	buildGoalTargetPlanExecutionGuardrails,
 	buildGoalTargetPlanExecutionSummary,
 	escapeXmlText,
 	type GoalPersistenceReason,
@@ -912,14 +913,23 @@ describe("goal runtime", () => {
 			parentDeliverableIds: ["D1"],
 		});
 		const workingSurface = buildGoalContextSurface(working, working.goal);
-		expect(workingSurface.target_execution_summary).toMatchObject({
+		expect(workingSurface.target_execution_guardrails).toMatchObject({
 			targetTitle: "Prove source-link smoke",
 			closureStandard: "Smoke output is observed.",
-			requiredSignals: [expect.objectContaining({ method: "Run the focused check." })],
+			requiredSignals: [
+				expect.objectContaining({
+					method: "Run the focused check.",
+					confidenceIfSatisfied: "high",
+				}),
+			],
 			excludedWork: [expect.objectContaining({ item: "Parent completion" })],
 		});
+		expect(workingSurface).not.toHaveProperty("target_execution_summary");
 		const workingSurfaceText = renderGoalPromptSurface(working, working.goal);
-		expect(workingSurfaceText).toContain('"target_execution_summary"');
+		expect(workingSurfaceText).toContain('"target_execution_guardrails"');
+		expect(workingSurfaceText).not.toContain('"target_execution_summary"');
+		expect(workingSurfaceText).not.toContain('"verificationAperture"');
+		expect(workingSurfaceText).not.toContain('"scopeCalibration"');
 		expect(workingSurfaceText).toContain("Run the focused check.");
 		const candidate = harness.runtime.buildCheckpointCandidate({
 			status: "closed_with_evidence",
@@ -1463,6 +1473,19 @@ describe("goal runtime", () => {
 		expect(executionSummary?.scopeCalibration?.deferredRelatedWork[0]?.rationale).toBe(
 			"Parent verification needs broader evidence.",
 		);
+		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
+		expect(executionGuardrails).toMatchObject({
+			payloadFilePath: targetPlanPayloadFilePath(approved.goal.currentTargetPlan?.planFilePath ?? "missing-plan.md"),
+			requiredSignals: [
+				expect.objectContaining({
+					method: approval.verificationSignals[0]?.method,
+					confidenceIfSatisfied: approval.verificationSignals[0]?.confidenceIfSatisfied,
+				}),
+			],
+		});
+		expect(executionGuardrails).not.toHaveProperty("verificationAperture");
+		expect(executionGuardrails).not.toHaveProperty("concernChecks");
+		expect(executionGuardrails).not.toHaveProperty("scopeCalibration");
 	});
 
 	it("rejects target plans whose primary signal is not required", async () => {

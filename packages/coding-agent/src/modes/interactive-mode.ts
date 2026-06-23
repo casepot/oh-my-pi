@@ -2056,17 +2056,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async handleGoalTargetPlanApproved(details: GoalTargetPlanApprovedDetails): Promise<void> {
-		this.session.setGoalTargetPlanReference(details);
-		const targetPlanPrompt = this.session.renderGoalTargetPlanApprovedPrompt({
-			...details,
-			contextPreserved: true,
-		});
 		if (this.session.isStreaming) {
 			await this.session.abort({ goalReason: "internal" });
 		}
+		const targetPlanPrompt = await this.session.prepareGoalTargetPlanExecutionContext(details);
 		this.session.markGoalTargetPlanReferenceSent();
 		try {
-			await this.session.prompt(targetPlanPrompt, { synthetic: true });
+			await this.session.prompt(targetPlanPrompt, { synthetic: true, skipGoalModeContext: true });
 		} catch (error) {
 			this.session.setGoalTargetPlanReference(details);
 			throw error;

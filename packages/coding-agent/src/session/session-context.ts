@@ -57,6 +57,11 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+function isContextResetCompaction(entry: CompactionEntry): boolean {
+	const details = entry.details;
+	return typeof details === "object" && details !== null && "contextReset" in details && details.contextReset === true;
+}
+
 interface CompactGoalModeData {
 	goalId: string;
 	stateVersion: number;
@@ -338,7 +343,7 @@ export function buildSessionContext(
 		// Find compaction index in path
 		const compactionIdx = path.findIndex(e => e.type === "compaction" && e.id === compaction.id);
 
-		if (!remoteReplacementHistory) {
+		if (!remoteReplacementHistory && !isContextResetCompaction(compaction)) {
 			// Emit kept messages (before compaction, starting from firstKeptEntryId)
 			let foundFirstKept = false;
 			for (let i = 0; i < compactionIdx; i++) {

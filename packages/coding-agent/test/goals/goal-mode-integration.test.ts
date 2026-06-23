@@ -352,7 +352,11 @@ async function activeGoalTool(harness: GoalHarness): Promise<Tool> {
 	return goalTool;
 }
 
-async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: Tool): Promise<AgentToolResult> {
+async function writeAndSubmitApprovedTargetPlan(
+	harness: GoalHarness,
+	goalTool: Tool,
+	options: { planSentinel?: string } = {},
+): Promise<AgentToolResult> {
 	const state = harness.session.getGoalModeState();
 	const target = state?.goal.currentTarget;
 	const plan = state?.goal.currentTargetPlan;
@@ -366,6 +370,9 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 	await Bun.write(
 		resolvedPlanPath,
 		[
+			"# Approved target plan",
+			options.planSentinel ? options.planSentinel : "",
+			"",
 			"## Target Claim",
 			"",
 			"Target behavior is directly verified. Parent completion remains outside this target.",
@@ -394,6 +401,7 @@ async function writeAndSubmitApprovedTargetPlan(harness: GoalHarness, goalTool: 
 			user_visible_surface: "Target behavior",
 			acceptance_rows: { closed: ["happy path"], open: [] },
 			verification_scenarios: [`happy path ${primarySignalId}`],
+			review_lenses: ["implementation code review lens"],
 			checkpoint_evidence: ["Focused check passes."],
 		},
 		verification_aperture: {
@@ -814,21 +822,50 @@ describe("InteractiveMode goal mode integration", () => {
 		await harness.mode.handleGoalTargetPlanApproved(approval);
 
 		expect(abort).toHaveBeenCalledWith({ goalReason: "internal" });
-		expect(prompt).toHaveBeenCalledWith(expect.stringContaining("Goal target plan approved."), { synthetic: true });
+		expect(prompt).toHaveBeenCalledWith(expect.stringContaining("Goal target plan approved."), {
+			synthetic: true,
+			skipGoalModeContext: true,
+		});
+		const abortOrder = abort.mock.invocationCallOrder[0];
+		const promptOrder = prompt.mock.invocationCallOrder[0];
+		if (abortOrder === undefined || promptOrder === undefined) throw new Error("expected abort and prompt calls");
+		expect(abortOrder).toBeLessThan(promptOrder);
 		const approvedPrompt = prompt.mock.calls[0]?.[0];
 		if (typeof approvedPrompt !== "string") throw new Error("expected approved target plan prompt");
 		if (!approval.planHash) throw new Error("expected target plan hash");
+		expect(approvedPrompt).toContain("Goal target plan approved. Execute this approved current-target plan.");
 		expect(approvedPrompt).toContain("<approved_target_plan_ref");
 		expect(approvedPrompt).toContain(approval.planFilePath);
 		expect(approval.payloadFilePath).toBe(targetPlanPayloadFilePath(approval.planFilePath));
 		expect(approvedPrompt).toContain(approval.payloadFilePath);
 		expect(approvedPrompt).toContain(`payload_path="${approval.payloadFilePath}"`);
 		expect(approvedPrompt).toContain(approval.planHash);
-		expect(approvedPrompt).toContain("<approved_target_execution_summary>");
-		expect(approvedPrompt).toContain("approved execution summary supersedes earlier drafts");
+		expect(approvedPrompt).toContain("<approved_target_plan_markdown");
+		expect(approvedPrompt).toContain("# Approved target plan");
+		const planBlockIndex = approvedPrompt.indexOf("<approved_target_plan_markdown");
+		const refIndex = approvedPrompt.indexOf("<approved_target_plan_ref");
+		const guardrailsIndex = approvedPrompt.indexOf("<approved_target_execution_guardrails>");
+		expect(planBlockIndex).toBeGreaterThan(-1);
+		expect(refIndex).toBeGreaterThan(-1);
+		expect(guardrailsIndex).toBeGreaterThan(-1);
+		expect(planBlockIndex).toBeLessThan(refIndex);
+		expect(planBlockIndex).toBeLessThan(guardrailsIndex);
+		expect(approvedPrompt).toContain("<approved_target_execution_guardrails>");
+		expect(approvedPrompt).not.toContain("<approved_target_execution_summary>");
+		expect(approvedPrompt).toContain(
+			"Fresh execution context: planning/reviewer transcript was removed from model context.",
+		);
+		expect(approvedPrompt).not.toContain("approved execution summary supersedes earlier drafts");
 		expect(approvedPrompt).not.toContain("Context preserved. Use conversation history when useful");
 		expect(approvedPrompt).toContain("Run the focused check.");
+		expect(approvedPrompt).toContain('"confidenceIfSatisfied": "high"');
+		expect(approvedPrompt).toContain("implementation code review lens");
 		expect(approvedPrompt).toContain("Parent completion");
+		expect(approvedPrompt).not.toContain('"verificationAperture"');
+		expect(approvedPrompt).not.toContain('"scopeCalibration"');
+		expect(approvedPrompt).not.toContain('"scenarioRowsInScope"');
+		expect(approvedPrompt).not.toContain('"concernChecks"');
+		expect(approvedPrompt).not.toContain('"concernIds"');
 		expect(approvedPrompt).not.toContain("## Verification Signal Aperture");
 		expect(approvedPrompt).not.toContain("Primary signal: focused target evidence.");
 		const state = harness.session.getGoalModeState();
@@ -846,6 +883,59 @@ describe("InteractiveMode goal mode integration", () => {
 				remainingQuestions: [],
 			}),
 		).not.toThrow("no active parent");
+	});
+
+	it("resets model-visible context after target-plan approval", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target", {
+			op: "start_target",
+			title: "Prove source-link smoke",
+			desired_future_claim: "Source-link install exercises smoke path.",
+			closure_standard: "Current smoke output exists.",
+		});
+		harness.session.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "PLANNING_SENTINEL_SHOULD_NOT_REACH_EXECUTION_CONTEXT" }],
+			timestamp: Date.now(),
+		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool, {
+			planSentinel: "APPROVED_PLAN_SENTINEL_REACHES_EXECUTION_CONTEXT",
+		});
+		const approval = harness.session.getGoalTargetPlanReference();
+		if (!approval) throw new Error("expected target-plan approval details");
+
+		let messagesBeforePrompt = "";
+		const prompt = vi.spyOn(harness.session, "prompt").mockImplementation(async targetPlanPrompt => {
+			messagesBeforePrompt = JSON.stringify(harness.session.state.messages);
+			harness.session.sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: String(targetPlanPrompt) }],
+				timestamp: Date.now(),
+			});
+			return true;
+		});
+
+		await harness.mode.handleGoalTargetPlanApproved(approval);
+
+		expect(prompt).toHaveBeenCalledWith(expect.stringContaining("Goal target plan approved."), {
+			synthetic: true,
+			skipGoalModeContext: true,
+		});
+		expect(messagesBeforePrompt).toContain("Target plan approved; execution context reset.");
+		expect(messagesBeforePrompt).not.toContain("PLANNING_SENTINEL_SHOULD_NOT_REACH_EXECUTION_CONTEXT");
+		const contextText = JSON.stringify(harness.session.buildDisplaySessionContext().messages);
+		expect(contextText).toContain(
+			"Goal target plan approved; planning and reviewer transcript intentionally removed from execution context.",
+		);
+		expect(contextText).toContain("<approved_target_plan_markdown");
+		expect(contextText).toContain("<approved_target_execution_guardrails>");
+		expect(contextText).toContain("APPROVED_PLAN_SENTINEL_REACHES_EXECUTION_CONTEXT");
+		expect(contextText).toContain("implementation code review lens");
+		expect(contextText).toContain("confidenceIfSatisfied");
+		expect(contextText).not.toContain("<goal_context>");
+		expect(contextText).not.toContain("PLANNING_SENTINEL_SHOULD_NOT_REACH_EXECUTION_CONTEXT");
+		expect(harness.session.getGoalModeState()?.runMode).toBe("working-target");
 	});
 
 	it("returns the recovered draft after auto-consolidated target-plan submit caps", async () => {

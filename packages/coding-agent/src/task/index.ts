@@ -1142,8 +1142,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 		// When the session is executing an approved plan, hand the overall plan to
 		// every subagent so they share the main agent's plan context. Goal target
-		// execution gets a bounded execution summary instead of full plan file
-		// contents so subagent context does not balloon.
+		// execution subagents get the approved target plan plus the structured
+		// execution summary guardrail.
 		const planReference = readOnlyPlanningActive
 			? undefined
 			: await loadOverallPlanReference(
@@ -1153,13 +1153,30 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const goalTargetPlanReferenceDetails = readOnlyPlanningActive
 			? undefined
 			: this.session.getGoalTargetPlanReference?.();
-		const targetPlanReference =
-			goalTargetPlanReferenceDetails?.executionSummary !== undefined
-				? {
-						path: goalTargetPlanReferenceDetails.planFilePath,
-						content: JSON.stringify(goalTargetPlanReferenceDetails.executionSummary, null, 2),
-					}
-				: undefined;
+		let targetPlanReference: { path: string; content: string } | undefined;
+		if (goalTargetPlanReferenceDetails) {
+			const loadedTargetPlan = await loadOverallPlanReference(
+				goalTargetPlanReferenceDetails.planFilePath,
+				localProtocolOptions,
+			);
+			if (loadedTargetPlan) {
+				targetPlanReference = {
+					path: goalTargetPlanReferenceDetails.planFilePath,
+					content: [
+						"Approved goal target plan markdown:",
+						loadedTargetPlan.content,
+						"",
+						"Approved target execution summary:",
+						JSON.stringify(goalTargetPlanReferenceDetails.executionSummary ?? {}, null, 2),
+					].join("\n"),
+				};
+			} else if (goalTargetPlanReferenceDetails.executionSummary !== undefined) {
+				targetPlanReference = {
+					path: goalTargetPlanReferenceDetails.planFilePath,
+					content: JSON.stringify(goalTargetPlanReferenceDetails.executionSummary, null, 2),
+				};
+			}
+		}
 
 		try {
 			// Check self-recursion prevention

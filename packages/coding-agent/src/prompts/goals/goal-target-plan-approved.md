@@ -1,29 +1,18 @@
-Goal target plan approved.
-{{#if contextPreserved}}
-- Context preserved for raw evidence only. The approved execution summary supersedes earlier drafts, failed payloads, lint diagnostics, reviewer rejections, and payload repairs.
+Goal target plan approved. Execute this approved current-target plan.
+
+{{#if approvedPlanMarkdown}}
+<approved_target_plan_markdown path="{{planFilePath}}">
+{{approvedPlanMarkdown}}
+</approved_target_plan_markdown>
 {{/if}}
 
-<instruction>
-You MUST execute the approved current target. Goal mode remains active.
-You MAY implement only target `{{targetId}}` using plan `{{targetPlanId}}` revision `{{revision}}`.
-Target-plan approval is not checkpoint completion.
-Target completion is not parent completion.
-{{#has tools "todo"}}
-Before execution, initialize todo tracking from the approved execution summary if `todo` remains allowed.
-After each completed step, immediately update `todo`.
-If the summary lacks exact sequencing, read the plan file and initialize todos from the exact plan steps.
-{{/has}}
-Start from the approved execution summary. The plan file is a detail/recovery artifact:
-- path: `{{planFilePath}}`
-- payload: `{{payloadFilePath}}`
-- hash: `{{planHash}}`
-- bytes: `{{planBytes}}`
-Read the plan only if exact file/symbol/command/recovery detail is missing from the summary.
-{{#if executionSummary}}
+<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
 
-<approved_target_execution_summary>
-{{executionSummary}}
-</approved_target_execution_summary>
+<execution_context>
+{{#if contextPreserved}}
+- Context preserved for raw evidence only.
+{{else}}
+- Fresh execution context: planning/reviewer transcript was removed from model context.
 {{/if}}
 {{#if planDepth}}
 - plan_depth: `{{planDepth}}`
@@ -38,17 +27,33 @@ Read the plan only if exact file/symbol/command/recovery detail is missing from 
 - workstreams: {{workstreamSummary}}
 {{/if}}
 {{#if implementationFanoutRequired}}
-- Implementation fanout is recommended by summary metadata only if `task` remains allowed and you can split by workstream contract. NEVER spawn tasks automatically from this notice.
+- Implementation fanout is recommended by guardrail metadata only if `task` remains allowed and you can split by workstream contract. NEVER spawn tasks automatically from this notice.
 {{/if}}
-Use target card/matrix summaries as execution guardrails; the plan file remains authority for exact details only when needed.
-</instruction>
+</execution_context>
 
-<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
+{{#if executionGuardrails}}
+<approved_target_execution_guardrails>
+{{executionGuardrails}}
+</approved_target_execution_guardrails>
+{{/if}}
+
+<instruction>
+You MUST execute the approved current target. Goal mode remains active.
+You MAY implement only target `{{targetId}}` using plan `{{targetPlanId}}` revision `{{revision}}`.
+Target-plan approval is not checkpoint completion.
+Target completion is not parent completion.
+{{#has tools "todo"}}
+Before execution, initialize todo tracking from the approved Markdown plan first if `todo` remains allowed.
+Use the execution guardrails to check closure signals and fanout.
+After each completed step, immediately update `todo`.
+{{/has}}
+Use target card/matrix summaries as execution guardrails; the approved Markdown plan remains authority.
+</instruction>
 
 <critical>
 - Execute only the approved current target.
 - Satisfy every required verification signal before checkpointing.
-- Code/behavior changes require post-green code review before commit/checkpoint.
+- Code/behavior changes require post-green code review before commit/checkpoint; use execution guardrails `reviewLenses` when present.
 - Call `goal({op:"checkpoint"})` only after the closure standard is met with current evidence.
 - NEVER call parent completion because this target plan was approved.
 - Keep going until the target checkpoint is accepted or goal mode asks for another controller action.

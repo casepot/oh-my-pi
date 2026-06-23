@@ -1,17 +1,14 @@
 Approved goal target plan reference.
 
-<instruction>
-Use the approved execution summary as authority for the current target only. It does not prove target closure or parent completion.
-If current goal state no longer matches this target, ignore this reference and call `goal({op:"get"})`.
-</instruction>
+{{#if approvedPlanMarkdown}}
+<approved_target_plan_markdown path="{{planFilePath}}">
+{{approvedPlanMarkdown}}
+</approved_target_plan_markdown>
+{{/if}}
 
 <approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
-{{#if executionSummary}}
 
-<approved_target_execution_summary>
-{{executionSummary}}
-</approved_target_execution_summary>
-{{/if}}
+<execution_context>
 {{#if planDepth}}
 - plan_depth: `{{planDepth}}`
 {{/if}}
@@ -22,8 +19,19 @@ If current goal state no longer matches this target, ignore this reference and c
 - scenario_matrix: {{matrixRowCounts}}
 {{/if}}
 {{#if implementationFanoutRequired}}
-- fanout: recommended by approved summary metadata; NEVER spawn tasks automatically from this reference.
+- fanout: recommended by approved guardrail metadata; NEVER spawn tasks automatically from this reference.
+{{/if}}
+- payload_sidecar: `{{payloadFilePath}}`
+</execution_context>
+
+{{#if executionGuardrails}}
+<approved_target_execution_guardrails>
+{{executionGuardrails}}
+</approved_target_execution_guardrails>
 {{/if}}
 
-Read the plan file only if exact file/symbol/command/recovery detail is missing from the summary.
-Payload sidecar: `{{payloadFilePath}}`.
+<instruction>
+Use the approved Markdown plan as authority for the current target only.
+Use the execution guardrails as structured guardrails, not a replacement for the plan.
+If current goal state no longer matches this target, ignore this reference and call `goal({op:"get"})`.
+</instruction>

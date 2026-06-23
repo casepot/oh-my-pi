@@ -218,6 +218,7 @@ import {
 } from "../goals/compaction-continuation";
 import {
 	buildGoalContinuationPacket,
+	buildGoalTargetPlanExecutionGuardrails,
 	buildGoalTargetPlanExecutionSummary,
 	completionBudgetReport,
 	currentTargetPlanSubmitIdentity,
@@ -632,6 +633,8 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt (internal use for maintenance flows). */
 	skipCompactionCheck?: boolean;
+	/** Internal goal-controller prompts already carry goal context; skip the automatic goal-mode prelude. */
+	skipGoalModeContext?: boolean;
 }
 
 /** Result from a handoff operation. */
@@ -3274,11 +3277,13 @@ export class AgentSession {
 		const continuePrompt = async () => {
 			let promptText = autoContinuePrompt;
 			let prependMessages: AgentMessage[] | undefined;
+			let skipGoalModeContext = false;
 			const goalState = this.#goalModeState;
 			if (goalState?.enabled && goalState.goal.status === "active") {
 				const dispatch = await this.prepareGoalContinuationDispatch();
 				if (!dispatch) return;
 				promptText = dispatch.prompt;
+				skipGoalModeContext = true;
 				if (dispatch.kind === "target-planning") {
 					await this.#ensureGoalTargetPlanningToolsActive();
 				}
@@ -3301,6 +3306,7 @@ export class AgentSession {
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages,
+					skipGoalModeContext,
 				},
 			);
 		};
@@ -4464,16 +4470,21 @@ export class AgentSession {
 		this.#providerSessionState.clear();
 	}
 
-	freshSession(): FreshSessionResult | undefined {
-		if (this.isStreaming) return undefined;
-		const previousSessionId = this.sessionId;
+	#resetProviderConversation(reason: string): number {
 		const closedProviderSessions = this.#providerSessionState.size;
-		this.#closeAllProviderSessions("fresh session");
+		this.#closeAllProviderSessions(reason);
 		this.#freshProviderSessionId = Bun.randomUUIDv7();
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
+		return closedProviderSessions;
+	}
+
+	freshSession(): FreshSessionResult | undefined {
+		if (this.isStreaming) return undefined;
+		const previousSessionId = this.sessionId;
+		const closedProviderSessions = this.#resetProviderConversation("fresh session");
 		return {
 			previousSessionId,
 			sessionId: this.sessionId,
@@ -7652,7 +7663,64 @@ export class AgentSession {
 		this.#goalTargetPlanReference = undefined;
 	}
 
-	renderGoalTargetPlanApprovedPrompt(input: GoalTargetPlanApprovedDetails & { contextPreserved?: boolean }): string {
+	async prepareGoalTargetPlanExecutionContext(details: GoalTargetPlanApprovedDetails): Promise<string> {
+		this.setGoalTargetPlanReference(details);
+
+		const resolvedPlanPath = resolveLocalUrlToPath(
+			normalizeLocalScheme(details.planFilePath),
+			this.#localProtocolOptions(),
+		);
+		let approvedPlanMarkdown: string;
+		try {
+			approvedPlanMarkdown = await Bun.file(resolvedPlanPath).text();
+		} catch (error) {
+			if (isEnoent(error)) throw new ToolError("approved target plan file is missing or empty");
+			throw error;
+		}
+		if (!approvedPlanMarkdown.trim()) {
+			throw new ToolError("approved target plan file is missing or empty");
+		}
+
+		const contextBefore = this.buildDisplaySessionContext();
+		const tokensBefore = contextBefore.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+		const boundaryBefore = buildGoalBoundaryStateRef(this.#goalModeState, "approved-plan");
+		const goalCompactionRefresh = this.#refreshGoalCompactionPreserveData(undefined, boundaryBefore);
+		this.sessionManager.appendCompaction(
+			"Goal target plan approved; planning and reviewer transcript intentionally removed from execution context. Execute from the approved plan prompt, compact guardrails, and current goal state.",
+			"Target plan approved; execution context reset.",
+			"__goal_target_plan_execution_context_reset__",
+			tokensBefore,
+			{
+				kind: "goal-target-plan-execution-context-reset",
+				contextReset: true,
+				targetId: details.targetId,
+				targetPlanId: details.targetPlanId,
+				revision: details.revision,
+				planFilePath: details.planFilePath,
+				payloadFilePath: details.payloadFilePath,
+				planHash: details.planHash,
+			},
+			false,
+			goalCompactionRefresh.preserveData,
+		);
+		this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, goalCompactionRefresh.auditRecord);
+
+		this.#resetProviderConversation("goal target plan execution context reset");
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#advisorRuntime?.reset();
+
+		return this.renderGoalTargetPlanApprovedPrompt({
+			...details,
+			contextPreserved: false,
+			approvedPlanMarkdown,
+		});
+	}
+
+	renderGoalTargetPlanApprovedPrompt(
+		input: GoalTargetPlanApprovedDetails & { contextPreserved?: boolean; approvedPlanMarkdown?: string },
+	): string {
+		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(input.executionSummary);
 		return prompt.render(goalTargetPlanApprovedPrompt, {
 			targetId: input.targetId,
 			targetPlanId: input.targetPlanId,
@@ -7662,6 +7730,7 @@ export class AgentSession {
 			planFilePath: input.planFilePath,
 			payloadFilePath: input.payloadFilePath,
 			contextPreserved: input.contextPreserved === true,
+			approvedPlanMarkdown: input.approvedPlanMarkdown,
 			planDepth: input.planDepth,
 			primarySignalGroupId: input.primarySignalGroupId,
 			matrixRowCounts: input.matrixRowCounts
@@ -7671,7 +7740,7 @@ export class AgentSession {
 			workstreamSummary: input.workstreamSummary?.length
 				? JSON.stringify(input.workstreamSummary, null, 2)
 				: undefined,
-			executionSummary: input.executionSummary ? JSON.stringify(input.executionSummary, null, 2) : undefined,
+			executionGuardrails: executionGuardrails ? JSON.stringify(executionGuardrails, null, 2) : undefined,
 		});
 	}
 
@@ -7846,25 +7915,24 @@ export class AgentSession {
 
 		let planHash = reference.planHash;
 		let planBytes = reference.planBytes;
-		if (!planHash || planBytes === undefined) {
-			const resolvedPlanPath = resolveLocalUrlToPath(
-				normalizeLocalScheme(reference.planFilePath),
-				this.#localProtocolOptions(),
-			);
-			let planContent: string;
-			try {
-				const planFile = Bun.file(resolvedPlanPath);
-				planContent = await planFile.text();
-				planHash = Bun.hash(planContent).toString(16);
-				planBytes = planFile.size;
-			} catch (error) {
-				if (isEnoent(error)) return null;
-				throw error;
-			}
+		const resolvedPlanPath = resolveLocalUrlToPath(
+			normalizeLocalScheme(reference.planFilePath),
+			this.#localProtocolOptions(),
+		);
+		let planContent: string;
+		try {
+			const planFile = Bun.file(resolvedPlanPath);
+			planContent = await planFile.text();
 			if (!planContent.trim()) return null;
+			planHash ??= Bun.hash(planContent).toString(16);
+			planBytes ??= planFile.size;
+		} catch (error) {
+			if (isEnoent(error)) return null;
+			throw error;
 		}
 		const executionSummary =
 			reference.executionSummary ?? buildGoalTargetPlanExecutionSummary(currentPlan, state.goal.currentTarget);
+		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
 
 		const content = prompt.render(goalTargetPlanReferencePrompt, {
 			targetId: reference.targetId,
@@ -7874,13 +7942,14 @@ export class AgentSession {
 			planBytes,
 			planFilePath: reference.planFilePath,
 			payloadFilePath: reference.payloadFilePath,
+			approvedPlanMarkdown: planContent,
 			planDepth: reference.planDepth,
 			primarySignalGroupId: reference.primarySignalGroupId,
 			matrixRowCounts: reference.matrixRowCounts
 				? `in_scope=${reference.matrixRowCounts.inScope}, left_open=${reference.matrixRowCounts.leftOpen}`
 				: undefined,
 			implementationFanoutRequired: reference.implementationFanoutRequired === true,
-			executionSummary: executionSummary ? JSON.stringify(executionSummary, null, 2) : undefined,
+			executionGuardrails: executionGuardrails ? JSON.stringify(executionGuardrails, null, 2) : undefined,
 		});
 		this.#appendGoalBoundaryAudit({
 			kind: "target-plan-reference",
@@ -7893,10 +7962,19 @@ export class AgentSession {
 					targetPlanRevision: reference.revision ?? currentPlan.revision,
 				}),
 			],
-			preservedFields: ["targetId", "targetPlanId", "revision", "planFilePath", "planHash", "planBytes"],
+			preservedFields: [
+				"targetId",
+				"targetPlanId",
+				"revision",
+				"planFilePath",
+				"planHash",
+				"planBytes",
+				"fullPlanContent",
+			],
 			staleFields: [],
-			omittedFields: ["fullPlanContent"],
-			recoveryInstruction: "Read the plan file only if exact execution details are needed.",
+			omittedFields: [],
+			recoveryInstruction:
+				"Use the inlined approved plan; read the file only if the inline block is missing or corrupted.",
 			action: "accepted",
 		});
 		reference.sent = true;
@@ -8225,7 +8303,7 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "skipGoalModeContext"> & {
 			prependMessages?: AgentMessage[];
 			appendMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
@@ -8288,9 +8366,11 @@ export class AgentSession {
 			if (planModeMessage) {
 				messages.push(planModeMessage);
 			}
-			const goalModeMessage = this.#buildGoalModeMessage();
-			if (goalModeMessage) {
-				messages.push(goalModeMessage);
+			if (!options?.skipGoalModeContext) {
+				const goalModeMessage = this.#buildGoalModeMessage();
+				if (goalModeMessage) {
+					messages.push(goalModeMessage);
+				}
 			}
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
