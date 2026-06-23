@@ -15,7 +15,7 @@ Canonical payload fields:
 - `scope_calibration`
 - `branch_evidence`
 - `excluded_work_review`
-- `workflow_review_rounds`
+- `target_plan_reviews`
 - `dry_run`
 
 Graph-lint-required for modern plans unless low-risk light legacy lint accepts omission:
@@ -109,12 +109,18 @@ Optional top-level metadata:
 - `checkpoint_evidence: string[]`
 - `rollback_cutover?`
 
-`workflow_review_rounds[]`:
-- `lens`
-- `verdict`
-- `summary`
-- `blockers: string[]`
-- `revised: boolean`
+`target_plan_reviews[]`:
+- `id`
+- `lens`: `aperture` or `execution-readiness`
+- `status`
+- `feedback`
+- aperture only: `aperture_classification`, `revision_decision`, `scores`
+- `scores?: { product_signal, related_work_bundling, concern_cohesion, verification_aperture, blast_radius_coverage, parent_uncertainty_reduction, anti_gaming }`
+- `findings: { id, severity, problem, required_revision, supporting_evidence? }[]`
+- `reviewed_target_plan_id`
+- `reviewed_revision`
+- `source: { kind, reviewer_id?, artifact_uri?, validation_uri? }`
+- `revised_after_review`
 
 `dry_run`:
 - `status`
@@ -134,7 +140,10 @@ Enum fields classify. Rationale/role/lens fields preserve product meaning. NEVER
 - `scenario_matrix.rows_left_open[].reason`: `different-primary-signal`, `different-authority`, `different-blast-radius`, `blocked-external`, `non-goal`, `unsafe-to-bundle`
 - `excluded_work_review[].classification`: `valid-boundary`, `parent-non-claim`, `essential-related-work`, `stale-or-unsupported`
 - `target_card.workstreams[].kind`: `main`, `backend-rust`, `app-ui`, `e2e-harness`, `docs-changelog`, `other`
-- `workflow_review_rounds[].verdict`: `accepted`, `revision-required`
+- `target_plan_reviews[].lens`: `aperture`, `execution-readiness`
+- `target_plan_reviews[].status`: `accepted`, `rejected`, `failed`, `stale`
+- `target_plan_reviews[].aperture_classification`: `right-sized`, `too-narrow`, `too-broad`, `stale`, `unclear`
+- `target_plan_reviews[].revision_decision`: `keep`, `merge-required`, `split-required`, `rescope-required`, `refresh-intention`, `needs-user-input`
 - `dry_run.status`: `passed`, `failed`
 
 ## Graph lint invariants
@@ -241,8 +250,40 @@ Enum fields classify. Rationale/role/lens fields preserve product meaning. NEVER
   "excluded_work_review": [
     { "item": "Parent completion", "classification": "parent-non-claim", "rationale": "Out of target scope." }
   ],
-  "workflow_review_rounds": [
-    { "lens": "local self-check", "verdict": "accepted", "summary": "Payload and Markdown agree.", "blockers": [], "revised": false }
+  "target_plan_reviews": [
+    {
+      "id": "review-aperture-r1",
+      "lens": "aperture",
+      "status": "accepted",
+      "feedback": "Target is right-sized for signal-primary.",
+      "aperture_classification": "right-sized",
+      "revision_decision": "keep",
+      "scores": {
+        "product_signal": 4,
+        "related_work_bundling": 4,
+        "concern_cohesion": 4,
+        "verification_aperture": 4,
+        "blast_radius_coverage": 4,
+        "parent_uncertainty_reduction": 4,
+        "anti_gaming": 4
+      },
+      "findings": [],
+      "reviewed_target_plan_id": "goal-1-target-1-plan-1",
+      "reviewed_revision": 1,
+      "source": { "kind": "subagent", "reviewer_id": "ApertureReview", "artifact_uri": "agent://ApertureReview" },
+      "revised_after_review": false
+    },
+    {
+      "id": "review-execution-r1",
+      "lens": "execution-readiness",
+      "status": "accepted",
+      "feedback": "Execution decisions and verification mapping are complete.",
+      "findings": [],
+      "reviewed_target_plan_id": "goal-1-target-1-plan-1",
+      "reviewed_revision": 1,
+      "source": { "kind": "subagent", "reviewer_id": "ExecutionReview", "artifact_uri": "agent://ExecutionReview" },
+      "revised_after_review": false
+    }
   ],
   "dry_run": { "status": "passed", "checks": [{ "id": "self-check", "passed": true, "rationale": "Plan is executable." }] }
 }
@@ -264,7 +305,17 @@ Use canonical snake_case only:
 - `excludedWorkReview` → `excluded_work_review`
 - `scenarioMatrix` → `scenario_matrix`
 - `targetCard` → `target_card`
-- `workflowReviewRounds` → `workflow_review_rounds`
+- `targetPlanReviews` → `target_plan_reviews`
+- `reviewedTargetPlanId` → `reviewed_target_plan_id`
+- `reviewedRevision` → `reviewed_revision`
+- `apertureClassification` → `aperture_classification`
+- `revisionDecision` → `revision_decision`
+- `requiredRevision` → `required_revision`
+- `supportingEvidence` → `supporting_evidence`
+- `reviewerId` → `reviewer_id`
+- `artifactUri` → `artifact_uri`
+- `validationUri` → `validation_uri`
+- `revisedAfterReview` → `revised_after_review`
 - `dryRun` → `dry_run`
 - `concernIds` → `concern_ids`
 - `expectedOutcome` → `expected_outcome`

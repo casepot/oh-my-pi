@@ -219,6 +219,23 @@ const DEFERRED_RELATED_WORK_REASON_VALUES = [
 	"non-goal",
 ] as const;
 const SCENARIO_MATRIX_OPEN_ROW_REASON_VALUES = [...DEFERRED_RELATED_WORK_REASON_VALUES, "unsafe-to-bundle"] as const;
+const TARGET_PLAN_REVIEW_LENS_VALUES = ["aperture", "execution-readiness"] as const;
+const TARGET_PLAN_REVIEW_STATUS_VALUES = ["accepted", "rejected", "failed", "stale"] as const;
+const TARGET_PLAN_APERTURE_CLASSIFICATION_VALUES = [
+	"right-sized",
+	"too-narrow",
+	"too-broad",
+	"stale",
+	"unclear",
+] as const;
+const TARGET_PLAN_REVISION_DECISION_VALUES = [
+	"keep",
+	"merge-required",
+	"split-required",
+	"rescope-required",
+	"refresh-intention",
+	"needs-user-input",
+] as const;
 
 const verificationLayerSchema = z.enum(VERIFICATION_LAYER_VALUES);
 const signalRoleSchema = z.enum(SIGNAL_ROLE_VALUES);
@@ -228,6 +245,10 @@ const concernKindSchema = z.enum(CONCERN_KIND_VALUES);
 const excludedWorkClassificationSchema = z.enum(EXCLUDED_WORK_CLASSIFICATION_VALUES);
 const targetPlanDepthSchema = z.enum(TARGET_PLAN_DEPTH_VALUES);
 const workstreamKindSchema = z.enum(WORKSTREAM_KIND_VALUES);
+const targetPlanReviewLensSchema = z.enum(TARGET_PLAN_REVIEW_LENS_VALUES);
+const targetPlanReviewStatusSchema = z.enum(TARGET_PLAN_REVIEW_STATUS_VALUES);
+const apertureClassificationSchema = z.enum(TARGET_PLAN_APERTURE_CLASSIFICATION_VALUES);
+const targetPlanRevisionDecisionSchema = z.enum(TARGET_PLAN_REVISION_DECISION_VALUES);
 type VerificationLayerValue = (typeof VERIFICATION_LAYER_VALUES)[number];
 type ConcernKindValue = (typeof CONCERN_KIND_VALUES)[number];
 
@@ -416,13 +437,51 @@ const targetCardSchema = z
 	})
 	.strict();
 
-const workflowReviewRoundSchema = z
+const targetPlanReviewScoresSchema = z
 	.object({
-		lens: z.string(),
-		verdict: z.enum(["accepted", "revision-required"]),
-		summary: z.string(),
-		blockers: z.array(z.string()),
-		revised: z.boolean(),
+		product_signal: z.number(),
+		related_work_bundling: z.number(),
+		concern_cohesion: z.number(),
+		verification_aperture: z.number(),
+		blast_radius_coverage: z.number(),
+		parent_uncertainty_reduction: z.number(),
+		anti_gaming: z.number(),
+	})
+	.strict();
+
+const targetPlanReviewFindingSchema = z
+	.object({
+		id: z.string(),
+		severity: z.enum(["blocking", "important", "polish"]),
+		problem: z.string(),
+		required_revision: z.string(),
+		supporting_evidence: z.string().optional(),
+	})
+	.strict();
+
+const targetPlanReviewSourceSchema = z
+	.object({
+		kind: z.enum(["subagent", "local"]),
+		reviewer_id: z.string().optional(),
+		artifact_uri: z.string().optional(),
+		validation_uri: z.string().optional(),
+	})
+	.strict();
+
+const targetPlanReviewSchema = z
+	.object({
+		id: z.string(),
+		lens: targetPlanReviewLensSchema,
+		status: targetPlanReviewStatusSchema,
+		feedback: z.string(),
+		aperture_classification: apertureClassificationSchema.optional(),
+		revision_decision: targetPlanRevisionDecisionSchema.optional(),
+		scores: targetPlanReviewScoresSchema.optional(),
+		findings: z.array(targetPlanReviewFindingSchema),
+		reviewed_target_plan_id: z.string(),
+		reviewed_revision: z.number().int().min(1),
+		source: targetPlanReviewSourceSchema,
+		revised_after_review: z.boolean(),
 	})
 	.strict();
 
@@ -607,7 +666,7 @@ const targetPlanPayloadShape = {
 	scope_calibration: scopeCalibrationSchema,
 	branch_evidence: z.array(branchEvidenceSchema).min(1),
 	excluded_work_review: z.array(excludedWorkReviewSchema),
-	workflow_review_rounds: z.array(workflowReviewRoundSchema).min(1),
+	target_plan_reviews: z.array(targetPlanReviewSchema).min(1),
 	dry_run: targetPlanDryRunSchema,
 };
 const targetPlanPayloadSchema = z.object(targetPlanPayloadShape).strict();
@@ -638,7 +697,17 @@ const TARGET_PLAN_PAYLOAD_FIELD_ALIASES: Record<string, string> = {
 	knownLimits: "known_limits",
 	verificationScenarios: "verification_scenarios",
 	checkpointEvidence: "checkpoint_evidence",
-	workflowReviewRounds: "workflow_review_rounds",
+	targetPlanReviews: "target_plan_reviews",
+	reviewedTargetPlanId: "reviewed_target_plan_id",
+	reviewedRevision: "reviewed_revision",
+	apertureClassification: "aperture_classification",
+	revisionDecision: "revision_decision",
+	requiredRevision: "required_revision",
+	supportingEvidence: "supporting_evidence",
+	reviewerId: "reviewer_id",
+	artifactUri: "artifact_uri",
+	validationUri: "validation_uri",
+	revisedAfterReview: "revised_after_review",
 	dryRun: "dry_run",
 	productIntention: "product_intention",
 	confidenceTarget: "confidence_target",
@@ -1092,6 +1161,45 @@ function mapTargetCard(params: z.infer<typeof targetCardSchema>): GoalSubmitTarg
 	};
 }
 
+function mapTargetPlanReview(params: z.infer<typeof targetPlanReviewSchema>): GoalTargetPlanReview {
+	return {
+		id: params.id,
+		lens: params.lens,
+		status: params.status,
+		feedback: params.feedback,
+		apertureClassification: params.aperture_classification,
+		revisionDecision: params.revision_decision,
+		scores: params.scores
+			? {
+					productSignal: params.scores.product_signal,
+					relatedWorkBundling: params.scores.related_work_bundling,
+					concernCohesion: params.scores.concern_cohesion,
+					verificationAperture: params.scores.verification_aperture,
+					blastRadiusCoverage: params.scores.blast_radius_coverage,
+					parentUncertaintyReduction: params.scores.parent_uncertainty_reduction,
+					antiGaming: params.scores.anti_gaming,
+				}
+			: undefined,
+		findings: params.findings.map(finding => ({
+			id: finding.id,
+			severity: finding.severity,
+			problem: finding.problem,
+			requiredRevision: finding.required_revision,
+			supportingEvidence: finding.supporting_evidence,
+		})),
+		reviewedAt: Date.now(),
+		reviewedTargetPlanId: params.reviewed_target_plan_id,
+		reviewedRevision: params.reviewed_revision,
+		source: {
+			kind: params.source.kind,
+			reviewerId: params.source.reviewer_id,
+			artifactUri: params.source.artifact_uri,
+			validationUri: params.source.validation_uri,
+		},
+		revisedAfterReview: params.revised_after_review,
+	};
+}
+
 function mapSubmitTargetPlanInput(
 	params: TargetPlanPayloadParams & { op?: "submit_target_plan" },
 ): GoalSubmitTargetPlanInput {
@@ -1170,7 +1278,7 @@ function mapSubmitTargetPlanInput(
 			classification: item.classification,
 			rationale: item.rationale,
 		})),
-		workflowReviewRounds: params.workflow_review_rounds.map(round => ({ ...round })),
+		targetPlanReviews: params.target_plan_reviews.map(review => mapTargetPlanReview(review)),
 		dryRun: {
 			status: params.dry_run.status,
 			checks: params.dry_run.checks.map(check => ({ ...check })),
@@ -1987,7 +2095,10 @@ function renderTargetPlanEnumReminder(): string {
 		`  rows_left_open.reason: ${SCENARIO_MATRIX_OPEN_ROW_REASON_VALUES.join(", ")}`,
 		`  excluded_work_review.classification: ${EXCLUDED_WORK_CLASSIFICATION_VALUES.join(", ")}`,
 		`  workstream kind: ${WORKSTREAM_KIND_VALUES.join(", ")}`,
-		"  workflow_review_rounds[].verdict: accepted, revision-required",
+		`  target_plan_reviews[].lens: ${TARGET_PLAN_REVIEW_LENS_VALUES.join(", ")}`,
+		`  target_plan_reviews[].status: ${TARGET_PLAN_REVIEW_STATUS_VALUES.join(", ")}`,
+		`  target_plan_reviews[].aperture_classification: ${TARGET_PLAN_APERTURE_CLASSIFICATION_VALUES.join(", ")}`,
+		`  target_plan_reviews[].revision_decision: ${TARGET_PLAN_REVISION_DECISION_VALUES.join(", ")}`,
 		"  dry_run.status: passed, failed",
 	].join("\n");
 }

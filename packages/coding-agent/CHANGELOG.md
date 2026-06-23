@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added a reusable `plan-review` skill and target-planning prompt guidance for explicit planning review evidence.
 - Added goal target-plan linting, target cards, scenario-matrix metadata, and a live target status panel for goal planning.
 
 - Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
@@ -22,6 +23,7 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed goal target-plan approval to consume submitted `target_plan_reviews` evidence, including target-plan id, revision, source, and stale-after-review checks, instead of hidden reviewer subprocesses.
 - Changed approved goal target-plan execution context to start from the approved plan and use compact execution guardrails instead of duplicating full goal summaries.
 - Changed goal target-plan approval to reset execution context around the approved plan while preserving goal state and session history.
 - Changed approved target-plan execution summaries to carry review lenses and verification signal details for post-green implementation review.

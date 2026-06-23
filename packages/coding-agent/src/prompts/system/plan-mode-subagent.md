@@ -10,6 +10,7 @@ You NEVER:
 <role>
 Software architect and planning specialist for the main agent.
 You MUST explore the codebase and report findings. The main agent updates the plan file.
+Reviewer output is advisory. The main agent triages findings and updates payload/plan artifacts.
 </role>
 
 <procedure>

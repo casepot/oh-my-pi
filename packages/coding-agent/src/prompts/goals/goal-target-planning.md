@@ -29,7 +29,7 @@ Tool availability:
 - `targetPlanSubmitIdentity.payloadFilePath` is the lint/submit authority.
 - Initial payload creation MUST use JSON text, not executable Python/JS object literals.
 - Markdown updates are REQUIRED only for executor-visible semantic changes: target claim, scope boundary, branch, workstream, verification scenario, known limit, or implementation step.
-- Schema-only payload fixes NEVER cause Markdown churn: ids, ordering, enum normalization, `target_unit_rule_ids`, `workflow_review_rounds`, or lint-only cross-reference repairs.
+- Schema-only payload fixes NEVER cause Markdown churn: ids, ordering, enum normalization, `target_unit_rule_ids`, `target_plan_reviews`, or lint-only cross-reference repairs.
 - After `submit_target_plan`, stop ordinary work and wait for the result.
 </critical>
 
@@ -52,36 +52,43 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 3. Validate target aperture against product signal, same-signal work, blast radius, and parent deliverables.
 4. Use required discovery lenses: architecture/data flow, callsites/contracts, tests/verification.
 5. Use docs/external lens only when repo evidence cannot answer.
-6. Spawn planning-only `agent()`/`task` reviewers or decomposers when independent lenses materially reduce uncertainty.
-7. Keep evidence in context; write only decisions needed by the executor.
-8. Patch the Markdown plan only when the change removes an executor decision or changes executor-visible semantics.
-9. Missing/empty plan or payload? Use `write`; payload content is JSON text.
-10. Existing payload changes? Use `edit`, `eval`, or bash-run `jq`/`python`; parse existing JSON and write JSON back.
-11. Trust-heavy/code/behavior/security/privacy/authority/multi-workstream/cross-subsystem targets MUST run a pre-submit planning review before first submit.
-   - Use planning-only `agent()`/`task` when available; otherwise local review and record why no subagent was available in `workflow_review_rounds`.
-   - Review execution-oracle gaps, branch coverage, schema/lint invariants, and Markdown/payload agreement.
-12. Run an adversarial planner review for all other targets: subagent review when cross-cutting/unclear, otherwise local self-review using aperture/execution bars.
-13. Broad execution-readiness rejection with ≥3 missing decision categories, or a second rejection from the same lens, means rewrite one fresh authoritative plan from accepted scope plus blockers; delete stale/revision text and do not accrete patches.
-14. Narrow rejection with 1-2 concrete missing details means patch only those details.
-15. A blocker that demands pages of literals MUST identify the contract, behavior, or verification outcome those literals fix; otherwise record compact implementation guidance.
-16. Revise until the material acceptance delta is closed; preserve accepted aperture and still-valid product/contract decisions.
-17. If no valid plan exists, call `fail_target_plan` with exact reason: `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`.
-18. Lint with `goal({op:"lint_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
-19. Fix diagnostics by patching addressed payload fields first.
-20. Patch Markdown only when the fix changes executor-visible semantics.
+6. Use `plan-review` skill cadence for explicit review evidence.
+7. Prefer `task` for planning-mode reviewers; it preserves LSP and IRC.
+8. Use `eval agent()` only for structured fanout where LSP is irrelevant.
+9. NEVER use bundled `plan` agent as target-plan reviewer during planning; it requires spawning `explore`, but planning restriction removes spawns.
+10. Keep evidence in context; write only decisions needed by the executor.
+11. Patch the Markdown plan only when the change removes an executor decision or changes executor-visible semantics.
+12. Missing/empty plan or payload? Use `write`; payload content is JSON text.
+13. Existing payload changes? Use `edit`, `eval`, or bash-run `jq`/`python`; parse existing JSON and write JSON back.
+14. Run required aperture review before submit: right-sizing, same-signal bundling, matrix/scope calibration, target-unit rules.
+15. Run required execution-readiness review before submit: decision completeness, contracts, state/failure/stale behavior, branch oracles, verification mapping.
+16. Trust-heavy/cross-subsystem targets SHOULD run fresh domain/authority/test-proof reviewers.
+17. Triage every finding; revise, restructure, reject noise, defer pre-existing, or fail formally.
+18. Fixed blocker? Ask the original reviewer by IRC to validate only that finding.
+19. Fresh convergence reviewers search for new issues; they NEVER validate old fixes.
+20. Broad execution-readiness rejection with ≥3 missing decision categories, or a second rejection from the same lens, means rewrite one fresh authoritative plan from accepted scope plus blockers; delete stale/revision text and do not accrete patches.
+21. Narrow rejection with 1-2 concrete missing details means patch only those details.
+22. A blocker that demands pages of literals MUST identify the contract, behavior, or verification outcome those literals fix; otherwise record compact implementation guidance.
+23. Revise until the material acceptance delta is closed; preserve accepted aperture and still-valid product/contract decisions.
+24. If no valid plan exists, call `fail_target_plan` with exact reason: `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`.
+25. Lint with `goal({op:"lint_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
+26. Fix diagnostics by patching addressed payload fields first.
+27. Patch Markdown only when the fix changes executor-visible semantics.
 
 Local self-check before submit MUST confirm:
 - No guessed schema keys remain; every payload key is from `target_plan_schema` or accepted lint diagnostics.
 - Markdown has `## Target Claim`, `## Implementation`, and `## Verification` only when they carry execution decisions.
 - Markdown and payload agree on executor-visible semantics: target claim, scope boundary, branch rows, workstreams, verification signals, and known limits.
 - The payload identity exactly matches `targetPlanSubmitIdentity`.
-- The plan is self-contained; it never depends on prior attempts, hidden reviewer context, or future product/contract/policy choices.
+- The plan is self-contained; it never depends on prior attempts, unsubmitted review context, or future product/contract/policy choices.
 - Code/API/storage/schema targets define externally visible contracts, invariants, state transitions, observable branch outcomes, assertion commands, and exact contract/verification literals.
 - Exact literals are required when tests, users, storage, protocols, policies, or cross-language seams consume them; private helpers/fixtures are exact only when they change target truth or verification.
 - No row says `same as above`, `etc.`, `TBD`, `use prior attempt`, or names a schema/helper without the values needed for its observable branch.
+- `target_plan_reviews` includes current accepted `aperture` and `execution-readiness` gate reviews for this exact target_plan_id/revision.
+- Accepted gate reviews have `revised_after_review:false`; plan edits after review require original-reviewer IRC validation or a fresh review.
 - `dry_run` records observed plan-artifact checks for this exact plan/payload; schema citations or self-approval prose are not evidence.
 - Code/behavior targets schedule post-green code review before commit/checkpoint.
-21. Submit with `goal({op:"submit_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
+28. Submit with `goal({op:"submit_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
 
 ## Plan file
 
@@ -104,7 +111,7 @@ Markdown plan and payload JSON are sibling artifacts. Payload JSON is the machin
 They MUST agree on executor-visible semantics: target claim, scope boundaries, branches, workstreams, verification scenarios, and known limits. They do not need mirrored schema bookkeeping prose.
 
 Write the payload object to `targetPlanSubmitIdentity.payloadFilePath`; do NOT paste the full object into `goal` tool calls. Lint/submit via `payload_file_path`. Use strict tool-schema field names:
-- Top-level JSON fields: `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `primary_signal_group_id`, `plan_depth`, `scenario_matrix`, `target_card`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `workflow_review_rounds`, `dry_run`.
+- Top-level JSON fields: `target_id`, `target_plan_id`, `plan_file_path`, `revision`, `primary_signal_group_id`, `plan_depth`, `scenario_matrix`, `target_card`, `verification_aperture`, `verification_signals`, `concern_checks`, `scope_calibration`, `branch_evidence`, `excluded_work_review`, `target_plan_reviews`, `dry_run`.
 - Required object shapes:
   - `verification_aperture`: `product_intention`, `primary_signal_id`, `blast_radius`, optional `blast_radius_scope`, `confidence_target`, optional `confidence_rationale`, `layer_rationale`, `residual_uncertainty: string[]`, `omitted_layers: {layer, reason}[]`.
   - `verification_signals[]`: `id`, `role`, `layer`, `concern_ids: string[]`, `claim`, `observation`, `method`, `expected_outcome`, `required: boolean`, `confidence_if_satisfied`, optional `confidence_rationale`, `stale_if: string[]`.
@@ -112,7 +119,7 @@ Write the payload object to `targetPlanSubmitIdentity.payloadFilePath`; do NOT p
   - `scope_calibration`: `right_sizing_basis`, optional `right_sizing_rationale`, `why_not_smaller: string[]`, `why_not_larger: string[]`, `included_related_work: {item, reason, signal_ids}[]`, `deferred_related_work: {item, reason, rationale?, follow_up_hint?}[]`, optional `target_unit_rule_ids`, `target_unit_exemptions`.
   - `branch_evidence[]`: `branch`, optional `row_ids: string[]`, `required: boolean`, `planned_signal_ids: string[]`, `rationale`.
   - `excluded_work_review[]`: `item`, `classification`, `rationale`.
-  - `workflow_review_rounds[]`: `lens`, `verdict`, `summary`, `blockers: string[]`, `revised: boolean`.
+  - `target_plan_reviews[]`: `id`, `lens`, `status`, `feedback`, aperture-only `aperture_classification`, `revision_decision`, `scores`, `findings: {id, severity, problem, required_revision, supporting_evidence?}[]`, `reviewed_target_plan_id`, `reviewed_revision`, `source`, `revised_after_review`.
   - `dry_run`: `status`, `checks: {id, passed, rationale}[]`.
   - `scenario_matrix`: `id`, `primary_signal_group_id`, `rows_in_scope: {id, branch, signal_ids, concern_ids, acceptance, expected_outcome, stale_if}[]`, `rows_left_open: {id, branch, reason, rationale?, follow_up_hint}[]`, `splitting_safety: {safe, rationale}`, optional `next_larger_target`.
   - `target_card`: `capability_claim`, `known_limits: string[]`, `user_visible_surface`, `acceptance_rows: {closed, open}`, `verification_scenarios: string[]`, `checkpoint_evidence: string[]`; standard/trust-heavy also need `workstreams: {id, label, kind, role?, files, contract_inputs, contract_outputs}[]` and `review_lenses: string[]`; trust-heavy also needs `confidence_earned`, `rollback_cutover`, `trust_privacy_claim`, `authority_boundary`, `policy_deletion_implications`.
@@ -132,7 +139,7 @@ Write the payload object to `targetPlanSubmitIdentity.payloadFilePath`; do NOT p
 - `verification_signals[].concern_ids`, `concern_checks[].covered_by_signal_ids`, `scope_calibration.included_related_work[].signal_ids`, and `branch_evidence[].planned_signal_ids` MUST reference submitted IDs.
 - `scope_calibration.why_not_smaller` MUST reject micro-targets; `why_not_larger` MUST name the independent signal/boundary that splits.
 - `excluded_work_review` includes only load-bearing exclusions; classify essential same-signal exclusions as unsafe and revise/fail.
-- `workflow_review_rounds` MUST record the actual planner review performed: task review when used, otherwise local self-review. NEVER fabricate an unavailable reviewer or schema citation as review.
+- `target_plan_reviews` MUST record explicit planning review evidence. Required gate lenses: `aperture` and `execution-readiness`. NEVER fabricate reviewers, artifacts, validation replies, or schema citations as review.
 - `dry_run.status` MUST be `"passed"` and every `dry_run.checks[]` item MUST have `passed: true`; failed or unobserved simulation means revise or `fail_target_plan`.
 
 <critical>

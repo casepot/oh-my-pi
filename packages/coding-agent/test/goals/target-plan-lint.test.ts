@@ -137,8 +137,8 @@ describe("target-plan lint rules", () => {
 		expect(diagnostic).toMatchObject({
 			severity: "info",
 			blocksSubmission: false,
-			path: "/workflow_review_rounds",
-			message: "target unit rule is checked by target-plan reviewers",
+			path: "/target_plan_reviews",
+			message: "target unit rule is checked by target-plan review evidence",
 		});
 		expect(diagnostic?.guidance).toContain(customRule.statement);
 		expect(diagnostic?.guidance).toContain("No payload edit is required");
@@ -160,8 +160,8 @@ describe("target-plan lint rules", () => {
 		expect(diagnostic).toMatchObject({
 			severity: "info",
 			blocksSubmission: false,
-			path: "/workflow_review_rounds",
-			message: "target unit rule is checked by target-plan reviewers",
+			path: "/target_plan_reviews",
+			message: "target unit rule is checked by target-plan review evidence",
 		});
 		expect(diagnostic?.guidance).toContain(customRule.statement);
 		expect(diagnostic?.guidance).toContain("No payload edit is required");

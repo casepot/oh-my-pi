@@ -236,7 +236,6 @@ import {
 	renderGoalStateSnapshot,
 	sanitizeGoalPlanSlug,
 	targetPlanPayloadFilePath,
-	targetPlanPayloadFromSubmitInput,
 } from "../goals/runtime";
 import {
 	type GoalCheckpointGuidanceOutput,
@@ -244,22 +243,16 @@ import {
 	type GoalCompletionVerifierOutput,
 	type GoalContinuationCompactorOutput,
 	type GoalRubricOutput,
-	type GoalTargetApertureReviewerOutput,
-	type GoalTargetExecutionReviewerOutput,
 	goalCheckpointGuidanceAgent,
 	goalCheckpointReviewerAgent,
 	goalCompletionVerifierAgent,
 	goalContinuationCompactorAgent,
 	goalRubricAgent,
-	goalTargetApertureReviewerAgent,
-	goalTargetExecutionReviewerAgent,
 	renderGoalCheckpointGuidanceAssignment,
 	renderGoalCheckpointReviewerAssignment,
 	renderGoalCompletionVerifierAssignment,
 	renderGoalContinuationCompactorAssignment,
 	renderGoalRubricAssignment,
-	renderGoalTargetApertureReviewerAssignment,
-	renderGoalTargetExecutionReviewerAssignment,
 	renderPreparedGoalContinuation,
 } from "../goals/side-agents";
 import type {
@@ -1363,92 +1356,6 @@ function parseGoalCheckpointReviewerOutput(value: unknown): GoalCheckpointReview
 	};
 }
 
-function parseTargetPlanReviewFinding(value: unknown): GoalTargetPlanReview["findings"][number] | undefined {
-	if (!isStringRecord(value)) return undefined;
-	if (
-		typeof value.id !== "string" ||
-		typeof value.problem !== "string" ||
-		typeof value.requiredRevision !== "string"
-	) {
-		return undefined;
-	}
-	if (value.severity !== "blocking" && value.severity !== "important" && value.severity !== "polish") {
-		return undefined;
-	}
-	return {
-		id: value.id,
-		severity: value.severity,
-		problem: value.problem,
-		requiredRevision: value.requiredRevision,
-		supportingEvidence: typeof value.supportingEvidence === "string" ? value.supportingEvidence : undefined,
-	};
-}
-
-function parseTargetPlanReviewFindings(value: unknown): GoalTargetPlanReview["findings"] {
-	return Array.isArray(value) ? value.flatMap(item => parseTargetPlanReviewFinding(item) ?? []) : [];
-}
-
-function parseTargetPlanReviewScores(value: unknown): GoalTargetPlanReview["scores"] | undefined {
-	if (!isStringRecord(value)) return undefined;
-	const score = {
-		productSignal: value.productSignal,
-		relatedWorkBundling: value.relatedWorkBundling,
-		concernCohesion: value.concernCohesion,
-		verificationAperture: value.verificationAperture,
-		blastRadiusCoverage: value.blastRadiusCoverage,
-		parentUncertaintyReduction: value.parentUncertaintyReduction,
-		antiGaming: value.antiGaming,
-	};
-	if (Object.values(score).some(item => typeof item !== "number" || !Number.isFinite(item))) return undefined;
-	return score as GoalTargetPlanReview["scores"];
-}
-
-function parseGoalTargetApertureReviewerOutput(value: unknown): GoalTargetApertureReviewerOutput | undefined {
-	if (!isStringRecord(value)) return undefined;
-	if (value.status !== "accepted" && value.status !== "rejected") return undefined;
-	if (typeof value.feedback !== "string") return undefined;
-	if (
-		value.apertureClassification !== "right-sized" &&
-		value.apertureClassification !== "too-narrow" &&
-		value.apertureClassification !== "too-broad" &&
-		value.apertureClassification !== "stale" &&
-		value.apertureClassification !== "unclear"
-	) {
-		return undefined;
-	}
-	if (
-		value.revisionDecision !== "keep" &&
-		value.revisionDecision !== "merge-required" &&
-		value.revisionDecision !== "split-required" &&
-		value.revisionDecision !== "rescope-required" &&
-		value.revisionDecision !== "refresh-intention" &&
-		value.revisionDecision !== "needs-user-input"
-	) {
-		return undefined;
-	}
-	const scores = parseTargetPlanReviewScores(value.scores);
-	if (!scores) return undefined;
-	return {
-		status: value.status,
-		feedback: value.feedback,
-		apertureClassification: value.apertureClassification,
-		revisionDecision: value.revisionDecision,
-		scores,
-		findings: parseTargetPlanReviewFindings(value.findings),
-	};
-}
-
-function parseGoalTargetExecutionReviewerOutput(value: unknown): GoalTargetExecutionReviewerOutput | undefined {
-	if (!isStringRecord(value)) return undefined;
-	if (value.status !== "accepted" && value.status !== "rejected") return undefined;
-	if (typeof value.feedback !== "string") return undefined;
-	return {
-		status: value.status,
-		feedback: value.feedback,
-		findings: parseTargetPlanReviewFindings(value.findings),
-	};
-}
-
 function parseGoalCheckpointGuidanceOutput(value: unknown): GoalCheckpointGuidanceOutput | undefined {
 	if (!isStringRecord(value) || typeof value.continuationMessage !== "string") return undefined;
 	return {
@@ -1565,40 +1472,6 @@ interface MaterializedProviderContextEstimate {
 }
 
 type AutoCompactionReason = "overflow" | "threshold" | "idle" | "incomplete";
-
-interface GoalTargetPlanReviewHistoryEntry {
-	id: string;
-	status: GoalTargetPlanRecord["status"];
-	revision: number;
-	planFilePath: string;
-	isCurrent: boolean;
-	recoveredFrom?: {
-		action: string;
-		reason: string;
-		guidance: string;
-		blockers: string[];
-	};
-	failure?: {
-		stage: string;
-		reason: string;
-		message: string;
-		blockers: string[];
-	};
-	reviews: Array<{
-		lens: GoalTargetPlanReview["lens"];
-		status: GoalTargetPlanReview["status"];
-		feedback: string;
-		apertureClassification?: GoalTargetPlanReview["apertureClassification"];
-		revisionDecision?: GoalTargetPlanReview["revisionDecision"];
-		findings: Array<{
-			id: string;
-			severity: string;
-			problem: string;
-			requiredRevision: string;
-			supportingEvidence?: string;
-		}>;
-	}>;
-}
 
 interface AutoCompactionOptions {
 	autoContinue?: boolean;
@@ -6077,7 +5950,7 @@ export class AgentSession {
 
 	async requestGoalTargetPlanApproval(
 		input: GoalSubmitTargetPlanInput,
-		signal?: AbortSignal,
+		_signal?: AbortSignal,
 	): Promise<{
 		goal: Goal | null;
 		state?: GoalModeState | null;
@@ -6119,7 +5992,7 @@ export class AgentSession {
 		}
 		if (!planContent.trim()) throw new ToolError("target plan file is missing or empty");
 		const expected = this.#goalRuntime.captureTargetPlanExpectation();
-		const reviews = await this.#reviewGoalTargetPlan(input, currentPlan, signal);
+		const reviews = input.targetPlanReviews;
 		if (!this.#goalRuntime.canCommitTargetPlanResult(expected)) {
 			await this.#goalRuntime.rejectCurrentTargetPlan({
 				targetPlanId: input.targetPlanId,
@@ -7063,121 +6936,6 @@ export class AgentSession {
 		};
 	}
 
-	async #reviewGoalTargetPlan(
-		input: GoalSubmitTargetPlanInput,
-		plan: GoalTargetPlanRecord,
-		signal?: AbortSignal,
-	): Promise<GoalTargetPlanReview[]> {
-		return await this.#withSerializedGoalSideAgent(async () => {
-			const state = this.#goalModeState;
-			if (!state?.goal) throw new Error("cannot review target plan because no goal is active");
-			const goalStateFile = await this.#writeGoalStateSnapshotFile("target-plan-review", state, {
-				includeRubric: true,
-			});
-			const goalStateSnapshot = renderGoalStateSnapshot(state, state.goal);
-			const artifactsDir = path.dirname(goalStateFile);
-			const safeGoalId = state.goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
-			const submissionFile = path.join(artifactsDir, `${Date.now()}-${safeGoalId}-target-plan-submission.json`);
-			await Bun.write(submissionFile, `${JSON.stringify(targetPlanPayloadFromSubmitInput(input), null, 2)}\n`);
-			const targetUnitRules = JSON.stringify(effectiveTargetUnitRules(state.goal), null, 2);
-			const planFile = resolveLocalUrlToPath(normalizeLocalScheme(plan.planFilePath), this.#localProtocolOptions());
-			const contextFile = await this.#writeGoalTargetPlanReviewContextFile({
-				state,
-				plan,
-				submission: input,
-				goalStateFile,
-				planFile,
-				submissionFile,
-				targetUnitRules,
-			});
-			return await Promise.all([
-				this.#runGoalTargetApertureReview({
-					contextFile,
-					goalStateFile,
-					goalStateSnapshot,
-					planFile,
-					submissionFile,
-					targetUnitRules,
-					signal,
-				}),
-				this.#runGoalTargetExecutionReview({
-					contextFile,
-					goalStateFile,
-					goalStateSnapshot,
-					planFile,
-					submissionFile,
-					targetUnitRules,
-					signal,
-				}),
-			]);
-		});
-	}
-
-	async #runGoalTargetApertureReview(input: {
-		contextFile: string;
-		goalStateFile: string;
-		goalStateSnapshot: string;
-		planFile: string;
-		submissionFile: string;
-		targetUnitRules?: string;
-		signal?: AbortSignal;
-	}): Promise<GoalTargetPlanReview> {
-		try {
-			const output = await this.#runGoalSideAgent({
-				agent: goalTargetApertureReviewerAgent,
-				assignment: renderGoalTargetApertureReviewerAssignment(input),
-				description: "Goal target aperture review",
-				contextFile: input.contextFile,
-				parse: parseGoalTargetApertureReviewerOutput,
-				signal: input.signal,
-			});
-			return {
-				id: `target-plan-aperture-review-${Date.now()}`,
-				lens: "aperture",
-				status: output.status,
-				feedback: output.feedback,
-				apertureClassification: output.apertureClassification,
-				revisionDecision: output.revisionDecision,
-				scores: output.scores,
-				findings: output.findings,
-				reviewedAt: Date.now(),
-			};
-		} catch (error) {
-			return this.#failedGoalTargetPlanReview("aperture", error);
-		}
-	}
-
-	async #runGoalTargetExecutionReview(input: {
-		contextFile: string;
-		goalStateFile: string;
-		goalStateSnapshot: string;
-		planFile: string;
-		submissionFile: string;
-		targetUnitRules?: string;
-		signal?: AbortSignal;
-	}): Promise<GoalTargetPlanReview> {
-		try {
-			const output = await this.#runGoalSideAgent({
-				agent: goalTargetExecutionReviewerAgent,
-				assignment: renderGoalTargetExecutionReviewerAssignment(input),
-				description: "Goal target execution-plan review",
-				contextFile: input.contextFile,
-				parse: parseGoalTargetExecutionReviewerOutput,
-				signal: input.signal,
-			});
-			return {
-				id: `target-plan-execution-review-${Date.now()}`,
-				lens: "execution-readiness",
-				status: output.status,
-				feedback: output.feedback,
-				findings: output.findings,
-				reviewedAt: Date.now(),
-			};
-		} catch (error) {
-			return this.#failedGoalTargetPlanReview("execution-readiness", error);
-		}
-	}
-
 	async #prepareGoalCheckpointGuidancePrompt(state: GoalModeState, signal?: AbortSignal): Promise<string> {
 		const checkpoint = state.goal.pendingCheckpointId
 			? state.goal.checkpoints?.find(packet => packet.id === state.goal.pendingCheckpointId)
@@ -7377,178 +7135,6 @@ export class AgentSession {
 			return dir;
 		}
 		return await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-goal-side-agents-"));
-	}
-
-	#goalTargetPlanReviewHistory(goal: Goal, currentPlan: GoalTargetPlanRecord): GoalTargetPlanReviewHistoryEntry[] {
-		const plansById = new Map<string, GoalTargetPlanRecord>();
-		for (const plan of goal.targetPlans ?? []) {
-			if (plan.targetId === currentPlan.targetId) plansById.set(plan.id, plan);
-		}
-		plansById.set(currentPlan.id, currentPlan);
-		return [...plansById.values()]
-			.filter(
-				plan =>
-					plan.id === currentPlan.id ||
-					plan.reviews.length > 0 ||
-					plan.failure !== undefined ||
-					plan.recoveredFrom !== undefined,
-			)
-			.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
-			.map(plan => ({
-				id: plan.id,
-				status: plan.status,
-				revision: plan.revision,
-				planFilePath: plan.planFilePath,
-				isCurrent: plan.id === currentPlan.id,
-				recoveredFrom: plan.recoveredFrom
-					? {
-							action: plan.recoveredFrom.action,
-							reason: plan.recoveredFrom.reason,
-							guidance: plan.recoveredFrom.guidance,
-							blockers: [...plan.recoveredFrom.blockers],
-						}
-					: undefined,
-				failure: plan.failure
-					? {
-							stage: plan.failure.stage,
-							reason: plan.failure.reason,
-							message: plan.failure.message,
-							blockers: [...plan.failure.blockers],
-						}
-					: undefined,
-				reviews: plan.reviews.map(review => ({
-					lens: review.lens,
-					status: review.status,
-					feedback: review.feedback,
-					apertureClassification: review.apertureClassification,
-					revisionDecision: review.revisionDecision,
-					findings: review.findings.map(finding => ({
-						id: finding.id,
-						severity: finding.severity,
-						problem: finding.problem,
-						requiredRevision: finding.requiredRevision,
-						supportingEvidence: finding.supportingEvidence,
-					})),
-				})),
-			}));
-	}
-
-	async #writeGoalTargetPlanReviewContextFile(input: {
-		state: GoalModeState;
-		plan: GoalTargetPlanRecord;
-		submission: GoalSubmitTargetPlanInput;
-		goalStateFile: string;
-		planFile: string;
-		submissionFile: string;
-		targetUnitRules: string;
-	}): Promise<string> {
-		const dir = path.dirname(input.goalStateFile);
-		await fs.promises.mkdir(dir, { recursive: true });
-		const goal = input.state.goal;
-		const target = goal.currentTarget;
-		const targetCard = input.submission.targetCard ?? input.plan.targetCard ?? target?.targetCard;
-		const safeGoalId = goal.id.replace(/[^A-Za-z0-9_-]/g, "_");
-		const filePath = path.join(dir, `${Date.now()}-${safeGoalId}-target-plan-review-context.txt`);
-		const latestCheckpoint = goal.checkpoints?.at(-1);
-		const latestResolution = goal.checkpointResolutions?.at(-1);
-		const checkpointSummary = latestCheckpoint
-			? {
-					id: latestCheckpoint.id,
-					status: latestCheckpoint.status,
-					summary: latestCheckpoint.summary,
-					localClaims: latestCheckpoint.localClaims,
-					notClaimed: latestCheckpoint.notClaimed,
-					remainingQuestions: latestCheckpoint.remainingQuestions,
-					reviewStatus: latestCheckpoint.review?.status,
-					reviewFeedback: latestCheckpoint.review?.feedback,
-				}
-			: null;
-		const resolutionSummary = latestResolution
-			? {
-					id: latestResolution.id,
-					checkpointId: latestResolution.checkpointId,
-					decision: latestResolution.decision,
-					parentReading: latestResolution.parentReading,
-					notPropagated: latestResolution.notPropagated,
-					remainingParentWork: latestResolution.remainingParentWork,
-					broaderChecksOrInputs: latestResolution.broaderChecksOrInputs,
-					lessonsForFuture: latestResolution.lessonsForFuture,
-					nextTargetTitle: latestResolution.nextTarget?.title,
-				}
-			: null;
-		const content = [
-			"# Focused target-plan review context",
-			"",
-			"## Current goal",
-			JSON.stringify(
-				{
-					id: goal.id,
-					title: goal.objective,
-					status: goal.status,
-					runMode: input.state.runMode,
-					stateVersion: input.state.stateVersion,
-					parentFrameVersion: input.state.parentFrameVersion,
-				},
-				null,
-				2,
-			),
-			"",
-			"## Compact goal prompt surface",
-			renderGoalPromptSurface(input.state, goal),
-			"",
-			"## Current target",
-			JSON.stringify(
-				{
-					id: target?.id,
-					title: target?.title,
-					status: target?.status,
-					capabilityClaim: targetCard?.capabilityClaim,
-					closureStandard: target?.closureStandard,
-					staleIf: target?.staleIf ?? [],
-					nonGoals: target?.nonGoals ?? [],
-					forbiddenClaims: target?.forbiddenClaims ?? [],
-					targetPlan: {
-						id: input.plan.id,
-						status: input.plan.status,
-						revision: input.plan.revision,
-						planDepth: input.submission.planDepth ?? input.plan.planDepth,
-					},
-				},
-				null,
-				2,
-			),
-			"",
-			"## Prior target-plan review history",
-			JSON.stringify(this.#goalTargetPlanReviewHistory(goal, input.plan), null, 2),
-			"",
-			"## Artifact references",
-			JSON.stringify(
-				{
-					goalStateFile: input.goalStateFile,
-					planMarkdownPath: input.plan.planFilePath,
-					resolvedPlanFile: input.planFile,
-					payloadSubmissionFile: input.submissionFile,
-					targetUnitRules: "inline below",
-				},
-				null,
-				2,
-			),
-			"",
-			"## Latest checkpoint summary",
-			JSON.stringify(checkpointSummary, null, 2),
-			"",
-			"## Latest checkpoint resolution summary",
-			JSON.stringify(resolutionSummary, null, 2),
-			"",
-			"## Target-unit rules",
-			input.targetUnitRules,
-			"",
-			"## Goal rubric",
-			goal.rubric ?? "(none)",
-			"",
-		].join("\n");
-		await Bun.write(filePath, content);
-		return filePath;
 	}
 
 	async #writeGoalTranscriptFile(

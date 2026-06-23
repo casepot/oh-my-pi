@@ -835,8 +835,8 @@ function collectTargetUnitDiagnostics(
 				lintDiagnostic({
 					severity: "info",
 					code: "target_unit.reviewer_required",
-					path: ["workflow_review_rounds"],
-					message: "target unit rule is checked by target-plan reviewers",
+					path: ["target_plan_reviews"],
+					message: "target unit rule is checked by target-plan review evidence",
 					guidance,
 					offender: { kind: "target_unit_rule", id: rule.id },
 				}),

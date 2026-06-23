@@ -178,18 +178,9 @@ export interface GoalSubmitTargetPlanInput {
 	scopeCalibration: GoalScopeCalibration;
 	branchEvidence: GoalTargetPlanBranchEvidence[];
 	excludedWorkReview: GoalTargetPlanExcludedWorkReview[];
-	workflowReviewRounds: GoalTargetPlanWorkflowReviewRound[];
+	targetPlanReviews: GoalTargetPlanReview[];
 	dryRun: GoalTargetPlanDryRun;
 }
-
-export interface GoalTargetPlanWorkflowReviewRound {
-	lens: string;
-	verdict: "accepted" | "revision-required";
-	summary: string;
-	blockers: string[];
-	revised: boolean;
-}
-
 export interface GoalTargetPlanDryRun {
 	status: "passed" | "failed";
 	checks: Array<{ id: string; passed: boolean; rationale: string }>;
@@ -293,13 +284,53 @@ export function targetPlanPayloadFromSubmitInput(input: GoalSubmitTargetPlanInpu
 			classification: item.classification,
 			rationale: item.rationale,
 		})),
-		workflow_review_rounds: input.workflowReviewRounds.map(round => ({
-			lens: round.lens,
-			verdict: round.verdict,
-			summary: round.summary,
-			blockers: round.blockers,
-			revised: round.revised,
-		})),
+		target_plan_reviews: input.targetPlanReviews.map(review => {
+			const item: Record<string, unknown> = {
+				id: review.id,
+				lens: review.lens,
+				status: review.status,
+				feedback: review.feedback,
+				findings: review.findings.map(finding => {
+					const findingItem: Record<string, unknown> = {
+						id: finding.id,
+						severity: finding.severity,
+						problem: finding.problem,
+						required_revision: finding.requiredRevision,
+					};
+					setIfDefined(findingItem, "supporting_evidence", finding.supportingEvidence);
+					return findingItem;
+				}),
+				reviewed_target_plan_id: review.reviewedTargetPlanId,
+				reviewed_revision: review.reviewedRevision,
+				source: review.source
+					? {
+							kind: review.source.kind,
+							reviewer_id: review.source.reviewerId,
+							artifact_uri: review.source.artifactUri,
+							validation_uri: review.source.validationUri,
+						}
+					: undefined,
+				revised_after_review: review.revisedAfterReview,
+			};
+			setIfDefined(item, "aperture_classification", review.apertureClassification);
+			setIfDefined(item, "revision_decision", review.revisionDecision);
+			setIfDefined(
+				item,
+				"scores",
+				review.scores
+					? {
+							product_signal: review.scores.productSignal,
+							related_work_bundling: review.scores.relatedWorkBundling,
+							concern_cohesion: review.scores.concernCohesion,
+							verification_aperture: review.scores.verificationAperture,
+							blast_radius_coverage: review.scores.blastRadiusCoverage,
+							parent_uncertainty_reduction: review.scores.parentUncertaintyReduction,
+							anti_gaming: review.scores.antiGaming,
+						}
+					: undefined,
+			);
+			return item;
+		}),
 		dry_run: {
 			status: input.dryRun.status,
 			checks: input.dryRun.checks.map(check => ({ id: check.id, passed: check.passed, rationale: check.rationale })),
@@ -1710,6 +1741,180 @@ function targetPlanRecoveryBlockersFromReviews(reviews: GoalTargetPlanReview[]):
 	return blockers;
 }
 
+function targetPlanReviewDiagnostic(input: {
+	severity: GoalTargetPlanLintDiagnostic["severity"];
+	code: string;
+	path: Array<string | number>;
+	message: string;
+	guidance: string;
+	review?: GoalTargetPlanReview;
+	value?: unknown;
+}): GoalTargetPlanLintDiagnostic {
+	return lintDiagnostic({
+		severity: input.severity,
+		code: input.code,
+		path: input.path,
+		message: input.message,
+		guidance: input.guidance,
+		offender: {
+			kind: "target_plan_review",
+			id: input.review?.id,
+			value: input.value,
+		},
+	});
+}
+
+function collectTargetPlanReviewEvidenceDiagnostics(input: GoalSubmitTargetPlanInput): GoalTargetPlanLintDiagnostic[] {
+	const diagnostics: GoalTargetPlanLintDiagnostic[] = [];
+	const reviewsByLens = new Map<
+		GoalTargetPlanReview["lens"],
+		Array<{ review: GoalTargetPlanReview; index: number }>
+	>();
+	input.targetPlanReviews.forEach((review, index) => {
+		const reviews = reviewsByLens.get(review.lens);
+		if (reviews) reviews.push({ review, index });
+		else reviewsByLens.set(review.lens, [{ review, index }]);
+	});
+	for (const lens of ["aperture", "execution-readiness"] as const) {
+		if (reviewsByLens.has(lens)) continue;
+		diagnostics.push(
+			targetPlanReviewDiagnostic({
+				severity: "error",
+				code: "review.missing_gate",
+				path: ["target_plan_reviews"],
+				message: `target_plan_reviews must include a current ${lens} gate review`,
+				guidance: "Run explicit planning-mode reviews and write their current evidence into target_plan_reviews.",
+				value: lens,
+			}),
+		);
+	}
+	input.targetPlanReviews.forEach((review, index) => {
+		if (review.reviewedTargetPlanId !== input.targetPlanId) {
+			diagnostics.push(
+				targetPlanReviewDiagnostic({
+					severity: "error",
+					code: "review.target_plan_mismatch",
+					path: ["target_plan_reviews", index, "reviewed_target_plan_id"],
+					message: "target plan review was not performed against the submitted target_plan_id",
+					guidance: "Rerun or revalidate the review against the current target_plan_id before submitting.",
+					review,
+					value: review.reviewedTargetPlanId,
+				}),
+			);
+		}
+		if (review.reviewedRevision !== input.revision) {
+			diagnostics.push(
+				targetPlanReviewDiagnostic({
+					severity: "error",
+					code: "review.revision_mismatch",
+					path: ["target_plan_reviews", index, "reviewed_revision"],
+					message: "target plan review revision does not match the submitted revision",
+					guidance: "Rerun or revalidate the review after every target plan revision.",
+					review,
+					value: review.reviewedRevision,
+				}),
+			);
+		}
+		if (review.status === "accepted" && review.revisedAfterReview === true) {
+			diagnostics.push(
+				targetPlanReviewDiagnostic({
+					severity: "error",
+					code: "review.stale_after_revision",
+					path: ["target_plan_reviews", index, "revised_after_review"],
+					message: "accepted gate review is marked stale after a plan revision",
+					guidance: "Ask the original reviewer to validate the fixed blocker or rerun the gate review.",
+					review,
+					value: review.revisedAfterReview,
+				}),
+			);
+		}
+		if (review.lens === "aperture") {
+			if (!review.apertureClassification) {
+				diagnostics.push(
+					targetPlanReviewDiagnostic({
+						severity: "error",
+						code: "review.aperture_classification_missing",
+						path: ["target_plan_reviews", index, "aperture_classification"],
+						message: "aperture review must include aperture_classification",
+						guidance: "Record the aperture reviewer classification for this revision.",
+						review,
+					}),
+				);
+			}
+			if (!review.revisionDecision) {
+				diagnostics.push(
+					targetPlanReviewDiagnostic({
+						severity: "error",
+						code: "review.revision_decision_missing",
+						path: ["target_plan_reviews", index, "revision_decision"],
+						message: "aperture review must include revision_decision",
+						guidance: "Record the aperture reviewer revision decision for this revision.",
+						review,
+					}),
+				);
+			}
+			if (!review.scores) {
+				diagnostics.push(
+					targetPlanReviewDiagnostic({
+						severity: "error",
+						code: "review.scores_missing",
+						path: ["target_plan_reviews", index, "scores"],
+						message: "aperture review must include all seven scores",
+						guidance:
+							"Record product_signal, related_work_bundling, concern_cohesion, verification_aperture, blast_radius_coverage, parent_uncertainty_reduction, and anti_gaming.",
+						review,
+					}),
+				);
+			}
+		}
+		if (input.planDepth !== "standard" && input.planDepth !== "trust-heavy") return;
+		const source = review.source;
+		if (!source) {
+			diagnostics.push(
+				targetPlanReviewDiagnostic({
+					severity: input.planDepth === "trust-heavy" ? "error" : "warning",
+					code: "review.source_missing",
+					path: ["target_plan_reviews", index, "source"],
+					message: "target plan review lacks source metadata",
+					guidance:
+						"Record subagent reviewer_id plus agent:// or history:// artifact, or use local only for low-risk plans.",
+					review,
+				}),
+			);
+			return;
+		}
+		if (source.kind === "local") {
+			diagnostics.push(
+				targetPlanReviewDiagnostic({
+					severity: input.planDepth === "trust-heavy" ? "error" : "warning",
+					code: "review.local_source",
+					path: ["target_plan_reviews", index, "source", "kind"],
+					message: "non-light target uses a local review source",
+					guidance:
+						"Use planning-mode subagent reviews for standard/trust-heavy plans, or explain task unavailability in feedback.",
+					review,
+					value: source.kind,
+				}),
+			);
+			return;
+		}
+		if (!source.reviewerId?.trim() || (!source.artifactUri?.trim() && !source.validationUri?.trim())) {
+			diagnostics.push(
+				targetPlanReviewDiagnostic({
+					severity: input.planDepth === "trust-heavy" ? "error" : "warning",
+					code: "review.subagent_source_incomplete",
+					path: ["target_plan_reviews", index, "source"],
+					message: "subagent review source must include reviewer_id and an artifact or validation URI",
+					guidance: "Record the reviewer id and agent://, history://, or validation URI for this review.",
+					review,
+					value: source,
+				}),
+			);
+		}
+	});
+	return diagnostics;
+}
+
 function nextRecoverySequence(goal: Goal): number {
 	return (goal.recoveryHistory?.reduce((max, record) => Math.max(max, record.sequence), 0) ?? 0) + 1;
 }
@@ -2091,6 +2296,26 @@ export class GoalRuntime {
 		const executionReview = input.reviews.find(review => review.lens === "execution-readiness");
 		if (!apertureReview || !executionReview) {
 			throw new Error("target plan requires aperture and execution-readiness reviews");
+		}
+		for (const review of input.reviews) {
+			if (review.reviewedTargetPlanId !== input.targetPlanId) {
+				throw new Error("target plan review target_plan_id does not match the submitted target plan");
+			}
+			if (review.reviewedRevision !== input.revision) {
+				throw new Error("target plan review revision does not match the submitted revision");
+			}
+			if (review.status === "accepted" && review.revisedAfterReview === true) {
+				throw new Error("accepted target plan review is stale after a plan revision");
+			}
+			if (review.lens === "aperture" && !review.apertureClassification) {
+				throw new Error("target plan aperture review must include aperture_classification");
+			}
+			if (review.lens === "aperture" && !review.revisionDecision) {
+				throw new Error("target plan aperture review must include revision_decision");
+			}
+			if (review.lens === "aperture" && !review.scores) {
+				throw new Error("target plan aperture review must include all seven scores");
+			}
 		}
 		if (input.reviews.some(review => review.status !== "accepted")) {
 			throw new Error("target plan cannot be approved with rejected or failed reviews");
@@ -3163,6 +3388,7 @@ export class GoalRuntime {
 					input.revision,
 				);
 			}
+			diagnostics.push(...collectTargetPlanReviewEvidenceDiagnostics(input));
 			diagnostics.push(
 				...collectTargetPlanGraphDiagnostics(input, {
 					mode,

@@ -169,14 +169,17 @@ function createHarness(initial: { state?: TestGoalModeStateInput; usage?: GoalTo
 	};
 }
 
-function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
+function acceptedTargetPlanReview(
+	lens: GoalTargetPlanReview["lens"],
+	overrides: Partial<GoalTargetPlanReview> = {},
+): GoalTargetPlanReview {
 	return {
 		id: `review-${lens}`,
 		lens,
 		status: "accepted",
 		feedback: `${lens} accepted the target plan.`,
 		apertureClassification: lens === "aperture" ? "right-sized" : undefined,
-		revisionDecision: "keep",
+		revisionDecision: lens === "aperture" ? "keep" : undefined,
 		scores:
 			lens === "aperture"
 				? {
@@ -191,6 +194,16 @@ function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTarge
 				: undefined,
 		findings: [],
 		reviewedAt: 1,
+		reviewedTargetPlanId: "target-plan-id",
+		reviewedRevision: 1,
+		source: {
+			kind: "subagent",
+			reviewerId: `${lens}-reviewer`,
+			artifactUri: `agent://${lens}-reviewer`,
+			validationUri: `agent://${lens}-reviewer/validation`,
+		},
+		revisedAfterReview: false,
+		...overrides,
 	};
 }
 
@@ -293,11 +306,21 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 		excludedWorkReview: [
 			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
 		],
-		workflowReviewRounds: [
-			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
+		targetPlanReviews: [
+			acceptedTargetPlanReview("aperture", { reviewedTargetPlanId: plan.id, reviewedRevision: plan.revision }),
+			acceptedTargetPlanReview("execution-readiness", {
+				reviewedTargetPlanId: plan.id,
+				reviewedRevision: plan.revision,
+			}),
 		],
 		dryRun: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
-		reviews: [acceptedTargetPlanReview("aperture"), acceptedTargetPlanReview("execution-readiness")],
+		reviews: [
+			acceptedTargetPlanReview("aperture", { reviewedTargetPlanId: plan.id, reviewedRevision: plan.revision }),
+			acceptedTargetPlanReview("execution-readiness", {
+				reviewedTargetPlanId: plan.id,
+				reviewedRevision: plan.revision,
+			}),
+		],
 	};
 }
 
@@ -1423,6 +1446,36 @@ describe("goal runtime", () => {
 		expect(() => harness.runtime.validateCurrentTargetPlanSubmission({ ...approval, revision: 99 })).toThrow(
 			`revision must equal currentTargetPlan.revision (${approval.revision}); got 99`,
 		);
+	});
+
+	it("rejects target-plan reviews whose evidence targets another plan or revision", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		const planning = await harness.runtime.startTarget({
+			title: "Prove installer smoke",
+			desiredFutureClaim: "Installer smoke exercises worker startup.",
+			closureStandard: "Focused smoke evidence exists.",
+		});
+		const approval = buildTargetPlanApprovalInput(planning);
+		const withReviewPatch = (
+			lens: GoalTargetPlanReview["lens"],
+			patch: Partial<GoalTargetPlanReview>,
+		): GoalTargetPlanApprovalInput => ({
+			...approval,
+			reviews: approval.reviews.map(review => (review.lens === lens ? { ...review, ...patch } : review)),
+		});
+
+		await expect(
+			harness.runtime.approveCurrentTargetPlan(
+				withReviewPatch("execution-readiness", { reviewedTargetPlanId: "previous-plan" }),
+			),
+		).rejects.toThrow("target plan review target_plan_id does not match the submitted target plan");
+		await expect(
+			harness.runtime.approveCurrentTargetPlan(withReviewPatch("execution-readiness", { reviewedRevision: 0 })),
+		).rejects.toThrow("target plan review revision does not match the submitted revision");
+		await expect(
+			harness.runtime.approveCurrentTargetPlan(withReviewPatch("aperture", { revisedAfterReview: true })),
+		).rejects.toThrow("accepted target plan review is stale after a plan revision");
 	});
 
 	it("approves right-sized target plans and carries verification signals onto the target", async () => {

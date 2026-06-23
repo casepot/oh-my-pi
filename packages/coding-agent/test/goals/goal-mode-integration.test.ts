@@ -68,16 +68,7 @@ type GoalSideAgentMock = {
 	checkpointReviewStatus: "accepted" | "rejected";
 	checkpointReviewFeedback: string;
 	checkpointGuidance: string;
-	targetExecutionReviewStatus: "accepted" | "rejected";
-	targetExecutionReviewFeedback: string;
-	targetExecutionReviewFindings: Array<{
-		id: string;
-		severity: "blocking" | "important" | "polish";
-		problem: string;
-		requiredRevision: string;
-	}>;
 };
-
 let goalSideAgentMock: GoalSideAgentMock;
 let goalSideAgentCalls: ExecutorOptions[];
 
@@ -116,16 +107,6 @@ function installGoalSideAgentMock(): void {
 		checkpointReviewStatus: "accepted",
 		checkpointReviewFeedback: "Checkpoint target is locally closed and bounded.",
 		checkpointGuidance: "Controller must resolve the checkpoint before local work resumes.",
-		targetExecutionReviewStatus: "accepted",
-		targetExecutionReviewFeedback: "Execution plan is complete.",
-		targetExecutionReviewFindings: [
-			{
-				id: "verification-command",
-				severity: "polish",
-				problem: "Verification command could be more explicit.",
-				requiredRevision: "Name the behavior proved by the command.",
-			},
-		],
 	};
 	goalSideAgentCalls = [];
 	vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
@@ -203,31 +184,6 @@ function installGoalSideAgentMock(): void {
 					goalSideAgentMock.checkpointReviewStatus === "accepted"
 						? undefined
 						: goalSideAgentMock.continuationFocus,
-			});
-		}
-		if (options.agent.name === "goal-target-aperture-reviewer") {
-			return createSideAgentResult(options, {
-				status: "accepted",
-				feedback: "Target aperture is right-sized.",
-				apertureClassification: "right-sized",
-				revisionDecision: "keep",
-				scores: {
-					productSignal: 4,
-					relatedWorkBundling: 4,
-					concernCohesion: 4,
-					verificationAperture: 4,
-					blastRadiusCoverage: 4,
-					parentUncertaintyReduction: 4,
-					antiGaming: 4,
-				},
-				findings: [],
-			});
-		}
-		if (options.agent.name === "goal-target-execution-reviewer") {
-			return createSideAgentResult(options, {
-				status: goalSideAgentMock.targetExecutionReviewStatus,
-				feedback: goalSideAgentMock.targetExecutionReviewFeedback,
-				findings: goalSideAgentMock.targetExecutionReviewFindings,
 			});
 		}
 		if (options.agent.name === "goal-checkpoint-guidance") {
@@ -355,13 +311,32 @@ async function activeGoalTool(harness: GoalHarness): Promise<Tool> {
 async function writeAndSubmitApprovedTargetPlan(
 	harness: GoalHarness,
 	goalTool: Tool,
-	options: { planSentinel?: string } = {},
+	options: {
+		planSentinel?: string;
+		executionReviewStatus?: "accepted" | "rejected";
+		executionReviewFeedback?: string;
+		executionReviewFindings?: Array<{
+			id: string;
+			severity: "blocking" | "important" | "polish";
+			problem: string;
+			requiredRevision: string;
+		}>;
+	} = {},
 ): Promise<AgentToolResult> {
 	const state = harness.session.getGoalModeState();
 	const target = state?.goal.currentTarget;
 	const plan = state?.goal.currentTargetPlan;
 	if (!state?.enabled || !target || !plan) throw new Error("expected active target plan");
 	const primarySignalId = `signal-${target.id}`;
+	const executionReviewStatus = options.executionReviewStatus ?? "accepted";
+	const executionReviewFindings = options.executionReviewFindings ?? [
+		{
+			id: "verification-command",
+			severity: "polish" as const,
+			problem: "Verification command could be more explicit.",
+			requiredRevision: "Name the behavior proved by the command.",
+		},
+	];
 	const localProtocolOptions = {
 		getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
 		getSessionId: () => harness.session.sessionManager.getSessionId(),
@@ -463,8 +438,55 @@ async function writeAndSubmitApprovedTargetPlan(
 		excluded_work_review: [
 			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
 		],
-		workflow_review_rounds: [
-			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
+		target_plan_reviews: [
+			{
+				id: "review-aperture",
+				lens: "aperture",
+				status: "accepted",
+				feedback: "Target aperture is right-sized.",
+				reviewed_target_plan_id: plan.id,
+				reviewed_revision: plan.revision,
+				revised_after_review: false,
+				source: {
+					kind: "subagent",
+					reviewer_id: "aperture-reviewer",
+					artifact_uri: "agent://aperture-reviewer",
+					validation_uri: "agent://aperture-reviewer/validation",
+				},
+				aperture_classification: "right-sized",
+				revision_decision: "keep",
+				scores: {
+					product_signal: 4,
+					related_work_bundling: 4,
+					concern_cohesion: 4,
+					verification_aperture: 4,
+					blast_radius_coverage: 4,
+					parent_uncertainty_reduction: 4,
+					anti_gaming: 4,
+				},
+				findings: [],
+			},
+			{
+				id: "review-execution-readiness",
+				lens: "execution-readiness",
+				status: executionReviewStatus,
+				feedback: options.executionReviewFeedback ?? "Execution plan is complete.",
+				reviewed_target_plan_id: plan.id,
+				reviewed_revision: plan.revision,
+				revised_after_review: false,
+				source: {
+					kind: "subagent",
+					reviewer_id: "execution-reviewer",
+					artifact_uri: "agent://execution-reviewer",
+					validation_uri: "agent://execution-reviewer/validation",
+				},
+				findings: executionReviewFindings.map(finding => ({
+					id: finding.id,
+					severity: finding.severity,
+					problem: finding.problem,
+					required_revision: finding.requiredRevision,
+				})),
+			},
 		],
 		dry_run: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
 	};
@@ -940,16 +962,6 @@ describe("InteractiveMode goal mode integration", () => {
 
 	it("returns the recovered draft after auto-consolidated target-plan submit caps", async () => {
 		await harness.mode.handleGoalModeCommand("Improve release reliability");
-		goalSideAgentMock.targetExecutionReviewStatus = "rejected";
-		goalSideAgentMock.targetExecutionReviewFeedback = "Execution plan is missing the verification command.";
-		goalSideAgentMock.targetExecutionReviewFindings = [
-			{
-				id: "verification-command",
-				severity: "blocking",
-				problem: "Verification command is missing.",
-				requiredRevision: "Name the exact command and behavior it proves.",
-			},
-		];
 		const goalTool = await activeGoalTool(harness);
 		await goalTool.execute("target", {
 			op: "start_target",
@@ -960,7 +972,18 @@ describe("InteractiveMode goal mode integration", () => {
 
 		let result: AgentToolResult | undefined;
 		for (let index = 0; index < 3; index += 1) {
-			result = await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+			result = await writeAndSubmitApprovedTargetPlan(harness, goalTool, {
+				executionReviewStatus: "rejected",
+				executionReviewFeedback: "Execution plan is missing the verification command.",
+				executionReviewFindings: [
+					{
+						id: "verification-command",
+						severity: "blocking",
+						problem: "Verification command is missing.",
+						requiredRevision: "Name the exact command and behavior it proves.",
+					},
+				],
+			});
 		}
 
 		expect(result?.details?.state?.runMode).toBe("planning-target");
@@ -978,7 +1001,7 @@ describe("InteractiveMode goal mode integration", () => {
 		);
 	});
 
-	it("reviews target plans from focused context artifacts", async () => {
+	it("approves from submitted planning review evidence without hidden target-plan reviewers", async () => {
 		await harness.mode.handleGoalModeCommand("Improve release reliability");
 		harness.session.sessionManager.appendMessage({
 			role: "user",
@@ -993,14 +1016,25 @@ describe("InteractiveMode goal mode integration", () => {
 			closure_standard: "Current smoke output exists.",
 		});
 		const targetState = harness.session.getGoalModeState();
-		const targetId = targetState?.goal.currentTarget?.id;
 		const targetPlanId = targetState?.goal.currentTargetPlan?.id;
-		if (!targetId || !targetPlanId) throw new Error("expected target and target plan ids");
+		if (!targetPlanId) throw new Error("expected target plan id");
 
 		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
 		const storedExecutionReview = harness.session
 			.getGoalModeState()
 			?.goal.currentTargetPlan?.reviews.find(review => review.lens === "execution-readiness");
+		expect(storedExecutionReview).toMatchObject({
+			lens: "execution-readiness",
+			status: "accepted",
+			reviewedTargetPlanId: targetPlanId,
+			revisedAfterReview: false,
+			source: {
+				kind: "subagent",
+				reviewerId: "execution-reviewer",
+				artifactUri: "agent://execution-reviewer",
+				validationUri: "agent://execution-reviewer/validation",
+			},
+		});
 		expect(storedExecutionReview?.findings.map(finding => finding.id)).toEqual(["verification-command"]);
 		expect(storedExecutionReview?.findings.some(finding => finding.id.startsWith("MISSING_EXECUTION_DETAIL_"))).toBe(
 			false,
@@ -1009,80 +1043,7 @@ describe("InteractiveMode goal mode integration", () => {
 		const reviewerCalls = goalSideAgentCalls.filter(call =>
 			["goal-target-aperture-reviewer", "goal-target-execution-reviewer"].includes(call.agent.name),
 		);
-		expect(reviewerCalls).toHaveLength(2);
-		for (const reviewerCall of reviewerCalls) {
-			expect(reviewerCall.agent.tools).toEqual(["read", "search", "find", "yield"]);
-			expect(reviewerCall.strictToolNames).toBe(true);
-			expect(reviewerCall.task).toContain("Focused target-plan review context file");
-			expect(reviewerCall.task).toContain("Serialized goal state file");
-			expect(reviewerCall.task).toContain("Proposed plan file");
-			expect(reviewerCall.task).toContain("Submitted target-plan JSON");
-			expect(reviewerCall.task).toContain("Target-unit rules");
-			expect(reviewerCall.task).toContain("do not expect a full transcript");
-			expect(reviewerCall.task).not.toContain("Transcript file");
-			if (!reviewerCall.contextFile) throw new Error("expected focused reviewer context file");
-			expect(reviewerCall.task).toContain(reviewerCall.contextFile);
-			const context = await Bun.file(reviewerCall.contextFile).text();
-			expect(context).toContain("# Focused target-plan review context");
-			expect(context).toContain(targetId);
-			expect(context).toContain(targetPlanId);
-			expect(context).toContain('"goalStateFile"');
-			expect(context).toContain('"planMarkdownPath"');
-			expect(context).toContain('"resolvedPlanFile"');
-			expect(context).toContain('"payloadSubmissionFile"');
-			const payloadPathMatch = /"payloadSubmissionFile": "([^"]+)"/.exec(context);
-			if (!payloadPathMatch) throw new Error("expected payload submission file reference");
-			const submittedPayload = await Bun.file(payloadPathMatch[1]).json();
-			const submittedPayloadText = JSON.stringify(submittedPayload);
-			expect(submittedPayload).toHaveProperty("verification_aperture");
-			expect(submittedPayload).not.toHaveProperty("verificationAperture");
-			expect(submittedPayloadText).toContain("primary_signal_id");
-			expect(submittedPayloadText).not.toContain("primarySignalId");
-			expect(context).toContain("## Target-unit rules");
-			expect(context).not.toContain("UNRELATED_TRANSCRIPT_SENTINEL_DO_NOT_INCLUDE");
-		}
-	});
-
-	it("summarizes prior target-plan reviews for fresh reviewer runs", async () => {
-		await harness.mode.handleGoalModeCommand("Improve release reliability");
-		const goalTool = await activeGoalTool(harness);
-		await goalTool.execute("target", {
-			op: "start_target",
-			title: "Prove source-link smoke",
-			desired_future_claim: "Source-link install exercises smoke path.",
-			closure_standard: "Current smoke output exists.",
-		});
-
-		goalSideAgentMock.targetExecutionReviewStatus = "rejected";
-		goalSideAgentMock.targetExecutionReviewFeedback = "Execution plan is missing the branch oracle.";
-		goalSideAgentMock.targetExecutionReviewFindings = [
-			{
-				id: "branch-oracle",
-				severity: "blocking",
-				problem: "No branch oracle says what the source-link smoke row proves.",
-				requiredRevision: "Add an observable branch oracle for the source-link smoke row.",
-			},
-		];
-		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
-
-		goalSideAgentMock.targetExecutionReviewStatus = "accepted";
-		goalSideAgentMock.targetExecutionReviewFeedback = "Execution plan is complete.";
-		goalSideAgentMock.targetExecutionReviewFindings = [];
-		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
-
-		const executionReviewerCalls = goalSideAgentCalls.filter(
-			call => call.agent.name === "goal-target-execution-reviewer",
-		);
-		expect(executionReviewerCalls).toHaveLength(2);
-		const secondContextFile = executionReviewerCalls[1]?.contextFile;
-		if (!secondContextFile) throw new Error("expected second reviewer context file");
-		const secondContext = await Bun.file(secondContextFile).text();
-		expect(secondContext).toContain("## Prior target-plan review history");
-		expect(secondContext).toContain("branch-oracle");
-		expect(secondContext).toContain("Execution plan is missing the branch oracle.");
-		expect(secondContext).toContain("Add an observable branch oracle for the source-link smoke row.");
-		expect(secondContext).toContain('"isCurrent": true');
-		expect(secondContext).toContain('"revision": 2');
+		expect(reviewerCalls).toHaveLength(0);
 	});
 
 	it("rejects parent completion while a target plan is still drafting", async () => {

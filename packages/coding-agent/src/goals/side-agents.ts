@@ -20,18 +20,6 @@ import goalContinuationCompactorSystem from "../prompts/goals/goal-continuation-
 import goalPreparedContinuation from "../prompts/goals/goal-prepared-continuation.md" with { type: "text" };
 import goalRubricAssignment from "../prompts/goals/goal-rubric-assignment.md" with { type: "text" };
 import goalRubricSystem from "../prompts/goals/goal-rubric-system.md" with { type: "text" };
-import goalTargetApertureReviewerAssignment from "../prompts/goals/goal-target-aperture-reviewer-assignment.md" with {
-	type: "text",
-};
-import goalTargetApertureReviewerSystem from "../prompts/goals/goal-target-aperture-reviewer-system.md" with {
-	type: "text",
-};
-import goalTargetExecutionReviewerAssignment from "../prompts/goals/goal-target-execution-reviewer-assignment.md" with {
-	type: "text",
-};
-import goalTargetExecutionReviewerSystem from "../prompts/goals/goal-target-execution-reviewer-system.md" with {
-	type: "text",
-};
 import type { AgentDefinition } from "../task/types";
 import type {
 	GoalCheckpointEvidenceItem,
@@ -189,56 +177,6 @@ const goalCheckpointGuidanceOutputSchema = {
 	},
 } as const;
 
-const targetPlanReviewFindingSchema = {
-	properties: {
-		id: { type: "string" },
-		severity: { enum: ["blocking", "important", "polish"] },
-		problem: { type: "string" },
-		requiredRevision: { type: "string" },
-	},
-	optionalProperties: { supportingEvidence: { type: "string" } },
-} as const;
-
-const targetPlanReviewScoreSchema = {
-	properties: {
-		productSignal: { type: "float64" },
-		relatedWorkBundling: { type: "float64" },
-		concernCohesion: { type: "float64" },
-		verificationAperture: { type: "float64" },
-		blastRadiusCoverage: { type: "float64" },
-		parentUncertaintyReduction: { type: "float64" },
-		antiGaming: { type: "float64" },
-	},
-} as const;
-
-const goalTargetApertureReviewOutputSchema = {
-	properties: {
-		status: { enum: ["accepted", "rejected"] },
-		feedback: { type: "string" },
-		apertureClassification: { enum: ["right-sized", "too-narrow", "too-broad", "stale", "unclear"] },
-		revisionDecision: {
-			enum: [
-				"keep",
-				"merge-required",
-				"split-required",
-				"rescope-required",
-				"refresh-intention",
-				"needs-user-input",
-			],
-		},
-		scores: targetPlanReviewScoreSchema,
-		findings: { elements: targetPlanReviewFindingSchema },
-	},
-} as const;
-
-const goalTargetExecutionReviewOutputSchema = {
-	properties: {
-		status: { enum: ["accepted", "rejected"] },
-		feedback: { type: "string" },
-		findings: { elements: targetPlanReviewFindingSchema },
-	},
-} as const;
-
 export const goalRubricAgent = {
 	name: "goal-rubric",
 	description: "Read-only goal rubric generator",
@@ -284,24 +222,6 @@ export const goalCheckpointGuidanceAgent = {
 	source: "bundled",
 } satisfies AgentDefinition;
 
-export const goalTargetApertureReviewerAgent = {
-	name: "goal-target-aperture-reviewer",
-	description: "Read-only goal target aperture reviewer",
-	systemPrompt: goalTargetApertureReviewerSystem,
-	tools: [...GOAL_SIDE_AGENT_TOOLS],
-	output: goalTargetApertureReviewOutputSchema,
-	source: "bundled",
-} satisfies AgentDefinition;
-
-export const goalTargetExecutionReviewerAgent = {
-	name: "goal-target-execution-reviewer",
-	description: "Read-only goal target execution-plan reviewer",
-	systemPrompt: goalTargetExecutionReviewerSystem,
-	tools: [...GOAL_SIDE_AGENT_TOOLS],
-	output: goalTargetExecutionReviewOutputSchema,
-	source: "bundled",
-} satisfies AgentDefinition;
-
 export interface GoalRubricOutput {
 	rubric: string;
 	deliverableMap: GoalDeliverableMapItem[];
@@ -336,43 +256,6 @@ export interface GoalCheckpointGuidanceOutput {
 	parentDeltaConsiderations: string[];
 	lessonsForFuture: string[];
 	avoidRepeating: string[];
-}
-
-export interface GoalTargetPlanReviewerFindingOutput {
-	id: string;
-	severity: "blocking" | "important" | "polish";
-	problem: string;
-	requiredRevision: string;
-	supportingEvidence?: string;
-}
-
-export interface GoalTargetApertureReviewerOutput {
-	status: "accepted" | "rejected";
-	feedback: string;
-	apertureClassification: "right-sized" | "too-narrow" | "too-broad" | "stale" | "unclear";
-	revisionDecision:
-		| "keep"
-		| "merge-required"
-		| "split-required"
-		| "rescope-required"
-		| "refresh-intention"
-		| "needs-user-input";
-	scores: {
-		productSignal: number;
-		relatedWorkBundling: number;
-		concernCohesion: number;
-		verificationAperture: number;
-		blastRadiusCoverage: number;
-		parentUncertaintyReduction: number;
-		antiGaming: number;
-	};
-	findings: GoalTargetPlanReviewerFindingOutput[];
-}
-
-export interface GoalTargetExecutionReviewerOutput {
-	status: "accepted" | "rejected";
-	feedback: string;
-	findings: GoalTargetPlanReviewerFindingOutput[];
 }
 
 export function renderGoalRubricAssignment(input: { objective: string; contextFile: string }): string {
@@ -422,28 +305,6 @@ export function renderGoalCheckpointGuidanceAssignment(input: {
 	targetUnitRules?: string;
 }): string {
 	return prompt.render(goalCheckpointGuidanceAssignment, input);
-}
-
-export function renderGoalTargetApertureReviewerAssignment(input: {
-	contextFile: string;
-	goalStateFile: string;
-	goalStateSnapshot: string;
-	planFile: string;
-	submissionFile: string;
-	targetUnitRules?: string;
-}): string {
-	return prompt.render(goalTargetApertureReviewerAssignment, input);
-}
-
-export function renderGoalTargetExecutionReviewerAssignment(input: {
-	contextFile: string;
-	goalStateFile: string;
-	goalStateSnapshot: string;
-	planFile: string;
-	submissionFile: string;
-	targetUnitRules?: string;
-}): string {
-	return prompt.render(goalTargetExecutionReviewerAssignment, input);
 }
 
 export function renderPreparedGoalContinuation(input: { basePrompt: string; continuationMessage: string }): string {

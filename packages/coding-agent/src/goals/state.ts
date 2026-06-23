@@ -408,6 +408,13 @@ export interface GoalTargetPlanReviewFinding {
 	supportingEvidence?: string;
 }
 
+export interface GoalTargetPlanReviewSource {
+	kind: "subagent" | "local";
+	reviewerId?: string;
+	artifactUri?: string;
+	validationUri?: string;
+}
+
 export interface GoalTargetPlanReview {
 	id: string;
 	lens: GoalTargetPlanReviewLens;
@@ -418,6 +425,10 @@ export interface GoalTargetPlanReview {
 	scores?: GoalTargetPlanReviewScore;
 	findings: GoalTargetPlanReviewFinding[];
 	reviewedAt: number;
+	reviewedTargetPlanId?: string;
+	reviewedRevision?: number;
+	source?: GoalTargetPlanReviewSource;
+	revisedAfterReview?: boolean;
 	sideAgentTokensUsed?: number;
 }
 
@@ -972,6 +983,7 @@ export interface GoalTargetPlanLintDiagnostic {
 			| "matrix_row"
 			| "target_card"
 			| "target_unit_rule"
+			| "target_plan_review"
 			| "history";
 		id?: string;
 		value?: unknown;
@@ -1636,6 +1648,7 @@ function cloneTargetPlanReview(review: GoalTargetPlanReview): GoalTargetPlanRevi
 		...review,
 		scores: review.scores ? { ...review.scores } : undefined,
 		findings: review.findings.map(finding => ({ ...finding })),
+		source: review.source ? { ...review.source } : undefined,
 	};
 }
 

@@ -35,12 +35,6 @@ import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import goalContinuationPrompt from "../../src/prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../../src/prompts/goals/goal-mode-active.md" with { type: "text" };
-import goalTargetApertureReviewerAssignment from "../../src/prompts/goals/goal-target-aperture-reviewer-assignment.md" with {
-	type: "text",
-};
-import goalTargetExecutionReviewerAssignment from "../../src/prompts/goals/goal-target-execution-reviewer-assignment.md" with {
-	type: "text",
-};
 import goalTargetPlanningPrompt from "../../src/prompts/goals/goal-target-planning.md" with { type: "text" };
 import goalToolPrompt from "../../src/prompts/tools/goal.md" with { type: "text" };
 
@@ -157,14 +151,17 @@ function createSubmitLintRuntime(): GoalRuntime {
 	} as unknown as GoalRuntime;
 }
 
-function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
+function acceptedTargetPlanReview(
+	lens: GoalTargetPlanReview["lens"],
+	overrides: Partial<GoalTargetPlanReview> = {},
+): GoalTargetPlanReview {
 	return {
 		id: `review-${lens}`,
 		lens,
 		status: "accepted",
 		feedback: `${lens} accepted the target plan.`,
 		apertureClassification: lens === "aperture" ? "right-sized" : undefined,
-		revisionDecision: "keep",
+		revisionDecision: lens === "aperture" ? "keep" : undefined,
 		scores:
 			lens === "aperture"
 				? {
@@ -179,6 +176,16 @@ function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTarge
 				: undefined,
 		findings: [],
 		reviewedAt: 1,
+		reviewedTargetPlanId: "target-plan-1",
+		reviewedRevision: 1,
+		source: {
+			kind: "subagent",
+			reviewerId: `${lens}-reviewer`,
+			artifactUri: `agent://${lens}-reviewer`,
+			validationUri: `agent://${lens}-reviewer/validation`,
+		},
+		revisedAfterReview: false,
+		...overrides,
 	};
 }
 
@@ -186,6 +193,13 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 	const target = state.goal.currentTarget;
 	const plan = state.goal.currentTargetPlan;
 	if (!target || !plan) throw new Error("expected current target plan");
+	const reviews = [
+		acceptedTargetPlanReview("aperture", { reviewedTargetPlanId: plan.id, reviewedRevision: plan.revision }),
+		acceptedTargetPlanReview("execution-readiness", {
+			reviewedTargetPlanId: plan.id,
+			reviewedRevision: plan.revision,
+		}),
+	];
 	return {
 		targetId: target.id,
 		targetPlanId: plan.id,
@@ -254,11 +268,9 @@ function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanAppro
 		excludedWorkReview: [
 			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
 		],
-		workflowReviewRounds: [
-			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
-		],
+		targetPlanReviews: reviews,
 		dryRun: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
-		reviews: [acceptedTargetPlanReview("aperture"), acceptedTargetPlanReview("execution-readiness")],
+		reviews,
 	};
 }
 
@@ -344,12 +356,27 @@ type SubmitTargetPlanParams = {
 		rationale: string;
 	}>;
 	excluded_work_review: Array<{ item: string; classification: string; rationale: string }>;
-	workflow_review_rounds: Array<{
+	target_plan_reviews: Array<{
+		id: string;
 		lens: string;
-		verdict: string;
-		summary: string;
-		blockers: string[];
-		revised: boolean;
+		status: string;
+		feedback: string;
+		aperture_classification?: string;
+		revision_decision?: string;
+		scores?: {
+			product_signal: number;
+			related_work_bundling: number;
+			concern_cohesion: number;
+			verification_aperture: number;
+			blast_radius_coverage: number;
+			parent_uncertainty_reduction: number;
+			anti_gaming: number;
+		};
+		findings: Array<{ id: string; severity: string; problem: string; required_revision: string }>;
+		reviewed_target_plan_id: string;
+		reviewed_revision: number;
+		source: { kind: string; reviewer_id?: string; artifact_uri?: string; validation_uri?: string };
+		revised_after_review: boolean;
 	}>;
 	dry_run: { status: string; checks: Array<{ id: string; passed: boolean; rationale: string }> };
 };
@@ -441,8 +468,50 @@ function buildSubmitTargetPlanParams(source: {
 		excluded_work_review: [
 			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
 		],
-		workflow_review_rounds: [
-			{ lens: "adversarial", verdict: "accepted", summary: "No blockers.", blockers: [], revised: false },
+		target_plan_reviews: [
+			{
+				id: "review-aperture",
+				lens: "aperture",
+				status: "accepted",
+				feedback: "Target aperture is right-sized.",
+				aperture_classification: "right-sized",
+				revision_decision: "keep",
+				scores: {
+					product_signal: 4,
+					related_work_bundling: 4,
+					concern_cohesion: 4,
+					verification_aperture: 4,
+					blast_radius_coverage: 4,
+					parent_uncertainty_reduction: 4,
+					anti_gaming: 4,
+				},
+				findings: [],
+				reviewed_target_plan_id: source.targetPlanId,
+				reviewed_revision: source.revision,
+				source: {
+					kind: "subagent",
+					reviewer_id: "aperture-reviewer",
+					artifact_uri: "agent://aperture-reviewer",
+					validation_uri: "agent://aperture-reviewer/validation",
+				},
+				revised_after_review: false,
+			},
+			{
+				id: "review-execution-readiness",
+				lens: "execution-readiness",
+				status: "accepted",
+				feedback: "Execution plan is complete.",
+				findings: [],
+				reviewed_target_plan_id: source.targetPlanId,
+				reviewed_revision: source.revision,
+				source: {
+					kind: "subagent",
+					reviewer_id: "execution-reviewer",
+					artifact_uri: "agent://execution-reviewer",
+					validation_uri: "agent://execution-reviewer/validation",
+				},
+				revised_after_review: false,
+			},
 		],
 		dry_run: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
 	};
@@ -524,29 +593,22 @@ describe("GoalTool", () => {
 		expect(goalTargetPlanningPrompt).toContain(
 			"Existing payload changes? Use `edit`, `eval`, or bash-run `jq`/`python`",
 		);
-		expect(goalTargetPlanningPrompt).toContain("MUST run a pre-submit planning review");
 		expect(goalTargetPlanningPrompt).toContain("rewrite one fresh authoritative plan");
 		expect(goalToolPrompt).toContain("do not guess aliases, nesting, enum values, or array/object shapes");
-		expect(goalTargetExecutionReviewerAssignment).toContain("Markdown/payload semantic drift");
-		expect(goalTargetExecutionReviewerAssignment).toContain("camelCase aliases, guessed nesting");
-		expect(goalTargetExecutionReviewerAssignment).toContain("Submitted target-plan JSON");
-		expect(goalTargetExecutionReviewerAssignment).toContain("context artifacts use internal camelCase");
-		expect(goalTargetExecutionReviewerAssignment).toContain("complete acceptance delta");
-		expect(goalTargetExecutionReviewerAssignment).toContain("NEVER drip-feed one blocker per round");
-		expect(goalTargetExecutionReviewerAssignment).toContain("Use prior target-plan review history");
-		expect(goalTargetExecutionReviewerAssignment).toContain("one finding per missing decision category");
-		expect(goalTargetExecutionReviewerAssignment).toContain("api-contract");
-		expect(goalTargetExecutionReviewerAssignment).toContain(
-			"Complete acceptance delta does not mean duplicated blockers",
+		expect(goalTargetPlanningPrompt).toContain("Use `plan-review` skill cadence for explicit review evidence");
+		expect(goalTargetPlanningPrompt).toContain("Prefer `task` for planning-mode reviewers; it preserves LSP and IRC");
+		expect(goalTargetPlanningPrompt).toContain(
+			"NEVER use bundled `plan` agent as target-plan reviewer during planning",
 		);
-		expect(goalTargetExecutionReviewerAssignment).toContain("Submitted target-plan JSON uses exact schema keys");
-		expect(goalTargetApertureReviewerAssignment).toContain("Preserve prior accepted aperture");
-		expect(goalTargetApertureReviewerAssignment).toContain("Do not convert execution-detail gaps");
-		expect(goalTargetApertureReviewerAssignment).toContain("Use prior target-plan review history");
-		expect(goalTargetApertureReviewerAssignment).toContain("claimed caller/surface");
-		expect(goalTargetApertureReviewerAssignment).toContain(
-			"Pure core/unit rows do not prove caller-level trust surfaces",
+		expect(goalTargetPlanningPrompt).toContain("Run required aperture review before submit");
+		expect(goalTargetPlanningPrompt).toContain("Run required execution-readiness review before submit");
+		expect(goalTargetPlanningPrompt).toContain("Ask the original reviewer by IRC to validate only that finding");
+		expect(goalTargetPlanningPrompt).toContain("Fresh convergence reviewers search for new issues");
+		expect(goalTargetPlanningPrompt).toContain("`target_plan_reviews` includes current accepted `aperture`");
+		expect(goalTargetPlanningPrompt).toContain(
+			"Accepted gate reviews have `revised_after_review:false`; plan edits after review require original-reviewer IRC validation or a fresh review",
 		);
+		expect(goalTargetPlanningPrompt).toContain("`target_plan_reviews` MUST record explicit planning review evidence");
 	});
 
 	it("keeps target acquisition guidance before target creation", () => {
@@ -1118,7 +1180,7 @@ describe("GoalTool", () => {
 		expect(text).toContain("Allowed target-plan enum values:");
 		expect(text).toContain("plan_depth: light, standard, trust-heavy");
 		expect(text).toContain("rows_left_open.reason: different-primary-signal");
-		expect(text).toContain("workflow_review_rounds[].verdict: accepted, revision-required");
+		expect(text).toContain("target_plan_reviews[].status: accepted, rejected, failed, stale");
 	});
 
 	it("returns target-plan schema reference only while planning", async () => {
@@ -1149,7 +1211,7 @@ describe("GoalTool", () => {
 		expect(text).toContain("`targetId` → `target_id`");
 		expect(text).toContain("## Allowed enum values");
 		expect(text).toContain("scenario_matrix.rows_left_open[].reason");
-		expect(text).toContain("workflow_review_rounds[].verdict");
+		expect(text).toContain("target_plan_reviews[].status");
 		expect(text).toContain("## Graph lint invariants");
 		expect(text).toContain("Enum fields classify");
 		expect(text).toContain("`blastRadiusScope` → `blast_radius_scope`");
@@ -1290,6 +1352,28 @@ describe("GoalTool", () => {
 				"Parent verification needs broader evidence.",
 			);
 			expect(submittedInput?.branchEvidence[0]?.rowIds).toEqual(["row-happy"]);
+			expect(submittedInput?.targetPlanReviews).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						lens: "aperture",
+						status: "accepted",
+						reviewedTargetPlanId: "target-plan-1",
+						reviewedRevision: 1,
+						revisedAfterReview: false,
+						source: expect.objectContaining({
+							kind: "subagent",
+							reviewerId: "aperture-reviewer",
+							artifactUri: "agent://aperture-reviewer",
+						}),
+					}),
+					expect.objectContaining({
+						lens: "execution-readiness",
+						status: "accepted",
+						reviewedTargetPlanId: "target-plan-1",
+						reviewedRevision: 1,
+					}),
+				]),
+			);
 			expect(submitted.details?.targetPlanApproval?.targetPlanId).toBe("target-plan-1");
 
 			await tool.execute("fail-plan", {
@@ -1457,6 +1541,55 @@ describe("GoalTool", () => {
 		}
 	});
 
+	it("rejects stale target-plan review evidence before requesting approval", async () => {
+		const harness = createRuntimeHarness();
+		await harness.runtime.createGoal({ objective: "Improve release reliability" });
+		await harness.runtime.startTarget({
+			title: "Prove review freshness",
+			desiredFutureClaim: "Submitted review evidence matches the target-plan revision.",
+			closureStandard: "Stale review evidence blocks approval before session handoff.",
+		});
+		const state = harness.getState();
+		const target = state?.goal.currentTarget;
+		const plan = state?.goal.currentTargetPlan;
+		if (!target || !plan) throw new Error("expected current target plan");
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "goal-payload-"));
+		try {
+			const localProtocolOptions = createLocalProtocolOptions(tempDir);
+			const requestGoalTargetPlanApproval = vi.fn(async () => buildGoalToolResponse(createGoal()));
+			const tool = new GoalTool(
+				createToolSession({
+					localProtocolOptions,
+					getGoalRuntime: () => harness.runtime,
+					getGoalModeState: () => harness.getState(),
+					requestGoalTargetPlanApproval,
+				}),
+			);
+			const staleReviewCall = await writeTargetPlanPayloadCall(
+				buildSubmitTargetPlanParams({
+					targetId: target.id,
+					targetPlanId: plan.id,
+					planFilePath: plan.planFilePath,
+					revision: plan.revision,
+				}),
+				{
+					localProtocolOptions,
+					mutatePayload: payload => {
+						const reviews = payload.target_plan_reviews as Array<Record<string, unknown>>;
+						reviews[1]!.reviewed_revision = 999;
+					},
+				},
+			);
+
+			await expect(tool.execute("submit-stale-review", staleReviewCall)).rejects.toThrow(
+				"target plan review revision does not match the submitted revision",
+			);
+			expect(requestGoalTargetPlanApproval).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("maps camelCase target-plan schema aliases to snake_case diagnostics", async () => {
 		const harness = createRuntimeHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });
@@ -1595,7 +1728,7 @@ describe("GoalTool", () => {
 		}
 	});
 
-	it("checks Markdown agreement before target-plan review", async () => {
+	it("checks Markdown agreement before target-plan approval", async () => {
 		const harness = createRuntimeHarness();
 		await harness.runtime.createGoal({ objective: "Improve release reliability" });
 		await harness.runtime.startTarget({
@@ -1771,8 +1904,8 @@ describe("GoalTool", () => {
 		const diagnostic: GoalTargetPlanLintDiagnostic = {
 			severity: "warning",
 			code: "target_unit.reviewer_required",
-			path: "/workflow_review_rounds",
-			message: "target unit rule is enforced by target-plan reviewers",
+			path: "/target_plan_reviews",
+			message: "target unit rule is checked by target-plan review evidence",
 			guidance: "Release gate evidence must exist before cutover targets.",
 			blocksSubmission: false,
 			offender: { kind: "target_unit_rule", id: "release-gate-before-cutover" },
@@ -1933,7 +2066,7 @@ describe("GoalTool", () => {
 		}
 	});
 
-	it("rejects invalid target-plan graphs before requesting review", async () => {
+	it("rejects invalid target-plan graphs before requesting approval", async () => {
 		const base = {
 			targetId: "target-1",
 			targetPlanId: "target-plan-1",
@@ -2085,7 +2218,7 @@ describe("GoalTool", () => {
 		}
 	});
 
-	it("normalizes concern-kind layer aliases before target-plan review", async () => {
+	it("normalizes concern-kind layer aliases before target-plan approval", async () => {
 		let submittedInput: GoalSubmitTargetPlanInput | undefined;
 		const requestGoalTargetPlanApproval = vi.fn(async (input: GoalSubmitTargetPlanInput) => {
 			submittedInput = input;
