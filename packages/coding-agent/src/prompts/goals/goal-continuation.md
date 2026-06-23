@@ -64,12 +64,10 @@ Verifier-repair action:
 - Repair blockers or start a blocker-linked target.
 - Do not retry `complete` without fresh evidence.
 {{/when}}
-
-
 {{#when runMode "==" "awaiting-user-input"}}
 Awaiting-input action:
 - Wait when no new user/broader-check/external input is present.
-- If current input resolves `blocked_state.requiredOperation == "recover_blocked_state"`, call `goal({op:"recover_blocked_state", ...})` using `blocked_state.id`, `blocked_state.source`, and one listed `blocked_state.allowedActions` item.
+- If current input resolves `blocked_state.requiredOperation == "recover_blocked_state"`, call `goal({op:"recover_blocked_state", …})` using `blocked_state.id`, `blocked_state.source`, and one listed `blocked_state.allowedActions` item.
 - Put the concrete user/external decision in `guidance`; use `reason:"user-input"` for direct user answers.
 - NEVER call `resume` or direct `start_target` while `blocked_state` is open.
 {{/when}}

@@ -27,7 +27,7 @@ Evaluate only aperture and product-signal fit:
 Review discipline:
 - Preserve prior accepted aperture unless the current plan changes product signal, scope, authority boundary, or blast radius.
 - Stale/self-contradictory artifacts are freshness findings, not too-broad/too-narrow unless scope changed.
-- Leave execution-detail blockers to execution readiness unless they change same-signal bundling or claimed surface.
+- Do not convert execution-detail gaps into aperture rejection unless they change claimed product surface, same-signal inclusion, authority boundary, or blast radius.
 - On rejection, name the exact merge/split/rescope needed; do not repeat accepted scope analysis.
 
 Decision rules:

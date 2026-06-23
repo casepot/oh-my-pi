@@ -45,7 +45,7 @@ Targets are product-meaningful completion units, not discovery notes, process ph
 - Use `write` for missing/empty plan Markdown and payload JSON.
 - Existing payload JSON changes → `eval`, bash-run `jq`/`python`, or `edit`; parse JSON, preserve identity/format, rerun lint.
 - Payload JSON sidecar is canonical for lint/submit; Markdown is executor-facing narrative.
-- Markdown MUST agree on executor-visible semantics, but SHOULD NOT mirror schema-only payload fixes.
+- Markdown MUST agree on executor-visible semantics, but SHOULD avoid mirroring schema-only payload fixes.
 - `dry_run` is read-only planner simulation, not executed verification.
 - Target-plan failed/stale recovery uses `recover_blocked_state` with action `restart_target_planning`; the recovered plan gets a new identity from `goal({op:"get"})`.
 - In `submit_target_plan`, `verification_aperture.primary_signal_id` is an exact required `verification_signals[].id`; `verification_signals[].layer` never accepts concern-kind values such as `behavior`, `contract`, `security`, `ux-manual`, or `docs-or-operator`.
@@ -73,7 +73,6 @@ File-backed submit:
 - `boundaries_added`, `residuals_added_or_updated`, `gate_deltas`, `frontier_deltas`;
 - `stale_refs`, `external_record_refs`, `authority_decision_refs`;
 - `deliverable_deltas` for compact deliverable-map status/evidence/blocker/next-target updates.
-
 </checkpoint-resolution>
 
 <output>

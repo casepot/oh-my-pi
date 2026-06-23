@@ -61,7 +61,7 @@ Target-planning action:
 - First call `goal({op:"get"})`.
 - Do not implement, checkpoint, complete, or mutate files outside the active plan and payload sidecar.
 - Use `write` for missing plan/payload; edit/eval/bash-transform only exact `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`.
-- Produce a decision-complete execution spec for the current product-meaningful target.
+- Produce a decision-complete plan for product/contract truth; NEVER prewrite implementation bodies.
 - Use planning-only `agent()`/`task` subagents when independent lenses materially reduce uncertainty; supervise with `job`/`irc`.
 - Submit only after read-only planner simulation and adversarial review pass.
 - Use `fail_target_plan` when the current target cannot yield a valid plan without user/external authority, task availability, or right-sizing repair.
@@ -92,12 +92,10 @@ Verifier-repair action:
 - If no current target links to the blockers, start a focused repair/evidence target with `linked_verifier_blocker_ids`.
 - Do not retry `complete` until blockers have fresh repair/evidence.
 {{/when}}
-
-
 {{#when runMode "==" "awaiting-user-input"}}
 Awaiting-input action:
 - Wait when no new user/broader-check/external input is present.
-- If current input resolves `blocked_state.requiredOperation == "recover_blocked_state"`, call `goal({op:"recover_blocked_state", ...})` using `blocked_state.id`, `blocked_state.source`, and one listed `blocked_state.allowedActions` item.
+- If current input resolves `blocked_state.requiredOperation == "recover_blocked_state"`, call `goal({op:"recover_blocked_state", …})` using `blocked_state.id`, `blocked_state.source`, and one listed `blocked_state.allowedActions` item.
 - Put the concrete user/external decision in `guidance`; use `reason:"user-input"` for direct user answers.
 - NEVER call `resume` or direct `start_target` while `blocked_state` is open.
 {{/when}}
