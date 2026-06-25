@@ -267,6 +267,42 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(apiKey).toBe("api-acct-healthy");
 	});
 
+	test("clears index-based usage backoff when broker reload changes credential topology", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [{ type: "oauth", ...createCredential("acct-old", "old@example.com") }]);
+		await authStorage.getApiKey("openai-codex", "session-before-reload");
+		await authStorage.markUsageLimitReached("openai-codex", "session-before-reload", {
+			retryAfterMs: 30 * 60 * 1000,
+		});
+
+		store.replaceAuthCredentialsForProvider("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-new", "new@example.com") },
+			{ type: "oauth", ...createCredential("acct-fallback", "fallback@example.com") },
+		]);
+		await authStorage.reload();
+
+		usageByAccount.set(
+			"acct-new",
+			createCodexUsageReport({
+				accountId: "acct-new",
+				primary: { usedFraction: 0.05, resetInMs: 20 * 60 * 1000 },
+				secondary: { usedFraction: 0.05, resetInMs: 3 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-fallback",
+			createCodexUsageReport({
+				accountId: "acct-fallback",
+				primary: { usedFraction: 0.8, resetInMs: 20 * 60 * 1000 },
+				secondary: { usedFraction: 0.8, resetInMs: 3 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "session-after-reload");
+		expectWeightedPreference(counts, "api-acct-new", "api-acct-fallback");
+	});
+
 	test("falls back to earliest-unblocking account when all exhausted", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

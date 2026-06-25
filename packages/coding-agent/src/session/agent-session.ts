@@ -5322,7 +5322,7 @@ export class AgentSession {
 			model: this.model ? `${this.model.provider}/${this.model.id}` : undefined,
 		});
 
-		try {
+		const runInlineCompaction = async (): Promise<void> => {
 			await this.#runAutoCompaction("threshold", false, false, false, {
 				autoContinue: false,
 				forceAction: "context-full",
@@ -5331,6 +5331,10 @@ export class AgentSession {
 				sourceSignal: signal,
 				throwOnError: true,
 			});
+		};
+
+		try {
+			await runInlineCompaction();
 		} catch (error) {
 			if (signal?.aborted) throw error;
 			const message = error instanceof Error ? error.message : String(error);
@@ -5344,12 +5348,28 @@ export class AgentSession {
 		const afterCompactionId = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
 		if (!afterCompactionId || afterCompactionId === beforeCompactionId) {
 			if (afterBranchLeafId !== beforeBranchLeafId) {
-				logger.warn("Provider-call context maintenance branch changed before compaction append; failing closed", {
+				logger.warn("Provider-call context maintenance branch changed before compaction append; retrying", {
 					contextTokens: decision.contextTokens,
 					contextWindow: decision.contextWindow,
 					baseLeafId: beforeBranchLeafId,
 					currentLeafId: afterBranchLeafId,
 				});
+				try {
+					await runInlineCompaction();
+				} catch (error) {
+					if (signal?.aborted) throw error;
+					const message = error instanceof Error ? error.message : String(error);
+					throw new ContextMaintenanceError(
+						`Context maintenance failed before provider call after branch changed: ${message}`,
+						{ cause: error },
+					);
+				}
+				if (signal?.aborted) return;
+				const retryCompactionId = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
+				if (retryCompactionId && retryCompactionId !== afterCompactionId) {
+					this.#syncActiveAgentContextFromSession(context);
+					return;
+				}
 				throw new ContextMaintenanceError(
 					`Context maintenance failed before provider call: branch changed before compaction could be appended for an estimated ${decision.contextTokens.toLocaleString()} token context.`,
 				);

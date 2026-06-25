@@ -293,19 +293,23 @@ describe("AgentSession inline provider-call maintenance", () => {
 		});
 	});
 
-	it("fails closed instead of appending stale inline maintenance history", async () => {
+	it("retries from the fresh branch instead of appending stale inline maintenance history", async () => {
 		const { mock, sessionManager } = createHarness();
 		let callsAtCompact = -1;
+		let compactCalls = 0;
 		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			compactCalls += 1;
 			callsAtCompact = mock.calls.length;
-			sessionManager.appendMessage({
-				role: "user",
-				content: "branch changed while inline maintenance was preparing",
-				timestamp: Date.now(),
-			});
+			if (compactCalls === 1) {
+				sessionManager.appendMessage({
+					role: "user",
+					content: "branch changed while inline maintenance was preparing",
+					timestamp: Date.now(),
+				});
+			}
 			session!.settings.override("compaction.thresholdTokens", 20_000);
 			return {
-				summary: "stale inline compacted",
+				summary: compactCalls === 1 ? "stale inline compacted" : "fresh inline compacted after branch change",
 				shortSummary: undefined,
 				firstKeptEntryId: findCurrentPromptEntryId(sessionManager),
 				tokensBefore: preparation.tokensBefore,
@@ -316,12 +320,21 @@ describe("AgentSession inline provider-call maintenance", () => {
 		await session!.prompt("use the echo tool");
 
 		expect(callsAtCompact).toBe(1);
-		expect(mock.calls).toHaveLength(1);
+		expect(compactCalls).toBe(2);
+		expect(mock.calls).toHaveLength(2);
 		expect(
 			sessionManager
 				.getEntries()
 				.some(entry => entry.type === "compaction" && entry.summary === "stale inline compacted"),
 		).toBe(false);
+		expect(
+			sessionManager
+				.getEntries()
+				.some(
+					entry => entry.type === "compaction" && entry.summary === "fresh inline compacted after branch change",
+				),
+		).toBe(true);
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("fresh inline compacted after branch change");
 		const persistedAssistantErrorMessages = sessionManager.getEntries().flatMap(entry => {
 			if (
 				entry.type === "message" &&
@@ -333,8 +346,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 			}
 			return [];
 		});
-		expect(persistedAssistantErrorMessages).toHaveLength(1);
-		expect(persistedAssistantErrorMessages[0]).toContain("branch changed before compaction could be appended");
+		expect(persistedAssistantErrorMessages).toHaveLength(0);
 	});
 
 	it("supersedes stale idle work before inline provider-call maintenance", async () => {

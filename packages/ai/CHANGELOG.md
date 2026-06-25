@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed broker-backed auth reloads leaving session stickiness and usage-limit backoff attached to stale credential indices after login/logout or snapshot topology changes, allowing newly available sibling Codex accounts to be selected immediately.
 - Fixed Codex SSE pre-response timeout handling so the first-event watchdog is cleared after response headers arrive instead of aborting long active response bodies later with a generic operation timeout.
 
 ## [16.0.2] - 2026-06-16

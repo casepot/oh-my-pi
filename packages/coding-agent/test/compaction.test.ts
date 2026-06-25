@@ -68,6 +68,30 @@ function createAssistantMessage(text: string, usage?: Usage): AssistantMessage {
 	};
 }
 
+function createAssistantToolCallMessage(toolCallId: string, usage?: Usage): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path: "/tmp/example.txt" } }],
+		usage: usage || createMockUsage(100, 50),
+		stopReason: "toolUse",
+		timestamp: Date.now(),
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+	};
+}
+
+function createToolResultMessage(toolCallId: string, text: string): AgentMessage {
+	return {
+		role: "toolResult",
+		toolCallId,
+		toolName: "read",
+		content: [{ type: "text", text }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+}
+
 function createOpenAiAssistantMessage(
 	text: string,
 	model: Model,
@@ -777,6 +801,49 @@ describe("findCutPoint", () => {
 			expect(result.isSplitTurn).toBe(true);
 			expect(result.turnStartIndex).toBe(2); // Turn 2 starts at index 2
 		}
+	});
+
+	it("cuts at the preceding assistant when a trailing tool result crosses the budget", () => {
+		const entries: SessionEntry[] = [
+			createMessageEntry(createAssistantToolCallMessage("call-old-1")),
+			createMessageEntry(createToolResultMessage("call-old-1", "old result")),
+			createMessageEntry(createAssistantToolCallMessage("call-old-2")),
+			createMessageEntry(createToolResultMessage("call-old-2", "older result")),
+			createMessageEntry(createAssistantToolCallMessage("call-latest")),
+			createMessageEntry(createToolResultMessage("call-latest", "newest result ".repeat(10_000))),
+		];
+
+		const result = findCutPoint(entries, 0, entries.length, 1);
+
+		expect(result.firstKeptEntryIndex).toBe(4);
+		expect((entries[result.firstKeptEntryIndex] as SessionMessageEntry).message.role).toBe("assistant");
+	});
+
+	it("prepares compaction when a post-compaction continuation ends with a large tool result", () => {
+		const previousCompaction = createCompactionEntry("Previous summary", "kept-entry");
+		const olderAssistant = createMessageEntry(createAssistantToolCallMessage("call-old"));
+		const olderToolResult = createMessageEntry(createToolResultMessage("call-old", "old result"));
+		const latestAssistant = createMessageEntry(createAssistantToolCallMessage("call-latest"));
+		const latestToolResult = createMessageEntry(
+			createToolResultMessage("call-latest", "newest result ".repeat(10_000)),
+		);
+		const entries: SessionEntry[] = [
+			previousCompaction,
+			olderAssistant,
+			olderToolResult,
+			latestAssistant,
+			latestToolResult,
+		];
+
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 1,
+		});
+
+		expect(preparation).toBeDefined();
+		expect(preparation?.firstKeptEntryId).toBe(latestAssistant.id);
+		expect(preparation?.messagesToSummarize).toEqual([olderAssistant.message, olderToolResult.message]);
+		expect(preparation?.recentMessages).toEqual([latestAssistant.message, latestToolResult.message]);
 	});
 });
 

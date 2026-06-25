@@ -839,6 +839,24 @@ function storedCredentialArraysEqual(left: StoredCredential[], right: StoredCred
 	return true;
 }
 
+function storedCredentialTopologyEqual(left: StoredCredential[], right: StoredCredential[]): boolean {
+	if (left.length !== right.length) return false;
+	for (let index = 0; index < left.length; index += 1) {
+		const leftEntry = left[index];
+		const rightEntry = right[index];
+		if (!leftEntry || !rightEntry) return false;
+		if (leftEntry.id !== rightEntry.id) return false;
+		if (leftEntry.credential.type !== rightEntry.credential.type) return false;
+		if (leftEntry.credential.type === "oauth" && rightEntry.credential.type === "oauth") {
+			if (leftEntry.credential.accountId !== rightEntry.credential.accountId) return false;
+			if (leftEntry.credential.email !== rightEntry.credential.email) return false;
+			if (leftEntry.credential.projectId !== rightEntry.credential.projectId) return false;
+			if (leftEntry.credential.enterpriseUrl !== rightEntry.credential.enterpriseUrl) return false;
+		}
+	}
+	return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Usage Cache (backed by AuthCredentialStore)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1160,11 +1178,13 @@ export class AuthStorage {
 	#setStoredCredentials(provider: string, credentials: StoredCredential[]): void {
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
+		const topologyChanged = !storedCredentialTopologyEqual(current, credentials);
 		if (credentials.length === 0) {
 			this.#data.delete(provider);
 		} else {
 			this.#data.set(provider, credentials);
 		}
+		if (topologyChanged) this.#resetProviderAssignments(provider);
 		this.#bumpGeneration("credentials");
 	}
 
