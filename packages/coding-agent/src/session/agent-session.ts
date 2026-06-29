@@ -14248,7 +14248,7 @@ export class AgentSession {
 		if (contextWindow <= 0) return true;
 		const compactionSettings = this.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
-			this.getContextUsage({ contextWindow })?.tokens ?? 0,
+			this.getContextUsage({ contextWindow, ignorePendingSnapshot: true })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
@@ -14290,7 +14290,7 @@ export class AgentSession {
 		if (contextWindow <= 0) return true;
 		const compactionSettings = this.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
-			this.getContextUsage({ contextWindow })?.tokens ?? 0,
+			this.getContextUsage({ contextWindow, ignorePendingSnapshot: true })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
 		);
 		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
@@ -17173,6 +17173,7 @@ export class AgentSession {
 	getContextBreakdown(options?: {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
+		ignorePendingSnapshot?: boolean;
 	}): ContextUsageBreakdown | undefined {
 		const model = this.model;
 		const rawContextWindow = options?.contextWindow ?? model?.contextWindow ?? 0;
@@ -17191,7 +17192,7 @@ export class AgentSession {
 
 		const pendingMessages = options?.pendingMessages ?? [];
 
-		const pending = this.#pendingContextSnapshot;
+		const pending = options?.ignorePendingSnapshot === true ? undefined : this.#pendingContextSnapshot;
 
 		// Always locate the latest real assistant-usage anchor after the last
 		// compaction. Its provider-reported promptTokens is ground truth for
@@ -17311,7 +17312,7 @@ export class AgentSession {
 		};
 	}
 
-	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined {
+	getContextUsage(options?: { contextWindow?: number; ignorePendingSnapshot?: boolean }): ContextUsage | undefined {
 		const breakdown = this.getContextBreakdown(options);
 		if (!breakdown) return undefined;
 		return {

@@ -219,9 +219,12 @@ describe("AgentSession inline provider-call maintenance", () => {
 		expect(events.some(event => event.type === "auto_compaction_end" && event.action === "context-full")).toBe(true);
 	});
 
-	it("reproduces the long-turn tool-result barrier before provider-floor continuation", async () => {
+	it("does not warn when stale pending usage exceeds the band but compacted context fits", async () => {
+		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!baseModel) throw new Error("Expected bundled Anthropic model");
 		const { mock, sessionManager, events, model } = createHarness({
-			firstUsageTokens: 25_000,
+			model: { ...baseModel, contextWindow: 272_000 },
+			firstUsageTokens: 204_405,
 			mockMatchesSessionModel: true,
 		});
 		let callsAtCompact = -1;
@@ -256,7 +259,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		}
 		expect(persistedToolUse.message.provider).toBe(model.provider);
 		expect(persistedToolUse.message.model).toBe(model.id);
-		expect(persistedToolUse.message.usage.totalTokens).toBe(25_000);
+		expect(persistedToolUse.message.usage.totalTokens).toBe(204_405);
 
 		expect(preflightResults).toEqual(["continue", "continue"]);
 		expect(compactSpy).toHaveBeenCalledTimes(1);
@@ -269,6 +272,13 @@ describe("AgentSession inline provider-call maintenance", () => {
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "context-full" });
 		expect(events.some(event => event.type === "auto_compaction_end" && event.action === "context-full")).toBe(true);
+		const noProgressNotices = events.filter(
+			event =>
+				event.type === "notice" &&
+				event.source === "compaction" &&
+				event.message.includes("Compaction freed too little context"),
+		);
+		expect(noProgressNotices).toHaveLength(0);
 	});
 
 	it("fails closed and persists a maintenance assistant error when inline compaction fails", async () => {
