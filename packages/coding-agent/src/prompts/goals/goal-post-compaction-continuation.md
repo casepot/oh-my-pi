@@ -20,6 +20,7 @@ Post-compaction policy:
 
 {{#when runMode "==" "working-target"}}
 - Continue the same current target; do not choose a new target because compaction occurred.
+- If `workstream_batch` is present in the controller surface, preserve its batch id/statuses; continue integrating those workstreams, not a narrowed subset.
 - Code/behavior changed? Reconfirm green verification, run code review, then commit/checkpoint.
 {{/when}}
 {{#when runMode "==" "planning-target"}}

@@ -43,6 +43,10 @@ export function summarizeTarget(target: GoalTarget | undefined): GoalToolTargetS
 		id: target.id,
 		title: target.title,
 		status: target.status,
+		parallelWorkstreamRequirement: target.parallelWorkstreamRequirement
+			? { ...target.parallelWorkstreamRequirement }
+			: undefined,
+		workstreamBatchId: target.workstreamBatchId,
 	};
 }
 

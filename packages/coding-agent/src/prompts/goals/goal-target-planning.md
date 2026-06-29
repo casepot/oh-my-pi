@@ -16,6 +16,7 @@ Tool availability:
 - eval: {{evalAvailable}}
 - write: {{writeAvailable}}
 - edit: {{editAvailable}}
+- todo: {{todoAvailable}}
 
 <critical>
 - First action MUST be `goal({op:"get"})`.
@@ -28,6 +29,7 @@ Tool availability:
 - Markdown updates are REQUIRED only for executor-visible semantic changes: target claim, scope boundary, branch, workstream, verification scenario, known limit, or implementation step.
 - Schema-only payload fixes NEVER cause Markdown churn: ids, ordering, enum normalization, `target_unit_rule_ids`, `target_plan_reviews`, or lint-only cross-reference repairs.
 - After `submit_target_plan`, stop ordinary work and wait for the result.
+- Todo items created or changed during target planning are planning scratch state; they are restored to the pre-planning todo state when the target plan is accepted.
 </critical>
 
 ## Target aperture
@@ -44,6 +46,7 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 
 1. Call `goal({op:"get"})`; use returned state as authority.
    - If `currentTargetPlan.recoveredFrom` exists, treat its guidance/blockers as mandatory repair input and use only the current target_plan_id/revision from `goal({op:"get"})`; never reuse any failed/stale source plan id.
+   - Stale target-plan recovery starts with a fresh `goal({op:"get"})`; use the current `blocked_state` identity plus current `state_version`/`parent_frame_version`, never stale plan IDs or stale versions.
 2. Ground every path, symbol, signature, behavior, and callsite in this-session evidence.
    - Before drafting payload fields, call `goal({op:"target_plan_schema"})`; do not guess schema field names, aliases, nesting, enum values, or array/object shapes from memory.
 3. Validate target aperture against product signal, same-signal work, blast radius, and parent deliverables.
@@ -68,6 +71,8 @@ The current target MUST be the smallest product-meaningful/domain-minimum unit w
 22. A blocker that demands pages of literals MUST identify the contract, behavior, or verification outcome those literals fix; otherwise record compact implementation guidance.
 23. Revise until the material acceptance delta is closed; preserve accepted aperture and still-valid product/contract decisions.
 24. If no valid plan exists, call `fail_target_plan` with exact reason: `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`.
+   - NEVER pass recovery reasons (`user-input`, `broader-checks`, `state-refresh`) to `fail_target_plan.reason`; use only the failure reasons above.
+   - NEVER pass failure reasons (`needs-user-input`, `task-unavailable`, `unable-to-find-right-sized-target`) to `recover_blocked_state.reason`.
 25. Lint with `goal({op:"lint_target_plan", payload_file_path: targetPlanSubmitIdentity.payloadFilePath})`.
 26. Fix diagnostics by patching addressed payload fields first.
 27. Patch Markdown only when the fix changes executor-visible semantics.

@@ -41,6 +41,6 @@ The rubric MUST include:
 - `blockedBy`: empty unless a known blocker exists.
 - `nextRelevantTarget`: optional first target hint.
 
-`targetUnitRules` kinds: `complete-acceptance-slice`, `scenario-matrix`, `gate-prerequisite`, `no-process-phase`, `same-primary-signal-together`, `branch-unblocks-matrix`. Use `enforcement:"error"` only for rules that must block target-plan submission.
+`targetUnitRules` kinds: `complete-acceptance-slice`, `scenario-matrix`, `gate-prerequisite`, `no-process-phase`, `same-primary-signal-together`, `branch-unblocks-matrix`, `parallel-workstreams-required`. Use `parallel-workstreams-required` only when the user objective explicitly asks for parallel workstreams or serializing branches would violate the objective. Use `enforcement:"error"` only for rules that must block target-plan submission.
 
 The rubric is a verification aid; NEVER narrow or rewrite the objective.

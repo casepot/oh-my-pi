@@ -31,6 +31,7 @@ Check:
 - checkpoint is not being used for fatigue, budget, arbitrary phase boundary, or partial work.
 - if target has accepted `verificationSignals`, every required signal has current evidence;
 - reject aperture abuse: essential same-signal work hidden in `not_claimed` or deferred work;
+- if `currentWorkstreamBatch` exists, reject partial fanout closure: non-doc workstreams must be completed/accepted or clearly replaced by equivalent serial evidence; failed/aborted/blocked workstreams need repaired evidence before acceptance;
 
 Return structured output:
 - `status`: `accepted` or `rejected`.

@@ -14,6 +14,7 @@
 
 <lifecycle>
 - Finished agents stay alive: `idle` first, then `parked` after a TTL.{{#if ircEnabled}} Both remain addressable and revivable: messaging one via `irc` wakes it and runs your message as a follow-up turn. **Prefer messaging an agent that already holds the relevant context over spawning fresh** — check `irc` op:"list" for candidates.{{/if}}
+- Async job state is process-local. After a restart, do not treat old job ids as live; use `irc` to wake a remembered agent or `history://<id>` for its transcript.
 - `history://<id>` is the agent's transcript; `agent://<id>` its latest output artifact.
 </lifecycle>
 

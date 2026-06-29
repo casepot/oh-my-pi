@@ -35,7 +35,13 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
-import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import {
+	createTools,
+	type TodoPhase,
+	type Tool,
+	type ToolSession,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
@@ -321,6 +327,7 @@ async function writeAndSubmitApprovedTargetPlan(
 			problem: string;
 			requiredRevision: string;
 		}>;
+		parallelWorkstreams?: boolean;
 	} = {},
 ): Promise<AgentToolResult> {
 	const state = harness.session.getGoalModeState();
@@ -355,6 +362,9 @@ async function writeAndSubmitApprovedTargetPlan(
 			"## Implementation",
 			"",
 			"- Execute the bounded happy path target work.",
+			...(options.parallelWorkstreams
+				? ["- Backend API workstream owns src/api.ts.", "- UI state workstream owns src/ui.ts."]
+				: []),
 			"",
 			"## Verification",
 			"",
@@ -378,6 +388,31 @@ async function writeAndSubmitApprovedTargetPlan(
 			verification_scenarios: [`happy path ${primarySignalId}`],
 			review_lenses: ["implementation code review lens"],
 			checkpoint_evidence: ["Focused check passes."],
+			...(options.parallelWorkstreams
+				? {
+						shared_contract: "Backend and UI agree on the saved preference shape.",
+						workstreams: [
+							{
+								id: "backend-api",
+								label: "Backend API",
+								kind: "main",
+								role: "Backend contract specialist",
+								files: ["src/api.ts"],
+								contract_inputs: ["Existing preference request"],
+								contract_outputs: ["Saved preference response"],
+							},
+							{
+								id: "ui-state",
+								label: "UI state",
+								kind: "app-ui",
+								role: "UI state specialist",
+								files: ["src/ui.ts"],
+								contract_inputs: ["Saved preference response"],
+								contract_outputs: ["Rendered preference state"],
+							},
+						],
+					}
+				: {}),
 		},
 		verification_aperture: {
 			product_intention: "Prove the target behavior with direct evidence.",
@@ -431,6 +466,7 @@ async function writeAndSubmitApprovedTargetPlan(
 					rationale: "Parent verification needs broader evidence.",
 				},
 			],
+			...(options.parallelWorkstreams ? { target_unit_rule_ids: ["parallel-workstreams-required"] } : {}),
 		},
 		branch_evidence: [
 			{ branch: "happy path", required: true, planned_signal_ids: [primarySignalId], rationale: "Primary signal." },
@@ -907,6 +943,37 @@ describe("InteractiveMode goal mode integration", () => {
 		).not.toThrow("no active parent");
 	});
 
+	it("surfaces approved parallel workstream scaffold in execution prompt", async () => {
+		await harness.mode.handleGoalModeCommand("Improve release reliability");
+		const goalTool = await activeGoalTool(harness);
+		await goalTool.execute("target-parallel", {
+			op: "start_target",
+			title: "Prove preference save",
+			desired_future_claim: "Preference save path works.",
+			closure_standard: "Backend and UI workstreams satisfy the shared preference contract.",
+			parallel_workstream_requirement: {
+				required: true,
+				source: "operator",
+				rationale: "Backend and UI changes can proceed independently.",
+			},
+		});
+		await writeAndSubmitApprovedTargetPlan(harness, goalTool, { parallelWorkstreams: true });
+		const approval = harness.session.getGoalTargetPlanReference();
+		if (!approval) throw new Error("expected target-plan approval details");
+		const prompt = vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+
+		await harness.mode.handleGoalTargetPlanApproved(approval);
+
+		const approvedPrompt = prompt.mock.calls[0]?.[0];
+		if (typeof approvedPrompt !== "string") throw new Error("expected approved target plan prompt");
+		expect(approvedPrompt).toContain("- task_batch_scaffold:");
+		expect(approvedPrompt).toContain('"batchId"');
+		expect(approvedPrompt).toContain('"backend-api"');
+		expect(approvedPrompt).toContain('"ui-state"');
+		expect(approvedPrompt).toContain("First implementation action SHOULD be one `task` batch");
+		expect(harness.session.getGoalModeState()?.goal.currentWorkstreamBatch?.status).toBe("pending-launch");
+	});
+
 	it("resets model-visible context after target-plan approval", async () => {
 		await harness.mode.handleGoalModeCommand("Improve release reliability");
 		const goalTool = await activeGoalTool(harness);
@@ -964,6 +1031,52 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(contextText).not.toContain("<goal_context>");
 		expect(contextText).not.toContain("PLANNING_SENTINEL_SHOULD_NOT_REACH_EXECUTION_CONTEXT");
 		expect(harness.session.getGoalModeState()?.runMode).toBe("working-target");
+	});
+
+	it("restores pre-planning todos after target-plan approval", async () => {
+		const originalPhases: TodoPhase[] = [
+			{
+				name: "Execution",
+				tasks: [{ content: "Preserve existing execution todo", status: "in_progress" }],
+			},
+		];
+		let todoAutoClearEvents = 0;
+		const unsubscribe = harness.session.subscribe(event => {
+			if (event.type === "todo_auto_clear") todoAutoClearEvents += 1;
+		});
+		try {
+			await harness.mode.handleGoalModeCommand("Improve release reliability");
+			const goalTool = await activeGoalTool(harness);
+			harness.session.setTodoPhases(originalPhases);
+			await goalTool.execute("target-planning-todos", {
+				op: "start_target",
+				title: "Prove source-link smoke",
+				desired_future_claim: "Source-link install exercises smoke path.",
+				closure_standard: "Current smoke output exists.",
+			});
+			await waitForMicrotasks();
+			expect(harness.session.getTodoPhases()).toEqual([]);
+
+			harness.session.setTodoPhases([
+				{
+					name: "Planning",
+					tasks: [{ content: "Draft target plan", status: "in_progress" }],
+				},
+			]);
+			await writeAndSubmitApprovedTargetPlan(harness, goalTool);
+			await waitForMicrotasks();
+
+			expect(harness.session.getTodoPhases()).toEqual(originalPhases);
+			expect(todoAutoClearEvents).toBeGreaterThan(0);
+			const todoEditEntries = harness.session.sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE);
+			const latestTodoEdit = todoEditEntries[todoEditEntries.length - 1];
+			if (latestTodoEdit?.type !== "custom") throw new Error("expected restored todo edit entry");
+			expect(latestTodoEdit.data).toEqual({ phases: originalPhases });
+		} finally {
+			unsubscribe();
+		}
 	});
 
 	it("returns the recovered draft after auto-consolidated target-plan submit caps", async () => {
@@ -1112,6 +1225,8 @@ describe("InteractiveMode goal mode integration", () => {
 			kind: "target-plan",
 			action: "restart_target_planning",
 			blocked_state_id: block.id,
+			state_version: blocked?.stateVersion ?? 0,
+			parent_frame_version: blocked?.parentFrameVersion ?? 0,
 			target_id: target.id,
 			target_plan_id: plan.id,
 			revision: plan.revision,
@@ -1442,9 +1557,12 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(guidanceTranscript).not.toContain("Strict test rubric");
 		expect(guidanceTranscript).toContain("Improve release reliability");
 
+		const stateBeforeResolution = harness.session.getGoalModeState();
 		const resolved = await goalTool.execute("resolve", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpointId,
+			state_version: stateBeforeResolution?.stateVersion ?? 0,
+			parent_frame_version: stateBeforeResolution?.parentFrameVersion ?? 0,
 			decision: "next_target",
 			parent_reading: "Source-link smoke is bounded local evidence; tarball smoke remains open.",
 			parent_delta: {
@@ -1547,9 +1665,12 @@ describe("InteractiveMode goal mode integration", () => {
 		const checkpointId = checkpoint.details?.checkpoint?.id;
 		if (!checkpointId) throw new Error("expected checkpoint id");
 
+		const stateBeforePauseResolution = harness.session.getGoalModeState();
 		const resolved = await goalTool.execute("resolve-pause", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpointId,
+			state_version: stateBeforePauseResolution?.stateVersion ?? 0,
+			parent_frame_version: stateBeforePauseResolution?.parentFrameVersion ?? 0,
 			decision: "pause_for_external_control",
 			parent_reading: "External operator must choose a release gate.",
 			not_propagated: ["Next target selected"],
@@ -1574,7 +1695,8 @@ describe("InteractiveMode goal mode integration", () => {
 			verifierCallsBefore,
 		);
 		expect(harness.session.getGoalModeState()?.goal.totalVerificationAttempts).toBe(0);
-		const blockedState = harness.session.getGoalModeState()?.goal.currentBlockedState;
+		const blockedGoalState = harness.session.getGoalModeState();
+		const blockedState = blockedGoalState?.goal.currentBlockedState;
 		if (blockedState?.kind !== "checkpoint-external-pause") {
 			throw new Error("expected checkpoint external-pause blocked state");
 		}
@@ -1583,6 +1705,8 @@ describe("InteractiveMode goal mode integration", () => {
 			kind: "checkpoint-external-pause",
 			action: "start_next_target",
 			blocked_state_id: blockedState.id,
+			state_version: blockedGoalState?.stateVersion ?? 0,
+			parent_frame_version: blockedGoalState?.parentFrameVersion ?? 0,
 			checkpoint_id: blockedState.source.checkpointId,
 			checkpoint_resolution_id: blockedState.source.checkpointResolutionId,
 			reason: "user-input",
@@ -1623,9 +1747,12 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 		const checkpointId = checkpoint.details?.checkpoint?.id;
 		if (!checkpointId) throw new Error("expected recovery checkpoint id");
+		const stateBeforeRecoveryResolution = harness.session.getGoalModeState();
 		const resolved = await goalTool.execute("resolve-recovery", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpointId,
+			state_version: stateBeforeRecoveryResolution?.stateVersion ?? 0,
+			parent_frame_version: stateBeforeRecoveryResolution?.parentFrameVersion ?? 0,
 			decision: "needs_broader_checks",
 			parent_reading: "Recovery proof is local; broader restored-session checks remain relevant.",
 			not_propagated: ["Parent goal is complete"],
@@ -1809,9 +1936,12 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 		const checkpointId = checkpoint.details?.checkpoint?.id;
 		if (!checkpointId) throw new Error("expected checkpoint id");
+		const stateBeforeTarballResolution = harness.session.getGoalModeState();
 		await goalTool.execute("resolve-to-tarball", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpointId,
+			state_version: stateBeforeTarballResolution?.stateVersion ?? 0,
+			parent_frame_version: stateBeforeTarballResolution?.parentFrameVersion ?? 0,
 			decision: "next_target",
 			parent_reading: "Source-link smoke is accepted; tarball smoke remains open.",
 			not_propagated: ["Tarball smoke is verified"],
@@ -1955,9 +2085,12 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.session.getGoalModeState()?.runMode).toBe("awaiting-checkpoint-resolution");
 		expect((await harness.session.prepareGoalContinuationDispatch())?.kind).toBe("checkpoint-resolution");
 
+		const stateBeforeGatewayResolution = harness.session.getGoalModeState();
 		const resolved = await goalTool.execute("resolve-gateway", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpointId,
+			state_version: stateBeforeGatewayResolution?.stateVersion ?? 0,
+			parent_frame_version: stateBeforeGatewayResolution?.parentFrameVersion ?? 0,
 			decision: "next_target",
 			parent_reading:
 				"Source-link smoke is accepted as bounded local evidence; tarball install evidence remains parent work.",
@@ -2079,9 +2212,12 @@ describe("InteractiveMode goal mode integration", () => {
 		const repairCheckpointId = repairCheckpoint.details?.checkpoint?.id;
 		if (!repairCheckpointId) throw new Error("expected repair checkpoint id");
 		expect(harness.session.getGoalModeState()?.goal.verificationRepair).toBeUndefined();
+		const stateBeforeRepairResolution = harness.session.getGoalModeState();
 		const repairResolution = await goalTool.execute("repair-resolution", {
 			op: "resolve_checkpoint",
 			checkpoint_id: repairCheckpointId,
+			state_version: stateBeforeRepairResolution?.stateVersion ?? 0,
+			parent_frame_version: stateBeforeRepairResolution?.parentFrameVersion ?? 0,
 			decision: "parent_completion_candidate",
 			parent_reading: "Verifier repair evidence is now recorded; parent completion may be retried.",
 			not_propagated: ["Parent goal is complete without verifier acceptance"],
@@ -2321,9 +2457,12 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 		const checkpointId = checkpoint.details?.checkpoint?.id;
 		if (!checkpointId) throw new Error("expected repair checkpoint id");
+		const stateBeforeRepeatedRepairResolution = harness.session.getGoalModeState();
 		await goalTool.execute("repair-resolution-repeat", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpointId,
+			state_version: stateBeforeRepeatedRepairResolution?.stateVersion ?? 0,
+			parent_frame_version: stateBeforeRepeatedRepairResolution?.parentFrameVersion ?? 0,
 			decision: "parent_completion_candidate",
 			parent_reading: "Fresh verifier evidence is recorded.",
 			not_propagated: ["Parent goal is complete without verifier acceptance"],

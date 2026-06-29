@@ -27,6 +27,7 @@ Goal tool contract:
 - `goal({op:"start_target", …})` starts a bounded current target before substantial work when no active target exists.
 - `goal({op:"checkpoint", …})` closes a stable current target with evidence, keeps the parent goal active, and stops ordinary work.
 - `goal({op:"resolve_checkpoint", …})` is the fresh controller turn after a checkpoint; parent truth changes require `parent_delta`.
+- `goal({op:"resolve_checkpoint", …})` and `goal({op:"recover_blocked_state", …})` must be based on a fresh `goal({op:"get"})` and include that response's `state_version` and `parent_frame_version`.
 - `goal({op:"complete"})` is only for verified parent-goal completion.
 
 Run-mode contract:
@@ -65,6 +66,7 @@ Target-planning action:
 - Use planning-only `agent()`/`task` subagents when independent lenses materially reduce uncertainty; supervise with `job`/`irc`.
 - Submit only after read-only planner simulation and adversarial review pass.
 - Use `fail_target_plan` when the current target cannot yield a valid plan without user/external authority, task availability, or right-sizing repair.
+- `fail_target_plan.reason` accepts only `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`; never pass recovery reasons (`user-input`, `broader-checks`, `state-refresh`).
 {{/when}}
 
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}
@@ -96,6 +98,8 @@ Verifier-repair action:
 Awaiting-input action:
 - Wait when no new user/broader-check/external input is present.
 - If current input resolves `blocked_state.requiredOperation == "recover_blocked_state"`, call `goal({op:"recover_blocked_state", …})` using `blocked_state.id`, `blocked_state.source`, and one listed `blocked_state.allowedActions` item.
+- Include fresh `state_version` and `parent_frame_version` from `goal({op:"get"})`; stale target-plan recovery must use the current blocked-state identity and current versions.
+- `recover_blocked_state.reason` accepts only `user-input`, `broader-checks`, `external-authority`, or `state-refresh`; never pass failure reasons such as `needs-user-input`.
 - Put the concrete user/external decision in `guidance`; use `reason:"user-input"` for direct user answers.
 - NEVER call `resume` or direct `start_target` while `blocked_state` is open.
 {{/when}}

@@ -104,6 +104,11 @@ import type { MnemopiSessionState } from "./mnemopi/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
+import {
+	AGENT_REF_CUSTOM_TYPE,
+	installRegistryStatusSync,
+	restorePersistedAgentRefs,
+} from "./registry/agent-persistence";
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
 	collectEnvSecrets,
@@ -1509,6 +1514,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
+			recordAgentRef: record => {
+				sessionManager.appendCustomEntry(AGENT_REF_CUSTOM_TYPE, record);
+			},
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
@@ -1542,6 +1550,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (!session) throw new Error("Goal mode is not active.");
 				return session.requestGoalTargetPlanFailure(input, signal);
 			},
+			recordGoalWorkstreamTaskDispatch: input => session?.goalRuntime.recordGoalWorkstreamTaskDispatch(input),
+			recordGoalWorkstreamTaskResult: input => session?.goalRuntime.recordGoalWorkstreamTaskResult(input),
 			requestGoalCompletion: signal => {
 				if (!session) throw new Error("Goal mode is not active.");
 				return session.requestGoalCompletion(signal);
@@ -2368,6 +2378,74 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				restored: new Set(existingSession.selectedMCPToolNames),
 				forceActive,
 			});
+		}
+
+		if (agentKind === "main") {
+			const restoredCount = restorePersistedAgentRefs({
+				entries: existingBranch,
+				registry: agentRegistry,
+				lifecycle: AgentLifecycleManager.global(),
+				idleTtlMs: Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+				makeReviver: record => {
+					const sessionFilePath = record.sessionFile;
+					if (!sessionFilePath || record.resumable === false) return undefined;
+					return async () => {
+						const reopened = await SessionManager.open(sessionFilePath, undefined, undefined, {
+							initialCwd: record.cwd ?? cwd,
+						});
+						const parentArtifactManager = sessionManager.getArtifactManager();
+						if (parentArtifactManager) reopened.adoptArtifactManager(parentArtifactManager);
+						let initEntry:
+							| { systemPrompt: string; task: string; tools: string[]; outputSchema?: unknown }
+							| undefined;
+						for (const entry of reopened.getBranch()) {
+							if (entry.type === "session_init") initEntry = entry;
+						}
+						if (!initEntry) {
+							throw new Error(
+								`Cannot revive agent "${record.id}" because ${sessionFilePath} has no session_init entry. Its transcript remains readable at history://${record.id}.`,
+							);
+						}
+						const { session: revived } = await createAgentSession({
+							cwd: record.cwd ?? reopened.getCwd(),
+							authStorage,
+							modelRegistry,
+							settings,
+							toolNames: initEntry.tools,
+							outputSchema: initEntry.outputSchema,
+							requireYieldTool: true,
+							contextFiles,
+							skills,
+							promptTemplates: await promptTemplatesPromise,
+							slashCommands: await slashCommandsPromise,
+							workspaceTree: resolvedWorkspaceTree,
+							rules: allRules,
+							preloadedExtensionPaths: toolSession.extensionPaths,
+							preloadedCustomToolPaths: toolSession.customToolPaths,
+							systemPrompt: initEntry.systemPrompt,
+							sessionManager: reopened,
+							hasUI: false,
+							spawns: record.spawns ?? "*",
+							taskDepth: record.taskDepth ?? 1,
+							parentTaskPrefix: record.id,
+							agentId: record.id,
+							agentDisplayName: record.displayName,
+							agentRegistry,
+							enableLsp,
+							skipPythonPreflight: !initEntry.tools.includes("eval"),
+							enableMCP,
+							mcpManager,
+							localProtocolOptions,
+							parentEvalSessionId: session?.getEvalSessionId() ?? defaultEvalSessionId(toolSession),
+						});
+						installRegistryStatusSync(record.id, revived, agentRegistry);
+						return revived;
+					};
+				},
+			});
+			if (restoredCount > 0) {
+				logger.debug("Restored persisted subagent refs", { count: restoredCount });
+			}
 		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,

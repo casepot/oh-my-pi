@@ -18,8 +18,10 @@ Approved goal target plan reference.
 {{#if matrixRowCounts}}
 - scenario_matrix: {{matrixRowCounts}}
 {{/if}}
-{{#if implementationFanoutRequired}}
-- fanout: recommended by approved guardrail metadata; NEVER spawn tasks automatically from this reference.
+{{#if parallelWorkstreamBatch}}
+<parallel_workstream_batch>
+{{parallelWorkstreamBatch}}
+</parallel_workstream_batch>
 {{/if}}
 - payload_sidecar: `{{payloadFilePath}}`
 </execution_context>
@@ -32,6 +34,7 @@ Approved goal target plan reference.
 
 <instruction>
 Use the approved Markdown plan as authority for the current target only.
+If `parallel_workstream_batch` is present, the harness has not spawned it automatically; call `task` yourself when fanout is safe.
 Use the execution guardrails as structured guardrails, not a replacement for the plan.
 If current goal state no longer matches this target, ignore this reference and call `goal({op:"get"})`.
 </instruction>

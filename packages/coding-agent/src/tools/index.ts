@@ -35,6 +35,7 @@ import type { DiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
+import type { PersistedAgentRefRecord } from "../registry/agent-persistence";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
@@ -44,7 +45,7 @@ import type { UsageStatistics } from "../session/session-entries";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
-import { canSpawnAtDepth } from "../task/types";
+import { canSpawnAtDepth, type TaskParams, type TaskToolDetails } from "../task/types";
 import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
 import type {
 	DiscoverableTool,
@@ -242,6 +243,8 @@ export interface ToolSession {
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
+	/** Persist a subagent ref so a resumed parent session can list/revive it independently of process-local jobs. */
+	recordAgentRef?: (record: PersistedAgentRefRecord) => void;
 	/** Get artifacts directory for artifact:// URLs */
 	getArtifactsDir?: () => string | null;
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */
@@ -322,6 +325,17 @@ export interface ToolSession {
 		input: GoalTargetPlanFailureInput,
 		signal?: AbortSignal,
 	) => Promise<GoalToolResponse>;
+	recordGoalWorkstreamTaskDispatch?: (input: {
+		toolCallId: string;
+		params: TaskParams;
+		details: TaskToolDetails;
+		spawns: Array<{ taskId?: string; agentId: string; jobId?: string }>;
+	}) => Promise<void> | void;
+	recordGoalWorkstreamTaskResult?: (input: {
+		toolCallId: string;
+		details: TaskToolDetails;
+		spawns?: Array<{ taskId?: string; agentId: string; jobId?: string }>;
+	}) => Promise<void> | void;
 	/** Get cumulative session usage statistics (input/output tokens, cost). */
 	getUsageStatistics?: () => UsageStatistics;
 	/** Current per-turn token budget {total, spent, hard} for the eval `budget` helper. */
@@ -524,6 +538,7 @@ const GOAL_TARGET_PLANNING_ALLOWED_TOOLS: Record<string, true> = {
 	bash: true,
 	eval: true,
 	edit: true,
+	todo: true,
 	resolve: true,
 	report_tool_issue: true,
 };
@@ -545,7 +560,7 @@ function goalRunModeBlockMessage(session: ToolSession, toolName: string): string
 				: `${planFilePath}.payload.json`;
 			planHint = ` Use write for missing plan/payload files; edit/eval/bash-transform only these paths: ${planFilePath}; ${payloadFilePath}.`;
 		}
-		return `Goal target planning is active; only read/search/find/lsp/web_search/task/job/irc/bash/eval/goal/write/edit/report_tool_issue/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
+		return `Goal target planning is active; only read/search/find/lsp/web_search/task/job/irc/bash/eval/goal/write/edit/todo/report_tool_issue/resolve/yield are allowed until the target plan is submitted or failed.${planHint}`;
 	}
 	if (state.runMode === "awaiting-checkpoint-resolution" && state.goal.pendingCheckpointId !== undefined) {
 		const checkpointId = state.goal.pendingCheckpointId;

@@ -67,6 +67,7 @@ const targetUnitRuleSchema = {
 				"no-process-phase",
 				"same-primary-signal-together",
 				"branch-unblocks-matrix",
+				"parallel-workstreams-required",
 			],
 		},
 		statement: { type: "string" },

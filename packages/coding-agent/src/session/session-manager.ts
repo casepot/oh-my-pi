@@ -285,10 +285,20 @@ export interface PreparedCompactionAppendInput<T = unknown> {
 	details?: T;
 	fromExtension?: boolean;
 	preserveData?: Record<string, unknown>;
+	/**
+	 * Permit the compaction to commit when the active leaf is a direct descendant
+	 * of the prepared base and every intervening entry satisfies
+	 * `isAppendOnlySafeEntry`.
+	 *
+	 * This is intentionally opt-in: extension-provided compactions and provider
+	 * histories with replacement payloads may have stricter snapshot semantics.
+	 */
+	allowAppendAfterBaseLeaf?: boolean;
+	isAppendOnlySafeEntry?: (entry: SessionEntry) => boolean;
 }
 
 export type PreparedCompactionAppendResult =
-	| { status: "appended"; entryId: string }
+	| { status: "appended"; entryId: string; appendedAfterBaseLeaf: boolean }
 	| { status: "already_compacted" | "stale" };
 
 interface SessionManagerStateSnapshot {
@@ -1234,13 +1244,38 @@ export class SessionManager {
 		this.#recordEntry(entry);
 		return entry.id;
 	}
+
+	#canAppendPreparedCompactionAfterBaseLeaf<T = unknown>(
+		input: PreparedCompactionAppendInput<T>,
+		branch: SessionEntry[],
+	): boolean {
+		if (!input.allowAppendAfterBaseLeaf || !input.isAppendOnlySafeEntry || input.baseLeafId === null) return false;
+
+		const baseIndex = branch.findIndex(entry => entry.id === input.baseLeafId);
+		if (baseIndex < 0) return false;
+
+		const firstKeptIndex = branch.findIndex(entry => entry.id === input.firstKeptEntryId);
+		if (firstKeptIndex < 0 || firstKeptIndex > baseIndex) return false;
+
+		const appendedEntries = branch.slice(baseIndex + 1);
+		if (appendedEntries.length === 0) return false;
+
+		return appendedEntries.every(entry => input.isAppendOnlySafeEntry?.(entry) ?? false);
+	}
+
 	/** Append a compaction only if the branch still matches the snapshot used to prepare it. */
 	tryAppendPreparedCompaction<T = unknown>(input: PreparedCompactionAppendInput<T>): PreparedCompactionAppendResult {
+		let appendedAfterBaseLeaf = false;
 		if (this.#index.leafId() !== input.baseLeafId) {
-			const currentLatestCompactionId = getLatestCompactionEntry(this.getBranch())?.id;
-			return currentLatestCompactionId !== input.baseLatestCompactionId
-				? { status: "already_compacted" }
-				: { status: "stale" };
+			const branch = this.getBranch();
+			const currentLatestCompactionId = getLatestCompactionEntry(branch)?.id;
+			if (currentLatestCompactionId !== input.baseLatestCompactionId) {
+				return { status: "already_compacted" };
+			}
+			if (!this.#canAppendPreparedCompactionAfterBaseLeaf(input, branch)) {
+				return { status: "stale" };
+			}
+			appendedAfterBaseLeaf = true;
 		}
 
 		return {
@@ -1254,6 +1289,7 @@ export class SessionManager {
 				input.fromExtension,
 				input.preserveData,
 			),
+			appendedAfterBaseLeaf,
 		};
 	}
 

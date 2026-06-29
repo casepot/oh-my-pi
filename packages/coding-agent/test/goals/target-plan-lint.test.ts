@@ -125,6 +125,41 @@ describe("target-plan lint rules", () => {
 		expect(diagnostics.some(diagnostic => diagnostic.code === "target_unit.unknown_rule")).toBe(true);
 	});
 
+	it("enforces acknowledged parallel workstream target-unit rule", () => {
+		const input = validLightTargetPlanInput();
+		input.scopeCalibration.targetUnitRuleIds = ["parallel-workstreams-required"];
+		input.targetCard = {
+			...input.targetCard!,
+			workstreams: [
+				{
+					id: "docs",
+					label: "Docs",
+					kind: "docs-changelog",
+					files: ["CHANGELOG.md"],
+					contractInputs: [],
+					contractOutputs: [],
+				},
+			],
+		};
+
+		const diagnostics = collectTargetPlanGraphDiagnostics(input, { mode: "submit" });
+
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				code: "target_unit.violation",
+				path: "/target_card/workstreams",
+				message: "target unit rule requires at least two non-doc workstreams",
+			}),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				code: "target_unit.violation",
+				path: "/target_card/shared_contract",
+				message: "target unit rule requires target_card.shared_contract",
+			}),
+		);
+	});
+
 	it("delegates gate-prerequisite target-unit rules to reviewers", () => {
 		const customRule = customGateRule();
 		const diagnostics = collectTargetPlanGraphDiagnostics(validLightTargetPlanInput(), {

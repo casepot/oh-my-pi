@@ -24,6 +24,7 @@ Budget:
 Run-mode policy:
 - Follow `policy.now`; avoid every `policy.blocked` item.
 - Need full audit state? Call `goal({op:"get"})`.
+- `resolve_checkpoint` and `recover_blocked_state` must include fresh `state_version` and `parent_frame_version` from `goal({op:"get"})`.
 
 {{#when runMode "==" "working-target"}}
 Working-target action:
@@ -42,6 +43,7 @@ Target-planning action:
 - Produce a decision-complete execution spec for the current product-meaningful target.
 - Use `write` for missing plan/payload; edit/eval/bash-transform only `currentTargetPlan.planFilePath` and `targetPlanSubmitIdentity.payloadFilePath`; do not implement.
 - Submit only after read-only planner simulation and review pass; use `payload_file_path`.
+- `fail_target_plan.reason` accepts only `needs-user-input`, `task-unavailable`, `external-authority`, or `unable-to-find-right-sized-target`; never pass recovery reasons (`user-input`, `broader-checks`, `state-refresh`).
 {{/when}}
 
 {{#when runMode "==" "awaiting-checkpoint-resolution"}}
@@ -68,6 +70,8 @@ Verifier-repair action:
 Awaiting-input action:
 - Wait when no new user/broader-check/external input is present.
 - If current input resolves `blocked_state.requiredOperation == "recover_blocked_state"`, call `goal({op:"recover_blocked_state", …})` using `blocked_state.id`, `blocked_state.source`, and one listed `blocked_state.allowedActions` item.
+- Include fresh `state_version` and `parent_frame_version` from `goal({op:"get"})`; stale target-plan recovery must use the current blocked-state identity and current versions.
+- `recover_blocked_state.reason` accepts only `user-input`, `broader-checks`, `external-authority`, or `state-refresh`; never pass failure reasons such as `needs-user-input`.
 - Put the concrete user/external decision in `guidance`; use `reason:"user-input"` for direct user answers.
 - NEVER call `resume` or direct `start_target` while `blocked_state` is open.
 {{/when}}

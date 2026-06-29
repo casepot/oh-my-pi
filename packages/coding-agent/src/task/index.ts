@@ -554,6 +554,37 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		return this.#spawnSemaphore;
 	}
 
+	async #recordWorkstreamTaskDispatch(
+		toolCallId: string,
+		params: TaskParams,
+		details: TaskToolDetails,
+		spawns: Array<{ taskId?: string; agentId: string; jobId?: string }>,
+	): Promise<void> {
+		if (!this.session.recordGoalWorkstreamTaskDispatch) return;
+		try {
+			await this.session.recordGoalWorkstreamTaskDispatch({ toolCallId, params, details, spawns });
+		} catch (error) {
+			logger.warn("Goal workstream task dispatch recording failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	async #recordWorkstreamTaskResult(
+		toolCallId: string,
+		details: TaskToolDetails,
+		spawns?: Array<{ taskId?: string; agentId: string; jobId?: string }>,
+	): Promise<void> {
+		if (!this.session.recordGoalWorkstreamTaskResult) return;
+		try {
+			await this.session.recordGoalWorkstreamTaskResult({ toolCallId, details, spawns });
+		} catch (error) {
+			logger.warn("Goal workstream task result recording failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	/**
 	 * Create a TaskTool instance with async agent discovery.
 	 */
@@ -677,7 +708,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			},
 		});
 
-		const started: Array<{ agentId: string; jobId: string; description?: string }> = [];
+		const started: Array<{ agentId: string; jobId: string; taskId?: string; description?: string }> = [];
 		const failedSchedules: string[] = [];
 		for (const spawn of spawns) {
 			try {
@@ -696,7 +727,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					},
 				});
 				if (started.length === 0) primaryJobId = jobId;
-				started.push({ agentId: spawn.agentId, jobId, description: spawn.item.description });
+				started.push({ agentId: spawn.agentId, jobId, taskId: spawn.item.id, description: spawn.item.description });
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				failedSchedules.push(`${spawn.agentId}: ${message}`);
@@ -718,6 +749,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			};
 		}
 
+		const startedSpawns = started.map(({ taskId, agentId, jobId }) => ({ taskId, agentId, jobId }));
+		const runningDetails = buildAsyncDetails("running", primaryJobId);
+		await this.#recordWorkstreamTaskDispatch(toolCallId, params, runningDetails, startedSpawns);
+
 		if (single) {
 			const { agentId, jobId, description } = started[0];
 			const coordinationHint = ircEnabled
@@ -726,7 +761,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const descriptionSuffix = description ? ` — ${description}` : "";
 			onUpdate?.({
 				content: [{ type: "text", text: `Spawned agent \`${agentId}\`...` }],
-				details: buildAsyncDetails("running", jobId),
+				details: runningDetails,
 			});
 			return withAdvisory({
 				content: [
@@ -735,7 +770,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						text: `Spawned agent \`${agentId}\` (job \`${jobId}\`)${descriptionSuffix}. The result will be delivered when it yields. ${coordinationHint}`,
 					},
 				],
-				details: buildAsyncDetails("running", jobId),
+				details: runningDetails,
 			});
 		}
 
@@ -754,7 +789,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			.join("\n");
 		onUpdate?.({
 			content: [{ type: "text", text: `Spawned ${started.length} agents...` }],
-			details: buildAsyncDetails("running", primaryJobId),
+			details: runningDetails,
 		});
 		return withAdvisory({
 			content: [
@@ -763,7 +798,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					text: `Spawned ${started.length} background agents using ${agentLabel}.${scheduleFailureSummary} Each result will be delivered when that agent yields.\n${startedListing}\n${coordinationHint}`,
 				},
 			],
-			details: buildAsyncDetails("running", primaryJobId),
+			details: runningDetails,
 		});
 	}
 
@@ -841,14 +876,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = resultFailed
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
-					await reportProgress(
-						statusText,
-						buildDetails(resultFailed ? "failed" : "completed", ownJobId) as unknown as Record<string, unknown>,
-					);
+					const terminalDetails = buildDetails(resultFailed ? "failed" : "completed", ownJobId);
+					await reportProgress(statusText, terminalDetails as unknown as Record<string, unknown>);
 					onUpdate?.({
 						content: [{ type: "text", text: statusText }],
-						details: buildDetails(resultFailed ? "failed" : "completed", ownJobId),
+						details: terminalDetails,
 					});
+					await this.#recordWorkstreamTaskResult(toolCallId, result.details ?? terminalDetails, [
+						{ taskId: spawnParams.id, agentId, jobId: ownJobId },
+					]);
 					const deliveryText = `${finalText}${buildFollowUpHint(singleResult?.aborted === true)}`;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
@@ -863,11 +899,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
 					onSettled?.(true);
 					const statusText = `Background task ${agentId} failed.`;
-					await reportProgress(statusText, buildDetails("failed", ownJobId) as unknown as Record<string, unknown>);
+					const failedDetails = buildDetails("failed", ownJobId);
+					await reportProgress(statusText, failedDetails as unknown as Record<string, unknown>);
 					onUpdate?.({
 						content: [{ type: "text", text: statusText }],
-						details: buildDetails("failed", ownJobId),
+						details: failedDetails,
 					});
+					await this.#recordWorkstreamTaskResult(toolCallId, failedDetails, [
+						{ taskId: spawnParams.id, agentId, jobId: ownJobId },
+					]);
 					const message = error instanceof Error ? error.message : String(error);
 					const hint = AgentRegistry.global().get(agentId) ? buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
@@ -904,7 +944,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (spawnItems.length === 1) {
 			await semaphore.acquire();
 			try {
-				return await this.#executeSync(
+				const result = await this.#executeSync(
 					toolCallId,
 					spawnParamsFor(params, spawnItems[0]),
 					signal,
@@ -912,6 +952,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					undefined,
 					0,
 				);
+				const details = result.details ?? { projectAgentsDir: null, results: [], totalDurationMs: 0 };
+				const spawns = details.results.map(run => ({
+					taskId: spawnItems[run.index]?.id,
+					agentId: run.id,
+				}));
+				await this.#recordWorkstreamTaskDispatch(toolCallId, params, details, spawns);
+				await this.#recordWorkstreamTaskResult(toolCallId, details, spawns);
+				return result;
 			} finally {
 				semaphore.release();
 			}
@@ -988,16 +1036,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			}
 		}
 
-		return {
-			content: [{ type: "text", text: contentParts.join("\n\n") }],
-			details: {
-				projectAgentsDir,
-				results,
-				totalDurationMs: Date.now() - startTime,
-				usage: hasUsage ? usageTotals : undefined,
-				outputPaths: outputPaths.length > 0 ? outputPaths : undefined,
-			},
+		const details: TaskToolDetails = {
+			projectAgentsDir,
+			results,
+			totalDurationMs: Date.now() - startTime,
+			usage: hasUsage ? usageTotals : undefined,
+			outputPaths: outputPaths.length > 0 ? outputPaths : undefined,
 		};
+		const result: AgentToolResult<TaskToolDetails> = {
+			content: [{ type: "text", text: contentParts.join("\n\n") }],
+			details,
+		};
+		const spawns = results.map(run => ({
+			taskId: spawnItems[run.index]?.id,
+			agentId: run.id,
+		}));
+		await this.#recordWorkstreamTaskDispatch(toolCallId, params, details, spawns);
+		await this.#recordWorkstreamTaskResult(toolCallId, details, spawns);
+		return result;
 	}
 
 	/**
@@ -1333,6 +1389,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				parentMnemopiSessionState: this.session.getMnemopiSessionState?.(),
 				parentTelemetry: this.session.getTelemetry?.(),
 				parentEvalSessionId,
+				recordAgentRef: this.session.recordAgentRef,
 			};
 
 			const runTask = async (): Promise<SingleResult> => {

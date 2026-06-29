@@ -36,4 +36,10 @@ describe("task tool description: role parameter", () => {
 		// rather than the exact copy-edited wording/capitalization.
 		expect(out).toMatch(/tailor[^\n]*role/i);
 	});
+
+	it("warns that async job ids are process-local while agent refs persist", () => {
+		const out = render(true);
+		expect(out).toMatch(/job state is process-local/i);
+		expect(out).toContain("history://<id>");
+	});
 });

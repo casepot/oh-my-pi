@@ -26,6 +26,11 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - `drop`: drop the parent goal without completing it.
 </operations>
 
+Reason enums are not interchangeable:
+- `fail_target_plan.reason`: `needs-user-input`, `task-unavailable`, `external-authority`, `unable-to-find-right-sized-target`.
+- `recover_blocked_state.reason`: `user-input`, `broader-checks`, `external-authority`, `state-refresh`.
+Do not pass `state-refresh`, `user-input`, or `broader-checks` to `fail_target_plan.reason`; do not pass `needs-user-input` to `recover_blocked_state.reason`.
+
 <target-aperture>
 Targets are product-meaningful completion units, not discovery notes, process phases, or miniature parent goals.
 - `start_target` commits a grounded target after acquisition, not exploration.
@@ -62,6 +67,7 @@ File-backed submit:
 </target-planning>
 
 <checkpoint-resolution>
+Before `resolve_checkpoint` or `recover_blocked_state`, call `goal({op:"get"})`; copy `state_version` and `parent_frame_version` from that fresh response into the mutation call. Stale versions are rejected before parent_delta, blocked-state recovery, checkpoint resolution records, or next-target creation.
 `resolve_checkpoint.decision` must be one of:
 - `next_target`: applies `parent_delta`, clears the pending checkpoint, installs `next_target`, and returns to `planning-target`. `next_target` is required for this decision and rejected for every other decision.
 - `parent_completion_candidate`: applies `parent_delta`, clears the pending checkpoint, enters `awaiting-parent-completion`, and makes the next action `complete`. It does not complete the parent. Use only when every parent deliverable already has accepted current evidence and the remaining work is verifier confirmation.
@@ -109,12 +115,27 @@ Checkpoint closed target evidence:
 
 Resolve to the next target:
 ```json
-{"op":"resolve_checkpoint","checkpoint_id":"goal-1-checkpoint-1","decision":"next_target","parent_reading":"The target is closed locally, but the parent still needs distribution-path evidence.","parent_delta":{"admitted_claims":[{"id":"installer-smoke-worker-startup","claim":"Installer smoke has local evidence for worker startup coverage.","status":"accepted","evidence_refs":[{"id":"checkpoint:goal-1-checkpoint-1","kind":"artifact"}],"non_implications":["Release is ready","Distribution path is verified"]}],"boundaries_added":[{"id":"local-smoke-not-distribution","kind":"forbidden-inference","statement":"Local smoke success does not prove distribution install success."}],"deliverable_deltas":[{"id":"D1","status":"partial","evidence_refs":[{"id":"checkpoint:goal-1-checkpoint-1","kind":"artifact"}],"next_relevant_target":"Prove distribution install runs smoke path"}]},"next_target":{"title":"Prove distribution install runs smoke path","desired_future_claim":"Distribution installs run the same smoke path.","closure_standard":"Distribution install test runs the smoke command and fails on worker startup errors.","parent_deliverable_ids":["D1"]},"not_propagated":["Local evidence is not distribution evidence."],"remaining_parent_work":["Distribution-path evidence","CI evidence"]}
+{
+  "op": "resolve_checkpoint",
+  "checkpoint_id": "goal-1-checkpoint-1",
+  "state_version": 8,
+  "parent_frame_version": 2,
+  "decision": "next_target",
+  "parent_reading": "The target is closed locally, but the parent still needs distribution-path evidence.",
+  "parent_delta": {
+    "admitted_claims": [{"id":"installer-smoke-worker-startup","claim":"Installer smoke has local evidence for worker startup coverage.","status":"accepted","evidence_refs":[{"id":"checkpoint:goal-1-checkpoint-1","kind":"artifact"}],"non_implications":["Release is ready","Distribution path is verified"]}],
+    "boundaries_added": [{"id":"local-smoke-not-distribution","kind":"forbidden-inference","statement":"Local smoke success does not prove distribution install success."}],
+    "deliverable_deltas": [{"id":"D1","status":"partial","evidence_refs":[{"id":"checkpoint:goal-1-checkpoint-1","kind":"artifact"}],"next_relevant_target":"Prove distribution install runs smoke path"}]
+  },
+  "next_target": {"title":"Prove distribution install runs smoke path","desired_future_claim":"Distribution installs run the same smoke path.","closure_standard":"Distribution install test runs the smoke command and fails on worker startup errors.","parent_deliverable_ids":["D1"]},
+  "not_propagated": ["Local evidence is not distribution evidence."],
+  "remaining_parent_work": ["Distribution-path evidence","CI evidence"]
+}
 ```
 
 Resolve to parent verification:
 ```json
-{"op":"resolve_checkpoint","checkpoint_id":"goal-1-checkpoint-1","decision":"parent_completion_candidate","parent_reading":"Accepted target evidence appears to satisfy the parent objective; the verifier must decide.","not_propagated":["Parent goal is complete without verifier acceptance"],"remaining_parent_work":["Call goal({op:\"complete\"}) for parent completion verification."]}
+{"op":"resolve_checkpoint","checkpoint_id":"goal-1-checkpoint-1","state_version":8,"parent_frame_version":2,"decision":"parent_completion_candidate","parent_reading":"Accepted target evidence appears to satisfy the parent objective; the verifier must decide.","not_propagated":["Parent goal is complete without verifier acceptance"],"remaining_parent_work":["Call goal({op:\"complete\"}) for parent completion verification."]}
 ```
 
 Attempt parent completion:

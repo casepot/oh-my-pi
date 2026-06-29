@@ -229,6 +229,86 @@ describe("AgentSession stale-safe compaction commits", () => {
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
 	});
 
+	it("appends prepared compaction after append-only background entries race the base leaf", () => {
+		const { userId } = appendSeedTurn("append-only suffix");
+		const baseLeafId = sessionManager.getLeafId();
+		const pathEntries = sessionManager.getBranch();
+		const baseLatestCompactionId = getLatestCompactionEntry(pathEntries)?.id;
+		const asyncMessageId = sessionManager.appendCustomMessageEntry(
+			"async-result",
+			"background job finished while compaction was running",
+			true,
+			{ jobs: [{ jobId: "job-1" }] },
+			"agent",
+		);
+		sessionManager.appendCustomEntry("agent-ref", { id: "ReviewScout", status: "idle" });
+		const usageId = sessionManager.appendGoalUsageDelta({
+			goalId: "goal-1",
+			stateVersion: 1,
+			tokenDelta: 12,
+			wallSeconds: 3,
+			tokensUsed: 12,
+			timeUsedSeconds: 3,
+			updatedAt: Date.now(),
+		});
+
+		const result = sessionManager.tryAppendPreparedCompaction({
+			baseLeafId,
+			baseLatestCompactionId,
+			summary: "summary prepared from the base branch",
+			shortSummary: undefined,
+			firstKeptEntryId: userId,
+			tokensBefore: 100,
+			details: {},
+			allowAppendAfterBaseLeaf: true,
+			isAppendOnlySafeEntry: entry =>
+				entry.type === "custom" ||
+				entry.type === "goal_usage_delta" ||
+				(entry.type === "custom_message" && entry.customType === "async-result"),
+		});
+
+		expect(result.status).toBe("appended");
+		if (result.status !== "appended") throw new Error("Expected append to succeed");
+		expect(result.appendedAfterBaseLeaf).toBe(true);
+		expect(sessionManager.getEntry(asyncMessageId)?.type).toBe("custom_message");
+		expect(sessionManager.getEntry(result.entryId)?.parentId).toBe(usageId);
+		expect(
+			sessionManager
+				.buildSessionContext()
+				.messages.some(message => JSON.stringify(message).includes("background job finished")),
+		).toBe(true);
+	});
+
+	it("rejects prepared compaction after an ordinary user message races the base leaf", () => {
+		const { userId } = appendSeedTurn("unsafe suffix");
+		const baseLeafId = sessionManager.getLeafId();
+		const pathEntries = sessionManager.getBranch();
+		const baseLatestCompactionId = getLatestCompactionEntry(pathEntries)?.id;
+		sessionManager.appendMessage({
+			role: "user",
+			content: "new user input should force a fresh compaction snapshot",
+			timestamp: Date.now(),
+		});
+
+		const result = sessionManager.tryAppendPreparedCompaction({
+			baseLeafId,
+			baseLatestCompactionId,
+			summary: "stale summary",
+			shortSummary: undefined,
+			firstKeptEntryId: userId,
+			tokensBefore: 100,
+			details: {},
+			allowAppendAfterBaseLeaf: true,
+			isAppendOnlySafeEntry: entry =>
+				entry.type === "custom" ||
+				entry.type === "goal_usage_delta" ||
+				(entry.type === "custom_message" && entry.customType === "async-result"),
+		});
+
+		expect(result.status).toBe("stale");
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+	});
+
 	it("discards a manual compaction summary when the branch mutates before append", async () => {
 		appendSeedTurn("first");
 		appendSeedTurn("second");
@@ -419,31 +499,25 @@ describe("AgentSession stale-safe compaction commits", () => {
 		});
 	});
 
-	it("supersedes active idle compaction with incomplete-response recovery", async () => {
-		appendSeedTurn("idle-incomplete");
+	it("recovers incomplete responses locally without starting compaction", async () => {
+		appendSeedTurn("incomplete-local");
 		const activeSession = createSession();
 		const calls = blockCompactions();
-		const idleRun = activeSession.runIdleCompaction();
-		await waitFor(() => calls.length === 1);
-		const idleSignal = calls[0].signal;
+		const continueSpy = vi.spyOn(activeSession.agent, "continue").mockResolvedValue(undefined);
 		const assistant = incompleteAssistant();
 
 		emitCompletedAssistant(activeSession, assistant);
-		await waitFor(() => calls.length === 2);
+		await waitFor(() => continueSpy.mock.calls.length === 1);
 
-		expect(idleSignal.aborted).toBe(true);
-		calls[1].resolve("superseding incomplete summary");
-		await waitFor(() => compactionEntries().length === 1);
-		await idleRun;
-
-		expect(compactionEntries()).toHaveLength(1);
-		expect(compactionEntries()[0].summary).toBe("superseding incomplete summary");
-		expect(events).toContainEqual({
-			type: "auto_compaction_end",
-			action: "context-full",
-			result: expect.objectContaining({ summary: "superseding incomplete summary" }),
-			aborted: false,
-			willRetry: true,
-		});
+		expect(calls).toHaveLength(0);
+		expect(compactionEntries()).toHaveLength(0);
+		expect(events.some(event => event.type === "auto_compaction_start")).toBe(false);
+		const developerReminder = activeSession.agent.state.messages.find(message => message.role === "developer");
+		if (developerReminder?.role !== "developer") throw new Error("expected developer reminder");
+		const reminderText =
+			typeof developerReminder.content === "string"
+				? developerReminder.content
+				: developerReminder.content.map(content => (content.type === "text" ? content.text : "")).join("");
+		expect(reminderText).toContain("Continue exactly where you left off");
 	});
 });

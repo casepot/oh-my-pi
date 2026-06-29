@@ -349,6 +349,63 @@ describe("AgentSession inline provider-call maintenance", () => {
 		expect(persistedAssistantErrorMessages).toHaveLength(0);
 	});
 
+	it("commits inline maintenance across append-only background entries without retrying", async () => {
+		const { mock, sessionManager } = createHarness();
+		let compactCalls = 0;
+		let usageId: string | undefined;
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
+			compactCalls += 1;
+			sessionManager.appendCustomMessageEntry(
+				"async-result",
+				"background job finished during inline maintenance",
+				true,
+				{ jobs: [{ jobId: "job-1" }] },
+				"agent",
+			);
+			sessionManager.appendCustomEntry("agent-ref", { id: "ReviewScout", status: "idle" });
+			usageId = sessionManager.appendGoalUsageDelta({
+				goalId: "goal-1",
+				stateVersion: 1,
+				tokenDelta: 9,
+				wallSeconds: 2,
+				tokensUsed: 9,
+				timeUsedSeconds: 2,
+				updatedAt: Date.now(),
+			});
+			session!.settings.override("compaction.thresholdTokens", 20_000);
+			return {
+				summary: "inline compacted despite append-only suffix",
+				shortSummary: undefined,
+				firstKeptEntryId: findCurrentPromptEntryId(sessionManager),
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		await session!.prompt("use the echo tool");
+
+		expect(compactCalls).toBe(1);
+		expect(mock.calls).toHaveLength(2);
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("inline compacted despite append-only suffix");
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain(
+			"background job finished during inline maintenance",
+		);
+		const compactionEntries = sessionManager.getEntries().filter(entry => entry.type === "compaction");
+		expect(compactionEntries).toHaveLength(1);
+		const compactionEntry = compactionEntries[0];
+		if (!compactionEntry || !usageId) throw new Error("Expected one compaction appended after usage delta");
+		expect(compactionEntry.parentId).toBe(usageId);
+		const persistedAssistantErrorMessages = sessionManager.getEntries().filter(entry => {
+			return (
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.stopReason === "error" &&
+				entry.message.errorMessage?.includes("Context maintenance failed before provider call")
+			);
+		});
+		expect(persistedAssistantErrorMessages).toHaveLength(0);
+	});
+
 	it("supersedes stale idle work before inline provider-call maintenance", async () => {
 		const { mock, sessionManager } = createHarness();
 		let compactCalls = 0;

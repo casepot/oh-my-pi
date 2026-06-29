@@ -68,6 +68,14 @@ export const BUILT_IN_TARGET_UNIT_RULES: GoalTargetUnitRule[] = [
 		source: "built-in",
 		enforcement: "error",
 	},
+	{
+		id: "parallel-workstreams-required",
+		kind: "parallel-workstreams-required",
+		statement:
+			"Targets that require parallel implementation MUST encode a workstream manifest with at least two non-doc workstreams and a shared contract.",
+		source: "built-in",
+		enforcement: "warning",
+	},
 ];
 
 function jsonPointer(path: Array<string | number>): string {
@@ -765,6 +773,7 @@ function collectTargetUnitDiagnostics(
 	});
 	const primarySignalGroupId = resolvePrimarySignalGroupId(input);
 	const history = collectPrimarySignalGroupHistory(options.goal, options.targetPlanId, primarySignalGroupId);
+	const acknowledgedRuleIds = new Set(input.scopeCalibration.targetUnitRuleIds ?? []);
 	for (const rule of rules) {
 		if (input.scopeCalibration.targetUnitExemptions?.some(exemption => exemption.ruleId === rule.id)) continue;
 		if (rule.kind === "complete-acceptance-slice" && !input.targetCard?.acceptanceRows.closed.length) {
@@ -826,6 +835,34 @@ function collectTargetUnitDiagnostics(
 						message: "target card may describe a process phase rather than a capability",
 						guidance: rule.statement,
 						offender: { kind: "target_unit_rule", id: rule.id, value: input.targetCard?.capabilityClaim },
+					}),
+				);
+			}
+		} else if (rule.kind === "parallel-workstreams-required") {
+			if (!acknowledgedRuleIds.has(rule.id)) continue;
+			const workstreams = input.targetCard?.workstreams ?? [];
+			const nonDocWorkstreams = workstreams.filter(workstream => workstream.kind !== "docs-changelog");
+			if (nonDocWorkstreams.length < 2) {
+				diagnostics.push(
+					lintDiagnostic({
+						severity: resolveDiagnosticSeverity(rule),
+						code: "target_unit.violation",
+						path: ["target_card", "workstreams"],
+						message: "target unit rule requires at least two non-doc workstreams",
+						guidance: rule.statement,
+						offender: { kind: "target_unit_rule", id: rule.id, value: workstreams.map(item => item.id) },
+					}),
+				);
+			}
+			if (!input.targetCard?.sharedContract?.trim()) {
+				diagnostics.push(
+					lintDiagnostic({
+						severity: resolveDiagnosticSeverity(rule),
+						code: "target_unit.violation",
+						path: ["target_card", "shared_contract"],
+						message: "target unit rule requires target_card.shared_contract",
+						guidance: rule.statement,
+						offender: { kind: "target_unit_rule", id: rule.id },
 					}),
 				);
 			}

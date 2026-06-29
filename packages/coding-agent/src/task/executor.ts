@@ -34,6 +34,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { installRegistryStatusSync, type PersistedAgentRefRecord } from "../registry/agent-persistence";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
@@ -364,6 +365,8 @@ export interface ExecutorOptions {
 	 * transition explicitly.
 	 */
 	parentTelemetry?: AgentTelemetryConfig;
+	/** Persist subagent ref metadata into the parent session branch. Process-local job liveness is recorded elsewhere. */
+	recordAgentRef?: (record: PersistedAgentRefRecord) => void;
 	/** Skills to autoload via sendCustomMessage before the first prompt */
 	autoloadSkills?: Skill[];
 }
@@ -1839,20 +1842,24 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let providerNotice: string | undefined;
 	let unsubscribe: (() => void) | null = null;
 	let reviveSession: (() => Promise<AgentSession>) | null = null;
-	// Adopted (kept-alive) subagents flip registry status from session events on
-	// later turns: revive/wake → running, turn drained → idle. The subscription
-	// intentionally survives this run; a disposed session emits nothing, so it
-	// needs no teardown.
-	const installRegistryStatusSync = (target: AgentSession): void => {
-		target.subscribe(event => {
-			if (event.type === "agent_start") {
-				AgentRegistry.global().setStatus(id, "running");
-			} else if (event.type === "agent_end") {
-				AgentRegistry.global().setStatus(id, "idle");
-			}
+	const persistAgentRef = (status: PersistedAgentRefRecord["status"], resumable: boolean): void => {
+		options.recordAgentRef?.({
+			schemaVersion: 1,
+			id,
+			displayName: subagentDisplayName,
+			kind: "sub",
+			parentId: options.parentTaskRunId,
+			status,
+			sessionFile,
+			agentName: agent.name,
+			role: subagentRole,
+			cwd: worktree ?? cwd,
+			spawns: spawnsEnv,
+			taskDepth: childDepth,
+			resumable,
+			updatedAt: Date.now(),
 		});
 	};
-
 	const runSubagent = async (): Promise<{
 		exitCode: number;
 		error?: string;
@@ -2127,7 +2134,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			monitor.setActiveSession(session);
-			installRegistryStatusSync(session);
+			installRegistryStatusSync(id, session, AgentRegistry.global());
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
@@ -2139,7 +2146,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						reopened.adoptArtifactManager(options.parentArtifactManager);
 					}
 					const { session: revived } = await createAgentSession(buildSubagentSessionOptions(reopened));
-					installRegistryStatusSync(revived);
+					installRegistryStatusSync(id, revived, AgentRegistry.global());
 					return revived;
 				};
 			}
@@ -2187,6 +2194,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				tools: session.getActiveToolNames(),
 				outputSchema,
 			});
+			persistAgentRef("running", sessionFile !== null && worktree === undefined);
 
 			abortSignal.addEventListener(
 				"abort",
@@ -2318,6 +2326,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				if (aborted) {
 					// Hard abort (caller signal / wall-clock / budget): terminal teardown.
 					registry.setStatus(id, "aborted");
+					persistAgentRef("aborted", false);
 					try {
 						await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
 					} catch {
@@ -2330,6 +2339,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					// Status must flip to "parked" before dispose so the sdk dispose
 					// wrapper skips unregister.
 					registry.setStatus(id, "parked");
+					persistAgentRef("parked", false);
 					try {
 						await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
 					} catch {
@@ -2340,6 +2350,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					// Keep-alive: finished and failed subagents both stay interrogable.
 					// The lifecycle manager owns idle-TTL parking + revival from here on.
 					registry.setStatus(id, "idle");
+					persistAgentRef("idle", sessionFile !== null);
 					AgentLifecycleManager.global().adopt(id, {
 						idleTtlMs: agentIdleTtlMs,
 						revive: reviveSession ?? undefined,

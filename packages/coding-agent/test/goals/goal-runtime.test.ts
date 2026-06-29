@@ -337,6 +337,43 @@ async function startApprovedTarget(
 	return await approveTargetPlan(harness, planningState);
 }
 
+function buildParallelWorkstreamApprovalInput(state: GoalModeState): GoalTargetPlanApprovalInput {
+	const input = buildTargetPlanApprovalInput(state);
+	const targetCard = input.targetCard;
+	if (!targetCard) throw new Error("expected target card");
+	return {
+		...input,
+		targetCard: {
+			...targetCard,
+			sharedContract: "Backend and UI agree on the saved preference shape.",
+			workstreams: [
+				{
+					id: "backend-api",
+					label: "Backend API",
+					kind: "main",
+					role: "Backend contract specialist",
+					files: ["src/api.ts"],
+					contractInputs: ["Existing preference request"],
+					contractOutputs: ["Saved preference response"],
+				},
+				{
+					id: "ui-state",
+					label: "UI state",
+					kind: "app-ui",
+					role: "UI state specialist",
+					files: ["src/ui.ts"],
+					contractInputs: ["Saved preference response"],
+					contractOutputs: ["Rendered preference state"],
+				},
+			],
+		},
+		scopeCalibration: {
+			...input.scopeCalibration,
+			targetUnitRuleIds: ["parallel-workstreams-required"],
+		},
+	};
+}
+
 describe("goal runtime", () => {
 	it("counts cache writes but ignores cache reads in token deltas", () => {
 		expect(
@@ -345,6 +382,172 @@ describe("goal runtime", () => {
 				createUsage({ input: 10, output: 4, cacheRead: 1, cacheWrite: 5 }),
 			),
 		).toBe(8);
+	});
+
+	it("persists approved parallel workstream batches through summaries and compaction context", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+		const planning = await harness.runtime.startTarget({
+			title: "Save preference",
+			desiredFutureClaim: "Preference changes are saved.",
+			closureStandard: "Backend and UI preference paths both satisfy the focused check.",
+			evidenceExpectation: ["Focused preference check passes."],
+			nonGoals: ["Parent completion"],
+			forbiddenClaims: ["Parent goal complete"],
+			staleIf: ["Preference schema changes."],
+			parallelWorkstreamRequirement: {
+				required: true,
+				source: "operator",
+				rationale: "Backend and UI can progress independently but share a response contract.",
+			},
+		});
+
+		const approved = await harness.runtime.approveCurrentTargetPlan(buildParallelWorkstreamApprovalInput(planning));
+		const batch = approved.goal.currentWorkstreamBatch;
+		expect(batch?.status).toBe("pending-launch");
+		expect(approved.goal.currentTarget?.workstreamBatchId).toBe(batch?.id);
+		expect(batch?.workstreams.map(run => run.scaffoldTaskId)).toEqual(["backend-api", "ui-state"]);
+		const summary = buildGoalTargetPlanExecutionSummary(
+			approved.goal.currentTargetPlan,
+			approved.goal.currentTarget,
+			batch,
+		);
+		expect(summary?.taskBatchScaffold?.batchId).toBe(batch?.id);
+		expect(summary?.taskBatchScaffold?.tasks.map(task => task.id)).toEqual(["backend-api", "ui-state"]);
+
+		const restored = parseGoalModeState(serializeGoalModeState(approved), true);
+		expect(restored?.goal.currentWorkstreamBatch?.id).toBe(batch?.id);
+		expect(restored?.goal.currentWorkstreamBatch?.workstreams.map(run => run.workstreamId)).toEqual([
+			"backend-api",
+			"ui-state",
+		]);
+		const surface = JSON.parse(renderGoalPromptSurface(approved, approved.goal));
+		expect(surface.workstream_batch).toMatchObject({
+			id: batch?.id,
+			status: "pending-launch",
+		});
+		const compactionContext = buildGoalCompactionContext(approved);
+		expect(compactionContext?.context).toContain('"workstream_batch"');
+		expect(compactionContext?.context).toContain(batch?.id ?? "");
+	});
+
+	it("records workstream task lifecycle and closes the batch with the target checkpoint", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+		const planning = await harness.runtime.startTarget({
+			title: "Save preference",
+			desiredFutureClaim: "Preference changes are saved.",
+			closureStandard: "Backend and UI preference paths both satisfy the focused check.",
+			evidenceExpectation: ["Focused preference check passes."],
+			nonGoals: ["Parent completion"],
+			forbiddenClaims: ["Parent goal complete"],
+			staleIf: ["Preference schema changes."],
+			parallelWorkstreamRequirement: {
+				required: true,
+				source: "operator",
+				rationale: "Backend and UI can progress independently but share a response contract.",
+			},
+		});
+		const approved = await harness.runtime.approveCurrentTargetPlan(buildParallelWorkstreamApprovalInput(planning));
+		const initialBatchId = approved.goal.currentWorkstreamBatch?.id;
+		const spawns = [
+			{ taskId: "backend-api", agentId: "BackendAgent", jobId: "job-backend" },
+			{ taskId: "ui-state", agentId: "UiAgent", jobId: "job-ui" },
+		];
+		const taskParams = {
+			agent: "task",
+			context: "Shared preference contract",
+			tasks: [
+				{ id: "backend-api", assignment: "Implement backend preference save." },
+				{ id: "ui-state", assignment: "Implement UI preference state." },
+			],
+		};
+		await harness.runtime.recordGoalWorkstreamTaskDispatch({
+			toolCallId: "task-call-1",
+			params: taskParams,
+			details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+			spawns,
+		});
+		let batch = harness.getState()?.goal.currentWorkstreamBatch;
+		expect(batch?.status).toBe("running");
+		expect(batch?.workstreams.map(run => `${run.workstreamId}:${run.status}:${run.agentId}:${run.jobId}`)).toEqual([
+			"backend-api:running:BackendAgent:job-backend",
+			"ui-state:running:UiAgent:job-ui",
+		]);
+
+		await harness.runtime.recordGoalWorkstreamTaskResult({
+			toolCallId: "task-call-1",
+			details: {
+				projectAgentsDir: null,
+				results: [],
+				totalDurationMs: 0,
+				progress: [
+					{
+						index: 0,
+						id: "BackendAgent",
+						agent: "task",
+						agentSource: "bundled",
+						status: "completed",
+						task: "backend",
+						recentTools: [],
+						recentOutput: [],
+						toolCount: 0,
+						requests: 0,
+						tokens: 0,
+						cost: 0,
+						durationMs: 1,
+					},
+					{
+						index: 1,
+						id: "UiAgent",
+						agent: "task",
+						agentSource: "bundled",
+						status: "completed",
+						task: "ui",
+						recentTools: [],
+						recentOutput: [],
+						toolCount: 0,
+						requests: 0,
+						tokens: 0,
+						cost: 0,
+						durationMs: 1,
+					},
+				],
+			},
+			spawns,
+		});
+		batch = harness.getState()?.goal.currentWorkstreamBatch;
+		expect(batch?.status).toBe("ready-for-integration");
+		expect(
+			batch?.workstreams.map(run => `${run.workstreamId}:${run.status}:${run.historyUrl}:${run.outputUrl}`),
+		).toEqual([
+			"backend-api:completed:history://BackendAgent:agent://BackendAgent",
+			"ui-state:completed:history://UiAgent:agent://UiAgent",
+		]);
+
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Preference save target is closed.",
+			localClaims: ["Preference changes are saved."],
+			evidence: [{ claim: "Focused preference check passes.", evidence: "bun test preference", current: true }],
+			notClaimed: ["Parent goal complete"],
+			remainingQuestions: ["Parent completion remains open."],
+		});
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Target closed.",
+			evidenceChecked: [],
+			blockers: [],
+			reviewedAt: 10,
+		});
+		expect(committed.goal.currentWorkstreamBatch?.id).toBe(initialBatchId);
+		expect(committed.goal.currentWorkstreamBatch?.status).toBe("closed");
+		expect(committed.goal.currentWorkstreamBatch?.workstreams.map(run => run.status)).toEqual([
+			"accepted",
+			"accepted",
+		]);
 	});
 
 	it("omits compaction goal preserve data when goal mode is disabled", () => {
@@ -985,6 +1188,8 @@ describe("goal runtime", () => {
 		});
 		const resolved = await harness.runtime.recordCheckpointResolution({
 			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			stateVersion: committed.stateVersion,
+			parentFrameVersion: committed.parentFrameVersion,
 			decision: "next_target",
 			parentReading: "Source-link smoke claim accepted; tarball path remains open.",
 			parentDelta: {
@@ -1872,6 +2077,8 @@ describe("goal runtime", () => {
 			kind: "target-plan",
 			action: "restart_target_planning",
 			blockedStateId: block.id,
+			stateVersion: resumed.stateVersion,
+			parentFrameVersion: resumed.parentFrameVersion,
 			targetId,
 			targetPlanId: failedPlan.id,
 			revision: failedPlan.revision,
@@ -1937,6 +2144,8 @@ describe("goal runtime", () => {
 			kind: "target-plan",
 			action: "restart_target_planning",
 			blockedStateId: block.id,
+			stateVersion: stale.stateVersion,
+			parentFrameVersion: stale.parentFrameVersion,
 			targetId: target.id,
 			targetPlanId: currentStalePlan.id,
 			revision: currentStalePlan.revision,
@@ -1970,6 +2179,8 @@ describe("goal runtime", () => {
 				kind: "target-plan",
 				action: "restart_target_planning",
 				blockedStateId: "missing",
+				stateVersion: planning.stateVersion,
+				parentFrameVersion: planning.parentFrameVersion,
 				targetId: planningTarget.id,
 				targetPlanId: planningPlan.id,
 				revision: planningPlan.revision,
@@ -2005,6 +2216,8 @@ describe("goal runtime", () => {
 			kind: "target-plan" as const,
 			action: "restart_target_planning" as const,
 			blockedStateId: block.id,
+			stateVersion: failed.stateVersion,
+			parentFrameVersion: failed.parentFrameVersion,
 			targetId: failedTarget.id,
 			targetPlanId: failedPlan.id,
 			revision: failedPlan.revision,
@@ -2083,7 +2296,7 @@ describe("goal runtime", () => {
 			notClaimed: ["Release is ready"],
 			remainingQuestions: ["Which installer surface is next?"],
 		});
-		await startHarness.runtime.commitCheckpoint(startCandidate, {
+		const startCommitted = await startHarness.runtime.commitCheckpoint(startCandidate, {
 			status: "accepted",
 			feedback: "Target closure evidence is bounded and current.",
 			evidenceChecked: startCandidate.evidence,
@@ -2092,6 +2305,8 @@ describe("goal runtime", () => {
 		});
 		const paused = await startHarness.runtime.recordCheckpointResolution({
 			checkpointId: startCandidate.id,
+			stateVersion: startCommitted.stateVersion,
+			parentFrameVersion: startCommitted.parentFrameVersion,
 			decision: "needs_user_input",
 			parentReading: "Need operator input before selecting next target.",
 			notPropagated: [],
@@ -2108,6 +2323,8 @@ describe("goal runtime", () => {
 			kind: "checkpoint-external-pause",
 			action: "start_next_target",
 			blockedStateId: block.id,
+			stateVersion: paused.stateVersion,
+			parentFrameVersion: paused.parentFrameVersion,
 			checkpointId: block.source.checkpointId,
 			checkpointResolutionId: block.source.checkpointResolutionId,
 			reason: "user-input",
@@ -2140,7 +2357,7 @@ describe("goal runtime", () => {
 			notClaimed: ["Release is verified"],
 			remainingQuestions: ["Parent verifier should decide."],
 		});
-		await completionHarness.runtime.commitCheckpoint(completionCandidate, {
+		const completionCommitted = await completionHarness.runtime.commitCheckpoint(completionCandidate, {
 			status: "accepted",
 			feedback: "Target closure evidence is bounded and current.",
 			evidenceChecked: completionCandidate.evidence,
@@ -2149,6 +2366,8 @@ describe("goal runtime", () => {
 		});
 		const completionPaused = await completionHarness.runtime.recordCheckpointResolution({
 			checkpointId: completionCandidate.id,
+			stateVersion: completionCommitted.stateVersion,
+			parentFrameVersion: completionCommitted.parentFrameVersion,
 			decision: "needs_user_input",
 			parentReading: "Need operator input before parent completion.",
 			notPropagated: [],
@@ -2163,6 +2382,8 @@ describe("goal runtime", () => {
 			kind: "checkpoint-external-pause",
 			action: "enter_parent_completion",
 			blockedStateId: completionBlock.id,
+			stateVersion: completionPaused.stateVersion,
+			parentFrameVersion: completionPaused.parentFrameVersion,
 			checkpointId: completionBlock.source.checkpointId,
 			checkpointResolutionId: completionBlock.source.checkpointResolutionId,
 			reason: "user-input",
@@ -2459,6 +2680,8 @@ describe("goal runtime", () => {
 
 		const resolved = await harness.runtime.recordCheckpointResolution({
 			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			stateVersion: committed.stateVersion,
+			parentFrameVersion: committed.parentFrameVersion,
 			decision: "next_target",
 			parentReading: "Local smoke claim accepted; tarball path remains open.",
 			parentDelta: {
@@ -2556,6 +2779,8 @@ describe("goal runtime", () => {
 
 		const resolved = await harness.runtime.recordCheckpointResolution({
 			checkpointId: committed.goal.pendingCheckpointId ?? "",
+			stateVersion: committed.stateVersion,
+			parentFrameVersion: committed.parentFrameVersion,
 			decision: "next_target",
 			parentReading: "Only the compact deliverable status changes; parent frame claims remain unchanged.",
 			parentDelta: {
@@ -2630,6 +2855,8 @@ describe("goal runtime", () => {
 		const checkpointId = committed.goal.pendingCheckpointId ?? "";
 		const resolved = await harness.runtime.recordCheckpointResolution({
 			checkpointId,
+			stateVersion: committed.stateVersion,
+			parentFrameVersion: committed.parentFrameVersion,
 			decision: "needs_user_input",
 			parentReading: "Operator must choose next gate.",
 			notPropagated: ["Next target selected"],
@@ -2646,6 +2873,8 @@ describe("goal runtime", () => {
 		await expect(
 			harness.runtime.recordCheckpointResolution({
 				checkpointId,
+				stateVersion: resolved.stateVersion,
+				parentFrameVersion: resolved.parentFrameVersion,
 				decision: "needs_user_input",
 				parentReading: "Duplicate resolution should fail.",
 				notPropagated: [],
@@ -2659,6 +2888,8 @@ describe("goal runtime", () => {
 			kind: "checkpoint-external-pause",
 			action: "start_next_target",
 			blockedStateId: block.id,
+			stateVersion: resolved.stateVersion,
+			parentFrameVersion: resolved.parentFrameVersion,
 			checkpointId: block.source.checkpointId,
 			checkpointResolutionId: block.source.checkpointResolutionId,
 			reason: "user-input",
@@ -2702,6 +2933,8 @@ describe("goal runtime", () => {
 
 			const resolved = await harness.runtime.recordCheckpointResolution({
 				checkpointId,
+				stateVersion: committed.stateVersion,
+				parentFrameVersion: committed.parentFrameVersion,
 				decision,
 				parentReading: "Controller cannot continue automatically.",
 				notPropagated: ["Parent goal complete"],
@@ -2714,6 +2947,8 @@ describe("goal runtime", () => {
 			await expect(
 				harness.runtime.recordCheckpointResolution({
 					checkpointId,
+					stateVersion: resolved.stateVersion,
+					parentFrameVersion: resolved.parentFrameVersion,
 					decision,
 					parentReading: "Duplicate resolution should fail.",
 					notPropagated: [],
@@ -2745,7 +2980,7 @@ describe("goal runtime", () => {
 			notClaimed: ["Release is ready"],
 			remainingQuestions: ["Need parent resolution."],
 		});
-		await harness.runtime.commitCheckpoint(candidate, {
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
 			status: "accepted",
 			feedback: "Closed locally.",
 			evidenceChecked: candidate.evidence,
@@ -2755,6 +2990,8 @@ describe("goal runtime", () => {
 		await expect(harness.runtime.completeGoalFromTool()).rejects.toThrow("checkpoint is pending resolution");
 		const parentCandidate = await harness.runtime.recordCheckpointResolution({
 			checkpointId: candidate.id,
+			stateVersion: committed.stateVersion,
+			parentFrameVersion: committed.parentFrameVersion,
 			decision: "parent_completion_candidate",
 			parentReading: "Parent might be complete; verifier must decide.",
 			notPropagated: ["Parent goal complete"],
@@ -2890,6 +3127,8 @@ describe("goal runtime", () => {
 		await expect(
 			harness.runtime.recordCheckpointResolution({
 				checkpointId: repairCandidate.id,
+				stateVersion: partiallyRepaired.stateVersion,
+				parentFrameVersion: partiallyRepaired.parentFrameVersion,
 				decision: "parent_completion_candidate",
 				parentReading: "Only one blocker was repaired.",
 				notPropagated: ["Parent goal is complete"],
@@ -2898,6 +3137,8 @@ describe("goal runtime", () => {
 		).rejects.toThrow("verifier blockers have fresh repair evidence");
 		const nextRepair = await harness.runtime.recordCheckpointResolution({
 			checkpointId: repairCandidate.id,
+			stateVersion: partiallyRepaired.stateVersion,
+			parentFrameVersion: partiallyRepaired.parentFrameVersion,
 			decision: "next_target",
 			parentReading: "Tarball blocker still needs repair.",
 			notPropagated: ["Parent goal is complete"],
@@ -2943,7 +3184,7 @@ describe("goal runtime", () => {
 			notClaimed: ["Release is ready"],
 			remainingQuestions: ["Need parent resolution."],
 		});
-		await harness.runtime.commitCheckpoint(candidate, {
+		const committed = await harness.runtime.commitCheckpoint(candidate, {
 			status: "accepted",
 			feedback: "Closed locally.",
 			evidenceChecked: candidate.evidence,
@@ -2954,6 +3195,8 @@ describe("goal runtime", () => {
 		const checkpointExpectation = harness.runtime.captureSideAgentExpectation({ includeParentFrame: true });
 		await harness.runtime.recordCheckpointResolution({
 			checkpointId: candidate.id,
+			stateVersion: committed.stateVersion,
+			parentFrameVersion: committed.parentFrameVersion,
 			decision: "parent_completion_candidate",
 			parentReading: "Accept one parent delta.",
 			parentDelta: {

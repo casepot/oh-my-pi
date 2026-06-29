@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, HIDDEN_TOOLS, type TodoPhase, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -285,6 +285,7 @@ describe("createTools", () => {
 			session: null,
 			status: "running",
 		});
+		let todoPhases: TodoPhase[] = [];
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({
 				"goal.enabled": true,
@@ -292,6 +293,10 @@ describe("createTools", () => {
 			}),
 			agentRegistry: registry,
 			getAgentId: () => "Main",
+			getTodoPhases: () => todoPhases,
+			setTodoPhases: phases => {
+				todoPhases = phases;
+			},
 			getGoalModeState: () => ({
 				...active,
 				runMode: "planning-target" as const,
@@ -325,6 +330,7 @@ describe("createTools", () => {
 			"irc",
 			"write",
 			"edit",
+			"todo",
 			"goal",
 			"resolve",
 			"bash",
@@ -344,6 +350,7 @@ describe("createTools", () => {
 				"irc",
 				"write",
 				"edit",
+				"todo",
 				"goal",
 				"resolve",
 				"bash",
@@ -365,6 +372,14 @@ describe("createTools", () => {
 			report: "planning guard rejected payload sidecar",
 		});
 		expect(JSON.stringify(reportResult.content)).not.toContain("Goal target planning is active");
+		const todoTool = tools.find(tool => tool.name === "todo");
+		if (!todoTool) throw new Error("expected todo tool");
+		const todoResult = await todoTool.execute("todo-plan", {
+			ops: [{ op: "append", phase: "Planning", items: ["Review target plan"] }],
+		});
+		expect(JSON.stringify(todoResult.content)).not.toContain("Goal target planning is active");
+		expect(todoPhases[0]?.name).toBe("Planning");
+		expect(todoPhases[0]?.tasks[0]?.content).toBe("Review target plan");
 		const bashTool = tools.find(tool => tool.name === "bash");
 		if (!bashTool) throw new Error("expected bash tool");
 		const bashResult = await bashTool.execute("bash-plan", { command: "true", cwd: "/tmp", timeout: 5 });

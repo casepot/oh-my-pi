@@ -30,6 +30,7 @@ import {
 	type AgentState,
 	type AgentTool,
 	AppendOnlyContextManager,
+	ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON,
 	type AsideMessage,
 	type CompactionSummaryMessage,
 	ContextMaintenanceError,
@@ -77,6 +78,7 @@ import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/to
 import type {
 	AssistantMessage,
 	Context,
+	DeveloperMessage,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -303,6 +305,10 @@ import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type:
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import incompleteOutputContinuePrompt from "../prompts/system/incomplete-output-continue.md" with { type: "text" };
+import incompleteOutputDirectPrompt from "../prompts/system/incomplete-output-direct.md" with { type: "text" };
+import incompleteOutputFinalPrompt from "../prompts/system/incomplete-output-final.md" with { type: "text" };
+import incompleteToolCallRetryPrompt from "../prompts/system/incomplete-tool-call-retry.md" with { type: "text" };
 import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
@@ -348,7 +354,14 @@ import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
-import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo";
+import {
+	GOAL_TARGET_PLANNING_TODO_BASELINE_CUSTOM_TYPE,
+	getLatestGoalTargetPlanningTodoBaselineFromEntries,
+	getLatestTodoPhasesFromEntries,
+	type TodoItem,
+	type TodoPhase,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "../tools/todo";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { parseCommandArgs } from "../utils/command-args";
@@ -444,11 +457,25 @@ export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
+const INCOMPLETE_OUTPUT_MAX_RECOVERY_ATTEMPTS = 3;
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
 export type CommandMetadataChangedListener = () => void | Promise<void>;
 export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime">;
 
 const RETRY_BACKOFF_JITTER_RATIO = 0.25;
+
+type IncompleteOutputRecoveryKind = "tool-call" | "partial-text" | "empty";
+
+interface IncompleteOutputRecoveryState {
+	key: string;
+	attempts: number;
+}
+
+interface IncompleteAssistantCleanupResult {
+	removed: boolean;
+	transientToolCallRecovery: boolean;
+}
+
 /**
  * Hysteresis band for the post-shake "did we actually create headroom?" check.
  * Shake counts as having resolved threshold pressure only when residual context
@@ -1145,7 +1172,8 @@ function isGoalTargetUnitRuleKind(value: unknown): value is GoalTargetUnitRule["
 		value === "gate-prerequisite" ||
 		value === "no-process-phase" ||
 		value === "same-primary-signal-together" ||
-		value === "branch-unblocks-matrix"
+		value === "branch-unblocks-matrix" ||
+		value === "parallel-workstreams-required"
 	);
 }
 
@@ -1476,7 +1504,7 @@ interface MaterializedProviderContextEstimate {
 	effectiveEstimate: number;
 }
 
-type AutoCompactionReason = "overflow" | "threshold" | "idle" | "incomplete";
+type AutoCompactionReason = "overflow" | "threshold" | "idle";
 
 interface AutoCompactionOptions {
 	autoContinue?: boolean;
@@ -1646,6 +1674,9 @@ export class AgentSession {
 	 */
 	#todoReminderAwaitingProgress = false;
 	#todoPhases: TodoPhase[] = [];
+	#goalTargetPlanningTodoBaseline:
+		| { goalId: string; targetId: string; targetPlanId: string; phases: TodoPhase[] }
+		| undefined;
 	#toolChoiceQueue = new ToolChoiceQueue();
 
 	// Bash execution state
@@ -1783,6 +1814,7 @@ export class AgentSession {
 	// on `agent_end` can fire its next `prompt` before #promptWithMessage's finally
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
+	#incompleteOutputRecoveryState: IncompleteOutputRecoveryState | undefined = undefined;
 	#promptGeneration = 0;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#pendingProviderRequestNonMessageTokens: number | undefined = undefined;
@@ -2062,7 +2094,9 @@ export class AgentSession {
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
+				const previous = this.#goalModeState;
 				this.#goalModeState = state;
+				this.#syncGoalTargetPlanningTodosForStateTransition(previous, state);
 			},
 			getCurrentUsage: () => {
 				const usage = this.getSessionStats().tokens;
@@ -2854,6 +2888,14 @@ export class AgentSession {
 					});
 					this.#retryAttempt = 0;
 				}
+				if (
+					assistantMsg.stopReason !== "length" &&
+					assistantMsg.stopReason !== "error" &&
+					assistantMsg.stopReason !== "aborted" &&
+					!this.#isEmptyAssistantStop(assistantMsg)
+				) {
+					this.#resetIncompleteOutputRecoveryState();
+				}
 			}
 
 			if (event.message.role === "toolResult") {
@@ -2867,6 +2909,9 @@ export class AgentSession {
 				// productive work in response to the prior nudge, so the next text-only stop
 				// is allowed to escalate to the next reminder if todos remain incomplete.
 				this.#todoReminderAwaitingProgress = false;
+				if (!isError) {
+					this.#resetIncompleteOutputRecoveryState();
+				}
 				// Invalidate streaming edit cache when edit tool completes to prevent stale data
 				if (toolName === "edit" && details?.path) {
 					this.#invalidateFileCacheForPath(details.path);
@@ -2880,6 +2925,7 @@ export class AgentSession {
 					const todoRetryAllowed =
 						!goalState?.enabled ||
 						goalState.goal.status !== "active" ||
+						goalState.runMode === "planning-target" ||
 						goalState.runMode === "working-target" ||
 						goalState.runMode === "awaiting-verification-repair";
 					if (!todoRetryAllowed) {
@@ -2982,6 +3028,9 @@ export class AgentSession {
 				return;
 			}
 			if (await this.#handleUnexpectedAssistantStop(msg)) {
+				return;
+			}
+			if (await this.#handleIncompleteOutputStop(msg)) {
 				return;
 			}
 
@@ -3200,7 +3249,7 @@ export class AgentSession {
 	}
 
 	async #ensureGoalTargetPlanningToolsActive(): Promise<void> {
-		const planningTools = ["task", "job", "irc", "bash", "eval", "write", "edit", "goal"].filter(
+		const planningTools = ["task", "job", "irc", "bash", "eval", "write", "edit", "todo", "goal"].filter(
 			toolName => this.getToolByName(toolName) !== undefined,
 		);
 		const activeTools = this.getActiveToolNames();
@@ -5451,6 +5500,26 @@ export class AgentSession {
 		return extra + (fragments.length > 0 ? countTokens(fragments) : 0);
 	}
 
+	#isAppendOnlyCompactionRaceEntry(entry: SessionEntry): boolean {
+		if (entry.type === "custom" || entry.type === "goal_usage_delta") return true;
+		if (entry.type === "message") {
+			return entry.message.role === "user" && entry.message.attribution === "agent";
+		}
+		if (entry.type !== "custom_message" || entry.attribution !== "agent") return false;
+		return (
+			entry.customType === "async-result" ||
+			entry.customType === "lsp-late-diagnostic" ||
+			entry.customType === "irc:incoming"
+		);
+	}
+
+	#hasRemoteCompactionReplacementHistory(preserveData: Record<string, unknown> | undefined): boolean {
+		const candidate = preserveData?.openaiRemoteCompaction;
+		if (!candidate || typeof candidate !== "object") return false;
+		const remote = candidate as { replacementHistory?: unknown };
+		return Array.isArray(remote.replacementHistory);
+	}
+
 	#estimateProviderContextTokens(context: Context): number {
 		let tokens = countTokens(context.systemPrompt ?? []);
 		tokens += estimateToolSchemaTokens(context.tools ?? []);
@@ -5697,8 +5766,10 @@ export class AgentSession {
 	}
 
 	setGoalModeState(state: GoalModeState | undefined): void {
+		const previous = this.#goalModeState;
 		this.#goalModeState = state;
 		this.#syncGoalTargetPlanReference(state);
+		this.#syncGoalTargetPlanningTodosForStateTransition(previous, state);
 	}
 
 	#appendGoalModeChange(mode: string, data?: Record<string, unknown>): void {
@@ -6145,7 +6216,11 @@ export class AgentSession {
 					matrixRowCounts: matrixRowCounts(approvedPlan),
 					implementationFanoutRequired: implementationFanoutRequired(approvedPlan),
 					workstreamSummary: targetPlanWorkstreamSummary(approvedPlan),
-					executionSummary: buildGoalTargetPlanExecutionSummary(approvedPlan, approvedState.goal.currentTarget),
+					executionSummary: buildGoalTargetPlanExecutionSummary(
+						approvedPlan,
+						approvedState.goal.currentTarget,
+						approvedState.goal.currentWorkstreamBatch,
+					),
 				}
 			: undefined;
 		if (targetPlanApproval) this.setGoalTargetPlanReference(targetPlanApproval);
@@ -7041,6 +7116,7 @@ export class AgentSession {
 			bashAvailable: this.getToolByName("bash") !== undefined,
 			writeAvailable: this.getToolByName("write") !== undefined,
 			editAvailable: this.getToolByName("edit") !== undefined,
+			todoAvailable: this.getToolByName("todo") !== undefined,
 		});
 	}
 
@@ -7337,6 +7413,7 @@ export class AgentSession {
 		input: GoalTargetPlanApprovedDetails & { contextPreserved?: boolean; approvedPlanMarkdown?: string },
 	): string {
 		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(input.executionSummary);
+		const taskBatchScaffold = input.executionSummary?.taskBatchScaffold;
 		return prompt.render(goalTargetPlanApprovedPrompt, {
 			targetId: input.targetId,
 			targetPlanId: input.targetPlanId,
@@ -7356,6 +7433,8 @@ export class AgentSession {
 			workstreamSummary: input.workstreamSummary?.length
 				? JSON.stringify(input.workstreamSummary, null, 2)
 				: undefined,
+			taskBatchScaffold: taskBatchScaffold ? JSON.stringify(taskBatchScaffold, null, 2) : undefined,
+			taskBatchScaffoldRequired: taskBatchScaffold?.required === true,
 			executionGuardrails: executionGuardrails ? JSON.stringify(executionGuardrails, null, 2) : undefined,
 		});
 	}
@@ -7546,9 +7625,24 @@ export class AgentSession {
 			if (isEnoent(error)) return null;
 			throw error;
 		}
+		const activeBatch =
+			state.goal.currentWorkstreamBatch?.targetPlanId === currentPlan.id &&
+			state.goal.currentWorkstreamBatch.targetPlanRevision === currentPlan.revision
+				? state.goal.currentWorkstreamBatch
+				: undefined;
 		const executionSummary =
-			reference.executionSummary ?? buildGoalTargetPlanExecutionSummary(currentPlan, state.goal.currentTarget);
+			reference.executionSummary ??
+			buildGoalTargetPlanExecutionSummary(currentPlan, state.goal.currentTarget, activeBatch);
 		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
+		const taskBatchScaffold = executionSummary?.taskBatchScaffold;
+		const parallelWorkstreamBatch = taskBatchScaffold
+			? {
+					batch_id: taskBatchScaffold.batchId,
+					required: taskBatchScaffold.required,
+					shared_contract: activeBatch?.sharedContract ?? executionSummary?.sharedContract,
+					tasks_count: taskBatchScaffold.tasks.length,
+				}
+			: undefined;
 
 		const content = prompt.render(goalTargetPlanReferencePrompt, {
 			targetId: reference.targetId,
@@ -7565,6 +7659,9 @@ export class AgentSession {
 				? `in_scope=${reference.matrixRowCounts.inScope}, left_open=${reference.matrixRowCounts.leftOpen}`
 				: undefined,
 			implementationFanoutRequired: reference.implementationFanoutRequired === true,
+			parallelWorkstreamBatch: parallelWorkstreamBatch
+				? JSON.stringify(parallelWorkstreamBatch, null, 2)
+				: undefined,
 			executionGuardrails: executionGuardrails ? JSON.stringify(executionGuardrails, null, 2) : undefined,
 		});
 		this.#appendGoalBoundaryAudit({
@@ -7938,6 +8035,7 @@ export class AgentSession {
 			this.#todoReminderAwaitingProgress = false;
 			this.#emptyStopRetryCount = 0;
 			this.#unexpectedStopRetryCount = 0;
+			this.#resetIncompleteOutputRecoveryState();
 
 			await this.#maybeRestoreRetryFallbackPrimary();
 
@@ -8625,6 +8723,115 @@ export class AgentSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todoPhases = this.#cloneTodoPhases(phases);
+	}
+
+	#goalTargetPlanningIdentity(
+		state: GoalModeState | undefined,
+	): { goalId: string; targetId: string; targetPlanId: string } | undefined {
+		if (state?.enabled !== true) return undefined;
+		if (state.goal.status !== "active") return undefined;
+		if (state.runMode !== "planning-target") return undefined;
+		const targetId = state.goal.currentTarget?.id;
+		const targetPlanId = state.goal.currentTargetPlan?.id;
+		if (!targetId || !targetPlanId) return undefined;
+		return { goalId: state.goal.id, targetId, targetPlanId };
+	}
+
+	#sameGoalTargetPlanningIdentity(
+		a: { goalId: string; targetId: string; targetPlanId: string } | undefined,
+		b: { goalId: string; targetId: string; targetPlanId: string } | undefined,
+	): boolean {
+		return (
+			a !== undefined &&
+			b !== undefined &&
+			a.goalId === b.goalId &&
+			a.targetId === b.targetId &&
+			a.targetPlanId === b.targetPlanId
+		);
+	}
+
+	#enterGoalTargetPlanningTodos(state: GoalModeState): void {
+		const identity = this.#goalTargetPlanningIdentity(state);
+		if (!identity) return;
+		if (this.#sameGoalTargetPlanningIdentity(this.#goalTargetPlanningTodoBaseline, identity)) return;
+
+		const existingBaseline = getLatestGoalTargetPlanningTodoBaselineFromEntries(
+			this.sessionManager.getBranch(),
+			identity,
+		);
+		if (existingBaseline !== undefined) {
+			this.#goalTargetPlanningTodoBaseline = { ...identity, phases: existingBaseline };
+			return;
+		}
+
+		const baseline = this.#cloneTodoPhases(this.#todoPhases);
+		this.#goalTargetPlanningTodoBaseline = { ...identity, phases: baseline };
+		this.sessionManager.appendCustomEntry(GOAL_TARGET_PLANNING_TODO_BASELINE_CUSTOM_TYPE, {
+			...identity,
+			phases: this.#cloneTodoPhases(baseline),
+		});
+		this.#todoPhases = [];
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
+		this.#todoReminderCount = 0;
+		this.#todoReminderAwaitingProgress = false;
+		void this.#emitSessionEvent({ type: "todo_auto_clear" });
+	}
+
+	#restoreGoalTargetPlanningTodoBaseline(identity: { goalId: string; targetId: string; targetPlanId: string }): void {
+		let resolved: TodoPhase[] | undefined;
+		if (this.#sameGoalTargetPlanningIdentity(this.#goalTargetPlanningTodoBaseline, identity)) {
+			resolved = this.#goalTargetPlanningTodoBaseline?.phases;
+		} else {
+			resolved = getLatestGoalTargetPlanningTodoBaselineFromEntries(this.sessionManager.getBranch(), identity);
+		}
+
+		const restored = this.#cloneTodoPhases(resolved ?? []);
+		this.#todoPhases = restored;
+		if (this.#sameGoalTargetPlanningIdentity(this.#goalTargetPlanningTodoBaseline, identity)) {
+			this.#goalTargetPlanningTodoBaseline = undefined;
+		}
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: this.#cloneTodoPhases(restored) });
+		this.#todoReminderCount = 0;
+		this.#todoReminderAwaitingProgress = false;
+		void this.#emitSessionEvent({ type: "todo_auto_clear" });
+	}
+
+	#syncGoalTargetPlanningTodosForStateTransition(
+		previous: GoalModeState | undefined,
+		next: GoalModeState | undefined,
+	): void {
+		const nextPlanningIdentity = this.#goalTargetPlanningIdentity(next);
+		const previousPlanningIdentity = this.#goalTargetPlanningIdentity(previous);
+		if (
+			next !== undefined &&
+			nextPlanningIdentity !== undefined &&
+			!this.#sameGoalTargetPlanningIdentity(previousPlanningIdentity, nextPlanningIdentity)
+		) {
+			this.#enterGoalTargetPlanningTodos(next);
+			return;
+		}
+
+		if (
+			previousPlanningIdentity !== undefined &&
+			next?.enabled === true &&
+			next.goal.status === "active" &&
+			next.runMode === "working-target" &&
+			next.goal.id === previousPlanningIdentity.goalId &&
+			next.goal.currentTarget?.id === previousPlanningIdentity.targetId &&
+			next.goal.currentTargetPlan?.id === previousPlanningIdentity.targetPlanId
+		) {
+			this.#restoreGoalTargetPlanningTodoBaseline(previousPlanningIdentity);
+			return;
+		}
+
+		if (
+			next === undefined ||
+			next.enabled !== true ||
+			next.goal.status !== "active" ||
+			next.runMode !== "planning-target"
+		) {
+			this.#goalTargetPlanningTodoBaseline = undefined;
+		}
 	}
 
 	#syncTodoPhasesFromBranch(): void {
@@ -9758,6 +9965,9 @@ export class AgentSession {
 				details,
 				fromExtension,
 				preserveData,
+				allowAppendAfterBaseLeaf:
+					compactionPrep.kind !== "fromHook" && !this.#hasRemoteCompactionReplacementHistory(preserveData),
+				isAppendOnlySafeEntry: entry => this.#isAppendOnlyCompactionRaceEntry(entry),
 			});
 			if (appendResult.status !== "appended") {
 				this.#appendGoalBoundaryAudit({
@@ -10089,17 +10299,286 @@ export class AgentSession {
 		await this.#runAutoCompaction("threshold", false, false, false, { autoContinue: false });
 	}
 
+	#removeIncompleteAssistantRecoverySequence(
+		assistantMessage: AssistantMessage,
+		rewindBranch = false,
+	): IncompleteAssistantCleanupResult {
+		const messages = this.agent.state.messages;
+		const targetIndex = this.#findAssistantMessageIndex(messages, assistantMessage);
+		if (targetIndex < 0) return { removed: false, transientToolCallRecovery: false };
+
+		let removeStart = targetIndex;
+		const followingToolResultEnd = this.#skipFollowingIncompleteToolResults(messages, targetIndex + 1);
+		const removeEnd = Math.max(targetIndex + 1, followingToolResultEnd);
+		let transientToolCallRecovery = followingToolResultEnd > targetIndex + 1;
+
+		while (removeStart > 1) {
+			let precedingToolStart = removeStart;
+			while (
+				precedingToolStart > 0 &&
+				this.#isAssistantOutputIncompleteSyntheticToolResult(messages[precedingToolStart - 1])
+			) {
+				precedingToolStart--;
+			}
+			if (precedingToolStart === removeStart) break;
+
+			const precedingAssistantIndex = precedingToolStart - 1;
+			const precedingAssistant = messages[precedingAssistantIndex];
+			if (
+				!this.#isAssistantMessage(precedingAssistant) ||
+				precedingAssistant.stopReason !== "length" ||
+				precedingAssistant.provider !== assistantMessage.provider ||
+				precedingAssistant.model !== assistantMessage.model
+			) {
+				break;
+			}
+			transientToolCallRecovery = true;
+			removeStart = precedingAssistantIndex;
+		}
+
+		const firstRemovedMessage = messages[removeStart];
+		this.agent.replaceMessages([...messages.slice(0, removeStart), ...messages.slice(removeEnd)]);
+		if ((transientToolCallRecovery || rewindBranch) && this.#isAssistantMessage(firstRemovedMessage)) {
+			this.#rewindSessionBranchBeforeAssistantMessage(firstRemovedMessage);
+		}
+		return { removed: true, transientToolCallRecovery };
+	}
+
+	#rewindSessionBranchBeforeAssistantMessage(assistantMessage: AssistantMessage): void {
+		const branch = this.sessionManager.getBranch();
+		const matchingEntry =
+			branch.find(
+				entry =>
+					entry.type === "message" && entry.message.role === "assistant" && entry.message === assistantMessage,
+			) ??
+			branch.find(
+				entry =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					this.#isSameAssistantMessage(entry.message as AssistantMessage, assistantMessage),
+			);
+		if (!matchingEntry) return;
+		if (matchingEntry.parentId === null) {
+			this.sessionManager.resetLeaf();
+		} else {
+			this.sessionManager.branch(matchingEntry.parentId);
+		}
+	}
+
+	async #handleIncompleteOutputStop(assistantMessage: AssistantMessage): Promise<boolean> {
+		if (assistantMessage.stopReason !== "length") {
+			return false;
+		}
+		const kind = this.#classifyIncompleteOutputRecovery(assistantMessage);
+		const attempt = this.#nextIncompleteOutputRecoveryAttempt(assistantMessage, kind);
+
+		if (kind === "tool-call") {
+			this.#removeIncompleteAssistantRecoverySequence(assistantMessage, true);
+		} else if (kind === "empty") {
+			this.#removeIncompleteAssistantRecoverySequence(assistantMessage, true);
+		}
+
+		if (attempt > INCOMPLETE_OUTPUT_MAX_RECOVERY_ATTEMPTS) {
+			this.#appendIncompleteOutputDiagnostic(assistantMessage, kind, attempt - 1);
+			this.#resetIncompleteOutputRecoveryState();
+			return true;
+		}
+
+		const finalAttempt = attempt === INCOMPLETE_OUTPUT_MAX_RECOVERY_ATTEMPTS;
+		if (finalAttempt) {
+			this.#toolChoiceQueue.pushOnce("none", { label: "incomplete-output-final", now: true });
+			this.#appendIncompleteOutputRecoveryPrompt(incompleteOutputFinalPrompt, attempt);
+		} else if (kind === "tool-call") {
+			this.#appendIncompleteOutputRecoveryPrompt(incompleteToolCallRetryPrompt, attempt);
+		} else if (kind === "partial-text") {
+			this.#appendIncompleteOutputRecoveryPrompt(incompleteOutputContinuePrompt, attempt);
+		} else {
+			this.#appendIncompleteOutputRecoveryPrompt(incompleteOutputDirectPrompt, attempt);
+		}
+
+		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
+		return true;
+	}
+
+	#classifyIncompleteOutputRecovery(assistantMessage: AssistantMessage): IncompleteOutputRecoveryKind {
+		if (assistantMessage.content.some(content => content.type === "toolCall")) {
+			return "tool-call";
+		}
+		return this.#assistantVisibleText(assistantMessage).trim().length > 0 ? "partial-text" : "empty";
+	}
+
+	#nextIncompleteOutputRecoveryAttempt(
+		assistantMessage: AssistantMessage,
+		kind: IncompleteOutputRecoveryKind,
+	): number {
+		const key = this.#incompleteOutputRecoveryKey(assistantMessage, kind);
+		if (this.#incompleteOutputRecoveryState?.key !== key) {
+			this.#incompleteOutputRecoveryState = { key, attempts: 0 };
+		}
+		this.#incompleteOutputRecoveryState.attempts += 1;
+		return this.#incompleteOutputRecoveryState.attempts;
+	}
+
+	#incompleteOutputRecoveryKey(assistantMessage: AssistantMessage, kind: IncompleteOutputRecoveryKind): string {
+		const lastUserMessage = this.agent.state.messages
+			.slice()
+			.reverse()
+			.find(message => message.role === "user");
+		const userAnchor = lastUserMessage ? String(lastUserMessage.timestamp) : "no-user";
+		return [userAnchor, assistantMessage.provider, assistantMessage.model, kind].join(":");
+	}
+
+	#resetIncompleteOutputRecoveryState(): void {
+		this.#incompleteOutputRecoveryState = undefined;
+	}
+
+	#appendNextTurnDeveloperReminder(text: string): DeveloperMessage {
+		const message: DeveloperMessage = {
+			role: "developer",
+			content: [{ type: "text", text }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		this.agent.appendMessage(message);
+		this.sessionManager.appendMessage(message);
+		return message;
+	}
+
+	#appendIncompleteOutputRecoveryPrompt(template: string, retryCount: number): void {
+		this.#appendNextTurnDeveloperReminder(
+			prompt
+				.render(template, {
+					retryCount,
+					maxRetries: INCOMPLETE_OUTPUT_MAX_RECOVERY_ATTEMPTS,
+				})
+				.trim(),
+		);
+	}
+
+	#appendIncompleteOutputDiagnostic(
+		assistantMessage: AssistantMessage,
+		kind: IncompleteOutputRecoveryKind,
+		attempts: number,
+	): void {
+		const pressure = this.#incompleteOutputContextPressure();
+		const providerReason = assistantMessage.stopDetails?.type ?? "unknown";
+		const visibleTextChars = this.#assistantVisibleText(assistantMessage).length;
+		const message = [
+			`Stopped automatic recovery after ${attempts} incomplete ${kind} responses from ${assistantMessage.provider}/${assistantMessage.model}.`,
+			`Provider reason: ${providerReason}. Visible output: ${visibleTextChars} chars.`,
+			`Independent context pressure: ${pressure.contextTokens}/${pressure.contextWindow || "unknown"} tokens; threshold pressure ${pressure.nearThreshold ? "detected" : "not detected"}.`,
+			"No automatic compaction was run because incomplete output is an output-generation failure unless context pressure is independently proven.",
+		].join(" ");
+		const details = {
+			kind,
+			attempts,
+			maxAttempts: INCOMPLETE_OUTPUT_MAX_RECOVERY_ATTEMPTS,
+			provider: assistantMessage.provider,
+			model: assistantMessage.model,
+			providerReason,
+			visibleTextChars,
+			contextTokens: pressure.contextTokens,
+			contextWindow: pressure.contextWindow,
+			nearThreshold: pressure.nearThreshold,
+		};
+		const diagnosticMessage: CustomMessage<typeof details> = {
+			role: "custom",
+			customType: "incomplete-output-diagnostic",
+			content: message,
+			display: true,
+			details,
+			attribution: "agent",
+			includeInContext: false,
+			timestamp: Date.now(),
+		};
+		this.agent.appendMessage(diagnosticMessage);
+		this.sessionManager.appendCustomMessageEntry(
+			diagnosticMessage.customType,
+			diagnosticMessage.content,
+			diagnosticMessage.display,
+			diagnosticMessage.details,
+			diagnosticMessage.attribution,
+			false,
+		);
+		this.emitNotice("warning", message, "incomplete-output");
+	}
+
+	#incompleteOutputContextPressure(): { contextTokens: number; contextWindow: number; nearThreshold: boolean } {
+		const contextWindow = this.model?.contextWindow ?? 0;
+		const estimate = this.#estimateContextTokens();
+		const compactionSettings = this.settings.getGroup("compaction");
+		return {
+			contextTokens: estimate.tokens,
+			contextWindow,
+			nearThreshold: contextWindow > 0 && shouldCompact(estimate.tokens, contextWindow, compactionSettings),
+		};
+	}
+
+	#assistantVisibleText(assistantMessage: AssistantMessage): string {
+		return assistantMessage.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map(content => content.text)
+			.join("");
+	}
+
+	#findAssistantMessageIndex(messages: readonly AgentMessage[], target: AssistantMessage): number {
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (!this.#isAssistantMessage(message)) continue;
+			if (message === target) return index;
+			if (message.timestamp !== target.timestamp) continue;
+			if (message.provider !== target.provider || message.model !== target.model) continue;
+			if (
+				message.responseId !== undefined &&
+				target.responseId !== undefined &&
+				message.responseId !== target.responseId
+			) {
+				continue;
+			}
+			return index;
+		}
+		return -1;
+	}
+
+	#skipFollowingIncompleteToolResults(messages: readonly AgentMessage[], startIndex: number): number {
+		let index = startIndex;
+		while (index < messages.length && this.#isAssistantOutputIncompleteSyntheticToolResult(messages[index])) {
+			index++;
+		}
+		return index;
+	}
+
+	#isAssistantMessage(message: AgentMessage | undefined): message is AssistantMessage {
+		return !!message && "role" in message && message.role === "assistant";
+	}
+
+	#isAssistantOutputIncompleteSyntheticToolResult(message: AgentMessage | undefined): boolean {
+		if (!message || !("role" in message) || message.role !== "toolResult" || !message.isError) return false;
+		const details = message.details;
+		if (details && typeof details === "object") {
+			const record = details as Record<string, unknown>;
+			if (
+				record.skipReason === ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON &&
+				record.stopReason === "length"
+			) {
+				return true;
+			}
+		}
+		return message.content.some(
+			content =>
+				content.type === "text" &&
+				content.text.includes("stop_reason: length") &&
+				content.text.includes("arguments are truncated"),
+		);
+	}
+
 	/**
 	 * Check if context maintenance is needed and run it.
 	 * Called after agent_end and before prompt submission.
 	 *
-	 * Three cases (in order):
+	 * Two cases (in order):
 	 * 1. Input overflow: run context maintenance, auto-retry on same model.
-	 * 2. Output incomplete (stopReason === "length", e.g. `response.incomplete`): the
-	 *    model burned its output budget without producing an actionable deliverable
-	 *    (reasoning-only or truncated). Drop the dead turn, run compaction/handoff,
-	 *    and retry.
-	 * 3. Threshold: context over threshold, run context maintenance (no auto-retry).
+	 * 2. Threshold: context over threshold after a successful turn, run context maintenance (no auto-retry).
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
@@ -10151,34 +10630,9 @@ export class AgentSession {
 			return false;
 		}
 
-		// Case 2: Output-side incomplete — `response.incomplete` from OpenAI Responses
-		// (and Codex) maps to stopReason === "length". The model burned its
-		// `max_output_tokens` budget on reasoning/text and emitted no actionable
-		// deliverable. Same recovery class as overflow: compaction/handoff.
-		// Unlike overflow, the *input* is fine, so we allow the handoff strategy to run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
-			const messages = this.agent.state.messages;
-			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-				this.agent.replaceMessages(messages.slice(0, -1));
-			}
-
-			const incompleteCompactionSettings = this.settings.getGroup("compaction");
-			if (incompleteCompactionSettings.enabled && incompleteCompactionSettings.strategy !== "off") {
-				logger.debug("Compaction triggered by response.incomplete (length stop)", {
-					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-					strategy: incompleteCompactionSettings.strategy,
-				});
-				await this.#runAutoCompaction("incomplete", true, false, allowDefer, {
-					autoContinue,
-					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
-				});
-			} else {
-				// Compaction is disabled — surface the dead-end so the user
-				// understands why the turn yielded with nothing.
-				logger.warn("response.incomplete with no recovery path because compaction is unavailable", {
-					model: `${assistantMessage.provider}/${assistantMessage.model}`,
-				});
-			}
+			// Incomplete output is recovered locally by #handleIncompleteOutputStop.
+			// Do not compact merely because a response hit its output cap.
 			return false;
 		}
 
@@ -10250,12 +10704,7 @@ export class AgentSession {
 			return true;
 		}
 		this.#removeEmptyStopFromActiveContext(assistantMessage);
-		this.agent.appendMessage({
-			role: "developer",
-			content: [{ type: "text", text: this.#emptyStopRetryReminder() }],
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		this.#appendNextTurnDeveloperReminder(this.#emptyStopRetryReminder());
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 		return true;
 	}
@@ -10339,12 +10788,7 @@ export class AgentSession {
 			return false;
 		}
 
-		this.agent.appendMessage({
-			role: "developer",
-			content: [{ type: "text", text: this.#unexpectedStopRetryReminder() }],
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		this.#appendNextTurnDeveloperReminder(this.#unexpectedStopRetryReminder());
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 		return true;
 	}
@@ -10405,12 +10849,7 @@ export class AgentSession {
 			"You are in an active checkpoint. You MUST call rewind with your investigation findings before yielding. Do NOT yield without completing the checkpoint.",
 			"</system-warning>",
 		].join("\n");
-		this.agent.appendMessage({
-			role: "developer",
-			content: [{ type: "text", text: reminder }],
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		this.#appendNextTurnDeveloperReminder(reminder);
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 		return true;
 	}
@@ -10719,12 +11158,7 @@ export class AgentSession {
 
 		this.#todoReminderAwaitingProgress = true;
 		// Inject reminder and continue the conversation
-		this.agent.appendMessage({
-			role: "developer",
-			content: [{ type: "text", text: reminder }],
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		this.#appendNextTurnDeveloperReminder(reminder);
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 	}
 
@@ -11081,6 +11515,31 @@ export class AgentSession {
 		);
 	}
 
+	async #markCompactionUsageLimitReached(model: Model, message: string, signal?: AbortSignal): Promise<boolean> {
+		if (!isUsageLimitError(message)) return false;
+		const retryAfterMs =
+			this.#parseRetryAfterMsFromError(message) ?? calculateRateLimitBackoffMs(parseRateLimitReason(message));
+		const outcome = await this.#modelRegistry.authStorage.markUsageLimitReached(model.provider, this.sessionId, {
+			retryAfterMs,
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+			signal,
+		});
+		if (outcome.switched) {
+			logger.warn("Compaction usage limit reached; retrying with sibling credential", {
+				model: `${model.provider}/${model.id}`,
+				retryAfterMs,
+			});
+			return true;
+		}
+		logger.warn("Compaction usage limit reached but no sibling credential was selected", {
+			model: `${model.provider}/${model.id}`,
+			retryAfterMs,
+			retryAtMs: outcome.retryAtMs,
+		});
+		return false;
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -11111,8 +11570,30 @@ export class AgentSession {
 					},
 				);
 			} catch (error) {
-				if (!this.#isCompactionAuthFailure(error)) {
-					throw error;
+				let finalError = error;
+				const message = error instanceof Error ? error.message : String(error);
+				if (await this.#markCompactionUsageLimitReached(candidateModel, message, signal)) {
+					try {
+						return await compact(
+							this.#obfuscatePreparationForProvider(preparation),
+							candidateModel,
+							this.#modelRegistry.resolver(candidateModel, this.sessionId),
+							this.#obfuscateTextForProvider(customInstructions),
+							signal,
+							{
+								...options,
+								metadata: this.agent.metadataForProvider(candidateModel.provider),
+								convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+								telemetry,
+								thinkingLevel: candidate.thinkingLevel ?? this.thinkingLevel,
+							},
+						);
+					} catch (retryError) {
+						finalError = retryError;
+					}
+				}
+				if (!this.#isCompactionAuthFailure(finalError)) {
+					throw finalError;
 				}
 			}
 		}
@@ -11303,7 +11784,6 @@ export class AgentSession {
 	#autoCompactionPriority(reason: AutoCompactionReason): number {
 		switch (reason) {
 			case "overflow":
-			case "incomplete":
 				return 3;
 			case "threshold":
 				return 2;
@@ -11361,15 +11841,14 @@ export class AgentSession {
 			);
 			if (outcome !== "fallback") return false;
 		}
-		// "overflow" and "incomplete" force inline execution because they are recovery
-		// paths the caller wants resolved before scheduling the next turn. "idle" is
+		// "overflow" forces inline execution because it is a recovery path the
+		// caller wants resolved before scheduling the next turn. "idle" is
 		// triggered by the idle loop and does its own scheduling.
 		if (
 			!forceContextFull &&
 			!deferred &&
 			allowDefer &&
 			reason !== "overflow" &&
-			reason !== "incomplete" &&
 			reason !== "idle" &&
 			compactionSettings.strategy === "handoff"
 		) {
@@ -11429,10 +11908,9 @@ export class AgentSession {
 		}
 
 		// "overflow" forces context-full because the input itself is broken — a handoff
-		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
-		// so a handoff request on the existing context is still viable. Snapcompact is
-		// safe for every reason (it makes no LLM call at all) but requires a vision
-		// model to be worth anything — fall back to context-full otherwise.
+		// LLM call would hit the same overflow. Snapcompact is safe for every reason
+		// (it makes no LLM call at all) but requires a vision model to be worth
+		// anything — fall back to context-full otherwise.
 		let action: "context-full" | "handoff" | "snapcompact" =
 			forceContextFull || compactionSettings.strategy !== "handoff" || reason === "overflow"
 				? "context-full"
@@ -11676,6 +12154,21 @@ export class AgentSession {
 								break;
 							}
 							const retryAfterMs = this.#parseRetryAfterMsFromError(message);
+							const switchedCredential = await this.#markCompactionUsageLimitReached(
+								candidateModel,
+								message,
+								autoCompactionSignal,
+							);
+							if (switchedCredential) {
+								attempt++;
+								logger.warn("Auto-compaction failed on usage-limited credential, retrying immediately", {
+									attempt,
+									maxRetries: retrySettings.maxRetries,
+									error: message,
+									model: `${candidateModel.provider}/${candidateModel.id}`,
+								});
+								continue;
+							}
 							const shouldRetry =
 								retrySettings.enabled &&
 								attempt < retrySettings.maxRetries &&
@@ -11764,6 +12257,9 @@ export class AgentSession {
 				details,
 				fromExtension,
 				preserveData,
+				allowAppendAfterBaseLeaf:
+					compactionPrep.kind !== "fromHook" && !this.#hasRemoteCompactionReplacementHistory(preserveData),
+				isAppendOnlySafeEntry: entry => this.#isAppendOnlyCompactionRaceEntry(entry),
 			});
 			if (appendResult.status !== "appended") {
 				this.#appendGoalBoundaryAudit({
@@ -11833,14 +12329,9 @@ export class AgentSession {
 				const lastMsg = messages[messages.length - 1];
 				if (lastMsg?.role === "assistant") {
 					const lastAssistant = lastMsg as AssistantMessage;
-					// Drop the prior turn before retry when it carries no actionable deliverable:
-					// - "error": failure was kept in history but must not re-enter the next turn's prompt.
-					// - reason === "incomplete" && stopReason === "length": truncated output (typically
-					//   reasoning-only) — re-running it produces the same dead-end.
-					const shouldDrop =
-						lastAssistant.stopReason === "error" ||
-						(reason === "incomplete" && lastAssistant.stopReason === "length");
-					if (shouldDrop) {
+					// Drop error turns before retry: the failure was kept in history
+					// but must not re-enter the next turn's prompt.
+					if (lastAssistant.stopReason === "error") {
 						this.agent.replaceMessages(messages.slice(0, -1));
 					}
 				}
@@ -11879,9 +12370,7 @@ export class AgentSession {
 				errorMessage:
 					reason === "overflow"
 						? `Context overflow recovery failed: ${errorMessage}`
-						: reason === "incomplete"
-							? `Incomplete response recovery failed: ${errorMessage}`
-							: `Auto-compaction failed: ${errorMessage}`,
+						: `Auto-compaction failed: ${errorMessage}`,
 			});
 			if (options.throwOnError) throw error;
 		} finally {
@@ -11910,7 +12399,7 @@ export class AgentSession {
 	 * the oversized input still gets resolved. Returns `"handled"` otherwise.
 	 */
 	async #runAutoShake(
-		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		reason: AutoCompactionReason,
 		willRetry: boolean,
 		generation: number,
 		autoContinue: boolean,
@@ -11939,10 +12428,9 @@ export class AgentSession {
 			// fires, shake runs, but residual context is still above the configured
 			// threshold. The next agent_end would re-trigger shake, which has nothing
 			// new to drop on the second pass, so the loop spins until the user kills it.
-			// Same hazard for "incomplete" (the retry would re-hit the length cap) and
-			// for the existing "overflow + nothing reclaimed" case. In every recovery
-			// reason we hand off to the summarization-driven context-full path so the
-			// situation actually resolves; "idle" is exempt because its 60s+ timer
+			// Same hazard for the existing "overflow + nothing reclaimed" case. In every
+			// recovery reason we hand off to the summarization-driven context-full path so
+			// the situation actually resolves; "idle" is exempt because its 60s+ timer
 			// re-checks usage before re-firing and cannot dead-loop on its own.
 			//
 			// #2275: the post-shake check MUST be anchored on the same metric that
@@ -12004,10 +12492,7 @@ export class AgentSession {
 				const lastMsg = messages[messages.length - 1];
 				if (lastMsg?.role === "assistant") {
 					const lastAssistant = lastMsg as AssistantMessage;
-					const shouldDrop =
-						lastAssistant.stopReason === "error" ||
-						(reason === "incomplete" && lastAssistant.stopReason === "length");
-					if (shouldDrop) this.agent.replaceMessages(messages.slice(0, -1));
+					if (lastAssistant.stopReason === "error") this.agent.replaceMessages(messages.slice(0, -1));
 				}
 				this.#scheduleAgentContinue({ delayMs: 100, generation });
 			} else if (this.agent.hasQueuedMessages()) {

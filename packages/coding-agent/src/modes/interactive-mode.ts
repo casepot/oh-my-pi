@@ -2033,7 +2033,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #enterGoalTargetPlanningTools(): Promise<void> {
 		if (this.#goalTargetPlanningPreviousTools !== undefined) return;
 		const previousTools = this.session.getActiveToolNames();
-		const availablePlanningTools = ["task", "job", "irc", "bash", "eval", "write", "edit", "goal"].filter(
+		const availablePlanningTools = ["task", "job", "irc", "bash", "eval", "write", "edit", "todo", "goal"].filter(
 			toolName => this.session.getToolByName(toolName) !== undefined,
 		);
 		this.#goalTargetPlanningPreviousTools = previousTools;

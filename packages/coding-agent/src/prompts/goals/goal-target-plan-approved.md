@@ -26,8 +26,14 @@ Goal target plan approved. Execute this approved current-target plan.
 {{#if workstreamSummary}}
 - workstreams: {{workstreamSummary}}
 {{/if}}
-{{#if implementationFanoutRequired}}
-- Implementation fanout is recommended by guardrail metadata only if `task` remains allowed and you can split by workstream contract. NEVER spawn tasks automatically from this notice.
+{{#if taskBatchScaffold}}
+- task_batch_scaffold:
+{{taskBatchScaffold}}
+{{#if taskBatchScaffoldRequired}}
+- First implementation action SHOULD be one `task` batch using `task_batch_scaffold` unless a concrete safety reason makes fanout unsafe. If you do not fan out, record why in goal/checkpoint evidence before serial work.
+{{else}}
+- A parallel workstream batch is available. Use the scaffold when fanout is safe; otherwise keep serial work aligned to the same workstream ids/contracts.
+{{/if}}
 {{/if}}
 </execution_context>
 
@@ -53,6 +59,7 @@ Use target card/matrix summaries as execution guardrails; the approved Markdown 
 <critical>
 - Execute only the approved current target.
 - Satisfy every required verification signal before checkpointing.
+- If a workstream batch exists, integrate or replace every required workstream with equivalent serial evidence before checkpointing; checkpoint review will reject partial batch closure.
 - Code/behavior changes require post-green code review before commit/checkpoint; use execution guardrails `reviewLenses` when present.
 - Call `goal({op:"checkpoint"})` only after the closure standard is met with current evidence.
 - NEVER call parent completion because this target plan was approved.

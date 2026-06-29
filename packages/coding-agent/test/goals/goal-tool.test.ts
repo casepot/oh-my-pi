@@ -588,6 +588,7 @@ describe("GoalTool", () => {
 		expect(goalTargetPlanningPrompt).toContain("Schema-only payload fixes NEVER cause Markdown churn");
 		expect(goalTargetPlanningPrompt).toContain("target_plan_reviews");
 		expect(goalTargetPlanningPrompt).toContain("dry_run");
+		expect(goalTargetPlanningPrompt).toContain("- todo:");
 		expect(goalTargetPlanningPrompt).toContain("Local self-check before submit MUST confirm");
 		expect(goalTargetPlanningPrompt).toContain("Enum fields classify");
 		expect(goalTargetPlanningPrompt).toContain("Use `branch_evidence[].row_ids` to link scenario rows");
@@ -601,6 +602,12 @@ describe("GoalTool", () => {
 		);
 		expect(goalTargetPlanningPrompt).toContain("rewrite one fresh authoritative plan");
 		expect(goalToolPrompt).toContain("do not guess aliases, nesting, enum values, or array/object shapes");
+		expect(goalToolPrompt).toContain("Reason enums are not interchangeable");
+		expect(goalToolPrompt).toContain("`fail_target_plan.reason`: `needs-user-input`, `task-unavailable`");
+		expect(goalToolPrompt).toContain("`recover_blocked_state.reason`: `user-input`, `broader-checks`");
+		expect(goalToolPrompt).toContain("copy `state_version` and `parent_frame_version` from that fresh response");
+		expect(goalTargetPlanningPrompt).toContain("never stale plan IDs or stale versions");
+		expect(goalTargetPlanningPrompt).toContain("NEVER pass recovery reasons");
 		expect(goalTargetPlanningPrompt).toContain("Use `plan-review` skill cadence for explicit review evidence");
 		expect(goalTargetPlanningPrompt).toContain("Prefer `task` for planning-mode reviewers; it preserves LSP and IRC");
 		expect(goalTargetPlanningPrompt).toContain(
@@ -646,6 +653,8 @@ describe("GoalTool", () => {
 		expect(goalToolPrompt).toContain("NEVER target process phases");
 		expect(goalToolPrompt).toContain("Same signal stays together");
 		expect(goalToolPrompt).toContain("Reject plumbing/parser-only slices");
+		expect(goalModeActivePrompt).toContain("include that response's `state_version` and `parent_frame_version`");
+		expect(goalContinuationPrompt).toContain("recover_blocked_state` must include fresh `state_version`");
 	});
 
 	it("routes create/get/complete operations and returns completion budget details", async () => {
@@ -977,23 +986,27 @@ describe("GoalTool", () => {
 				}),
 			).success,
 		).toBe(false);
-		expect(
-			tool.parameters.safeParse({
-				op: "fail_target_plan",
-				target_id: "target-1",
-				target_plan_id: "target-plan-1",
-				revision: 1,
-				reason: "needs-user-input",
-				message: "Cannot choose the right target without operator input.",
-				blockers: ["Missing operator choice."],
-				suggested_questions: ["Which gate should be targeted first?"],
-			}).success,
-		).toBe(true);
+		const failTargetPlanPayload = {
+			op: "fail_target_plan",
+			target_id: "target-1",
+			target_plan_id: "target-plan-1",
+			revision: 1,
+			reason: "needs-user-input",
+			message: "Cannot choose the right target without operator input.",
+			blockers: ["Missing operator choice."],
+			suggested_questions: ["Which gate should be targeted first?"],
+		};
+		expect(tool.parameters.safeParse(failTargetPlanPayload).success).toBe(true);
+		for (const reason of ["state-refresh", "user-input", "broader-checks"] as const) {
+			expect(tool.parameters.safeParse({ ...failTargetPlanPayload, reason }).success).toBe(false);
+		}
 		const recoverTargetPlanPayload = {
 			op: "recover_blocked_state",
 			kind: "target-plan",
 			action: "restart_target_planning",
 			blocked_state_id: "goal-1-blocked-1",
+			state_version: 0,
+			parent_frame_version: 0,
 			target_id: "target-1",
 			target_plan_id: "target-1-plan",
 			revision: 3,
@@ -1003,12 +1016,21 @@ describe("GoalTool", () => {
 		};
 		expect(tool.parameters.safeParse(recoverTargetPlanPayload).success).toBe(true);
 		expect(tool.parameters.safeParse({ ...recoverTargetPlanPayload, extra: "not allowed" }).success).toBe(false);
+		expect(tool.parameters.safeParse({ ...recoverTargetPlanPayload, reason: "needs-user-input" }).success).toBe(
+			false,
+		);
+		expect(tool.parameters.safeParse({ ...recoverTargetPlanPayload, state_version: undefined }).success).toBe(false);
+		expect(tool.parameters.safeParse({ ...recoverTargetPlanPayload, parent_frame_version: undefined }).success).toBe(
+			false,
+		);
 		expect(
 			tool.parameters.safeParse({
 				op: "recover_blocked_state",
 				kind: "checkpoint-external-pause",
 				action: "start_next_target",
 				blocked_state_id: "goal-1-blocked-2",
+				state_version: 0,
+				parent_frame_version: 0,
 				checkpoint_id: "goal-1-checkpoint-1",
 				checkpoint_resolution_id: "goal-1-checkpoint-resolution-1",
 				reason: "user-input",
@@ -1021,6 +1043,8 @@ describe("GoalTool", () => {
 				kind: "checkpoint-external-pause",
 				action: "start_next_target",
 				blocked_state_id: "goal-1-blocked-2",
+				state_version: 0,
+				parent_frame_version: 0,
 				checkpoint_id: "goal-1-checkpoint-1",
 				checkpoint_resolution_id: "goal-1-checkpoint-resolution-1",
 				reason: "user-input",
@@ -1038,6 +1062,8 @@ describe("GoalTool", () => {
 				kind: "checkpoint-external-pause",
 				action: "enter_parent_completion",
 				blocked_state_id: "goal-1-blocked-2",
+				state_version: 0,
+				parent_frame_version: 0,
 				checkpoint_id: "goal-1-checkpoint-1",
 				checkpoint_resolution_id: "goal-1-checkpoint-resolution-1",
 				reason: "user-input",
@@ -1058,6 +1084,8 @@ describe("GoalTool", () => {
 			tool.parameters.safeParse({
 				op: "resolve_checkpoint",
 				checkpoint_id: "checkpoint-1",
+				state_version: 0,
+				parent_frame_version: 0,
 				decision: "next_target",
 				parent_reading: "Need another target.",
 				not_propagated: [],
@@ -1068,6 +1096,8 @@ describe("GoalTool", () => {
 			tool.parameters.safeParse({
 				op: "resolve_checkpoint",
 				checkpoint_id: "checkpoint-1",
+				state_version: 0,
+				parent_frame_version: 0,
 				decision: "parent_completion_candidate",
 				parent_reading: "Ready for verifier.",
 				not_propagated: [],
@@ -1079,9 +1109,26 @@ describe("GoalTool", () => {
 				},
 			}).success,
 		).toBe(false);
+		const parentCandidatePayload = {
+			op: "resolve_checkpoint",
+			checkpoint_id: "checkpoint-1",
+			state_version: 0,
+			parent_frame_version: 0,
+			decision: "parent_completion_candidate",
+			parent_reading: "Ready for verifier.",
+			not_propagated: [],
+			remaining_parent_work: [],
+		};
+		expect(tool.parameters.safeParse(parentCandidatePayload).success).toBe(true);
+		expect(tool.parameters.safeParse({ ...parentCandidatePayload, state_version: undefined }).success).toBe(false);
+		expect(tool.parameters.safeParse({ ...parentCandidatePayload, parent_frame_version: undefined }).success).toBe(
+			false,
+		);
 		const emptyNextTargetParentCandidate = {
 			op: "resolve_checkpoint",
 			checkpoint_id: "checkpoint-1",
+			state_version: 0,
+			parent_frame_version: 0,
 			decision: "parent_completion_candidate",
 			parent_reading: "Ready for verifier.",
 			not_propagated: [],
@@ -1127,6 +1174,8 @@ describe("GoalTool", () => {
 				arguments: {
 					op: "resolve_checkpoint",
 					checkpoint_id: "checkpoint-1",
+					state_version: 0,
+					parent_frame_version: 0,
 					decision: "parent_completion_candidate",
 					parent_reading: "Ready for verifier.",
 					not_propagated: [],
@@ -1288,6 +1337,8 @@ describe("GoalTool", () => {
 			kind: "target-plan",
 			action: "restart_target_planning",
 			blocked_state_id: block.id,
+			state_version: failed.stateVersion,
+			parent_frame_version: failed.parentFrameVersion,
 			target_id: target.id,
 			target_plan_id: failedPlan.id,
 			revision: failedPlan.revision,
@@ -2712,6 +2763,8 @@ describe("GoalTool", () => {
 		const resolved = await tool.execute("resolve", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpoint.details?.checkpoint?.id ?? "",
+			state_version: stateAfterCheckpoint?.stateVersion ?? 0,
+			parent_frame_version: stateAfterCheckpoint?.parentFrameVersion ?? 0,
 			decision: "next_target",
 			parent_reading: "Source-link smoke is local evidence; tarball evidence remains open.",
 			parent_delta: {
@@ -2815,9 +2868,12 @@ describe("GoalTool", () => {
 		const checkpointId = checkpoint.details?.checkpoint?.id;
 		if (!checkpointId) throw new Error("expected checkpoint id");
 
+		const compactCheckpointState = harness.getState();
 		const resolved = await tool.execute("resolve", {
 			op: "resolve_checkpoint",
 			checkpoint_id: checkpointId ?? "",
+			state_version: compactCheckpointState?.stateVersion ?? 0,
+			parent_frame_version: compactCheckpointState?.parentFrameVersion ?? 0,
 			decision: "next_target",
 			parent_reading: "Checkpoint narrows the parent but leaves another target.",
 			not_propagated: ["Parent objective proven"],

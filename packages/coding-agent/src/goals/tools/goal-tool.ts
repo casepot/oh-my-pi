@@ -49,6 +49,7 @@ import type {
 	GoalToolDetails,
 	GoalToolGoalSummary,
 	GoalToolStateSummary,
+	GoalWorkstreamBatch,
 } from "../state";
 import { normalizeParentFrame } from "../state";
 import { buildGoalToolDetails, type GoalToolDetailSource } from "../tool-details";
@@ -236,6 +237,13 @@ const TARGET_PLAN_REVISION_DECISION_VALUES = [
 	"refresh-intention",
 	"needs-user-input",
 ] as const;
+const TARGET_PLAN_FAILURE_REASON_VALUES = [
+	"needs-user-input",
+	"task-unavailable",
+	"external-authority",
+	"unable-to-find-right-sized-target",
+] as const;
+const RECOVERY_REASON_VALUES = ["user-input", "broader-checks", "external-authority", "state-refresh"] as const;
 
 const verificationLayerSchema = z.enum(VERIFICATION_LAYER_VALUES);
 const signalRoleSchema = z.enum(SIGNAL_ROLE_VALUES);
@@ -513,6 +521,16 @@ const targetFields = {
 	stale_if: z.array(z.string()).optional(),
 	linked_verifier_blocker_ids: z.array(z.string()).optional(),
 	parent_deliverable_ids: z.array(z.string()).optional(),
+	parallel_workstream_requirement: z
+		.object({
+			required: z.boolean(),
+			source: z.enum(["rubric", "checkpoint-resolution", "operator", "target-plan"]),
+			rationale: z.string().min(1),
+			min_non_doc_workstreams: z.number().int().positive().optional(),
+			shared_contract_required: z.boolean().optional(),
+		})
+		.strict()
+		.optional(),
 };
 const targetSchema = z.object(targetFields).strict();
 const resolveTargetSchema = z.object(targetFields);
@@ -615,6 +633,8 @@ const resolveCheckpointSchema = z
 	.object({
 		op: z.literal("resolve_checkpoint"),
 		checkpoint_id: z.string(),
+		state_version: z.number().int().nonnegative(),
+		parent_frame_version: z.number().int().nonnegative(),
 		decision: z.enum([
 			"next_target",
 			"parent_completion_candidate",
@@ -764,19 +784,14 @@ const failTargetPlanSchema = z
 		target_id: z.string(),
 		target_plan_id: z.string(),
 		revision: z.number().int().min(1),
-		reason: z.enum([
-			"needs-user-input",
-			"task-unavailable",
-			"external-authority",
-			"unable-to-find-right-sized-target",
-		]),
+		reason: z.enum(TARGET_PLAN_FAILURE_REASON_VALUES),
 		message: z.string(),
 		blockers: z.array(z.string()),
 		suggested_questions: z.array(z.string()),
 	})
 	.strict();
 
-const recoveryReasonSchema = z.enum(["user-input", "broader-checks", "external-authority", "state-refresh"]);
+const recoveryReasonSchema = z.enum(RECOVERY_REASON_VALUES);
 
 const recoverBlockedStateSchema = z
 	.object({
@@ -784,6 +799,8 @@ const recoverBlockedStateSchema = z
 		kind: z.enum(["target-plan", "checkpoint-external-pause"]),
 		action: z.enum(["restart_target_planning", "start_next_target", "enter_parent_completion"]),
 		blocked_state_id: z.string(),
+		state_version: z.number().int().nonnegative(),
+		parent_frame_version: z.number().int().nonnegative(),
 		target_id: z.string().optional(),
 		target_plan_id: z.string().optional(),
 		revision: z.number().int().min(1).optional(),
@@ -970,6 +987,23 @@ function validateCreateParams(params: z.infer<typeof createSchema>): {
 	return { objective, tokenBudget, parentFrame: normalizeParentFrame(params.parent_frame, objective) };
 }
 
+function mapParallelWorkstreamRequirement(
+	params: z.infer<typeof targetSchema>["parallel_workstream_requirement"],
+): GoalStartTargetInput["parallelWorkstreamRequirement"] {
+	if (!params) return undefined;
+	const rationale = params.rationale.trim();
+	if (params.required && !rationale) {
+		throw new ToolError("parallel_workstream_requirement.rationale must be non-empty when required is true");
+	}
+	return {
+		required: params.required,
+		source: params.source,
+		rationale,
+		minNonDocWorkstreams: params.min_non_doc_workstreams,
+		sharedContractRequired: params.shared_contract_required,
+	};
+}
+
 function mapTargetInput(params: z.infer<typeof targetSchema>): GoalStartTargetInput {
 	return {
 		title: params.title,
@@ -984,6 +1018,7 @@ function mapTargetInput(params: z.infer<typeof targetSchema>): GoalStartTargetIn
 		staleIf: params.stale_if,
 		linkedVerifierBlockerIds: params.linked_verifier_blocker_ids,
 		parentDeliverableIds: params.parent_deliverable_ids,
+		parallelWorkstreamRequirement: mapParallelWorkstreamRequirement(params.parallel_workstream_requirement),
 	};
 }
 
@@ -1080,6 +1115,8 @@ function mapParentDelta(input: z.infer<typeof parentDeltaSchema> | undefined): G
 function mapResolutionInput(params: z.infer<typeof resolveCheckpointSchema>): GoalCheckpointResolutionInput {
 	return {
 		checkpointId: params.checkpoint_id,
+		stateVersion: params.state_version,
+		parentFrameVersion: params.parent_frame_version,
 		decision: params.decision,
 		parentReading: params.parent_reading,
 		parentDelta: mapParentDelta(params.parent_delta),
@@ -1523,6 +1560,14 @@ function schemaDiagnosticGuidance(issue: z.ZodError["issues"][number], params?: 
 	const alias = firstUnrecognizedAlias(issue);
 	if (alias) return `Use snake_case key ${alias.canonical}, not ${alias.alias}.`;
 	const path = issue.path.map(segment => String(segment)).join("/");
+	const op = isRecordValue(params) ? params.op : undefined;
+	const isReasonPath = path === "reason" || path.endsWith("/reason");
+	if (op === "fail_target_plan" && isReasonPath) {
+		return `Allowed fail_target_plan.reason values: ${TARGET_PLAN_FAILURE_REASON_VALUES.join(", ")}. state-refresh belongs to recover_blocked_state.reason, not fail_target_plan.reason.`;
+	}
+	if (op === "recover_blocked_state" && isReasonPath) {
+		return `Allowed recover_blocked_state.reason values: ${RECOVERY_REASON_VALUES.join(", ")}. needs-user-input belongs to fail_target_plan.reason, not recover_blocked_state.reason.`;
+	}
 	if (path.endsWith("/layer") || /^verification_aperture\/omitted_layers\/\d+\/layer$/.test(path)) {
 		const submitted = getValueAtIssuePath(params, issue.path);
 		const hint = layerAliasHint(submitted);
@@ -1862,6 +1907,8 @@ function mapRecoverBlockedStateInput(params: z.infer<typeof recoverBlockedStateS
 			kind: "target-plan",
 			action: "restart_target_planning",
 			blockedStateId: params.blocked_state_id,
+			stateVersion: params.state_version,
+			parentFrameVersion: params.parent_frame_version,
 			targetId: requireRecoverField(params.target_id, "target_id"),
 			targetPlanId: requireRecoverField(params.target_plan_id, "target_plan_id"),
 			revision: requireRecoverField(params.revision, "revision"),
@@ -1879,6 +1926,8 @@ function mapRecoverBlockedStateInput(params: z.infer<typeof recoverBlockedStateS
 			kind: "checkpoint-external-pause",
 			action: "start_next_target",
 			blockedStateId: params.blocked_state_id,
+			stateVersion: params.state_version,
+			parentFrameVersion: params.parent_frame_version,
 			checkpointId: requireRecoverField(params.checkpoint_id, "checkpoint_id"),
 			checkpointResolutionId: requireRecoverField(params.checkpoint_resolution_id, "checkpoint_resolution_id"),
 			reason: params.reason,
@@ -1891,6 +1940,8 @@ function mapRecoverBlockedStateInput(params: z.infer<typeof recoverBlockedStateS
 		kind: "checkpoint-external-pause",
 		action: "enter_parent_completion",
 		blockedStateId: params.blocked_state_id,
+		stateVersion: params.state_version,
+		parentFrameVersion: params.parent_frame_version,
 		checkpointId: requireRecoverField(params.checkpoint_id, "checkpoint_id"),
 		checkpointResolutionId: requireRecoverField(params.checkpoint_resolution_id, "checkpoint_resolution_id"),
 		reason: params.reason,
@@ -2087,6 +2138,27 @@ function renderTargetPlanSchemaPointer(): string {
 	return 'Schema/enum source: call goal({op:"target_plan_schema"}); lint diagnostics include allowed values and alias repairs. Do not guess enum values from memory.';
 }
 
+function renderWorkstreamBatchText(batch: GoalWorkstreamBatch | undefined): string {
+	if (!batch) return "";
+	const counts = batch.workstreams.reduce<Record<string, number>>((acc, run) => {
+		acc[run.status] = (acc[run.status] ?? 0) + 1;
+		return acc;
+	}, {});
+	const summary = ["pending", "running", "completed", "failed", "aborted", "accepted", "blocked", "superseded"]
+		.filter(status => counts[status])
+		.map(status => `${status}:${counts[status]}`)
+		.join(", ");
+	let text = `\nWorkstream batch: ${batch.id} (${batch.status}${batch.required ? ", required" : ""})`;
+	if (summary) text += `\n  summary: ${summary}`;
+	for (const run of batch.workstreams) {
+		const agent = run.agentId ? ` agent:${run.agentId}` : "";
+		const job = run.jobId ? ` job:${run.jobId}` : "";
+		const task = run.scaffoldTaskId ? ` task:${run.scaffoldTaskId}` : "";
+		text += `\n  - ${run.workstreamId}: ${run.status}${task}${agent}${job}`;
+	}
+	return text;
+}
+
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
 	const goal = response.goal;
 	if (!goal) return "No active goal.";
@@ -2114,7 +2186,27 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 			: goal.deliverableMap.slice(0, 5).map(item => item.id);
 		if (relevant.length) text += `\nRelevant deliverables: ${relevant.join(", ")}`;
 	}
-	if (goal.currentTarget) text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
+	if (goal.currentTarget) {
+		text += `\nCurrent target: ${goal.currentTarget.title} (${goal.currentTarget.status})`;
+		const requirement = goal.currentTarget.parallelWorkstreamRequirement;
+		if (requirement) {
+			text += `\nParallel workstream requirement: ${requirement.required ? "required" : "optional"} (${requirement.source})`;
+			text += `\n  rationale: ${requirement.rationale}`;
+			if (requirement.minNonDocWorkstreams !== undefined)
+				text += `\n  min_non_doc_workstreams: ${requirement.minNonDocWorkstreams}`;
+			if (requirement.sharedContractRequired !== undefined)
+				text += `\n  shared_contract_required: ${requirement.sharedContractRequired}`;
+		}
+		if (goal.currentTarget.workstreamBatchId) {
+			const activeBatch =
+				goal.currentWorkstreamBatch?.id === goal.currentTarget.workstreamBatchId
+					? goal.currentWorkstreamBatch
+					: undefined;
+			text += activeBatch
+				? renderWorkstreamBatchText(activeBatch)
+				: `\nWorkstream batch: ${goal.currentTarget.workstreamBatchId}`;
+		}
+	}
 	if (goal.currentTargetPlan) {
 		text += `\nTarget plan: ${goal.currentTargetPlan.status} ${goal.currentTargetPlan.planFilePath}`;
 		const identity =

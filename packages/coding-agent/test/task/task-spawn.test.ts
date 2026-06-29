@@ -29,7 +29,11 @@ const taskAgent: AgentDefinition = {
 	source: "bundled",
 };
 
-function createSession(options: { manager?: AsyncJobManager; settings?: Record<string, unknown> }): ToolSession {
+function createSession(options: {
+	manager?: AsyncJobManager;
+	settings?: Record<string, unknown>;
+	recordAgentRef?: ToolSession["recordAgentRef"];
+}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
@@ -37,6 +41,7 @@ function createSession(options: { manager?: AsyncJobManager; settings?: Record<s
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		asyncJobManager: options.manager,
+		recordAgentRef: options.recordAgentRef,
 	} as unknown as ToolSession;
 }
 
@@ -144,6 +149,25 @@ describe("task spawn routing", () => {
 		expect(job!.resultText).toContain("message it via `irc` to follow up");
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("forwards the session agent-ref persistence hook into subprocess runs", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Persisted"));
+		const recordAgentRef: NonNullable<ToolSession["recordAgentRef"]> = () => {};
+		const tool = await TaskTool.create(createSession({ recordAgentRef }));
+
+		await tool.execute("tc-persist", {
+			agent: "task",
+			id: "Persisted",
+			assignment: "Do the thing.",
+		} as TaskParams);
+
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(runSpy.mock.calls[0]?.[0]?.recordAgentRef).toBe(recordAgentRef);
 	});
 
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {

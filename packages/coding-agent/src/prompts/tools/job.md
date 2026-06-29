@@ -2,6 +2,8 @@ Inspects, waits, or cancels async jobs.
 
 Background job results are delivered automatically when complete. Reach for this tool only when you need to intervene.
 
+Jobs are process-local scheduling records. They are not restored after a restart or resume; for a remembered subagent, use `irc` to wake it or `history://<id>` to read its transcript.
+
 # Operations
 
 ## `list: true`

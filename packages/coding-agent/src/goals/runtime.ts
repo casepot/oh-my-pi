@@ -2,6 +2,7 @@ import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
+import type { TaskParams, TaskToolDetails } from "../task/types";
 import type {
 	Goal,
 	GoalBlockedState,
@@ -17,6 +18,7 @@ import type {
 	GoalDeliverableDelta,
 	GoalDeliverableMapItem,
 	GoalModeState,
+	GoalParallelWorkstreamRequirement,
 	GoalParentFrame,
 	GoalParentStateDelta,
 	GoalRecoveryLink,
@@ -40,6 +42,8 @@ import type {
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
 	GoalTargetUnitRule,
+	GoalTargetWorkstream,
+	GoalTaskBatchScaffold,
 	GoalTokenUsage,
 	GoalVerificationAperture,
 	GoalVerificationAttempt,
@@ -47,6 +51,7 @@ import type {
 	GoalVerificationRepairState,
 	GoalVerificationSignal,
 	GoalVerificationStatus,
+	GoalWorkstreamBatch,
 } from "./state";
 import {
 	cloneBlockedState,
@@ -61,6 +66,7 @@ import {
 	normalizeParentFrame,
 	upsertBlockedState,
 	upsertRecoveryRecord,
+	upsertWorkstreamBatch,
 } from "./state";
 import { collectTargetPlanGraphDiagnostics, lintDiagnostic } from "./target-plan-lint";
 import { implementationFanoutRequired } from "./tool-details";
@@ -123,6 +129,25 @@ export interface GoalRuntimeSnapshot {
 	budgetReportedFor?: string;
 }
 
+export interface GoalWorkstreamTaskSpawnRecord {
+	taskId?: string;
+	agentId: string;
+	jobId?: string;
+}
+
+export interface GoalWorkstreamTaskDispatchInput {
+	toolCallId: string;
+	params: TaskParams;
+	details: TaskToolDetails;
+	spawns: GoalWorkstreamTaskSpawnRecord[];
+}
+
+export interface GoalWorkstreamTaskResultInput {
+	toolCallId: string;
+	details: TaskToolDetails;
+	spawns?: GoalWorkstreamTaskSpawnRecord[];
+}
+
 export type GoalPromptKind = "active" | "continuation" | "budget-limit";
 
 export interface GoalStartTargetInput {
@@ -141,6 +166,7 @@ export interface GoalStartTargetInput {
 	createdFromVerificationAttemptId?: string;
 	linkedVerifierBlockerIds?: string[];
 	parentDeliverableIds?: string[];
+	parallelWorkstreamRequirement?: GoalParallelWorkstreamRequirement;
 }
 
 export interface GoalCheckpointInput {
@@ -467,6 +493,8 @@ export type GoalRecoverBlockedStateInput =
 			kind: "target-plan";
 			action: "restart_target_planning";
 			blockedStateId: string;
+			stateVersion: number;
+			parentFrameVersion: number;
 			targetId: string;
 			targetPlanId: string;
 			revision: number;
@@ -478,6 +506,8 @@ export type GoalRecoverBlockedStateInput =
 			kind: "checkpoint-external-pause";
 			action: "start_next_target";
 			blockedStateId: string;
+			stateVersion: number;
+			parentFrameVersion: number;
 			checkpointId: string;
 			checkpointResolutionId: string;
 			reason: GoalRecoveryReason;
@@ -489,6 +519,8 @@ export type GoalRecoverBlockedStateInput =
 			kind: "checkpoint-external-pause";
 			action: "enter_parent_completion";
 			blockedStateId: string;
+			stateVersion: number;
+			parentFrameVersion: number;
 			checkpointId: string;
 			checkpointResolutionId: string;
 			reason: GoalRecoveryReason;
@@ -497,6 +529,8 @@ export type GoalRecoverBlockedStateInput =
 	  };
 export interface GoalCheckpointResolutionInput {
 	checkpointId: string;
+	stateVersion: number;
+	parentFrameVersion: number;
 	decision: GoalCheckpointResolutionDecision;
 	parentReading: string;
 	parentDelta?: GoalParentStateDelta;
@@ -538,6 +572,9 @@ export interface GoalContinuationPacket {
 	currentTargetPlanRevision?: number;
 	currentTargetPlanFilePath?: string;
 	currentTargetPlanPayloadFilePath?: string;
+	currentWorkstreamBatchId?: string;
+	currentWorkstreamBatchStatus?: GoalWorkstreamBatch["status"];
+	currentWorkstreamStatuses?: string[];
 	pendingCheckpointId?: string;
 	verificationAttemptId?: string;
 	parentGoalStillActive: boolean;
@@ -684,6 +721,8 @@ function compactTarget(target: GoalTarget | undefined): Record<string, unknown> 
 		createdFromVerificationAttemptId: target.createdFromVerificationAttemptId,
 		linkedVerifierBlockerIds: target.linkedVerifierBlockerIds,
 		parentDeliverableIds: target.parentDeliverableIds,
+		parallelWorkstreamRequirement: target.parallelWorkstreamRequirement,
+		workstreamBatchId: target.workstreamBatchId,
 	};
 }
 
@@ -840,6 +879,7 @@ export interface GoalContextSurface {
 	current_target?: GoalPromptObject;
 	target_plan?: GoalPromptObject;
 	target_execution_guardrails?: Record<string, unknown>;
+	workstream_batch?: GoalPromptObject;
 	checkpoint?: GoalPromptObject;
 	latest_resolution?: GoalPromptObject;
 	parent_completion?: GoalPromptObject;
@@ -873,6 +913,34 @@ function compactTargetForPrompt(target: GoalTarget | undefined): GoalPromptObjec
 		createdFromCheckpointId: target.createdFromCheckpointId,
 		createdFromVerificationAttemptId: target.createdFromVerificationAttemptId,
 		linkedVerifierBlockerIds: target.linkedVerifierBlockerIds,
+		parallel_workstream_requirement: target.parallelWorkstreamRequirement,
+		parallelWorkstreamRequirement: target.parallelWorkstreamRequirement,
+		workstreamBatchId: target.workstreamBatchId,
+	};
+}
+
+function compactWorkstreamBatchForPrompt(batch: GoalWorkstreamBatch | undefined): GoalPromptObject | undefined {
+	if (!batch) return undefined;
+	return {
+		id: batch.id,
+		required: batch.required,
+		status: batch.status,
+		targetPlanId: batch.targetPlanId,
+		targetPlanRevision: batch.targetPlanRevision,
+		sharedContract: batch.sharedContract,
+		workstreams: batch.workstreams.map(run => ({
+			id: run.workstreamId,
+			taskId: run.scaffoldTaskId,
+			label: run.label,
+			kind: run.kind,
+			status: run.status,
+			agentId: run.agentId,
+			jobId: run.jobId,
+			historyUrl: run.historyUrl,
+			outputUrl: run.outputUrl,
+			summary: run.summary,
+			blockers: run.blockers,
+		})),
 	};
 }
 
@@ -1045,6 +1113,7 @@ function uniqueStrings(values: string[]): string[] {
 export function buildGoalTargetPlanExecutionSummary(
 	plan: GoalTargetPlanRecord | undefined,
 	target: GoalTarget | undefined,
+	workstreamBatch?: GoalWorkstreamBatch,
 ): GoalTargetPlanExecutionSummary | undefined {
 	if (!plan) return undefined;
 	const targetCard = plan.targetCard ?? target?.targetCard;
@@ -1162,6 +1231,7 @@ export function buildGoalTargetPlanExecutionSummary(
 		]),
 		readPlanFileWhen:
 			"Exact edit order, file/symbol details, command text, or recovery detail is missing from this summary.",
+		taskBatchScaffold: buildTaskBatchScaffold(workstreamBatch),
 	};
 }
 
@@ -1425,8 +1495,17 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 		},
 	};
 	if (runMode === "working-target") {
+		const currentBatch = goal.currentWorkstreamBatch;
+		const activeBatch =
+			currentBatch &&
+			currentBatch.targetId === currentTarget?.id &&
+			currentBatch.targetPlanId === goal.currentTargetPlan?.id &&
+			currentBatch.targetPlanRevision === goal.currentTargetPlan?.revision
+				? currentBatch
+				: undefined;
 		surface.current_target = compactTargetForPrompt(currentTarget);
-		const executionSummary = buildGoalTargetPlanExecutionSummary(goal.currentTargetPlan, currentTarget);
+		surface.workstream_batch = compactWorkstreamBatchForPrompt(activeBatch);
+		const executionSummary = buildGoalTargetPlanExecutionSummary(goal.currentTargetPlan, currentTarget, activeBatch);
 		surface.target_execution_guardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
 	} else if (runMode === "planning-target") {
 		surface.current_target = compactTargetForPrompt(currentTarget);
@@ -1481,6 +1560,7 @@ export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: 
 		parentFrame: compactParentFrame(goal.parentFrame, goal.objective),
 		deliverableMap: compactDeliverableMap(goal.deliverableMap),
 		currentTarget: compactTarget(goal.currentTarget),
+		currentWorkstreamBatch: compactWorkstreamBatchForPrompt(goal.currentWorkstreamBatch),
 		pendingCheckpoint: compactCheckpoint(latestCheckpoint(goal)),
 		latestCheckpointResolution: compactResolution(latestResolution(goal)),
 		lastCheckpointRejection: goal.lastCheckpointRejection
@@ -1519,6 +1599,11 @@ export function buildGoalContinuationPacket(
 			? targetPlanPayloadFilePath(goal.currentTargetPlan.planFilePath)
 			: undefined,
 		currentTargetId: goal.currentTarget?.id,
+		currentWorkstreamBatchId: goal.currentWorkstreamBatch?.id,
+		currentWorkstreamBatchStatus: goal.currentWorkstreamBatch?.status,
+		currentWorkstreamStatuses: goal.currentWorkstreamBatch?.workstreams.map(
+			run => `${run.workstreamId}:${run.status}${run.agentId ? `:${run.agentId}` : ""}`,
+		),
 		pendingCheckpointId: goal.pendingCheckpointId,
 		verificationAttemptId: goal.verificationRepair?.verificationAttemptId,
 		parentGoalStillActive: goal.status === "active" || goal.status === "budget-limited",
@@ -1647,6 +1732,164 @@ export function sanitizeGoalPlanSlug(value: string): string {
 	return sanitized || "goal";
 }
 
+const WORKSTREAM_SCAFFOLD_TASK_ID_MAX = 48;
+
+function sanitizeWorkstreamIdentifier(value: string, fallback: string): string {
+	const sanitized = value
+		.replaceAll(/[^A-Za-z0-9_-]/g, "-")
+		.replaceAll(/-+/g, "-")
+		.replaceAll(/^-+|-+$/g, "");
+	return sanitized || fallback;
+}
+
+function truncateIdentifierWithSuffix(base: string, suffix: string): string {
+	const limit = WORKSTREAM_SCAFFOLD_TASK_ID_MAX - suffix.length;
+	return `${base.slice(0, Math.max(1, limit))}${suffix}`;
+}
+
+export function buildWorkstreamScaffoldTaskIds(workstreams: GoalTargetWorkstream[]): Map<string, string> {
+	const reserved = new Set<string>();
+	const attempts = new Map<string, number>();
+	const ids = new Map<string, string>();
+	for (const workstream of workstreams) {
+		const rawBase = sanitizeWorkstreamIdentifier(workstream.id, "workstream").slice(
+			0,
+			WORKSTREAM_SCAFFOLD_TASK_ID_MAX,
+		);
+		const base = rawBase || "workstream";
+		let attempt = attempts.get(base) ?? 1;
+		let candidate = attempt === 1 ? base : truncateIdentifierWithSuffix(base, `-${attempt}`);
+		while (reserved.has(candidate)) {
+			attempt += 1;
+			candidate = truncateIdentifierWithSuffix(base, `-${attempt}`);
+		}
+		attempts.set(base, attempt + 1);
+		reserved.add(candidate);
+		ids.set(workstream.id, candidate);
+	}
+	return ids;
+}
+
+function targetPlanAcknowledgesParallelWorkstreams(plan: GoalTargetPlanRecord): boolean {
+	return plan.scopeCalibration?.targetUnitRuleIds?.includes("parallel-workstreams-required") === true;
+}
+
+function nonDocWorkstreams(plan: GoalTargetPlanRecord): GoalTargetWorkstream[] {
+	return plan.targetCard?.workstreams?.filter(workstream => workstream.kind !== "docs-changelog") ?? [];
+}
+
+function buildWorkstreamBatchId(targetId: string, planId: string, revision: number): string {
+	return sanitizeWorkstreamIdentifier(`wsb-${targetId}-${planId}-${revision}`, "workstream-batch");
+}
+
+export function buildWorkstreamBatchFromApprovedPlan(input: {
+	goal: Goal;
+	target: GoalTarget;
+	plan: GoalTargetPlanRecord;
+	planFilePath: string;
+	payloadFilePath: string;
+	now: number;
+}): GoalWorkstreamBatch | undefined {
+	const requirement = input.target.parallelWorkstreamRequirement;
+	const acknowledgedRule = targetPlanAcknowledgesParallelWorkstreams(input.plan);
+	const workstreams = input.plan.targetCard?.workstreams ?? [];
+	const actionableWorkstreams = nonDocWorkstreams(input.plan);
+	const required = requirement?.required === true || acknowledgedRule;
+	const shouldCreate =
+		required || acknowledgedRule || requirement?.required === true || actionableWorkstreams.length >= 2;
+	if (!shouldCreate) return undefined;
+	const minRequiredNonDocWorkstreams = requirement?.minNonDocWorkstreams ?? 2;
+	if (required && actionableWorkstreams.length < minRequiredNonDocWorkstreams) {
+		throw new Error(
+			`Parallel workstream execution is required for this target, but the approved target plan defines ${actionableWorkstreams.length} non-doc workstream(s); expected at least ${minRequiredNonDocWorkstreams}.`,
+		);
+	}
+	const sharedContract = input.plan.targetCard?.sharedContract?.trim();
+	if (required && requirement?.sharedContractRequired !== false && !sharedContract) {
+		throw new Error(
+			"Parallel workstream execution is required for this target, but target_card.shared_contract is empty.",
+		);
+	}
+	if (workstreams.length === 0) return undefined;
+	const scaffoldTaskIds = buildWorkstreamScaffoldTaskIds(workstreams);
+	return {
+		id: buildWorkstreamBatchId(input.target.id, input.plan.id, input.plan.revision),
+		goalId: input.goal.id,
+		targetId: input.target.id,
+		targetPlanId: input.plan.id,
+		targetPlanRevision: input.plan.revision,
+		planFilePath: input.planFilePath,
+		payloadFilePath: input.payloadFilePath,
+		required,
+		implementationFanoutRequired: implementationFanoutRequired(input.plan) === true,
+		sharedContract: sharedContract || undefined,
+		status: "pending-launch",
+		workstreams: workstreams.map(workstream => ({
+			workstreamId: workstream.id,
+			scaffoldTaskId: scaffoldTaskIds.get(workstream.id),
+			label: workstream.label,
+			kind: workstream.kind,
+			role: workstream.role,
+			files: [...workstream.files],
+			contractInputs: [...workstream.contractInputs],
+			contractOutputs: [...workstream.contractOutputs],
+			status: "pending",
+			updatedAt: input.now,
+		})),
+		createdAt: input.now,
+		updatedAt: input.now,
+	};
+}
+
+function formatWorkstreamList(values: string[]): string {
+	return values.length ? values.map(value => `- ${value}`).join("\n") : "- none";
+}
+
+function buildTaskBatchScaffold(batch: GoalWorkstreamBatch | undefined): GoalTaskBatchScaffold | undefined {
+	if (!batch) return undefined;
+	return {
+		required: batch.required,
+		batchId: batch.id,
+		agent: "task",
+		context: [
+			"# Goal",
+			`Execute workstream batch ${batch.id} for goal ${batch.goalId}, target ${batch.targetId}.`,
+			"",
+			"# Constraints",
+			`- target_plan_id: ${batch.targetPlanId}`,
+			`- target_plan_revision: ${batch.targetPlanRevision}`,
+			`- plan_file_path: ${batch.planFilePath}`,
+			`- payload_file_path: ${batch.payloadFilePath}`,
+			"- Subagents do not run project-wide tests, lint, or formatters; main agent owns final integration and verification.",
+			"- Subagents do not mark the parent target complete or call goal checkpoint/completion tools.",
+			"",
+			"# Contract",
+			batch.sharedContract ?? "No shared contract was provided; obey each workstream's inputs/outputs exactly.",
+		].join("\n"),
+		tasks: batch.workstreams.map(workstream => ({
+			id: workstream.scaffoldTaskId ?? workstream.workstreamId,
+			description: workstream.label,
+			role: workstream.role ?? `${workstream.label} workstream specialist`,
+			assignment: [
+				"# Target",
+				`Workstream ${workstream.workstreamId}: ${workstream.label}.`,
+				`Files:\n${formatWorkstreamList(workstream.files)}`,
+				"Non-goal: do not mark the parent target complete or call goal checkpoint/completion tools.",
+				"",
+				"# Change",
+				`Use approved plan ${batch.planFilePath} and payload ${batch.payloadFilePath}.`,
+				`Contract inputs:\n${formatWorkstreamList(workstream.contractInputs)}`,
+				`Contract outputs:\n${formatWorkstreamList(workstream.contractOutputs)}`,
+				"Implement only this workstream and coordinate contract conflicts through the main agent or siblings.",
+				"",
+				"# Acceptance",
+				"Return changed files, behavior evidence, blockers, and integration notes for this workstream.",
+				"Skip project-wide gates, formatters, and full-suite tests; main agent verifies the integrated target.",
+			].join("\n"),
+		})),
+	};
+}
+
 function isAccountingStatus(goal: Goal): boolean {
 	return goal.status === "active" || goal.status === "budget-limited";
 }
@@ -1663,6 +1906,17 @@ function cloneRefs(refs: GoalRef[] | undefined): GoalRef[] {
 
 function cloneStringArray(value: string[] | undefined): string[] {
 	return value ? [...value] : [];
+}
+
+function cloneParallelWorkstreamRequirement(
+	requirement: GoalParallelWorkstreamRequirement | undefined,
+): GoalParallelWorkstreamRequirement | undefined {
+	return requirement
+		? {
+				...requirement,
+				rationale: requirement.rationale.trim(),
+			}
+		: undefined;
 }
 
 function parentDeltaHasFrameChanges(delta: GoalParentStateDelta): boolean {
@@ -2034,6 +2288,10 @@ function targetFromInput(
 	now: number,
 	createdBy: GoalTarget["createdBy"],
 ): GoalTarget {
+	const parallelWorkstreamRequirement = cloneParallelWorkstreamRequirement(input.parallelWorkstreamRequirement);
+	if (parallelWorkstreamRequirement?.required === true && !parallelWorkstreamRequirement.rationale) {
+		throw new Error("parallel_workstream_requirement.rationale must be non-empty when required is true");
+	}
 	return {
 		id: `${goal.id}-target-${sequence}`,
 		sequence,
@@ -2057,7 +2315,50 @@ function targetFromInput(
 		createdFromVerificationAttemptId: input.createdFromVerificationAttemptId,
 		linkedVerifierBlockerIds: input.linkedVerifierBlockerIds ? [...input.linkedVerifierBlockerIds] : undefined,
 		parentDeliverableIds: input.parentDeliverableIds ? [...input.parentDeliverableIds] : undefined,
+		parallelWorkstreamRequirement,
 	};
+}
+
+function workstreamTaskIdMatches(run: GoalWorkstreamBatch["workstreams"][number], taskId: string | undefined): boolean {
+	const trimmedTaskId = taskId?.trim();
+	return Boolean(trimmedTaskId && (trimmedTaskId === run.scaffoldTaskId || trimmedTaskId === run.workstreamId));
+}
+
+function terminalWorkstreamStatusFromResult(
+	result: TaskToolDetails["results"][number] | undefined,
+): GoalWorkstreamBatch["workstreams"][number]["status"] | undefined {
+	if (!result) return undefined;
+	if (result.aborted) return "aborted";
+	return result.exitCode === 0 && !result.error ? "completed" : "failed";
+}
+
+function terminalWorkstreamStatusFromProgress(
+	progress: NonNullable<TaskToolDetails["progress"]>[number] | undefined,
+): GoalWorkstreamBatch["workstreams"][number]["status"] | undefined {
+	if (progress?.status === "completed" || progress?.status === "failed" || progress?.status === "aborted") {
+		return progress.status;
+	}
+	return undefined;
+}
+
+function updateWorkstreamBatchStatus(batch: GoalWorkstreamBatch, now: number): void {
+	if (batch.status === "closed" || batch.status === "superseded") return;
+	const statuses = batch.workstreams.map(run => run.status);
+	if (statuses.every(status => status === "completed" || status === "accepted")) {
+		batch.status = "ready-for-integration";
+	} else if (
+		statuses.some(status => status === "failed" || status === "aborted" || status === "blocked") &&
+		statuses.every(status => status !== "pending" && status !== "running")
+	) {
+		batch.status = "blocked";
+	} else if (statuses.some(status => status === "completed" || status === "failed" || status === "aborted")) {
+		batch.status = "collecting-results";
+	} else if (statuses.some(status => status === "running")) {
+		batch.status = "running";
+	} else {
+		batch.status = "pending-launch";
+	}
+	batch.updatedAt = now;
 }
 
 export class GoalRuntime {
@@ -2143,6 +2444,114 @@ export class GoalRuntime {
 		return cloned;
 	}
 
+	#activeWorkstreamBatch(state: GoalModeState): GoalWorkstreamBatch | undefined {
+		const batch = state.goal.currentWorkstreamBatch;
+		const target = state.goal.currentTarget;
+		const plan = state.goal.currentTargetPlan;
+		if (!batch || !target || !plan) return undefined;
+		if (target.workstreamBatchId !== batch.id) return undefined;
+		if (batch.targetId !== target.id) return undefined;
+		if (batch.targetPlanId !== plan.id || batch.targetPlanRevision !== plan.revision) return undefined;
+		return batch;
+	}
+
+	#storeWorkstreamBatch(state: GoalModeState, batch: GoalWorkstreamBatch): void {
+		state.goal.currentWorkstreamBatch = batch;
+		state.goal.workstreamBatches = upsertWorkstreamBatch(state.goal.workstreamBatches, batch);
+	}
+
+	async recordGoalWorkstreamTaskDispatch(input: GoalWorkstreamTaskDispatchInput): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active") return;
+			const batch = this.#activeWorkstreamBatch(state);
+			if (!batch) return;
+			const now = this.#now();
+			let changed = false;
+			for (const run of batch.workstreams) {
+				const spawn = input.spawns.find(item => workstreamTaskIdMatches(run, item.taskId));
+				if (!spawn || run.status === "accepted" || run.status === "superseded") continue;
+				run.status = "running";
+				run.agentId = spawn.agentId;
+				run.jobId = spawn.jobId;
+				run.historyUrl = `history://${spawn.agentId}`;
+				run.updatedAt = now;
+				changed = true;
+			}
+			if (!changed) return;
+			batch.status = "running";
+			batch.launchedAt ??= now;
+			batch.updatedAt = now;
+			this.#storeWorkstreamBatch(state, batch);
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal", reason: "semantic" });
+		});
+	}
+
+	async recordGoalWorkstreamTaskResult(input: GoalWorkstreamTaskResultInput): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active") return;
+			const batch = this.#activeWorkstreamBatch(state);
+			if (!batch) return;
+			const resultsByAgentId = new Map(input.details.results.map(result => [result.id, result]));
+			const progressByAgentId = new Map(input.details.progress?.map(progress => [progress.id, progress]) ?? []);
+			const spawns = input.spawns ?? [];
+			const now = this.#now();
+			let changed = false;
+			for (const run of batch.workstreams) {
+				if (run.status === "accepted" || run.status === "superseded") continue;
+				const spawn = spawns.find(
+					item =>
+						workstreamTaskIdMatches(run, item.taskId) ||
+						(run.agentId !== undefined && item.agentId === run.agentId),
+				);
+				const agentId = spawn?.agentId ?? run.agentId;
+				const result = agentId ? resultsByAgentId.get(agentId) : undefined;
+				const progress = agentId ? progressByAgentId.get(agentId) : undefined;
+				const status = terminalWorkstreamStatusFromResult(result) ?? terminalWorkstreamStatusFromProgress(progress);
+				if (!status) continue;
+				run.status = status;
+				if (agentId) {
+					run.agentId = agentId;
+					run.historyUrl = `history://${agentId}`;
+					run.outputUrl = `agent://${agentId}`;
+				}
+				run.jobId = spawn?.jobId ?? run.jobId;
+				run.summary = result?.lastIntent ?? run.summary;
+				run.blockers =
+					status === "failed"
+						? [
+								result?.error ??
+									result?.retryFailure?.errorMessage ??
+									`Task ${agentId ?? run.workstreamId} failed.`,
+							]
+						: undefined;
+				run.updatedAt = now;
+				changed = true;
+			}
+			if (!changed) return;
+			updateWorkstreamBatchStatus(batch, now);
+			this.#storeWorkstreamBatch(state, batch);
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal", reason: "semantic" });
+		});
+	}
+
+	#closeActiveWorkstreamBatchForTarget(state: GoalModeState, targetId: string, closedAt: number): void {
+		const batch = this.#activeWorkstreamBatch(state);
+		if (!batch || batch.targetId !== targetId) return;
+		for (const run of batch.workstreams) {
+			if (run.status === "superseded") continue;
+			run.status = "accepted";
+			run.updatedAt = closedAt;
+		}
+		batch.status = "closed";
+		batch.closedAt = closedAt;
+		batch.updatedAt = closedAt;
+		this.#storeWorkstreamBatch(state, batch);
+	}
+
 	#enterBlockedState(state: GoalModeState, block: GoalBlockedState): GoalBlockedState {
 		const current = state.goal.currentBlockedState;
 		if (current?.status === "open" && current.id !== block.id) {
@@ -2219,6 +2628,27 @@ export class GoalRuntime {
 			state.runMode === "awaiting-verification-repair"
 		) {
 			throw new Error(ACTIVE_GOAL_DROP_ERROR);
+		}
+	}
+
+	#assertFreshGoalMutationInput(
+		state: GoalModeState | undefined,
+		input: { stateVersion: number; parentFrameVersion: number },
+		op: "resolve_checkpoint" | "recover_blocked_state",
+	): asserts state is GoalModeState {
+		if (!state?.enabled || state.goal.status !== "active") {
+			const action = op === "resolve_checkpoint" ? "resolve checkpoint" : "recover blocked state";
+			throw new Error(`cannot ${action} because no active parent goal exists`);
+		}
+		if (input.stateVersion !== state.stateVersion) {
+			throw new Error(
+				`${op} is stale: state_version must equal current goal stateVersion (${state.stateVersion}); got ${input.stateVersion}. Refresh with goal({op:"get"}) and retry.`,
+			);
+		}
+		if (input.parentFrameVersion !== state.parentFrameVersion) {
+			throw new Error(
+				`${op} is stale: parent_frame_version must equal current goal parentFrameVersion (${state.parentFrameVersion}); got ${input.parentFrameVersion}. Refresh with goal({op:"get"}) and retry.`,
+			);
 		}
 	}
 
@@ -3029,7 +3459,8 @@ export class GoalRuntime {
 			if (state.goal.currentTarget?.id === target.id) {
 				this.#assertCurrentTargetPlanApprovedForTarget(state, target);
 			}
-			const closedTarget: GoalTarget = { ...target, status: "closed", closedAt: this.#now() };
+			const closedAt = this.#now();
+			const closedTarget: GoalTarget = { ...target, status: "closed", closedAt };
 			const committedPacket: GoalCheckpointPacket = {
 				...(cloneCheckpoint(packet) ?? packet),
 				targetSnapshot: closedTarget,
@@ -3040,6 +3471,7 @@ export class GoalRuntime {
 			state.goal.checkpoints = [...(state.goal.checkpoints ?? []), committedPacket];
 			state.goal.pendingCheckpointId = committedPacket.id;
 			state.goal.lastCheckpointRejection = undefined;
+			this.#closeActiveWorkstreamBatchForTarget(state, closedTarget.id, closedAt);
 			if (state.goal.verificationRepair) {
 				const nextRepair = updateVerificationRepairForClosedTarget(state.goal.verificationRepair, closedTarget);
 				state.goal.verificationRepair = nextRepair;
@@ -3082,6 +3514,7 @@ export class GoalRuntime {
 			if (input.decision === "next_target" && !input.nextTarget) {
 				throw new Error("next_target is required when decision is next_target");
 			}
+			this.#assertFreshGoalMutationInput(state, input, "resolve_checkpoint");
 			const repair = state.goal.verificationRepair;
 			if (repair && input.decision === "parent_completion_candidate") {
 				throw new Error(
@@ -3453,7 +3886,7 @@ export class GoalRuntime {
 				reviews: this.#mergeTargetPlanReviews(submittedPlan, input.reviews),
 			});
 			if (!approvedPlan) throw new Error("target plan approval record is invalid");
-			const target = {
+			const targetBase: GoalTarget = {
 				...state.goal.currentTarget,
 				planId: approvedPlan.id,
 				verificationAperture: approvedPlan.verificationAperture,
@@ -3464,9 +3897,28 @@ export class GoalRuntime {
 				primarySignalGroupId: approvedPlan.primarySignalGroupId,
 				scenarioMatrix: approvedPlan.scenarioMatrix,
 				targetCard: approvedPlan.targetCard,
+				workstreamBatchId: undefined,
+			};
+			const workstreamBatch = buildWorkstreamBatchFromApprovedPlan({
+				goal: state.goal,
+				target: targetBase,
+				plan: approvedPlan,
+				planFilePath: approvedPlan.planFilePath,
+				payloadFilePath: targetPlanPayloadFilePath(approvedPlan.planFilePath),
+				now,
+			});
+			const target: GoalTarget = {
+				...targetBase,
+				workstreamBatchId: workstreamBatch?.id,
 			};
 			state.goal.currentTarget = target;
 			state.goal.targets = upsertById(state.goal.targets ?? [], [target]);
+			if (workstreamBatch) {
+				state.goal.currentWorkstreamBatch = workstreamBatch;
+				state.goal.workstreamBatches = upsertWorkstreamBatch(state.goal.workstreamBatches, workstreamBatch);
+			} else if (state.goal.currentWorkstreamBatch?.targetId === target.id) {
+				state.goal.currentWorkstreamBatch = undefined;
+			}
 			this.#upsertTargetPlan(state, approvedPlan);
 			state.runMode = "working-target";
 			this.#bumpState(state);
@@ -3862,6 +4314,7 @@ export class GoalRuntime {
 	async recoverBlockedState(input: GoalRecoverBlockedStateInput): Promise<GoalModeState> {
 		return await this.#withAccounting(async () => {
 			const state = this.#getStateClone();
+			this.#assertFreshGoalMutationInput(state, input, "recover_blocked_state");
 			const now = this.#now();
 			let parentFrameChanged = false;
 			if (input.kind === "target-plan") {
@@ -3870,7 +4323,6 @@ export class GoalRuntime {
 				parentFrameChanged = input.parentDelta ? parentDeltaHasFrameChanges(input.parentDelta) : false;
 				this.#recoverCheckpointExternalPause(state, input, now);
 			}
-			if (!state) throw new Error("cannot recover blocked state because no active parent goal exists");
 			this.#bumpState(state, { parentFrameChanged });
 			await this.#commitState(state, { persist: "goal" });
 			return state;

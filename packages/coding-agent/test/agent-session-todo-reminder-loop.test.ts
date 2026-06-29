@@ -164,31 +164,42 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		expect(reminderAttempts).toEqual([1]);
 	});
 
-	it("suppresses todo error retry reminders while goal planning disallows todo", async () => {
+	it("sends todo error retry reminders while goal planning allows todo", async () => {
 		await session.goalRuntime.createGoal({ objective: "Improve release reliability" });
 		await session.goalRuntime.startTarget({
 			title: "Plan source-link smoke",
 			desiredFutureClaim: "Source-link smoke has current bounded evidence.",
 			closureStandard: "Current source-link smoke output exists.",
 		});
-		emitToolResult("todo", {}, { isError: true, text: "Tool todo is unavailable during goal target planning." });
-		await session.waitForIdle();
+		const { promise: todoErrorReminderPromise, resolve: resolveTodoErrorReminder } = Promise.withResolvers<void>();
+		const previousOnEntryAppended = sessionManager.onEntryAppended;
+		sessionManager.onEntryAppended = entry => {
+			previousOnEntryAppended?.(entry);
+			if (entry.type === "custom_message" && entry.customType === "todo-error-reminder") {
+				resolveTodoErrorReminder();
+			}
+		};
+		try {
+			emitToolResult("todo", {}, { isError: true, text: "Invalid todo payload." });
+			await session.waitForIdle();
+			await withTimeout(todoErrorReminderPromise, 1000, "todo-error-reminder never persisted");
 
-		const todoRetryReminders = sessionManager
-			.getEntries()
-			.filter(entry => entry.type === "custom_message" && entry.customType === "todo-error-reminder");
-		expect(todoRetryReminders).toHaveLength(0);
-		const boundaryAudits = sessionManager
-			.getEntries()
-			.filter(entry => entry.type === "custom" && entry.customType === "goal_boundary_audit");
-		expect(boundaryAudits).toHaveLength(1);
-		const boundaryAudit = boundaryAudits[0];
-		if (boundaryAudit?.type !== "custom") throw new Error("expected goal boundary audit");
-		expect(boundaryAudit.data).toMatchObject({
-			kind: "goal-error",
-			action: "skipped",
-			omittedFields: ["todo-error-reminder"],
-		});
+			const todoRetryReminders = sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom_message" && entry.customType === "todo-error-reminder");
+			expect(todoRetryReminders).toHaveLength(1);
+			const reminder = todoRetryReminders[0];
+			if (reminder?.type !== "custom_message") throw new Error("expected todo error reminder");
+			const reminderText =
+				typeof reminder.content === "string" ? reminder.content : JSON.stringify(reminder.content);
+			expect(reminderText).toContain("Fix the todo payload and call todo again before continuing.");
+			const boundaryAudits = sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === "goal_boundary_audit");
+			expect(boundaryAudits).toHaveLength(0);
+		} finally {
+			sessionManager.onEntryAppended = previousOnEntryAppended;
+		}
 	});
 
 	it("fires exactly one reminder per user pause when the agent only acknowledges", async () => {

@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { GoalTargetPlanApprovalInput } from "@oh-my-pi/pi-coding-agent/goals/runtime";
+import type { GoalModeState, GoalTargetPlanReview } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -22,6 +26,128 @@ function getRuntimeSignals(): string[] {
 		globalWithSignals[runtimeSignalStoreKey] = [];
 	}
 	return globalWithSignals[runtimeSignalStoreKey];
+}
+
+function acceptedTargetPlanReview(lens: GoalTargetPlanReview["lens"]): GoalTargetPlanReview {
+	return {
+		id: `${lens}-review`,
+		lens,
+		status: "accepted",
+		feedback: `${lens} accepted.`,
+		apertureClassification: lens === "aperture" ? "right-sized" : undefined,
+		revisionDecision: lens === "aperture" ? "keep" : undefined,
+		scores:
+			lens === "aperture"
+				? {
+						productSignal: 4,
+						relatedWorkBundling: 4,
+						concernCohesion: 4,
+						verificationAperture: 4,
+						blastRadiusCoverage: 4,
+						parentUncertaintyReduction: 4,
+						antiGaming: 4,
+					}
+				: undefined,
+		findings: [],
+		reviewedAt: Date.now(),
+		revisedAfterReview: false,
+	};
+}
+
+function buildTargetPlanApprovalInput(state: GoalModeState): GoalTargetPlanApprovalInput {
+	const target = state.goal.currentTarget;
+	const plan = state.goal.currentTargetPlan;
+	if (!target || !plan) throw new Error("expected current target plan");
+	const reviews = [
+		{
+			...acceptedTargetPlanReview("aperture"),
+			reviewedTargetPlanId: plan.id,
+			reviewedRevision: plan.revision,
+		},
+		{
+			...acceptedTargetPlanReview("execution-readiness"),
+			reviewedTargetPlanId: plan.id,
+			reviewedRevision: plan.revision,
+		},
+	];
+	return {
+		targetId: target.id,
+		targetPlanId: plan.id,
+		planFilePath: plan.planFilePath,
+		revision: plan.revision,
+		primarySignalGroupId: "signal-primary",
+		planDepth: "light",
+		targetCard: {
+			capabilityClaim: "Target behavior is directly verified.",
+			knownLimits: ["Parent completion remains outside this target."],
+			userVisibleSurface: "Target behavior",
+			acceptanceRows: { closed: ["happy path"], open: [] },
+			verificationScenarios: ["happy path signal-primary"],
+			checkpointEvidence: ["Focused check passes."],
+		},
+		verificationAperture: {
+			productIntention: "Prove the target behavior with direct evidence.",
+			primarySignalId: "signal-primary",
+			blastRadius: "local",
+			confidenceTarget: "high",
+			layerRationale: "The target is local and directly observable.",
+			residualUncertainty: ["Parent completion remains outside this target."],
+			omittedLayers: [{ layer: "e2e", reason: "Parent-level e2e belongs to a later target." }],
+		},
+		verificationSignals: [
+			{
+				id: "signal-primary",
+				role: "primary",
+				layer: "integration",
+				concernIds: ["concern-behavior"],
+				claim: "Target behavior is verified.",
+				observation: "Focused evidence is observed.",
+				method: "Run the focused check.",
+				expectedOutcome: "The focused check passes.",
+				required: true,
+				confidenceIfSatisfied: "high",
+				staleIf: ["Relevant code changes."],
+			},
+		],
+		concernChecks: [
+			{
+				id: "concern-behavior",
+				kind: "behavior",
+				whyIndependent: "Behavior can fail independently of parent completion.",
+				coveredBySignalIds: ["signal-primary"],
+			},
+		],
+		scopeCalibration: {
+			rightSizingBasis: "product-signal",
+			whyNotSmaller: ["Smaller work would not produce an observable signal."],
+			whyNotLarger: ["Larger work would claim parent-level completion."],
+			includedRelatedWork: [
+				{ item: "Focused target work", reason: "Needed for primary signal.", signalIds: ["signal-primary"] },
+			],
+			deferredRelatedWork: [
+				{
+					item: "Parent completion verification",
+					reason: "different-primary-signal",
+					followUpHint: "Checkpoint first.",
+				},
+			],
+		},
+		branchEvidence: [
+			{ branch: "happy path", required: true, plannedSignalIds: ["signal-primary"], rationale: "Primary signal." },
+		],
+		excludedWorkReview: [
+			{ item: "Parent completion", classification: "parent-non-claim", rationale: "Checkpoint is bounded." },
+		],
+		targetPlanReviews: reviews,
+		dryRun: { status: "passed", checks: [{ id: "dry-run", passed: true, rationale: "Plan steps are executable." }] },
+		reviews,
+	};
+}
+
+async function approveActiveTargetPlan(session: AgentSession): Promise<void> {
+	const state = session.getGoalModeState();
+	if (!state) throw new Error("expected goal state");
+	await session.goalRuntime.approveCurrentTargetPlan(buildTargetPlanApprovalInput(state));
 }
 
 /**
@@ -95,6 +221,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			throw new Error("Expected built-in anthropic model to exist");
 		}
 
+		let syncSession: AgentSession | undefined;
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -102,6 +229,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				tools: [],
 				messages: [],
 			},
+			syncContextBeforeModelCall: (context, signal) => syncSession?.syncContextBeforeModelCall(context, signal),
 		});
 
 		// Seed a minimal session branch so prepareCompaction() returns a preparation.
@@ -122,6 +250,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			modelRegistry,
 			extensionRunner,
 		});
+		syncSession = session;
 	});
 
 	afterEach(async () => {
@@ -206,6 +335,297 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
 	});
 
+	it("rewinds incomplete tool-call recovery cheaply instead of compacting", async () => {
+		const model = session.model;
+		if (!model) throw new Error("expected model");
+		const now = Date.now();
+		const userMessage = { role: "user" as const, content: "write huge file", timestamp: now };
+		const firstAssistant = {
+			role: "assistant" as const,
+			content: [{ type: "toolCall" as const, id: "call_1|fc_1", name: "write", arguments: { content: "partial" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "length" as const,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: now + 1,
+		};
+		const firstToolResult = {
+			role: "toolResult" as const,
+			toolCallId: "call_1|fc_1",
+			toolName: "write",
+			content: [{ type: "text" as const, text: "Tool call was not executed because stop_reason: length." }],
+			details: {
+				skipReason: ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON,
+				stopReason: "length",
+			},
+			isError: true,
+			timestamp: now + 2,
+		};
+		const secondAssistant = {
+			...firstAssistant,
+			content: [{ type: "toolCall" as const, id: "call_2|fc_2", name: "write", arguments: { content: "partial" } }],
+			timestamp: now + 3,
+		};
+		const secondToolResult = {
+			...firstToolResult,
+			toolCallId: "call_2|fc_2",
+			timestamp: now + 4,
+		};
+		sessionManager.appendMessage(userMessage);
+		sessionManager.appendMessage(firstAssistant);
+		sessionManager.appendMessage(firstToolResult);
+		sessionManager.appendMessage(secondAssistant);
+		sessionManager.appendMessage(secondToolResult);
+		session.agent.replaceMessages([userMessage, firstAssistant, firstToolResult, secondAssistant, secondToolResult]);
+
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {});
+
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [secondAssistant, secondToolResult] });
+		await session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		const activeMessages = session.agent.state.messages;
+		expect(activeMessages[0]).toEqual(userMessage);
+		expect(activeMessages).toHaveLength(2);
+		const recoveryReminder = activeMessages[1];
+		expect(recoveryReminder?.role).toBe("developer");
+		if (recoveryReminder?.role !== "developer") throw new Error("expected developer reminder");
+		const recoveryReminderText =
+			typeof recoveryReminder.content === "string"
+				? recoveryReminder.content
+				: recoveryReminder.content.map(content => (content.type === "text" ? content.text : "")).join("");
+		expect(recoveryReminderText).toContain("truncated before its arguments were complete");
+
+		const branchMessages = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message);
+		expect(branchMessages.at(-2)).toEqual(userMessage);
+		expect(branchMessages.at(-1)?.role).toBe("developer");
+		expect(branchMessages.some(message => message.role === "toolResult")).toBe(false);
+		expect(getRuntimeSignals().some(signal => signal.startsWith("compaction:start:"))).toBe(false);
+	});
+
+	it("continues partial visible length output without compacting or discarding text", async () => {
+		const model = session.model;
+		if (!model) throw new Error("expected model");
+		const now = Date.now();
+		const userMessage = { role: "user" as const, content: "explain the fix", timestamp: now };
+		const assistantMessage = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "The first part of the answer" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "length" as const,
+			stopDetails: { type: "max_output_tokens", category: "response.incomplete" },
+			usage: {
+				input: 10,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 30,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: now + 1,
+		};
+		sessionManager.appendMessage(userMessage);
+		sessionManager.appendMessage(assistantMessage);
+		session.agent.replaceMessages([userMessage, assistantMessage]);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {});
+
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+		await session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		const activeMessages = session.agent.state.messages;
+		expect(activeMessages.map(message => message.role)).toEqual(["user", "assistant", "developer"]);
+		expect(activeMessages[1]).toEqual(assistantMessage);
+		const recoveryReminder = activeMessages[2];
+		if (recoveryReminder?.role !== "developer") throw new Error("expected developer reminder");
+		const recoveryReminderText =
+			typeof recoveryReminder.content === "string"
+				? recoveryReminder.content
+				: recoveryReminder.content.map(content => (content.type === "text" ? content.text : "")).join("");
+		expect(recoveryReminderText).toContain("Continue exactly where you left off");
+		expect(getRuntimeSignals().some(signal => signal.startsWith("compaction:start:"))).toBe(false);
+	});
+
+	it("rewinds empty length output without compacting", async () => {
+		const model = session.model;
+		if (!model) throw new Error("expected model");
+		const now = Date.now();
+		const userMessage = { role: "user" as const, content: "continue", timestamp: now };
+		const assistantMessage = {
+			role: "assistant" as const,
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "length" as const,
+			stopDetails: { type: "max_output_tokens", category: "response.incomplete" },
+			usage: {
+				input: 10,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 30,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: now + 1,
+		};
+		sessionManager.appendMessage(userMessage);
+		sessionManager.appendMessage(assistantMessage);
+		session.agent.replaceMessages([userMessage, assistantMessage]);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {});
+
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+		await session.waitForIdle();
+
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		const activeMessages = session.agent.state.messages;
+		expect(activeMessages.map(message => message.role)).toEqual(["user", "developer"]);
+		const recoveryReminder = activeMessages[1];
+		if (recoveryReminder?.role !== "developer") throw new Error("expected developer reminder");
+		const recoveryReminderText =
+			typeof recoveryReminder.content === "string"
+				? recoveryReminder.content
+				: recoveryReminder.content.map(content => (content.type === "text" ? content.text : "")).join("");
+		expect(recoveryReminderText).toContain("before producing actionable visible output");
+		const branchMessages = sessionManager
+			.getBranch()
+			.filter(entry => entry.type === "message")
+			.map(entry => entry.message);
+		expect(branchMessages.at(-2)).toEqual(userMessage);
+		expect(branchMessages.at(-1)?.role).toBe("developer");
+		expect(getRuntimeSignals().some(signal => signal.startsWith("compaction:start:"))).toBe(false);
+	});
+
+	it("keeps incomplete-output recovery prompt through pre-provider context sync", async () => {
+		vi.useRealTimers();
+		const mock = createMockModel({
+			provider: "anthropic",
+			id: "claude-sonnet-4-5",
+			responses: [
+				{
+					content: [],
+					stopReason: "length",
+					stopDetails: { type: "max_output_tokens", category: "response.incomplete" },
+				},
+				{ content: ["recovered"] },
+			],
+		});
+		const localSessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		let syncSession: AgentSession | undefined;
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			convertToLlm: messages =>
+				messages.filter(
+					(message): message is Message =>
+						message.role === "user" ||
+						message.role === "developer" ||
+						message.role === "assistant" ||
+						message.role === "toolResult",
+				),
+			streamFn: mock.stream,
+			syncContextBeforeModelCall: (context, signal) => syncSession?.syncContextBeforeModelCall(context, signal),
+		});
+		const localSession = new AgentSession({
+			agent,
+			sessionManager: localSessionManager,
+			settings: Settings.isolated({ "compaction.autoContinue": false }),
+			modelRegistry,
+		});
+		syncSession = localSession;
+
+		try {
+			await localSession.prompt("start");
+			await localSession.waitForIdle();
+
+			expect(mock.calls).toHaveLength(2);
+			const secondCallText = mock.calls[1]?.context.messages
+				.map(message => (typeof message.content === "string" ? message.content : JSON.stringify(message.content)))
+				.join("\n");
+			expect(secondCallText).toContain("before producing actionable visible output");
+			expect(
+				localSessionManager
+					.getBranch()
+					.some(entry => entry.type === "message" && entry.message.role === "developer"),
+			).toBe(true);
+		} finally {
+			await localSession.dispose();
+		}
+	});
+
+	it("escalates repeated incomplete output to no-tool recovery and then a visible diagnostic", async () => {
+		const model = session.model;
+		if (!model) throw new Error("expected model");
+		const now = Date.now();
+		const userMessage = { role: "user" as const, content: "continue", timestamp: now };
+		sessionManager.appendMessage(userMessage);
+		session.agent.replaceMessages([userMessage]);
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {});
+
+		for (let attempt = 1; attempt <= 4; attempt++) {
+			const assistantMessage = {
+				role: "assistant" as const,
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "length" as const,
+				stopDetails: { type: "max_output_tokens", category: "response.incomplete" },
+				usage: {
+					input: 10,
+					output: 20,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 30,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: now + attempt,
+			};
+			sessionManager.appendMessage(assistantMessage);
+			session.agent.replaceMessages([...session.agent.state.messages, assistantMessage]);
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+		}
+
+		expect(continueSpy).toHaveBeenCalledTimes(3);
+		expect(session.toolChoiceQueue.inspect()).toContain("incomplete-output-final");
+		const activeMessages = session.agent.state.messages;
+		const developerText = activeMessages
+			.filter(message => message.role === "developer")
+			.map(message => {
+				if (typeof message.content === "string") return message.content;
+				return message.content.map(content => (content.type === "text" ? content.text : "")).join("");
+			})
+			.join("\n");
+		expect(developerText).toContain("For this final recovery attempt");
+		const diagnostic = activeMessages.find(
+			message => message.role === "custom" && message.customType === "incomplete-output-diagnostic",
+		);
+		expect(diagnostic).toBeDefined();
+		if (diagnostic?.role !== "custom") throw new Error("expected diagnostic message");
+		expect(diagnostic.display).toBe(true);
+		expect(diagnostic.includeInContext).toBe(false);
+		expect(String(diagnostic.content)).toContain("No automatic compaction was run");
+		expect(getRuntimeSignals().some(signal => signal.startsWith("compaction:start:"))).toBe(false);
+	});
+
 	it("overflow recovery preserves pending goal checkpoints without resolving or creating checkpoints", async () => {
 		await session.goalRuntime.createGoal({ objective: "Improve release reliability" });
 		await session.goalRuntime.startTarget({
@@ -213,6 +633,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			desiredFutureClaim: "Installer smoke has bounded current evidence.",
 			closureStandard: "Current smoke output is recorded.",
 		});
+		await approveActiveTargetPlan(session);
 		const candidate = session.goalRuntime.buildCheckpointCandidate({
 			status: "closed_with_evidence",
 			summary: "Installer smoke target closed.",
@@ -296,7 +717,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(getRuntimeSignals()).toContain("compaction:start:overflow");
 	});
 
-	it("incomplete-output recovery preserves verifier repair state without creating checkpoints", async () => {
+	it("incomplete-output recovery preserves verifier repair state without compacting", async () => {
 		const created = await session.goalRuntime.createGoal({ objective: "Improve release reliability" });
 		await session.goalRuntime.recordFailedCompletionVerification(created.goal.id, "Missing parent evidence", {
 			attempt: 1,
@@ -315,10 +736,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 					},
 				],
 			},
-		});
-		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		session.subscribe(event => {
-			if (event.type === "auto_compaction_end") onCompactionDone();
 		});
 		const model = session.model;
 		if (!model) throw new Error("expected model");
@@ -358,24 +775,19 @@ describe("AgentSession auto-compaction queue resume", () => {
 			},
 			timestamp: Date.now(),
 		};
+		const continueSpy = vi.spyOn(session.agent, "continue").mockImplementation(async () => {});
 
 		session.agent.emitExternalEvent({ type: "message_end", message: incompleteAssistant });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [incompleteAssistant] });
-		await withTimeout(compactionDone, 1000, "auto compaction did not finish");
+		await session.waitForIdle();
 
 		const state = session.getGoalModeState();
 		expect(state?.runMode).toBe("awaiting-verification-repair");
 		expect(state?.goal.verificationRepair?.feedback).toBe("Missing parent evidence");
 		expect(state?.goal.checkpoints?.length ?? 0).toBe(0);
-		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
-		if (compactionEntry?.type !== "compaction") throw new Error("expected compaction entry");
-		expect(JSON.stringify(compactionEntry.preserveData?.goalMode)).toContain(
-			'"runMode":"awaiting-verification-repair"',
-		);
-		expect(JSON.stringify(compactionEntry.preserveData?.goalContinuationPacket)).toContain(
-			'"transition":"verification-rejected"',
-		);
-		expect(getRuntimeSignals()).toContain("compaction:start:incomplete");
+		expect(continueSpy).toHaveBeenCalledTimes(1);
+		expect(sessionManager.getEntries().some(entry => entry.type === "compaction")).toBe(false);
+		expect(getRuntimeSignals().some(signal => signal.startsWith("compaction:start:"))).toBe(false);
 	});
 
 	it("forwards todo reminder lifecycle signals to extensions", async () => {
@@ -431,6 +843,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			desiredFutureClaim: "Installer smoke has bounded current evidence.",
 			closureStandard: "Current smoke output is recorded.",
 		});
+		await approveActiveTargetPlan(session);
 		const candidate = session.goalRuntime.buildCheckpointCandidate({
 			status: "closed_with_evidence",
 			summary: "Installer smoke target closed.",
@@ -495,6 +908,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			desiredFutureClaim: "Installer smoke has bounded current evidence.",
 			closureStandard: "Current smoke output is recorded.",
 		});
+		await approveActiveTargetPlan(session);
 		const candidate = session.goalRuntime.buildCheckpointCandidate({
 			status: "closed_with_evidence",
 			summary: "Installer smoke target closed.",
@@ -505,7 +919,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			notClaimed: ["Parent goal is complete"],
 			remainingQuestions: ["Operator must choose a release gate."],
 		});
-		await session.goalRuntime.commitCheckpoint(candidate, {
+		const committed = await session.goalRuntime.commitCheckpoint(candidate, {
 			status: "accepted",
 			feedback: "Checkpoint accepted.",
 			evidenceChecked: candidate.evidence,
@@ -514,6 +928,8 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 		await session.goalRuntime.recordCheckpointResolution({
 			checkpointId: candidate.id,
+			stateVersion: committed.stateVersion,
+			parentFrameVersion: committed.parentFrameVersion,
 			decision: "pause_for_external_control",
 			parentReading: "External operator must choose a release gate.",
 			notPropagated: ["Next target selected"],

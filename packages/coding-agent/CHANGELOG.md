@@ -5,6 +5,7 @@
 ### Added
 - Added a reusable `plan-review` skill and target-planning prompt guidance for explicit planning review evidence.
 - Added goal target-plan linting, target cards, scenario-matrix metadata, and a live target status panel for goal planning.
+- Added durable goal-mode parallel workstream batches with approved-plan task scaffolds, task dispatch status tracking, checkpoint closure, and compaction-safe continuation context.
 
 - Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
 - Added autonomous goal target planning with verification-aperture review before target execution.
@@ -23,6 +24,7 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Allowed goal target planning turns to use temporary todos, restoring the pre-planning todo list when an approved target plan enters execution.
 - Changed goal target-planning context to stop repeating full target-plan JSON, schema shapes, and enum catalogs; planners now use `target_plan_schema` as the single schema authority while target-plan artifacts stay UI/storage-only.
 - Changed oversized failed bash results to keep compact head/tail diagnostics inline with exit details and a full raw-output artifact pointer.
 - Changed goal target-plan approval to consume submitted `target_plan_reviews` evidence, including target-plan id, revision, source, and stale-after-review checks, instead of hidden reviewer subprocesses.
@@ -67,7 +69,11 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed incomplete-output recovery so length-truncated tool calls are rewound locally, partial text is continued, empty output is retried with direct guidance, and repeated failures surface diagnostics instead of triggering auto-compaction solely because output ended incomplete.
+- Fixed provider-call compaction races where append-only background results, agent refs, or goal usage deltas landed while the summary was running and repeatedly caused stale compaction failures.
 - Fixed provider-call context maintenance to rerun compaction from the fresh branch when a long-running stale compaction is correctly discarded, avoiding a visible maintenance error when the next branch snapshot can compact successfully.
+- Fixed resumed sessions to restore persisted subagent references as parked/aborted transcript records, keeping async job liveness process-local while allowing resumable agents to wake through IRC.
+- Fixed auto-compaction summarization failures on Codex usage limits so the exhausted compaction credential is marked and a sibling account can be retried immediately instead of failing provider-call context maintenance.
 - Fixed provider-context rebuilds to prune zero-token context-maintenance failure clusters and adjacent synthetic continuation noise without removing persisted transcript entries.
 - Fixed goal target-plan review artifacts to show reviewers canonical snake_case payload JSON instead of internal camelCase submission state.
 - Fixed goal target-plan rejection caps to auto-open a recovered planning attempt when reviewer feedback is actionable and no user authority is needed.

@@ -3,6 +3,9 @@ import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@oh-my-p
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionActions, LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import type { PersistedAgentRefRecord } from "@oh-my-pi/pi-coding-agent/registry/agent-persistence";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -95,6 +98,8 @@ function mockCreateAgentSession(session: AgentSession) {
 describe("runSubprocess yield reminders", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
 	});
 
 	const baseAgent: AgentDefinition = {
@@ -531,6 +536,53 @@ describe("runSubprocess yield reminders", () => {
 
 		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.authStorage).toBe(fakeAuthStorage);
+	});
+
+	it("records running and terminal subagent refs for session restore", async () => {
+		const records: PersistedAgentRefRecord[] = [];
+		const id = "subagent-persist-ref";
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-persist-ref",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		AgentRegistry.global().register({
+			id,
+			displayName: "task",
+			kind: "sub",
+			session,
+			sessionFile: null,
+			status: "running",
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id,
+			parentTaskRunId: "Main",
+			role: "Persistence specialist",
+			recordAgentRef: record => records.push(record),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(records).toHaveLength(2);
+		expect(records.map(record => record.status)).toEqual(["running", "idle"]);
+		expect(records[0]).toMatchObject({
+			id,
+			parentId: "Main",
+			agentName: "task",
+			role: "Persistence specialist",
+			sessionFile: null,
+			resumable: false,
+		});
+		expect(records[1]).toMatchObject({ id, status: "idle", resumable: false });
 	});
 
 	it("rejects when options.authStorage and options.modelRegistry.authStorage are different instances", async () => {

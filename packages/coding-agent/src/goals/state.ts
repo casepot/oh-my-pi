@@ -13,7 +13,7 @@ export type GoalRunMode =
 	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
 	| "awaiting-user-input";
-export const GOAL_MODE_SCHEMA_VERSION = 5;
+export const GOAL_MODE_SCHEMA_VERSION = 6;
 export type GoalDeliverableStatus = "pending" | "partial" | "satisfied" | "blocked" | "stale";
 
 export type GoalTargetPlanStatus = "drafting" | "reviewing" | "revision-required" | "approved" | "failed" | "stale";
@@ -106,6 +106,74 @@ export interface GoalTargetWorkstream {
 	contractOutputs: string[];
 }
 
+export type GoalWorkstreamBatchStatus =
+	| "pending-launch"
+	| "running"
+	| "collecting-results"
+	| "ready-for-integration"
+	| "blocked"
+	| "ready-for-checkpoint"
+	| "closed"
+	| "superseded";
+
+export type GoalWorkstreamStatus =
+	| "pending"
+	| "running"
+	| "completed"
+	| "failed"
+	| "aborted"
+	| "accepted"
+	| "blocked"
+	| "superseded";
+
+export interface GoalParallelWorkstreamRequirement {
+	required: boolean;
+	source: "rubric" | "checkpoint-resolution" | "operator" | "target-plan";
+	rationale: string;
+	minNonDocWorkstreams?: number;
+	sharedContractRequired?: boolean;
+}
+
+export interface GoalWorkstreamRun {
+	workstreamId: string;
+	scaffoldTaskId?: string;
+	label: string;
+	kind: GoalTargetWorkstream["kind"];
+	role?: string;
+	files: string[];
+	contractInputs: string[];
+	contractOutputs: string[];
+	status: GoalWorkstreamStatus;
+	agentId?: string;
+	jobId?: string;
+	sessionFile?: string;
+	historyUrl?: string;
+	outputUrl?: string;
+	summary?: string;
+	evidenceRefs?: GoalRef[];
+	blockers?: string[];
+	updatedAt: number;
+}
+
+export interface GoalWorkstreamBatch {
+	id: string;
+	goalId: string;
+	targetId: string;
+	targetPlanId: string;
+	targetPlanRevision: number;
+	planFilePath: string;
+	payloadFilePath: string;
+	required: boolean;
+	implementationFanoutRequired: boolean;
+	sharedContract?: string;
+	status: GoalWorkstreamBatchStatus;
+	workstreams: GoalWorkstreamRun[];
+	createdAt: number;
+	updatedAt: number;
+	launchedAt?: number;
+	closedAt?: number;
+}
+
 export interface GoalTargetCard {
 	capabilityClaim: string;
 	trustPrivacyClaim?: string;
@@ -132,7 +200,8 @@ export type GoalTargetUnitRuleKind =
 	| "gate-prerequisite"
 	| "no-process-phase"
 	| "same-primary-signal-together"
-	| "branch-unblocks-matrix";
+	| "branch-unblocks-matrix"
+	| "parallel-workstreams-required";
 
 export interface GoalTargetUnitRule {
 	id: string;
@@ -580,6 +649,19 @@ export interface GoalTargetPlanExecutionExcludedWorkSummary {
 	rationale: string;
 }
 
+export interface GoalTaskBatchScaffold {
+	required: boolean;
+	batchId: string;
+	agent: "task";
+	context: string;
+	tasks: Array<{
+		id: string;
+		description: string;
+		role: string;
+		assignment: string;
+	}>;
+}
+
 export interface GoalTargetPlanExecutionSummary {
 	targetId: string;
 	targetPlanId: string;
@@ -615,6 +697,7 @@ export interface GoalTargetPlanExecutionSummary {
 	checkpointEvidence: string[];
 	staleIf: string[];
 	readPlanFileWhen: string;
+	taskBatchScaffold?: GoalTaskBatchScaffold;
 }
 
 export interface GoalTargetPlanRecord {
@@ -677,6 +760,8 @@ export interface GoalTarget {
 	primarySignalGroupId?: string;
 	scenarioMatrix?: GoalScenarioMatrix;
 	targetCard?: GoalTargetCard;
+	parallelWorkstreamRequirement?: GoalParallelWorkstreamRequirement;
+	workstreamBatchId?: string;
 }
 
 export interface GoalCheckpointEvidenceItem {
@@ -817,6 +902,8 @@ export interface Goal {
 	currentBlockedState?: GoalBlockedState;
 	blockedStates?: GoalBlockedState[];
 	recoveryHistory?: GoalRecoveryRecord[];
+	currentWorkstreamBatch?: GoalWorkstreamBatch;
+	workstreamBatches?: GoalWorkstreamBatch[];
 }
 
 export interface GoalModeState {
@@ -901,6 +988,8 @@ export interface GoalToolTargetSummary {
 	id: string;
 	title: string;
 	status: GoalTarget["status"];
+	parallelWorkstreamRequirement?: GoalParallelWorkstreamRequirement;
+	workstreamBatchId?: string;
 }
 
 export interface GoalToolGoalSummary {
@@ -1561,6 +1650,50 @@ function cloneTargetWorkstreams(workstreams: GoalTargetWorkstream[] | undefined)
 	}));
 }
 
+function cloneParallelWorkstreamRequirement(
+	requirement: GoalParallelWorkstreamRequirement | undefined,
+): GoalParallelWorkstreamRequirement | undefined {
+	return requirement ? { ...requirement } : undefined;
+}
+
+function cloneWorkstreamRun(run: GoalWorkstreamRun): GoalWorkstreamRun {
+	return {
+		...run,
+		files: [...run.files],
+		contractInputs: [...run.contractInputs],
+		contractOutputs: [...run.contractOutputs],
+		evidenceRefs: run.evidenceRefs ? cloneRefs(run.evidenceRefs) : undefined,
+		blockers: run.blockers ? [...run.blockers] : undefined,
+	};
+}
+
+export function cloneWorkstreamBatch(batch: GoalWorkstreamBatch | undefined): GoalWorkstreamBatch | undefined {
+	if (!batch) return undefined;
+	return {
+		...batch,
+		workstreams: batch.workstreams.map(run => cloneWorkstreamRun(run)),
+	};
+}
+
+export function upsertWorkstreamBatch(
+	batches: GoalWorkstreamBatch[] | undefined,
+	batch: GoalWorkstreamBatch,
+): GoalWorkstreamBatch[] {
+	const next =
+		batches
+			?.map(item => cloneWorkstreamBatch(item))
+			.filter((item): item is GoalWorkstreamBatch => item !== undefined) ?? [];
+	const cloned = cloneWorkstreamBatch(batch);
+	if (!cloned) return next;
+	const existingIndex = next.findIndex(item => item.id === cloned.id);
+	if (existingIndex >= 0) {
+		next[existingIndex] = cloned;
+	} else {
+		next.push(cloned);
+	}
+	return next;
+}
+
 function cloneTargetCard(card: GoalTargetCard | undefined): GoalTargetCard | undefined {
 	if (!card) return undefined;
 	return {
@@ -1742,6 +1875,8 @@ export function cloneTarget(target: GoalTarget | undefined): GoalTarget | undefi
 		scopeCalibration: cloneScopeCalibration(target.scopeCalibration),
 		scenarioMatrix: cloneScenarioMatrix(target.scenarioMatrix),
 		targetCard: cloneTargetCard(target.targetCard),
+		parallelWorkstreamRequirement: cloneParallelWorkstreamRequirement(target.parallelWorkstreamRequirement),
+		workstreamBatchId: target.workstreamBatchId,
 	};
 }
 
@@ -1868,6 +2003,10 @@ export function cloneGoal(goal: Goal): Goal {
 		recoveryHistory: goal.recoveryHistory
 			?.map(record => cloneRecoveryRecord(record))
 			.filter((record): record is GoalRecoveryRecord => record !== undefined),
+		currentWorkstreamBatch: cloneWorkstreamBatch(goal.currentWorkstreamBatch),
+		workstreamBatches: goal.workstreamBatches
+			?.map(batch => cloneWorkstreamBatch(batch))
+			.filter((batch): batch is GoalWorkstreamBatch => batch !== undefined),
 	};
 }
 
@@ -2052,6 +2191,41 @@ function normalizeTargetWorkstream(value: unknown): GoalTargetWorkstream | undef
 	};
 }
 
+function normalizeParallelWorkstreamRequirement(value: unknown): GoalParallelWorkstreamRequirement | undefined {
+	if (!isRecord(value)) return undefined;
+	const source =
+		value.source === "rubric" ||
+		value.source === "checkpoint-resolution" ||
+		value.source === "operator" ||
+		value.source === "target-plan"
+			? value.source
+			: undefined;
+	const minNonDocWorkstreams = optionalNumber(value.minNonDocWorkstreams ?? value.min_non_doc_workstreams);
+	if (
+		typeof value.required !== "boolean" ||
+		!source ||
+		typeof value.rationale !== "string" ||
+		(minNonDocWorkstreams !== undefined && (!Number.isInteger(minNonDocWorkstreams) || minNonDocWorkstreams <= 0)) ||
+		(value.sharedContractRequired !== undefined &&
+			typeof value.sharedContractRequired !== "boolean" &&
+			typeof value.shared_contract_required !== "boolean")
+	) {
+		return undefined;
+	}
+	return {
+		required: value.required,
+		source,
+		rationale: value.rationale,
+		minNonDocWorkstreams,
+		sharedContractRequired:
+			typeof value.sharedContractRequired === "boolean"
+				? value.sharedContractRequired
+				: typeof value.shared_contract_required === "boolean"
+					? value.shared_contract_required
+					: undefined,
+	};
+}
+
 function normalizeTargetCard(value: unknown): GoalTargetCard | undefined {
 	if (!isRecord(value)) return undefined;
 	const acceptanceRows = value.acceptanceRows;
@@ -2098,7 +2272,8 @@ function normalizeTargetUnitRuleKind(value: unknown): GoalTargetUnitRuleKind | u
 		value === "gate-prerequisite" ||
 		value === "no-process-phase" ||
 		value === "same-primary-signal-together" ||
-		value === "branch-unblocks-matrix"
+		value === "branch-unblocks-matrix" ||
+		value === "parallel-workstreams-required"
 		? value
 		: undefined;
 }
@@ -2161,6 +2336,16 @@ function normalizeTargetRecord(value: unknown): GoalTarget | undefined {
 	if (!isRecord(value)) return undefined;
 	const normalized: Record<string, unknown> = { ...value };
 	applyOptionalTargetPlanFields(normalized);
+	const requirement = normalizeParallelWorkstreamRequirement(
+		normalized.parallelWorkstreamRequirement ?? normalized.parallel_workstream_requirement,
+	);
+	if (requirement) normalized.parallelWorkstreamRequirement = requirement;
+	else delete normalized.parallelWorkstreamRequirement;
+	delete normalized.parallel_workstream_requirement;
+	const workstreamBatchId = optionalString(normalized.workstreamBatchId ?? normalized.workstream_batch_id);
+	if (workstreamBatchId) normalized.workstreamBatchId = workstreamBatchId;
+	else delete normalized.workstreamBatchId;
+	delete normalized.workstream_batch_id;
 	return cloneTarget(normalized as unknown as GoalTarget);
 }
 
@@ -2273,6 +2458,113 @@ function normalizeRecoveryRecord(value: unknown): GoalRecoveryRecord | undefined
 	});
 }
 
+function normalizeWorkstreamBatchStatus(value: unknown): GoalWorkstreamBatchStatus | undefined {
+	return value === "pending-launch" ||
+		value === "running" ||
+		value === "collecting-results" ||
+		value === "ready-for-integration" ||
+		value === "blocked" ||
+		value === "ready-for-checkpoint" ||
+		value === "closed" ||
+		value === "superseded"
+		? value
+		: undefined;
+}
+
+function normalizeWorkstreamStatus(value: unknown): GoalWorkstreamStatus | undefined {
+	return value === "pending" ||
+		value === "running" ||
+		value === "completed" ||
+		value === "failed" ||
+		value === "aborted" ||
+		value === "accepted" ||
+		value === "blocked" ||
+		value === "superseded"
+		? value
+		: undefined;
+}
+
+function normalizeWorkstreamRun(value: unknown): GoalWorkstreamRun | undefined {
+	if (!isRecord(value)) return undefined;
+	const kind = normalizeTargetWorkstreamKind(value.kind);
+	const status = normalizeWorkstreamStatus(value.status);
+	if (
+		typeof value.workstreamId !== "string" ||
+		typeof value.label !== "string" ||
+		!kind ||
+		!Array.isArray(value.files) ||
+		!Array.isArray(value.contractInputs) ||
+		!Array.isArray(value.contractOutputs) ||
+		!status ||
+		typeof value.updatedAt !== "number"
+	) {
+		return undefined;
+	}
+	return {
+		workstreamId: value.workstreamId,
+		scaffoldTaskId: optionalString(value.scaffoldTaskId),
+		label: value.label,
+		kind,
+		role: optionalString(value.role),
+		files: stringArray(value.files),
+		contractInputs: stringArray(value.contractInputs),
+		contractOutputs: stringArray(value.contractOutputs),
+		status,
+		agentId: optionalString(value.agentId),
+		jobId: optionalString(value.jobId),
+		sessionFile: optionalString(value.sessionFile),
+		historyUrl: optionalString(value.historyUrl),
+		outputUrl: optionalString(value.outputUrl),
+		summary: optionalString(value.summary),
+		evidenceRefs: normalizeRefs(value.evidenceRefs),
+		blockers: Array.isArray(value.blockers) ? stringArray(value.blockers) : undefined,
+		updatedAt: value.updatedAt,
+	};
+}
+
+function normalizeWorkstreamBatch(value: unknown): GoalWorkstreamBatch | undefined {
+	if (!isRecord(value)) return undefined;
+	const status = normalizeWorkstreamBatchStatus(value.status);
+	const workstreams = Array.isArray(value.workstreams)
+		? value.workstreams.flatMap(run => normalizeWorkstreamRun(run) ?? [])
+		: [];
+	if (
+		typeof value.id !== "string" ||
+		typeof value.goalId !== "string" ||
+		typeof value.targetId !== "string" ||
+		typeof value.targetPlanId !== "string" ||
+		typeof value.targetPlanRevision !== "number" ||
+		typeof value.planFilePath !== "string" ||
+		typeof value.payloadFilePath !== "string" ||
+		typeof value.required !== "boolean" ||
+		typeof value.implementationFanoutRequired !== "boolean" ||
+		!status ||
+		typeof value.createdAt !== "number" ||
+		typeof value.updatedAt !== "number" ||
+		workstreams.length === 0
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		goalId: value.goalId,
+		targetId: value.targetId,
+		targetPlanId: value.targetPlanId,
+		targetPlanRevision: value.targetPlanRevision,
+		planFilePath: value.planFilePath,
+		payloadFilePath: value.payloadFilePath,
+		required: value.required,
+		implementationFanoutRequired: value.implementationFanoutRequired,
+		sharedContract: optionalString(value.sharedContract),
+		status,
+		workstreams,
+		createdAt: value.createdAt,
+		updatedAt: value.updatedAt,
+		launchedAt: optionalNumber(value.launchedAt),
+		closedAt: optionalNumber(value.closedAt),
+	};
+}
+
 export function normalizeGoal(value: unknown): Goal | undefined {
 	if (!isRecord(value)) return undefined;
 	if (
@@ -2339,6 +2631,14 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 		goal.recoveryHistory = value.recoveryHistory
 			.map(record => normalizeRecoveryRecord(record))
 			.filter((record): record is GoalRecoveryRecord => record !== undefined);
+	}
+	if (isRecord(value.currentWorkstreamBatch)) {
+		goal.currentWorkstreamBatch = normalizeWorkstreamBatch(value.currentWorkstreamBatch);
+	}
+	if (Array.isArray(value.workstreamBatches)) {
+		goal.workstreamBatches = value.workstreamBatches
+			.map(batch => normalizeWorkstreamBatch(batch))
+			.filter((batch): batch is GoalWorkstreamBatch => batch !== undefined);
 	}
 	return cloneGoal(goal);
 }

@@ -137,6 +137,39 @@ function normalizeInProgressTask(phases: TodoPhase[]): void {
 }
 
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
+export const GOAL_TARGET_PLANNING_TODO_BASELINE_CUSTOM_TYPE = "goal_target_planning_todo_baseline";
+
+export type GoalTargetPlanningTodoBaselineRecord = {
+	goalId: string;
+	targetId: string;
+	targetPlanId: string;
+	phases: TodoPhase[];
+};
+
+export function getLatestGoalTargetPlanningTodoBaselineFromEntries(
+	entries: SessionEntry[],
+	identity: { goalId: string; targetId: string; targetPlanId: string },
+): TodoPhase[] | undefined {
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type !== "custom" || entry.customType !== GOAL_TARGET_PLANNING_TODO_BASELINE_CUSTOM_TYPE) {
+			continue;
+		}
+		const data = entry.data as Partial<GoalTargetPlanningTodoBaselineRecord> | undefined;
+		if (
+			data?.goalId !== identity.goalId ||
+			data.targetId !== identity.targetId ||
+			data.targetPlanId !== identity.targetPlanId
+		) {
+			continue;
+		}
+		if (Array.isArray(data.phases)) {
+			return clonePhases(data.phases as TodoPhase[]);
+		}
+	}
+
+	return undefined;
+}
 
 export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
 	for (let i = entries.length - 1; i >= 0; i--) {
