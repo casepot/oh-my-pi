@@ -67,6 +67,8 @@ import { yieldIfDue } from "./utils/yield";
 
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
+/** Tool-result marker for tool calls skipped because the assistant response was incomplete. */
+export const ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON = "assistant_output_incomplete";
 
 /** Sentinel returned by the abort race in `streamAssistantResponse`. */
 const ABORTED: unique symbol = Symbol("agent-loop-aborted");
@@ -78,6 +80,7 @@ const ABORTED: unique symbol = Symbol("agent-loop-aborted");
  * must not spin the loop forever. Resets whenever a turn carries tool calls.
  */
 const MAX_PAUSED_TURN_CONTINUATIONS = 8;
+const MAX_INLINE_LENGTH_TOOL_CALL_RECOVERY_CONTINUATIONS = 1;
 
 /**
  * Cadence (ms) for polling queued steering while an `interruptible` tool is in
@@ -608,6 +611,41 @@ async function materializeProviderContext(
 	};
 }
 
+interface FinalizedProviderContext {
+	context: Context;
+	promptToolWireTools: Context["tools"];
+}
+
+function finalizeProviderContextForDispatch(
+	providerContext: Context,
+	config: AgentLoopConfig,
+	ownedDialect: Dialect | undefined,
+): FinalizedProviderContext {
+	let finalContext = providerContext;
+	if (config.transformProviderContext) {
+		finalContext = config.transformProviderContext(finalContext, config.model);
+	}
+
+	// Owned tool calling: take tool calls away from the provider and run them
+	// through the selected in-band prompt dialect. `PI_DIALECT=1` still
+	// force-enables GLM; `PI_DIALECT=<dialect>` force-enables that dialect.
+	let promptToolWireTools: Context["tools"];
+	if (ownedDialect && finalContext.tools && finalContext.tools.length > 0) {
+		promptToolWireTools = finalContext.tools;
+		finalContext = {
+			...finalContext,
+			systemPrompt: [
+				...(finalContext.systemPrompt ?? []),
+				renderInbandToolPrompt(promptToolWireTools, ownedDialect),
+			],
+			messages: encodeInbandToolHistory(finalContext.messages, ownedDialect, promptToolWireTools),
+			tools: undefined,
+		};
+	}
+
+	return { context: finalContext, promptToolWireTools };
+}
+
 function resolveIntentMode(intent: AgentTool["intent"]): "require" | "optional" | "omit" {
 	if (typeof intent === "function") return "omit";
 	if (intent === "optional" || intent === "omit") return intent;
@@ -703,6 +741,7 @@ async function runLoopBody(
 	let harmonyRetryAttempt = 0;
 	let harmonyTruncateResumeCount = 0;
 	let pausedTurnContinuations = 0;
+	let lengthToolCallRecoveryContinuations = 0;
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
@@ -834,6 +873,7 @@ async function runLoopBody(
 
 			const toolResults: ToolResultMessage[] = [];
 			if (hasMoreToolCalls) {
+				lengthToolCallRecoveryContinuations = 0;
 				const executionResult = await executeToolCalls(
 					currentContext,
 					message,
@@ -871,8 +911,22 @@ async function runLoopBody(
 					});
 				}
 				if (message.stopReason === "length" && toolResults.length > 0) {
-					hasMoreToolCalls = true;
+					if (lengthToolCallRecoveryContinuations < MAX_INLINE_LENGTH_TOOL_CALL_RECOVERY_CONTINUATIONS) {
+						lengthToolCallRecoveryContinuations++;
+						hasMoreToolCalls = true;
+					} else {
+						message.stopDetails = {
+							type: "assistant_output_incomplete_tool_call_rewind_required",
+							category: message.stopDetails?.type ?? "length",
+							explanation:
+								"Assistant output was incomplete while streaming tool-call arguments after an inline recovery retry; the caller should rewind the transient tool-call exchange before continuing.",
+						};
+					}
+				} else {
+					lengthToolCallRecoveryContinuations = 0;
 				}
+			} else {
+				lengthToolCallRecoveryContinuations = 0;
 			}
 
 			if (toolCalls.length > 0) {
@@ -974,7 +1028,11 @@ async function streamAssistantResponse(
 
 	const ownedDialect: Dialect | undefined = config.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 	const exampleDialect = ownedDialect ?? preferredDialect(config.model.id);
-	let llmContext = await materializeProviderContext(context, config, signal, exampleDialect);
+	const initialProviderContext = await materializeProviderContext(context, config, signal, exampleDialect);
+	if (signal?.aborted) {
+		return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
+	}
+	let finalized = finalizeProviderContextForDispatch(initialProviderContext, config, ownedDialect);
 	for (let rematerializations = 0; config.preflightProviderContext; ) {
 		if (signal?.aborted) {
 			return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
@@ -983,7 +1041,7 @@ async function streamAssistantResponse(
 		try {
 			result = await config.preflightProviderContext({
 				agentContext: context,
-				providerContext: llmContext,
+				providerContext: finalized.context,
 				signal,
 			});
 		} catch (err) {
@@ -1007,29 +1065,18 @@ async function streamAssistantResponse(
 			);
 		}
 		rematerializations++;
-		llmContext = await materializeProviderContext(context, config, signal, exampleDialect);
+		const rematerializedProviderContext = await materializeProviderContext(context, config, signal, exampleDialect);
+		if (signal?.aborted) {
+			return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
+		}
+		finalized = finalizeProviderContextForDispatch(rematerializedProviderContext, config, ownedDialect);
 	}
 
 	if (signal?.aborted) {
 		return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 	}
-	if (config.transformProviderContext) {
-		llmContext = config.transformProviderContext(llmContext, config.model);
-	}
-
-	// Owned tool calling: take tool calls away from the provider and run them
-	// through the selected in-band prompt dialect. `PI_DIALECT=1` still
-	// force-enables GLM; `PI_DIALECT=<dialect>` force-enables that dialect.
-	let promptToolWireTools: Context["tools"];
-	if (ownedDialect && llmContext.tools && llmContext.tools.length > 0) {
-		promptToolWireTools = llmContext.tools;
-		llmContext = {
-			...llmContext,
-			systemPrompt: [...(llmContext.systemPrompt ?? []), renderInbandToolPrompt(promptToolWireTools, ownedDialect)],
-			messages: encodeInbandToolHistory(llmContext.messages, ownedDialect, promptToolWireTools),
-			tools: undefined,
-		};
-	}
+	const llmContext = finalized.context;
+	const promptToolWireTools = finalized.promptToolWireTools;
 
 	const streamFunction = streamFn || streamSimple;
 
@@ -1942,9 +1989,10 @@ function createAbortedToolResult(
 				: reason === "skipped"
 					? "Tool call was not executed because the assistant ended its turn"
 					: "Tool execution failed due to an error";
-	const result: AgentToolResult<any> = {
+	const details = createAbortedToolResultDetails(reason);
+	const result: AgentToolResult<Record<string, unknown>> = {
 		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : `${message}.` }],
-		details: {},
+		details,
 	};
 
 	stream.push({
@@ -1967,7 +2015,7 @@ function createAbortedToolResult(
 		toolCallId: toolCall.id,
 		toolName: toolCall.name,
 		content: result.content,
-		details: {},
+		details,
 		isError: true,
 		timestamp: Date.now(),
 	};
@@ -1976,6 +2024,15 @@ function createAbortedToolResult(
 	stream.push({ type: "message_end", message: toolResultMessage });
 
 	return toolResultMessage;
+}
+
+function createAbortedToolResultDetails(reason: "aborted" | "error" | "skipped" | "length"): Record<string, unknown> {
+	if (reason !== "length") return {};
+	return {
+		skipped: true,
+		skipReason: ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON,
+		stopReason: "length",
+	};
 }
 
 function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<unknown> {

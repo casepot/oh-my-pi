@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed repeated length-truncated assistant tool calls so the loop skips incomplete calls, allows one inline retry, then yields structured rewind-required details instead of executing partial arguments or spinning.
 - Fixed compaction cut-point selection when a post-compaction continuation crosses the keep-recent budget on a trailing tool result; compaction now keeps the latest assistant/tool-result pair and summarizes earlier continuation history instead of treating the pass as a no-op.
 - Added provider-call maintenance hooks, materialized-context preflight/rematerialization, abort guards, event-consumption acknowledgements, and a visible `ContextMaintenanceError` lifecycle so embedders can fail closed before sending an unsafe continuation request.
 - Fixed remote compaction to classify caller cancellation separately from timeout, HTTP, malformed-response, and transport failures, preserving cancellation while allowing live remote failures to fall back locally with structured diagnostics.

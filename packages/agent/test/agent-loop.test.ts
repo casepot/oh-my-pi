@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { agentLoop, agentLoopContinue, agentLoopDetailed, INTENT_FIELD } from "@oh-my-pi/pi-agent-core/agent-loop";
+import {
+	ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON,
+	agentLoop,
+	agentLoopContinue,
+	agentLoopDetailed,
+	INTENT_FIELD,
+} from "@oh-my-pi/pi-agent-core/agent-loop";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -10,7 +16,7 @@ import type {
 	StreamFn,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
-import type { AssistantMessage, AssistantMessageEvent, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { z } from "zod/v4";
@@ -19,6 +25,11 @@ import { createAssistantMessage, createUserMessage } from "./helpers";
 // Simple identity converter for tests - just passes through standard messages
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+}
+
+function providerMessageText(message: Message): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content.map(block => (block.type === "text" ? block.text : block.type)).join(" ");
 }
 
 describe("agentLoop with AgentMessage", () => {
@@ -1369,13 +1380,7 @@ it("preflights transformed provider context and rematerializes before streaming"
 		},
 		convertToLlm: identityConverter,
 		preflightProviderContext: input => {
-			preflightMessages.push(
-				input.providerContext.messages.map(message =>
-					typeof message.content === "string"
-						? message.content
-						: message.content.map(block => (block.type === "text" ? block.text : block.type)).join(" "),
-				),
-			);
+			preflightMessages.push(input.providerContext.messages.map(providerMessageText));
 			if (!compacted) {
 				input.agentContext.messages = [createUserMessage("compacted provider context")];
 				compacted = true;
@@ -1396,6 +1401,132 @@ it("preflights transformed provider context and rematerializes before streaming"
 	]);
 	expect(mock.calls).toHaveLength(1);
 	expect(mock.calls[0]?.context.messages.map(message => message.content)).toEqual(["compacted provider context"]);
+});
+
+it("preflights provider context after provider transforms", async () => {
+	const context: AgentContext = { systemPrompt: ["preflight"], messages: [], tools: [] };
+	const mock = createMockModel({ responses: [{ content: ["done"] }] });
+	const preflightMessages: string[][] = [];
+	let transformCalls = 0;
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: identityConverter,
+		transformProviderContext: providerContext => {
+			transformCalls++;
+			return {
+				...providerContext,
+				systemPrompt: [...(providerContext.systemPrompt ?? []), "provider-transform"],
+				messages: [...providerContext.messages, createUserMessage(`provider-transform-${transformCalls}`)],
+			};
+		},
+		preflightProviderContext: input => {
+			preflightMessages.push(input.providerContext.messages.map(providerMessageText));
+			return { action: "continue" };
+		},
+	};
+
+	const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+	for await (const _ of stream) {
+		// drain
+	}
+
+	expect(transformCalls).toBe(1);
+	expect(preflightMessages).toEqual([["start", "provider-transform-1"]]);
+	expect(mock.calls).toHaveLength(1);
+	expect(mock.calls[0]?.context.systemPrompt).toContain("provider-transform");
+	expect(mock.calls[0]?.context.messages.map(providerMessageText)).toEqual(preflightMessages[0]);
+});
+
+it("re-finalizes provider context once for each preflight rematerialization", async () => {
+	const context: AgentContext = { systemPrompt: ["preflight"], messages: [], tools: [] };
+	const mock = createMockModel({ responses: [{ content: ["done"] }] });
+	const preflightMessages: string[][] = [];
+	let compacted = false;
+	let transformCalls = 0;
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: identityConverter,
+		transformProviderContext: providerContext => {
+			transformCalls++;
+			return {
+				...providerContext,
+				messages: [...providerContext.messages, createUserMessage(`provider-transform-${transformCalls}`)],
+			};
+		},
+		preflightProviderContext: input => {
+			preflightMessages.push(input.providerContext.messages.map(providerMessageText));
+			if (!compacted) {
+				input.agentContext.messages = [createUserMessage("compacted provider context")];
+				compacted = true;
+				return { action: "rematerialize" };
+			}
+			return { action: "continue" };
+		},
+	};
+
+	const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+	for await (const _ of stream) {
+		// drain
+	}
+
+	expect(transformCalls).toBe(2);
+	expect(preflightMessages).toEqual([
+		["start", "provider-transform-1"],
+		["compacted provider context", "provider-transform-2"],
+	]);
+	expect(mock.calls).toHaveLength(1);
+	expect(mock.calls[0]?.context.messages.map(providerMessageText)).toEqual([
+		"compacted provider context",
+		"provider-transform-2",
+	]);
+});
+
+it("preflights owned-dialect provider context with native tools removed", async () => {
+	const toolSchema = z.object({ value: z.string() });
+	const tool: AgentTool<typeof toolSchema, { value: string }> = {
+		name: "echo",
+		label: "Echo",
+		description: "Echo tool",
+		parameters: toolSchema,
+		async execute(_toolCallId, params) {
+			return { content: [{ type: "text", text: params.value }] };
+		},
+	};
+	const context: AgentContext = { systemPrompt: ["preflight"], messages: [], tools: [tool] };
+	const mock = createMockModel({ responses: [{ content: ["done"] }] });
+	const preflightContexts: Array<{
+		systemPrompt: string[] | undefined;
+		messages: Message[];
+		tools: Context["tools"];
+	}> = [];
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm: identityConverter,
+		dialect: "xml",
+		preflightProviderContext: input => {
+			preflightContexts.push({
+				systemPrompt: input.providerContext.systemPrompt,
+				messages: input.providerContext.messages,
+				tools: input.providerContext.tools,
+			});
+			return { action: "continue" };
+		},
+	};
+
+	const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+	for await (const _ of stream) {
+		// drain
+	}
+
+	expect(preflightContexts).toHaveLength(1);
+	const preflightContext = preflightContexts[0];
+	expect(preflightContext?.tools).toBeUndefined();
+	expect(preflightContext?.systemPrompt?.length).toBeGreaterThan(1);
+	expect(preflightContext?.systemPrompt?.join("\n")).toContain("echo");
+	expect(mock.calls).toHaveLength(1);
+	expect(mock.calls[0]?.context.tools).toBeUndefined();
+	expect(mock.calls[0]?.context.systemPrompt).toEqual(preflightContext?.systemPrompt);
+	expect(mock.calls[0]?.context.messages).toEqual(preflightContext?.messages);
 });
 
 it("does not call the provider after sync aborts the request", async () => {
@@ -1957,12 +2088,79 @@ describe("agentLoopContinue with AgentMessage", () => {
 		if (toolResult?.role !== "toolResult") throw new Error("expected tool result");
 		expect(toolResult.toolCallId).toBe("tc-write-1");
 		expect(toolResult.isError).toBe(true);
+		expect(toolResult.details).toMatchObject({
+			skipReason: ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON,
+			stopReason: "length",
+		});
 		const text = toolResult.content
 			.filter((c): c is { type: "text"; text: string } => c.type === "text")
 			.map(c => c.text)
 			.join("\n");
 		expect(text).toContain("stop_reason: length");
 		expect(text).toMatch(/split|chunk/i);
+	});
+
+	it("yields repeated length-truncated tool calls for caller rewind instead of spinning", async () => {
+		const writeSchema = z.object({ path: z.string(), content: z.string() });
+		const executed: { path: string; content: string }[] = [];
+		const writeTool: AgentTool<typeof writeSchema, { path: string }> = {
+			name: "write",
+			label: "Write",
+			description: "Write tool",
+			parameters: writeSchema,
+			async execute(_id, params) {
+				executed.push({ path: params.path, content: params.content });
+				return { content: [{ type: "text", text: "ok" }], details: { path: params.path } };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [writeTool] };
+		const lengthToolCall = (id: string): MockResponse => ({
+			content: [
+				{
+					type: "toolCall",
+					id,
+					name: "write",
+					arguments: { path: "/tmp/huge.ts", content: "partial" },
+				},
+			],
+			stopReason: "length",
+		});
+		const mock = createMockModel({
+			responses: [
+				lengthToolCall("tc-write-1"),
+				lengthToolCall("tc-write-2"),
+				{ content: ["should not be consumed"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
+		const stream = agentLoop([createUserMessage("write huge file")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+
+		expect(executed).toEqual([]);
+		expect(mock.calls).toHaveLength(2);
+		expect(messages.map(message => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"assistant",
+			"toolResult",
+		]);
+		const lastAssistant = messages[3];
+		expect(lastAssistant.role).toBe("assistant");
+		if (lastAssistant.role !== "assistant") throw new Error("expected assistant");
+		expect(lastAssistant.stopReason).toBe("length");
+		expect(lastAssistant.stopDetails?.type).toBe("assistant_output_incomplete_tool_call_rewind_required");
+		const toolResults = messages.filter((message): message is ToolResultMessage => message.role === "toolResult");
+		expect(toolResults).toHaveLength(2);
+		for (const toolResult of toolResults) {
+			expect(toolResult.details).toMatchObject({
+				skipReason: ASSISTANT_OUTPUT_INCOMPLETE_TOOL_RESULT_SKIP_REASON,
+				stopReason: "length",
+			});
+		}
 	});
 	it("fills whitespace-only error tool results so Anthropic does not 400", async () => {
 		const toolSchema = z.object({ value: z.string() });
