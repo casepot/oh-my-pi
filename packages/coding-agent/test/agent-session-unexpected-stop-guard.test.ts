@@ -245,7 +245,7 @@ describe("AgentSession unexpected stop guard", () => {
 		await session.waitForIdle();
 
 		expect(spy).not.toHaveBeenCalled();
-		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls).toHaveLength(2);
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(0);
 	});
 });

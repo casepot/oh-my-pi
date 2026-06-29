@@ -290,8 +290,9 @@ export async function handleRpcSessionChange(
 			if (!result.cancelled) subagentRegistry?.clear();
 			return { type: "branch", data: { text: result.selectedText, cancelled: result.cancelled } };
 		}
+		default:
+			throw new Error(`Unsupported RPC session change command: ${String((command as { type?: unknown }).type)}`);
 	}
-	throw new Error("Unsupported RPC session change command");
 }
 
 function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostToolDefinition[] {
@@ -1460,20 +1461,20 @@ export async function runRpcMode(
 				emitStateChanged(["sessionName"]);
 				return success(id, "set_session_name");
 			}
-			case "handoff":
-				return success(
-					id,
-					"handoff",
-					startOperation(
-						"handoff",
+			case "handoff": {
+				// Resetting the agent mid-stream lets the live turn keep emitting into a
+				// session that handoff has already torn down. Refuse while a prompt is in
+				// flight (mirrors the TUI /handoff guard).
+				if (session.isStreaming) {
+					return error(
 						id,
-						async () => {
-							const result = await session.handoff(command.customInstructions);
-							return result ? { savedPath: result.savedPath } : null;
-						},
-						() => session.abort(),
-					),
-				);
+						"handoff",
+						rpcErrorInfo("invalid_arguments", "Cannot hand off while a response is in progress"),
+					);
+				}
+				const result = await session.handoff(command.customInstructions);
+				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
+			}
 			case "get_messages":
 				return success(id, "get_messages", await messagesResponseData());
 			case "get_session_entries": {

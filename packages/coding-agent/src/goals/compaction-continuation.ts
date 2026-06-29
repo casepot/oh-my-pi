@@ -1,15 +1,10 @@
-import { prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlText, prompt } from "@oh-my-pi/pi-utils";
 import goalCompactionContextTemplate from "../prompts/goals/goal-compaction-context.md" with { type: "text" };
 import goalPostCompactionContinuationTemplate from "../prompts/goals/goal-post-compaction-continuation.md" with {
 	type: "text",
 };
 import { buildGoalBoundaryStateRef } from "./boundary-audit";
-import {
-	buildGoalContinuationPacket,
-	escapeXmlText,
-	type GoalContinuationPacket,
-	renderGoalPromptSurface,
-} from "./runtime";
+import { buildGoalContinuationPacket, type GoalContinuationPacket, renderGoalPromptSurface } from "./runtime";
 import type { GoalModeState } from "./state";
 import { serializeGoalModeState } from "./state";
 

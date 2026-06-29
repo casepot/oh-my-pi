@@ -117,14 +117,27 @@ class CountingViewportTerminal extends VirtualTerminal {
 	}
 }
 
+class LegacyKeyboardVirtualTerminal extends VirtualTerminal {
+	get keyboardEnhancementEnterSequence(): string | null {
+		return undefined as unknown as string | null;
+	}
+
+	get keyboardEnhancementExitSequence(): string | null {
+		return undefined as unknown as string | null;
+	}
+}
+
 function rows(prefix: string, count: number): string[] {
 	return Array.from({ length: count }, (_v, i) => `${prefix}${i}`);
 }
 
 async function settle(term: VirtualTerminal): Promise<void> {
-	const nextTick = Promise.withResolvers<void>();
-	process.nextTick(nextTick.resolve);
-	await nextTick.promise;
+	// The render scheduler defers its immediate hop with setImmediate (so queued
+	// stdin such as Esc is read before an ordinary render). Drain that hop so the
+	// throttled setTimeout(0) render is scheduled, let it fire, then flush.
+	const immediate = Promise.withResolvers<void>();
+	setImmediate(immediate.resolve);
+	await immediate.promise;
 	await Bun.sleep(1);
 	await term.flush();
 }
@@ -193,10 +206,20 @@ describe("TUI terminal-state regressions", () => {
 
 	beforeEach(() => {
 		monotonicNow = 0;
-		// Resize classification now depends on TERM_PROGRAM (Warp takes the
-		// in-place path), so neutralize the ambient terminal identity to keep
-		// these direct-terminal assertions deterministic on any dev machine.
-		for (const key of ["TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"]) {
+		// Resize classification depends on both multiplexer markers and terminal
+		// identity (Warp takes the in-place path), so neutralize ambient session
+		// state to keep direct-terminal assertions deterministic inside the OMP
+		// harness and on any dev machine.
+		for (const key of [
+			"TMUX",
+			"STY",
+			"ZELLIJ",
+			"CMUX_WORKSPACE_ID",
+			"CMUX_SURFACE_ID",
+			"TERM",
+			"TERM_PROGRAM",
+			"PI_TUI_RESIZE_IN_PLACE",
+		]) {
 			savedTerminalEnv[key] = Bun.env[key];
 			delete Bun.env[key];
 		}
@@ -3278,6 +3301,32 @@ describe("TUI terminal-state regressions", () => {
 			}
 		});
 
+		it("falls back to kittyEnableSequence for legacy custom terminals", async () => {
+			const term = new LegacyKeyboardVirtualTerminal(40, 8, 200);
+			const writes = captureWrites(term);
+			const tui = new TUI(term);
+			tui.addChild(new MutableLinesComponent(rows("base-", 8)));
+
+			try {
+				tui.start();
+				await settle(term);
+
+				const showFrom = writes.length;
+				tui.showOverlay(new MutableLinesComponent(["MODAL-0"]), {
+					width: "100%",
+					maxHeight: "100%",
+					margin: 0,
+					fullscreen: true,
+				});
+				await settle(term);
+
+				const modalWrites = writes.slice(showFrom).join("");
+				expect(modalWrites).toContain("\x1b[?1049h\x1b[>1u");
+			} finally {
+				tui.stop();
+			}
+		});
+
 		it("leaves native scrollback untouched across the modal lifetime", async () => {
 			const term = new VirtualTerminal(40, 6, 200);
 			const tui = new TUI(term);
@@ -4115,7 +4164,21 @@ describe("TUI terminal-state regressions", () => {
 });
 
 describe("foreground-tool streaming on ED3-risk terminals", () => {
+	let savedTerminalEnv: Record<string, string | undefined> = {};
 	beforeEach(() => {
+		for (const key of [
+			"TMUX",
+			"STY",
+			"ZELLIJ",
+			"CMUX_WORKSPACE_ID",
+			"CMUX_SURFACE_ID",
+			"TERM",
+			"TERM_PROGRAM",
+			"PI_TUI_RESIZE_IN_PLACE",
+		]) {
+			savedTerminalEnv[key] = Bun.env[key];
+			delete Bun.env[key];
+		}
 		let monotonicNow = 0;
 		vi.spyOn(performance, "now").mockImplementation(() => {
 			monotonicNow += 20;
@@ -4124,6 +4187,12 @@ describe("foreground-tool streaming on ED3-risk terminals", () => {
 	});
 
 	afterEach(() => {
+		for (const key in savedTerminalEnv) {
+			const value = savedTerminalEnv[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+		savedTerminalEnv = {};
 		vi.restoreAllMocks();
 	});
 

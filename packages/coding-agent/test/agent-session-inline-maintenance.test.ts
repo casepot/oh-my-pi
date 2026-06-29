@@ -16,6 +16,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 const LONG_TOOL_RESULT = "inline maintenance tool result ".repeat(20);
 const OLD_CONTEXT = "old seed context ".repeat(3_000);
+const RESTING_THRESHOLD_TOKENS = 49_000;
 
 describe("AgentSession inline provider-call maintenance", () => {
 	let tempDir: TempDir;
@@ -149,7 +150,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 				"compaction.enabled": true,
 				"compaction.autoContinue": true,
 				"compaction.strategy": options?.strategy ?? "context-full",
-				"compaction.thresholdTokens": 20_000,
+				"compaction.thresholdTokens": RESTING_THRESHOLD_TOKENS,
 				"compaction.keepRecentTokens": 300,
 			}),
 			modelRegistry,
@@ -187,7 +188,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		let callsAtCompact = -1;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
 			callsAtCompact = mock.calls.length;
-			session!.settings.override("compaction.thresholdTokens", 20_000);
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 			return {
 				summary: "inline provider-call compacted",
 				shortSummary: undefined,
@@ -226,7 +227,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		let callsAtCompact = -1;
 		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
 			callsAtCompact = mock.calls.length;
-			session!.settings.override("compaction.thresholdTokens", 20_000);
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 			return {
 				summary: "provider-floor compacted before second call",
 				shortSummary: undefined,
@@ -257,7 +258,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		expect(persistedToolUse.message.model).toBe(model.id);
 		expect(persistedToolUse.message.usage.totalTokens).toBe(25_000);
 
-		expect(preflightResults).toContain("rematerialize");
+		expect(preflightResults).toEqual(["continue", "continue"]);
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(callsAtCompact).toBe(1);
 		expect(mock.calls).toHaveLength(2);
@@ -307,7 +308,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 					timestamp: Date.now(),
 				});
 			}
-			session!.settings.override("compaction.thresholdTokens", 20_000);
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 			return {
 				summary: compactCalls === 1 ? "stale inline compacted" : "fresh inline compacted after branch change",
 				shortSummary: undefined,
@@ -372,7 +373,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 				timeUsedSeconds: 2,
 				updatedAt: Date.now(),
 			});
-			session!.settings.override("compaction.thresholdTokens", 20_000);
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 			return {
 				summary: "inline compacted despite append-only suffix",
 				shortSummary: undefined,
@@ -429,7 +430,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 						}
 					});
 				}
-				session!.settings.override("compaction.thresholdTokens", 20_000);
+				session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 				return {
 					summary: "fresh inline compacted after idle",
 					shortSummary: undefined,
@@ -480,7 +481,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 						}
 					});
 				}
-				session!.settings.override("compaction.thresholdTokens", 20_000);
+				session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 				return {
 					summary: "fresh inline compacted after threshold",
 					shortSummary: undefined,
@@ -500,7 +501,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		session!.agent.emitExternalEvent({ type: "message_end", message: thresholdAssistant });
 		session!.agent.emitExternalEvent({ type: "agent_end", messages: [thresholdAssistant] });
 		await waitFor(() => compactCalls === 1);
-		session!.settings.override("compaction.thresholdTokens", 20_000);
+		session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 
 		await session!.prompt("use the echo tool", { skipCompactionCheck: true });
 
@@ -519,7 +520,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		const closeSpy = vi.fn();
 		session!.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
 		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
-			session!.settings.override("compaction.thresholdTokens", 20_000);
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 			return {
 				summary: "codex inline compacted",
 				shortSummary: undefined,
@@ -543,7 +544,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		const closeSpy = vi.fn();
 		session!.providerSessionState.set("openai-responses:openai", { close: closeSpy } satisfies ProviderSessionState);
 		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => {
-			session!.settings.override("compaction.thresholdTokens", 20_000);
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
 			return {
 				summary: "openai inline compacted",
 				shortSummary: undefined,

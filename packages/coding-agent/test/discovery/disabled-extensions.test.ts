@@ -6,6 +6,7 @@ import { defineCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/ca
 import { type ContextFile, contextFileCapability } from "@oh-my-pi/pi-coding-agent/capability/context-file";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initializeWithSettings, loadCapability, type SourceMeta } from "@oh-my-pi/pi-coding-agent/discovery";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 interface InvalidLevelFixture {
 	name: string;
@@ -75,8 +76,8 @@ describe("disabledExtensions runtime filtering", () => {
 		} else {
 			process.env.HOME = originalHome;
 		}
-		await fs.rm(tempHomeDir, { recursive: true, force: true });
-		await fs.rm(tempDir, { recursive: true, force: true });
+		await removeWithRetries(tempHomeDir);
+		await removeWithRetries(tempDir);
 	});
 
 	test("hides disabled context files from runtime loads by default", async () => {

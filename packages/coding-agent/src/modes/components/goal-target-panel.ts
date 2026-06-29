@@ -112,7 +112,12 @@ function compactActionFlow(actions: readonly string[]): string | undefined {
 				if (action.includes('op:"submit_target_plan"') && action.includes('op:"fail_target_plan"')) {
 					return "submit_target_plan/fail_target_plan";
 				}
-				if (action === "Edit target plan/payload sidecar in place") return "edit target plan/payload";
+				if (
+					action === "Edit target plan/payload sidecar in place" ||
+					action.startsWith("Edit or eval/bash-transform")
+				) {
+					return "edit target plan/payload";
+				}
 				return action;
 			})
 			.join(" → "),

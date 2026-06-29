@@ -94,7 +94,9 @@ describe("EvalTool timeout semantics", () => {
 		// 1s budget; the cell idles for 5s and emits no status, so nothing extends
 		// the budget — it must be cut off at the wall-clock limit.
 		const result = await tool.execute("call-compute-timeout", {
-			cells: [{ language: "js", code: "await Bun.sleep(2000); return 'never';", timeout: 1 }],
+			language: "js",
+			code: "await Bun.sleep(2000); return 'never';",
+			timeout: 1,
 		});
 
 		const text = result.content
@@ -144,7 +146,9 @@ describe("EvalTool timeout semantics", () => {
 		});
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-reset-race", {
-			cells: [{ language: "py", code: "print('unreached')", title: "reset race" }],
+			language: "py",
+			code: "print('unreached')",
+			title: "reset race",
 		});
 
 		const text = result.content
@@ -176,7 +180,9 @@ describe("EvalTool timeout semantics", () => {
 		});
 		const tool = new EvalTool(makeSession());
 		const result = await tool.execute("call-shutdown", {
-			cells: [{ language: "py", code: "while True: pass", title: "shutdown cell" }],
+			language: "py",
+			code: "while True: pass",
+			title: "shutdown cell",
 		});
 
 		const text = result.content

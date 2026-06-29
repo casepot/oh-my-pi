@@ -21,8 +21,8 @@ function makeSession(options: { artifactDir?: string } = {}): ToolSession {
 				if (key === "bash.stripTrailingHeadTail") return false;
 				if (key === "astGrep.enabled") return false;
 				if (key === "astEdit.enabled") return false;
-				if (key === "search.enabled") return false;
-				if (key === "find.enabled") return false;
+				if (key === "grep.enabled") return false;
+				if (key === "glob.enabled") return false;
 				return undefined;
 			},
 			getBashInterceptorRules() {
@@ -75,7 +75,7 @@ describe("BashTool non-zero exit", () => {
 			expect(text).toContain("Command exited with code 7");
 			const artifactMatch = text.match(/\[raw output: artifact:\/\/(bash-failure-\d+)\]$/);
 			expect(artifactMatch).not.toBeNull();
-			expect(text).toMatch(/\[… elided \d+ bytes of bash failure output …\]/);
+			expect(text).toMatch(/\[…\d+B elided…\]/);
 
 			const artifactId = artifactMatch?.[1];
 			if (!artifactId) throw new Error("expected raw output artifact footer");

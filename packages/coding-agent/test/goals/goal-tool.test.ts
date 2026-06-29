@@ -1077,7 +1077,7 @@ describe("GoalTool", () => {
 				title: "Prove smoke",
 				desired_future_claim: "Smoke path is exercised.",
 				closure_standard: "Current smoke output exists.",
-				summary: "not allowed on start_target",
+				unexpected_extra: "not allowed on start_target",
 			}).success,
 		).toBe(false);
 		expect(
@@ -1153,19 +1153,13 @@ describe("GoalTool", () => {
 				next_target: {},
 			}).success,
 		).toBe(true);
-		const pollutedParentCandidate = {
-			...emptyNextTargetParentCandidate,
-			objective: "",
-			status: "",
-			summary: "",
-		};
-		const validatedPollutedParentCandidate = validateToolArguments(tool, {
+		const validatedEmptyParentCandidate = validateToolArguments(tool, {
 			type: "toolCall",
-			id: "call-polluted-parent-candidate",
+			id: "call-empty-parent-candidate",
 			name: "goal",
-			arguments: pollutedParentCandidate,
+			arguments: emptyNextTargetParentCandidate,
 		}) as { op: string };
-		expect(validatedPollutedParentCandidate.op).toBe("resolve_checkpoint");
+		expect(validatedEmptyParentCandidate.op).toBe("resolve_checkpoint");
 		expect(() =>
 			validateToolArguments(tool, {
 				type: "toolCall",
@@ -1180,7 +1174,11 @@ describe("GoalTool", () => {
 					parent_reading: "Ready for verifier.",
 					not_propagated: [],
 					remaining_parent_work: [],
-					next_target: { objective: "Do more work" },
+					next_target: {
+						title: "Do more work",
+						desired_future_claim: "More work is done.",
+						closure_standard: "Current evidence exists.",
+					},
 				},
 			}),
 		).toThrow("next_target");

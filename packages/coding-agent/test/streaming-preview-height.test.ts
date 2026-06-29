@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,6 +9,7 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { theme as activeTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
 // The streaming edit preview is a fixed-height tail window ("cursor"): the last
@@ -37,6 +38,24 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 	let file: string;
 	let themed = false;
 
+	// The streaming edit window is sized as min(EDIT_STREAMING_PREVIEW_LINES,
+	// previewWindowRows()), and previewWindowRows() reads process.stdout.rows.
+	// Pin a tall, stable viewport so the "full window of real diff" height
+	// assertions don't shrink (and flake) under a short ambient terminal when the
+	// file runs inside the full suite. Restored in afterAll.
+	let originalRowsDescriptor: PropertyDescriptor | undefined;
+	beforeAll(() => {
+		originalRowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { value: 50, configurable: true });
+	});
+	afterAll(() => {
+		if (originalRowsDescriptor) {
+			Object.defineProperty(process.stdout, "rows", originalRowsDescriptor);
+		} else {
+			delete (process.stdout as { rows?: number }).rows;
+		}
+	});
+
 	beforeEach(async () => {
 		if (!themed) {
 			await initTheme();
@@ -51,7 +70,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 
 	afterEach(async () => {
 		resetSettingsForTest();
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	// Char-by-char partials of the new function body.
@@ -106,6 +125,42 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 				}
 			},
 		};
+	}
+
+	const NO_MULTIPLEXER_ENV: Record<string, string | undefined> = {
+		TMUX: undefined,
+		STY: undefined,
+		ZELLIJ: undefined,
+		CMUX_WORKSPACE_ID: undefined,
+		CMUX_SURFACE_ID: undefined,
+		TERM: "xterm-256color",
+		TERM_PROGRAM: undefined,
+		PI_TUI_RESIZE_IN_PLACE: undefined,
+	};
+
+	async function withEnvPatch<T>(patch: Record<string, string | undefined>, run: () => T | Promise<T>): Promise<T> {
+		const saved: Record<string, string | undefined> = {};
+		for (const key in patch) {
+			saved[key] = Bun.env[key];
+			const value = patch[key];
+			if (value === undefined) {
+				delete Bun.env[key];
+			} else {
+				Bun.env[key] = value;
+			}
+		}
+		try {
+			return await run();
+		} finally {
+			for (const key in saved) {
+				const value = saved[key];
+				if (value === undefined) {
+					delete Bun.env[key];
+				} else {
+					Bun.env[key] = value;
+				}
+			}
+		}
 	}
 
 	// Real TUI + virtual terminal harness: drives the component through the
@@ -234,103 +289,105 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 	}, 30_000);
 
 	test("real TUI finalization replaces streaming edit preview throughout native scrollback", async () => {
-		const previewPrefix = "PREVIEW_ONLY_STREAM_SENTINEL_";
-		const finalSentinel = "FINAL_RESULT_SENTINEL_committed_edit";
-		const streamedReplacements = Array.from({ length: 12 }, (_unused, i) =>
-			[
-				"function foo() {",
-				"  const x = 1;",
-				...Array.from({ length: 10 + (i % 5) }, (_value, j) => `  const p${j} = "${previewPrefix}${i}_${j}";`),
-				`  return "${previewPrefix}${i}_tail";`,
-				"}",
-			].join("\n"),
-		);
-		const finalDiff = [
-			"@@ -1,4 +1,5 @@",
-			" function foo() {",
-			"   const x = 1;",
-			"-  return x;",
-			`+  const finalValue = "${finalSentinel}";`,
-			"+  return finalValue;",
-			" }",
-		].join("\n");
-		const { component, term, tui, scheduler } = makeTuiComponent();
+		await withEnvPatch(NO_MULTIPLEXER_ENV, async () => {
+			const previewPrefix = "PREVIEW_ONLY_STREAM_SENTINEL_";
+			const finalSentinel = "FINAL_RESULT_SENTINEL_committed_edit";
+			const streamedReplacements = Array.from({ length: 12 }, (_unused, i) =>
+				[
+					"function foo() {",
+					"  const x = 1;",
+					...Array.from({ length: 10 + (i % 5) }, (_value, j) => `  const p${j} = "${previewPrefix}${i}_${j}";`),
+					`  return "${previewPrefix}${i}_tail";`,
+					"}",
+				].join("\n"),
+			);
+			const finalDiff = [
+				"@@ -1,4 +1,5 @@",
+				" function foo() {",
+				"   const x = 1;",
+				"-  return x;",
+				`+  const finalValue = "${finalSentinel}";`,
+				"+  return finalValue;",
+				" }",
+			].join("\n");
+			const { component, term, tui, scheduler } = makeTuiComponent();
 
-		try {
-			tui.start();
-			await settleTerminal(component, scheduler, term);
-
-			let maxStreamingHeight = 0;
-			let sawPreviewSentinel = false;
-			const streamingStepCount = streamedReplacements.length;
-			const lifecycleSteps = [
-				...streamedReplacements.map((newText, i) => () => {
-					component.updateArgs({ path: file, edits: [{ old_text: oldBlock, new_text: newText }] });
-					if (i % 4 === 1) {
-						component.setExpanded(true);
-					} else if (i % 4 === 3) {
-						component.setExpanded(false);
-					}
-					if (i % 5 === 2) {
-						term.resize(68, 7);
-					} else if (i % 5 === 4) {
-						term.resize(72, 8);
-					}
-				}),
-				() => {
-					component.setArgsComplete();
-				},
-				() => {
-					component.updateResult(
-						{
-							content: [{ type: "text", text: finalSentinel }],
-							details: { path: file, diff: finalDiff, firstChangedLine: 3 },
-						},
-						false,
-					);
-					component.setExpanded(true);
-					term.resize(70, 9);
-				},
-			];
-
-			for (const [i, applyStep] of lifecycleSteps.entries()) {
-				applyStep();
-				term.scrollLines(1_000);
-				tui.requestRender(i % 3 === 0 || i >= streamingStepCount);
+			try {
+				tui.start();
 				await settleTerminal(component, scheduler, term);
 
-				if (i < streamingStepCount) {
-					const rows = normalizedBufferRows(term);
-					sawPreviewSentinel ||= rows.some(row => row.includes(previewPrefix));
-					maxStreamingHeight = Math.max(maxStreamingHeight, component.render(term.columns).length);
-					expect(term.isNativeViewportAtBottom()).toBe(true);
+				let maxStreamingHeight = 0;
+				let sawPreviewSentinel = false;
+				const streamingStepCount = streamedReplacements.length;
+				const lifecycleSteps = [
+					...streamedReplacements.map((newText, i) => () => {
+						component.updateArgs({ path: file, edits: [{ old_text: oldBlock, new_text: newText }] });
+						if (i % 4 === 1) {
+							component.setExpanded(true);
+						} else if (i % 4 === 3) {
+							component.setExpanded(false);
+						}
+						if (i % 5 === 2) {
+							term.resize(68, 7);
+						} else if (i % 5 === 4) {
+							term.resize(72, 8);
+						}
+					}),
+					() => {
+						component.setArgsComplete();
+					},
+					() => {
+						component.updateResult(
+							{
+								content: [{ type: "text", text: finalSentinel }],
+								details: { path: file, diff: finalDiff, firstChangedLine: 3 },
+							},
+							false,
+						);
+						component.setExpanded(true);
+						term.resize(70, 9);
+					},
+				];
+
+				for (const [i, applyStep] of lifecycleSteps.entries()) {
+					applyStep();
+					term.scrollLines(1_000);
+					tui.requestRender(i % 3 === 0 || i >= streamingStepCount);
+					await settleTerminal(component, scheduler, term);
+
+					if (i < streamingStepCount) {
+						const rows = normalizedBufferRows(term);
+						sawPreviewSentinel ||= rows.some(row => row.includes(previewPrefix));
+						maxStreamingHeight = Math.max(maxStreamingHeight, component.render(term.columns).length);
+						expect(term.isNativeViewportAtBottom()).toBe(true);
+					}
 				}
+
+				expect(sawPreviewSentinel).toBe(true);
+				expect(maxStreamingHeight).toBeGreaterThan(term.rows);
+
+				term.scrollLines(1_000);
+				await settleTerminal(component, scheduler, term);
+
+				const finalBufferText = normalizedBufferRows(term).join("\n");
+				expect(finalBufferText).toContain(finalSentinel);
+				expect(finalBufferText).not.toContain(previewPrefix);
+
+				term.scrollLines(-1_000);
+				await term.flush();
+				const scrolledViewportText = term
+					.getViewport()
+					.map(row => row.trimEnd())
+					.join("\n");
+				expect(scrolledViewportText).not.toContain(previewPrefix);
+				term.scrollLines(1_000);
+				await term.flush();
+			} finally {
+				component.stopAnimation();
+				tui.stop();
+				await term.flush();
 			}
-
-			expect(sawPreviewSentinel).toBe(true);
-			expect(maxStreamingHeight).toBeGreaterThan(term.rows);
-
-			term.scrollLines(1_000);
-			await settleTerminal(component, scheduler, term);
-
-			const finalBufferText = normalizedBufferRows(term).join("\n");
-			expect(finalBufferText).toContain(finalSentinel);
-			expect(finalBufferText).not.toContain(previewPrefix);
-
-			term.scrollLines(-1_000);
-			await term.flush();
-			const scrolledViewportText = term
-				.getViewport()
-				.map(row => row.trimEnd())
-				.join("\n");
-			expect(scrolledViewportText).not.toContain(previewPrefix);
-			term.scrollLines(1_000);
-			await term.flush();
-		} finally {
-			component.stopAnimation();
-			tui.stop();
-			await term.flush();
-		}
+		});
 		// Real TUI + Ghostty WASM integration can exceed Bun's default budget on CI:
 		// startup, repeated native scrollback refreshes, and throttled render frames are
 		// intentionally exercised here. Keep the contract assertions above; only widen
@@ -386,11 +443,11 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		const width = 80;
 		const { lines } = renderPending("bash", { command: "echo hi" });
 		const strippedLines = lines.map(line => Bun.stripANSI(line));
-		const topBorder = strippedLines.find(line => line.includes(activeTheme.boxSharp.topLeft));
+		const topBorder = strippedLines.find(line => line.includes(activeTheme.boxRound.topLeft));
 
 		expect(topBorder).toBeDefined();
-		expect(topBorder?.[0]).toBe(activeTheme.boxSharp.topLeft);
-		expect(topBorder?.endsWith(activeTheme.boxSharp.topRight)).toBe(true);
+		expect(topBorder?.[0]).toBe(activeTheme.boxRound.topLeft);
+		expect(topBorder?.endsWith(activeTheme.boxRound.topRight)).toBe(true);
 		expect(visibleWidth(topBorder ?? "")).toBe(width);
 	});
 
@@ -435,7 +492,9 @@ describe("streaming tool call preview height (bounded across renderers)", () => 
 		const hidden = total - window;
 		const longLines = Array.from({ length: total }, (_, i) => `line-${i}`);
 		const { lines, text } = renderPending("eval", {
-			cells: [{ language: "js", title: "big", code: longLines.map(line => `const ${line} = 1;`).join("\n") }],
+			language: "js",
+			title: "big",
+			code: longLines.map(line => `const ${line} = 1;`).join("\n"),
 		});
 
 		expect(lines.length, "eval code preview should stay bounded").toBeLessThan(window + 10);

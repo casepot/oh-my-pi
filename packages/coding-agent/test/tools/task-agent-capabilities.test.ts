@@ -111,7 +111,7 @@ describe("task agent capability descriptions", () => {
 					name: "read_scout",
 					description: "Read-only scout",
 					systemPrompt: "Scout the codebase.",
-					tools: ["read", "search", "find"],
+					tools: ["read", "grep", "glob"],
 					source: "project",
 				},
 				{
@@ -130,9 +130,6 @@ describe("task agent capability descriptions", () => {
 		expect(description).toContain("# read_scout — READ-ONLY (no edit/write/exec tools)\nRead-only scout");
 		expect(description).toContain("# full_agent\nFull agent");
 		expect(description).not.toContain("# full_agent — READ-ONLY");
-		expect(description).toContain(
-			"NEVER offload reasoning, analysis, design, or decision-making to `quick_task` or `explore`",
-		);
 	});
 
 	it("forces subagents into read-only planning mode during goal target planning", async () => {

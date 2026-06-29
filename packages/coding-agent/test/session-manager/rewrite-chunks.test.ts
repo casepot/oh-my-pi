@@ -9,17 +9,20 @@ import {
 	type SessionStorageStat,
 	type SessionStorageWriter,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class ChunkRecordingStorage implements SessionStorage {
 	readonly #inner = new MemorySessionStorage();
 	syncRewriteCalls = 0;
 	atomicRewriteCalls = 0;
+	titleUpdateCalls = 0;
 	lastChunkCount = 0;
 	lastTotalBytes = 0;
 
 	resetRecords(): void {
 		this.syncRewriteCalls = 0;
 		this.atomicRewriteCalls = 0;
+		this.titleUpdateCalls = 0;
 		this.lastChunkCount = 0;
 		this.lastTotalBytes = 0;
 	}
@@ -46,6 +49,11 @@ class ChunkRecordingStorage implements SessionStorage {
 		this.syncRewriteCalls++;
 		this.#record(materialized);
 		this.#inner.writeChunksSync(p, materialized);
+	}
+
+	updateSessionTitle(p: string, update: SessionTitleUpdate): Promise<void> {
+		this.titleUpdateCalls++;
+		return this.#inner.updateSessionTitle(p, update);
 	}
 
 	statSync(p: string): SessionStorageStat {
@@ -129,16 +137,17 @@ function createManager(storage: ChunkRecordingStorage): SessionManager {
 }
 
 describe("SessionManager chunked rewrites", () => {
-	it("uses chunked rewrite APIs for divergent session rewrites", async () => {
+	it("uses chunked rewrite APIs for rewrites and title slot updates for renames", async () => {
 		let storage = new ChunkRecordingStorage();
 		let manager = createManager(storage);
 		manager.appendMessage({ role: "user", content: "before assistant", timestamp: Date.now() });
 		manager.appendMessage(assistantMessage("materialize"));
 		storage.resetRecords();
-		await expect(manager.setSessionName("renamed", "user")).resolves.toBe(true);
-		expect(storage.atomicRewriteCalls).toBe(1);
-		expect(storage.lastChunkCount).toBeGreaterThan(1);
-		expect(storage.lastTotalBytes).toBeGreaterThan(0);
+		const renamed = await manager.setSessionName("renamed", "user");
+		expect(renamed).toBe(true);
+		expect(storage.titleUpdateCalls).toBe(1);
+		expect(storage.atomicRewriteCalls).toBe(0);
+		expect(storage.lastChunkCount).toBe(0);
 
 		storage = new ChunkRecordingStorage();
 		manager = createManager(storage);
@@ -151,9 +160,9 @@ describe("SessionManager chunked rewrites", () => {
 
 		storage = new ChunkRecordingStorage();
 		manager = createManager(storage);
-		manager.appendMessage({ role: "user", content: "sync flush", timestamp: Date.now() });
+		manager.appendMessage({ role: "user", content: "sync rewrite", timestamp: Date.now() });
 		storage.resetRecords();
-		manager.flushSync();
+		manager.appendMessage(assistantMessage("materialize sync"));
 		expect(storage.syncRewriteCalls).toBe(1);
 		expect(storage.lastChunkCount).toBeGreaterThan(1);
 		expect(storage.lastTotalBytes).toBeGreaterThan(0);

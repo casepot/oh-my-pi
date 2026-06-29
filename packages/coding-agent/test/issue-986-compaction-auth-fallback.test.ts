@@ -44,6 +44,7 @@ describe("issue #986 compaction auth fallback", () => {
 
 		const settings = Settings.isolated({
 			"compaction.keepRecentTokens": 1,
+			"compaction.strategy": "context-full",
 			"compaction.allowModelFallbacks": options?.allowModelFallbacks === true,
 		});
 		if (options?.fallbackModelRole) {

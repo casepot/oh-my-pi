@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+## [16.2.3] - 2026-06-28
+
+### Added
+
+- Support for parsing named advisor transcripts using the `__advisor.<slug>.jsonl` naming convention.
+
+## [16.2.0] - 2026-06-27
+
+### Added
+
+- Added a Gain tab to the `omp stats` dashboard (`/#/gain`) to display snapcompact token-savings with project scoping from synced session folders.
+
+## [16.1.17] - 2026-06-24
+
+### Fixed
+
+- Stats sync counted the same provider request multiple times when a forked or branched session file copied the parent's entries verbatim. Inserts now skip rows whose `(entry_id, timestamp)` already exists under a different `session_file`, and a one-shot migration on the next `omp stats` run collapses any pre-existing duplicates ([#3370](https://github.com/can1357/oh-my-pi/issues/3370)).
+
+## [16.1.15] - 2026-06-22
+
+### Added
+
+- Added token usage breakdown by agent type (Main, Subagents, Advisor) to the overview dashboard
+
+## [16.0.10] - 2026-06-18
+
+### Changed
+
+- Updated description of moderated content categories to use more inclusive terminology
+
+### Fixed
+
+- Wide data tables (Requests, Errors, Overview, Projects) overflowed the page horizontally at narrow-desktop widths (768-1023px): the `.stats-table-desktop-only` wrapper used for mobile-card tables lacked the `overflow-x: auto` containment that `.stats-table-container` already has. They now scroll within their own bounds instead of spilling the page body.
+
+## [16.0.5] - 2026-06-17
+
+### Added
+
+- New Projects view summarizing usage, cost, and reliability per project folder (backed by the existing `/api/stats/folders` endpoint).
+- System-aware light/dark theme toggle — follows the OS by default, and an explicit choice persists across reloads.
+
+### Changed
+
+- Redesigned the local stats dashboard with an OMP-themed product shell, dedicated per-section views, accessible loading/empty/error states, and flicker-free navigation between screens and time ranges.
+
+### Fixed
+
+- The 1h time-range chart rendered an empty/single-point line; it now buckets at 5-minute granularity for a real trend.
+
 ## [15.13.3] - 2026-06-15
 
 ### Changed

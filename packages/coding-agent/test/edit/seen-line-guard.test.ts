@@ -7,7 +7,8 @@ import { type ExecuteHashlineSingleOptions, executeHashlineSingle } from "@oh-my
 import { canonicalSnapshotKey, getFileSnapshotStore } from "@oh-my-pi/pi-coding-agent/edit/file-snapshot-store";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { SearchTool } from "@oh-my-pi/pi-coding-agent/tools/search";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { GrepTool } from "../../src/tools/grep";
 
 function createSession(cwd: string): ToolSession {
 	return {
@@ -19,6 +20,17 @@ function createSession(cwd: string): ToolSession {
 		allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
 		settings: Settings.isolated(),
 		enableLsp: false,
+	} as ToolSession;
+}
+
+function createBridgeSession(cwd: string, content: string): ToolSession {
+	const bridge = {
+		capabilities: { readTextFile: true },
+		readTextFile: async () => content,
+	};
+	return {
+		...createSession(cwd),
+		getClientBridge: () => bridge,
 	} as ToolSession;
 }
 
@@ -67,7 +79,7 @@ describe("read → edit seen-line guard", () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "seen-line-guard-"));
 	});
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	it("records the displayed range as seen and excludes far lines", async () => {
@@ -94,7 +106,7 @@ describe("read → edit seen-line guard", () => {
 
 		await expect(
 			executeHashlineSingle(execOptions(`[notes.txt#${tag}]\nSWAP 12.=12:\n+EDITED`, session)),
-		).rejects.toThrow(/were not shown in the read\/search output/);
+		).rejects.toThrow(/never displayed \(it showed/);
 		// The reject left the file untouched.
 		expect(await Bun.file(file).text()).toBe(CONTENT);
 	});
@@ -110,6 +122,53 @@ describe("read → edit seen-line guard", () => {
 		await executeHashlineSingle(execOptions(`[notes.txt#${tag}]\nSWAP 2.=2:\n+EDITED`, session));
 		expect(await Bun.file(file).text()).toContain("EDITED");
 	});
+
+	it("merges displayed lines from ACP bridge range reads into existing provenance", async () => {
+		const file = path.join(tmpDir, "notes.txt");
+		await Bun.write(file, CONTENT);
+		const session = createBridgeSession(tmpDir, CONTENT);
+		const store = getFileSnapshotStore(session);
+		const tag = store.record(canonicalSnapshotKey(file), CONTENT, [12]);
+
+		const read = await new ReadTool(session).execute("r1", { path: `${file}:1-3` });
+		expect(tagFromOutput(resultText(read))).toBe(tag);
+
+		const seen = store.byHash(canonicalSnapshotKey(file), tag)?.seenLines;
+		expect(seen?.has(2)).toBe(true);
+		await executeHashlineSingle(execOptions(`[notes.txt#${tag}]\nINS.POST 2:\n+EDITED`, session));
+		expect(await Bun.file(file).text()).toContain("line 2\nEDITED");
+	});
+
+	it("merges displayed lines from ACP bridge multi-range reads into existing provenance", async () => {
+		const file = path.join(tmpDir, "src/main.c");
+		const lines = Array.from({ length: 1300 }, (_, i) => `\tline_${i + 1}();`);
+		lines[1121] = "\tconfigure_gpio();";
+		lines[1287] = "\tbeep_3k8hz_on();";
+		lines[1289] = "\tk_sleep(K_MSEC(300));";
+		lines[1290] = "\tbeep_3k8hz_off();";
+		const content = `${lines.join("\n")}\n`;
+		await Bun.write(file, content);
+		const session = createBridgeSession(tmpDir, content);
+		const store = getFileSnapshotStore(session);
+		const tag = store.record(canonicalSnapshotKey(file), content, [1288, 1289, 1290, 1291]);
+
+		const read = await new ReadTool(session).execute("r1", { path: `${file}:1118-1126,1284-1292` });
+		const text = resultText(read);
+		expect(tagFromOutput(text)).toBe(tag);
+		expect(text).toContain("1122:\tconfigure_gpio();");
+
+		const seen = store.byHash(canonicalSnapshotKey(file), tag)?.seenLines;
+		expect(seen?.has(1122)).toBe(true);
+		await executeHashlineSingle(
+			execOptions(
+				`[src/main.c#${tag}]\nINS.POST 1122:\n+\tbeep_3k8hz_on();\n+\tk_sleep(K_MSEC(300));\n+\tbeep_3k8hz_off();\nDEL 1288.=1291`,
+				session,
+			),
+		);
+		const edited = await Bun.file(file).text();
+		expect(edited).toContain("\tconfigure_gpio();\n\tbeep_3k8hz_on();\n\tk_sleep(K_MSEC(300));\n\tbeep_3k8hz_off();");
+		expect(edited).not.toContain("\tbeep_3k8hz_on();\n\tline_1289();\n\tk_sleep(K_MSEC(300));");
+	});
 });
 
 describe("search → edit seen-line guard", () => {
@@ -122,7 +181,7 @@ describe("search → edit seen-line guard", () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "seen-line-search-"));
 	});
 	afterEach(async () => {
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		await removeWithRetries(tmpDir);
 	});
 
 	function searchSession(cwd: string): ToolSession {
@@ -135,7 +194,7 @@ describe("search → edit seen-line guard", () => {
 			getArtifactsDir: () => path.join(cwd, "artifacts"),
 			allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
 			// Zero context so the seen set is exactly the matched lines.
-			settings: Settings.isolated({ "search.contextBefore": 0, "search.contextAfter": 0 }),
+			settings: Settings.isolated({ "grep.contextBefore": 0, "grep.contextAfter": 0 }),
 			enableLsp: false,
 		} as ToolSession;
 	}
@@ -146,7 +205,7 @@ describe("search → edit seen-line guard", () => {
 		await Bun.write(file, `${lines.join("\n")}\n`);
 		const session = searchSession(tmpDir);
 
-		const search = await new SearchTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
+		const search = await new GrepTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
 		const tag = tagFromOutput(resultText(search));
 
 		const seen = getFileSnapshotStore(session).byHash(canonicalSnapshotKey(file), tag)?.seenLines;
@@ -164,11 +223,11 @@ describe("search → edit seen-line guard", () => {
 		await Bun.write(file, `${lines.join("\n")}\n`);
 		const session = searchSession(tmpDir);
 
-		const search = await new SearchTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
+		const search = await new GrepTool(session).execute("s1", { pattern: "NEEDLE", paths: [file] });
 		const tag = tagFromOutput(resultText(search));
 
 		await expect(executeHashlineSingle(execOptions(`[code.txt#${tag}]\nSWAP 8.=8:\n+X`, session))).rejects.toThrow(
-			/were not shown in the read\/search output/,
+			/never displayed \(it showed/,
 		);
 		expect(await Bun.file(file).text()).toBe(`${lines.join("\n")}\n`);
 	});

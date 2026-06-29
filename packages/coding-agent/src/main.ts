@@ -11,6 +11,7 @@ import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
+	directoryExists,
 	getLogPath,
 	getProjectDir,
 	logger,
@@ -55,6 +56,7 @@ import type { PrintModeOptions } from "./modes/print-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
+import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -67,9 +69,11 @@ import type { AuthStorage } from "./session/auth-storage";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
+import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { AUTO_THINKING } from "./thinking";
+import { AUTO_THINKING, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
 import { checkForInstallStatus, type StartupUpdateNotification } from "./update/source-status";
 import {
@@ -89,17 +93,8 @@ type RunRpcMode = (
 	options?: { mode?: "rpc" | "rpc-ui"; eventBus?: EventBus; oneShotCommand?: string },
 ) => Promise<void>;
 
-function maybeShowStartupSplash(options: {
-	isInteractive: boolean;
-	resuming: boolean;
-	quiet: boolean;
-	version: string;
-}): void {
-	if (!options.isInteractive) return;
-	if (options.resuming || options.quiet) return;
-	if ($env.PI_TIMING) return;
-	if (!process.stdin.isTTY || !process.stdout.isTTY) return;
-	//process.stdout.write(`${chalk.dim(`omp ${options.version}`)}\n${chalk.dim("Initializing session…")}\n`);
+export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
+	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
 }
 
 async function checkForUpdateStatus(currentVersion: string): Promise<StartupUpdateNotification | undefined> {
@@ -113,11 +108,9 @@ async function checkForUpdateStatus(currentVersion: string): Promise<StartupUpda
 	}
 }
 
+// Todo settings are caller-controlled in protocol modes. Do not host-default them:
+// embedders need project-level opt-outs for reminder/prelude prompt injection.
 const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
-	"todo.enabled",
-	"todo.reminders",
-	"todo.reminders.max",
-	"todo.eager",
 	"task.isolation.mode",
 	"task.isolation.merge",
 	"task.isolation.commits",
@@ -132,9 +125,13 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"memory.backend",
 	"memories.enabled",
 	// Advisor is interactive-session assistance. Protocol hosts opt in explicitly
-	// instead of inheriting a user's globally-enabled local preference.
+	// instead of inheriting a user's globally-enabled local preference, and when
+	// they do opt in they get the default tuning rather than the user's local tuning.
 	"advisor.enabled",
 	"advisor.subagents",
+	"advisor.syncBacklog",
+	"advisor.immuneTurns",
+	"serviceTierAdvisor",
 ];
 
 const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
@@ -144,8 +141,16 @@ const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"bash.autoBackground.thresholdMs",
 ];
 
+// Protocol-mode hosts opt into a small set of paths whose host-default we
+// re-apply at startup so embedders inherit OMP's neutral defaults instead of
+// the local user's globally-persisted preferences for interactive use. The
+// guard preserves any explicit configuration — caller `Settings.isolated`
+// overrides, project `.claude/settings.yml`, `--config` overlays, or global
+// `config.yml` — so the host default only kicks in when nothing is set. Without
+// it the override clobbers every caller/host choice (#2598, #3207).
 function applyDefaultSettingOverrides(settingPaths: SettingPath[], targetSettings: Settings): void {
 	for (const settingPath of settingPaths) {
+		if (targetSettings.isConfigured(settingPath)) continue;
 		targetSettings.override(settingPath, getDefault(settingPath));
 	}
 }
@@ -378,6 +383,7 @@ async function runInteractiveMode(
 	mcpManager: MCPManager | undefined,
 	resuming: boolean,
 	forceSetupWizard: boolean,
+	showStartupSplash: boolean,
 	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
@@ -398,10 +404,13 @@ async function runInteractiveMode(
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
 	// their TUI/OAuth/search/theme deps) is heavy, yet the common case only needs
 	// to know whether the stored setup version is current. Lazy-load the wizard
-	// barrel only when setup is stale or forced; otherwise skip it entirely.
+	// barrel only when setup is stale, forced, or the explicit startup splash
+	// setting needs the shared setup splash renderer.
 	const storedSetupVersion = settings.get("setupVersion");
 	const setupWizard =
-		forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION ? await import("./modes/setup-wizard") : undefined;
+		forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
+			? await import("./modes/setup-wizard")
+			: undefined;
 	const setupScenes = setupWizard
 		? await setupWizard.selectSetupScenes(storedSetupVersion, setupWizard.ALL_SCENES, mode, {
 				resuming,
@@ -410,11 +419,16 @@ async function runInteractiveMode(
 				force: forceSetupWizard,
 			})
 		: [];
+	const playStartupSplash = showStartupSplash && setupScenes.length === 0;
 
 	await mode.init({
-		suppressWelcomeIntro: resuming || setupScenes.length > 0,
+		suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 		clearInitialTerminalHistory: true,
 	});
+
+	if (setupWizard && playStartupSplash) {
+		await setupWizard.runStartupSplash(mode);
+	}
 
 	if (setupWizard && setupScenes.length > 0) {
 		await setupWizard.runSetupWizard(mode, setupScenes);
@@ -562,7 +576,11 @@ async function moveMissingCwdSessionIfNeeded(
 		return { status: "declined" };
 	}
 
-	const manager = await SessionManager.open(session.path, sessionDir);
+	// Open anchored at the (now-missing) recorded cwd: `open` otherwise falls back
+	// to the launch cwd, which would make the `moveTo` below a no-op whenever the
+	// move target equals the current project dir. moveTo never chdirs, so the
+	// stale cwd is only a relocation source, not a directory we enter.
+	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
 	await manager.moveTo(cwd, sessionDir);
 	return { status: "moved", manager };
 }
@@ -738,6 +756,20 @@ function discoverAppendSystemPromptFile(): string | undefined {
 	return undefined;
 }
 
+/** Apply resolved CLI/discovered prompt files without bypassing system prompt templates. */
+export function applyResolvedSystemPromptInputs(
+	options: CreateAgentSessionOptions,
+	resolvedSystemPrompt: string | undefined,
+	resolvedAppendPrompt: string | undefined,
+): void {
+	if (resolvedSystemPrompt) {
+		options.customSystemPrompt = resolvedSystemPrompt;
+	}
+	if (resolvedAppendPrompt) {
+		options.appendSystemPrompt = resolvedAppendPrompt;
+	}
+}
+
 async function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
@@ -749,6 +781,9 @@ async function buildSessionOptions(
 		cwd: parsed.cwd ?? getProjectDir(),
 		autoApprove: parsed.autoApprove ?? false,
 	};
+	if (parsed.maxTime !== undefined) {
+		options.deadline = Date.now() + parsed.maxTime * 1000;
+	}
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided
 	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
@@ -844,7 +879,7 @@ async function buildSessionOptions(
 	if (scopedModels.length > 0) {
 		// `auto` is a session-level concept only; per-scoped-model (Ctrl+P) thinking
 		// overrides stay concrete, so coerce the auto default to "unset" here.
-		const defaultThinkingLevelSetting = activeSettings.get("defaultThinkingLevel");
+		const defaultThinkingLevelSetting = parseConfiguredThinkingLevel(activeSettings.get("defaultThinkingLevel"));
 		const defaultThinkingLevel =
 			defaultThinkingLevelSetting === AUTO_THINKING ? undefined : defaultThinkingLevelSetting;
 		options.scopedModels = scopedModels.map(scopedModel => ({
@@ -859,13 +894,7 @@ async function buildSessionOptions(
 	// (handled by caller before createAgentSession)
 
 	// System prompt
-	if (resolvedSystemPrompt && resolvedAppendPrompt) {
-		options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, resolvedAppendPrompt, ...defaultPrompt.slice(1)];
-	} else if (resolvedSystemPrompt) {
-		options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, ...defaultPrompt.slice(1)];
-	} else if (resolvedAppendPrompt) {
-		options.systemPrompt = defaultPrompt => [...defaultPrompt, resolvedAppendPrompt];
-	}
+	applyResolvedSystemPromptInputs(options, resolvedSystemPrompt, resolvedAppendPrompt);
 
 	// Tools
 	if (parsed.noTools) {
@@ -908,6 +937,7 @@ async function buildSessionOptions(
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
+	selectSession?: typeof selectSession;
 	runAcpMode?: RunAcpMode;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
@@ -935,7 +965,7 @@ export async function runRootCommand(
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	if (parsedArgs.version) {
-		process.stdout.write(`${VERSION}\n`);
+		writeStartupNotice(parsedArgs, `${VERSION}\n`);
 		process.exit(0);
 	}
 
@@ -950,7 +980,7 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
 			process.exit(1);
 		}
-		process.stdout.write(`Exported to: ${result}\n`);
+		writeStartupNotice(parsedArgs, `Exported to: ${result}\n`);
 		process.exit(0);
 	}
 
@@ -1026,9 +1056,20 @@ export async function runRootCommand(
 		});
 	}
 
+	// --print-thoughts (single-shot print mode) must surface reasoning, so un-hide
+	// thinking before the session is built — otherwise a passive omitThinking
+	// setting makes the provider omit summaries and the flag prints nothing. An
+	// explicit --hide-thinking block display option still wins for output display.
+	if (parsedArgs.printThoughts && !isProtocolMode && !isInteractive) {
+		settingsInstance.override("omitThinking", false);
+	}
 	// Apply --hide-thinking CLI flag (ephemeral, not persisted)
 	if (parsedArgs.hideThinking) {
 		settingsInstance.override("hideThinkingBlock", true);
+	}
+	// Apply --advisor CLI flag (ephemeral, not persisted)
+	if (parsedArgs.advisor) {
+		settingsInstance.override("advisor.enabled", true);
 	}
 
 	await logger.time(
@@ -1082,39 +1123,56 @@ export async function runRootCommand(
 	// message rather than letting the decline bubble up as an uncaught exception
 	// (see issue #1668).
 	if (typeof parsedArgs.resume === "string" && !sessionManager) {
-		process.stdout.write(`${chalk.dim("Resume cancelled: session is in another project.")}\n`);
-		return;
+		writeStartupNotice(parsedArgs, `${chalk.dim("Resume cancelled: session is in another project.")}\n`);
+		stopStartupWatchdog();
+		process.exit(0);
 	}
 
 	// Handle --resume (no value): show session picker
 	if (parsedArgs.resume === true && !parsedArgs.fork) {
 		const folderSessions = await logger.time("SessionManager.list", SessionManager.list, cwd, parsedArgs.sessionDir);
 		let preloadedAllSessions: SessionInfo[] | undefined;
-		let startInAllScope = false;
 		if (folderSessions.length === 0) {
-			// Nothing in the current folder — fall back to a global scan so the
-			// picker can still open in all-projects scope instead of dead-ending.
+			// Probe globally so we can exit fast when the user has no sessions at
+			// all, but never auto-switch the picker into all-projects scope — that
+			// silently surfaced other projects' history when the cwd was empty
+			// (issue #3099). The preloaded list also makes the user's Tab switch
+			// instant on the way in.
 			preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll);
 			if (preloadedAllSessions.length === 0) {
-				process.stdout.write(`${chalk.dim("No sessions found")}\n`);
-				return;
+				writeStartupNotice(parsedArgs, `${chalk.dim("No sessions found")}\n`);
+				stopStartupWatchdog();
+				process.exit(0);
 			}
-			startInAllScope = true;
 		}
 		pauseStartupWatchdog();
-		const selected = await logger.time("selectSession", selectSession, folderSessions, {
+		const selected = await logger.time("selectSession", deps.selectSession ?? selectSession, folderSessions, {
 			allSessions: preloadedAllSessions,
-			startInAllScope,
 		});
 		resumeStartupWatchdog();
 		if (!selected) {
-			process.stdout.write(`${chalk.dim("No session selected")}\n`);
-			return;
+			writeStartupNotice(parsedArgs, `${chalk.dim("No session selected")}\n`);
+			// Quit instead of returning: startup already armed long-lived handles
+			// (theme watcher + SIGWINCH/macOS appearance listeners via initTheme,
+			// settings save timer, model registry) that keep the event loop alive,
+			// so a bare return hangs the process after the picker leaves the alt
+			// screen. No session was built here, so there is nothing to flush. The
+			// in-session `/resume` picker (selector-controller.ts) takes a different
+			// onCancel that just closes the overlay — only this startup path exits.
+			stopStartupWatchdog();
+			process.exit(0);
 		}
 		// Resuming a session from another project: switch the process into that
 		// project's directory and refresh cwd-derived caches before the session is
 		// built, so settings discovery, plugins, and capabilities all scope to it.
-		if (selected.cwd && normalizePathForComparison(selected.cwd) !== normalizePathForComparison(getProjectDir())) {
+		// Skip the chdir when the recorded project directory is gone: `setProjectDir`
+		// would throw on the missing path. `SessionManager.open` then falls back to
+		// the launch cwd, so the resumed session simply stays where the user is.
+		if (
+			selected.cwd &&
+			normalizePathForComparison(selected.cwd) !== normalizePathForComparison(getProjectDir()) &&
+			(await directoryExists(selected.cwd))
+		) {
 			// Let the original (launch-cwd) plugin-root preload settle first so its
 			// late resolution can't clobber the re-warm we trigger below.
 			await pluginPreloadPromise.catch(() => {});
@@ -1241,11 +1299,14 @@ export async function runRootCommand(
 			stdinContent: pipedInput,
 		});
 
-		maybeShowStartupSplash({
+		const showStartupSplash = shouldShowStartupSplash({
+			configured: settingsInstance.get("startup.showSplash"),
 			isInteractive,
 			resuming: Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
 			quiet: settingsInstance.get("startup.quiet"),
-			version: VERSION,
+			timing: Boolean($env.PI_TIMING),
+			stdinIsTTY: process.stdin.isTTY,
+			stdoutIsTTY: process.stdout.isTTY,
 		});
 
 		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
@@ -1253,6 +1314,24 @@ export async function runRootCommand(
 			eventBus,
 			preloadedExtensions: extensionsResult,
 		});
+
+		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
+		// scan, collab mirror, resumed process) has a sessionFile but no in-memory
+		// reviver, so `ensureLive` (IRC sends, hub focus) would refuse it. Install a
+		// factory — bound to THIS top-level session — that rebuilds the subagent from
+		// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
+		// bootstrap: ACP keeps several concurrent top-level sessions and a single
+		// process-global factory must not be clobbered by the most recent one.
+		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
+			createPersistedSubagentReviverFactory({
+				session,
+				authStorage,
+				modelRegistry,
+				settings: settingsInstance,
+				enableLsp: sessionOptions.enableLsp ?? true,
+			}),
+			Math.trunc(Number(settingsInstance.get("task.agentIdleTtlMs") ?? 420_000) || 0),
+		);
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 		}
@@ -1323,6 +1402,7 @@ export async function runRootCommand(
 				mcpManager,
 				Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
 				deps.forceSetupWizard === true,
+				showStartupSplash,
 				eventBus,
 				initialMessage,
 				initialImages,
@@ -1338,6 +1418,7 @@ export async function runRootCommand(
 				messages: initialArgs.messages,
 				initialMessage,
 				initialImages,
+				printThoughts: initialArgs.printThoughts,
 			});
 			if ($env.PI_TIMING) {
 				logger.printTimings();

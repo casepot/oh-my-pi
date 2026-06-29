@@ -1,40 +1,45 @@
-You MUST rewrite <previous-summary> using the new messages above.
+You MUST incorporate the new messages above into the existing handoff summary in <previous-summary> tags, used by another LLM to resume the task.
+RULES:
+- MUST preserve all information from the previous summary
+- MUST add new progress, decisions, and context from new messages
+- MUST update Progress: move items from "In Progress" to "Done" when completed
+- MUST update "Next Steps" based on what was accomplished
+- MUST preserve exact file paths, function names, and error messages
+- You MAY remove anything no longer relevant
 
-Previous summary is disposable input, not an archive.
-Operationally relevant means needed to choose, edit, verify, or explain the next step.
-Preserve exact file paths, symbols, commands, observed outputs, errors, user constraints/preferences, pending decisions, and branch/staged/uncommitted state ONLY when operationally relevant.
-Preserve only still-operational facts. Delete resolved Done items, stale investigations, superseded plans, read-only inventories, repeated tool logs, and historical ceremony.
-New messages override stale <previous-summary> claims.
-If old content no longer changes the next action, remove it.
-If a previous pending question/request was answered, remove it.
-If the new messages end with an unanswered user question/request, put that exact request under `## Pending User Ask / Blocker`, replacing any older pending request.
-NEVER present inferred or unverified work as completed; put it under `## Verification State` as `Unverified`.
+IMPORTANT: If the new messages end with an unanswered question or request to the user, you MUST add it to Critical Context (replacing any previous pending question if answered).
 
-Use this format. Omit empty sections.
+You MUST use this format (omit sections if not applicable):
 
-## Active Objective
-[Current user-visible task and desired end state.]
+## Goal
+[Preserve existing goals; add new ones if task expanded]
 
-## Non-Negotiables
-- [User constraints, repo rules, required verification, forbidden claims.]
+## Constraints & Preferences
+- [Preserve existing; add new ones discovered]
 
-## Current State
-- [Unfinished work, applied changes affecting next work, branch/staged/uncommitted state, and live blockers.]
+## Progress
 
-## Working Set
-- [Modified/RW files and exact symbols/contracts needed next; NEVER list read-only files unless the next action depends on them.]
+### Done
+- [x] [Include previously done and newly completed items]
 
-## Verification State
-- Observed: [Commands/scenarios run and result.]
-- Unverified: [Claims, behavior, or changes not yet checked.]
+### In Progress
+- [ ] [Current work—update based on progress]
 
-## Decisions Still Relevant
-- [Decision]: [Reason it still affects implementation.]
+### Blocked
+- [Current blockers—remove if resolved]
 
-## Pending User Ask / Blocker
-- [Only unanswered user request or blocker; omit when none.]
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
 
-## Next Action
-1. [The next concrete action.]
+## Next Steps
+1. [Update based on current state]
 
-You MUST output only the structured summary.
+## Critical Context
+- [Preserve important context; add new if needed]
+
+## Additional Notes
+[Other important info not fitting above]
+
+You MUST output only the structured summary; you NEVER include extra text.
+
+Sections MUST be kept concise. You MUST preserve relevant tool outputs/command results. You MUST include repository state changes (branch, uncommitted changes) if mentioned.

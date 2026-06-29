@@ -141,7 +141,7 @@ describe("goal target panel", () => {
 		expect(details?.allowedNextActs).toEqual([
 			'Call goal({op:"lint_target_plan", payload_file_path:...}) before submit_target_plan',
 			'Call goal({op:"submit_target_plan", payload_file_path:...}) or goal({op:"fail_target_plan", ...})',
-			"Edit target plan/payload sidecar in place",
+			"Edit or eval/bash-transform only the active target plan/payload sidecar",
 		]);
 	});
 

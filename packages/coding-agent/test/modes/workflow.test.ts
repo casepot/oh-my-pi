@@ -68,7 +68,7 @@ describe("workflow notice", () => {
 		expect(WORKFLOW_NOTICE.length).toBeGreaterThan(0);
 		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
 		expect(WORKFLOW_NOTICE).toContain("parallel_settled(");
-		expect(WORKFLOW_NOTICE).toContain('agent(prompt, *, agent_type="task"');
+		expect(WORKFLOW_NOTICE).toContain('agent(prompt, *, agent="task"');
 	});
 
 	it("renders an inline-only notice when spawns are disabled", () => {
@@ -82,8 +82,8 @@ describe("workflow notice", () => {
 	it("renders restricted spawn examples without defaulting to task", () => {
 		const notice = renderWorkflowNotice({ ...base, sessionSpawns: "explore" });
 		expect(notice).toContain("Allowed subagent spawns now: explore");
-		expect(notice).toContain('agent_type="explore"');
-		expect(notice).not.toContain('agent(prompt, *, agent_type="task"');
+		expect(notice).toContain('agent="explore"');
+		expect(notice).not.toContain("agent_type");
 	});
 
 	it("keeps recursive spawning available below depth limits and disables it at max depth", () => {
@@ -100,9 +100,9 @@ describe("workflow notice", () => {
 	it("uses a concrete enabled agent when wildcard spawns disable task", () => {
 		const notice = renderWorkflowNotice({ ...base, disabledAgents: ["task"] });
 		expect(notice).toContain("Allowed subagent spawns now: explore");
-		expect(notice).toContain('agent_type="explore"');
-		expect(notice).not.toContain('agent_type=""');
-		expect(notice).not.toContain('agent(prompt, *, agent_type="task"');
+		expect(notice).toContain('agent="explore"');
+		expect(notice).not.toContain('agent=""');
+		expect(notice).not.toContain("agent_type");
 	});
 
 	it("falls back to inline workflow when every discovered wildcard agent is disabled", () => {
@@ -113,7 +113,7 @@ describe("workflow notice", () => {
 		});
 		expect(notice).toContain("Allowed subagent spawns now: none");
 		expect(notice).toContain("Do not call eval `agent()`");
-		expect(notice).not.toContain('agent_type=""');
+		expect(notice).not.toContain('agent=""');
 		expect(notice).not.toContain("agent(prompt");
 	});
 

@@ -25,7 +25,7 @@ omp --mode rpc-ui [session/model/tool/config options]
 Behavior notes:
 
 - RPC mode disables automatic session title generation by default to avoid an extra model call.
-- RPC mode resets workflow-altering `todo.*`, `task.*`, `memory.backend`/`memories.enabled`, `async.*`, and `bash.autoBackground.*` settings to their built-in defaults instead of inheriting user overrides.
+- RPC mode resets workflow-altering `todo.*`, `task.*`, `memory.backend`/`memories.enabled`, `advisor.*`, `async.*`, and `bash.autoBackground.*` settings to their built-in defaults instead of inheriting user overrides.
 - The process reads stdin as JSONL (`readJsonl(Bun.stdin.stream())`).
 
 Deterministic one-shot probing:

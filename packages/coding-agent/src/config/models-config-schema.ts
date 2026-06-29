@@ -50,6 +50,7 @@ const OpenAICompatFieldsSchema = z.object({
 	supportsReasoningParams: z.boolean().optional(),
 	alwaysSendMaxTokens: z.boolean().optional(),
 	strictResponsesPairing: z.boolean().optional(),
+	supportsImageDetailOriginal: z.boolean().optional(),
 	// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
 	requiresToolResultId: z.boolean().optional(),
 	replayUnsignedThinking: z.boolean().optional(),
@@ -58,6 +59,17 @@ const OpenAICompatFieldsSchema = z.object({
 export const OpenAICompatSchema = OpenAICompatFieldsSchema.extend({
 	whenThinking: OpenAICompatFieldsSchema.optional(),
 });
+
+const ApiSchema = z.enum([
+	"openai-completions",
+	"openai-responses",
+	"openai-codex-responses",
+	"azure-openai-responses",
+	"anthropic-messages",
+	"google-generative-ai",
+	"google-gemini-cli",
+	"google-vertex",
+]);
 
 const EffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
 
@@ -75,7 +87,7 @@ const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"] as const;
  * Accepts the canonical `efforts` vocabulary plus the legacy
  * `minLevel`/`maxLevel`/`levels` range shape, normalizing both to
  * `ThinkingConfig` (ordered `efforts`, never empty). Precedence mirrors the
- * old runtime: explicit `levels` beat the min..max range; `efforts` beats both.
+ * old runtime: explicit `levels` beat the min..max range; `efforts` beat both.
  */
 const ModelThinkingSchema = z
 	.object({
@@ -114,21 +126,20 @@ const ModelThinkingSchema = z
 		};
 	});
 
+const RemoteCompactionSchema = z.object({
+	enabled: z.boolean().optional(),
+	api: ApiSchema.optional(),
+	endpoint: z.string().min(1).optional(),
+	v2StreamingEnabled: z.boolean().optional(),
+	v2Endpoint: z.string().min(1).optional(),
+	streamingEndpoint: z.string().min(1).optional(),
+	model: z.string().min(1).optional(),
+});
+
 const ModelDefinitionSchema = z.object({
 	id: z.string().min(1),
 	name: z.string().min(1).optional(),
-	api: z
-		.enum([
-			"openai-completions",
-			"openai-responses",
-			"openai-codex-responses",
-			"azure-openai-responses",
-			"anthropic-messages",
-			"google-generative-ai",
-			"google-gemini-cli",
-			"google-vertex",
-		])
-		.optional(),
+	api: ApiSchema.optional(),
 	baseUrl: z.string().min(1).optional(),
 	reasoning: z.boolean().optional(),
 	thinking: ModelThinkingSchema.optional(),
@@ -148,6 +159,8 @@ const ModelDefinitionSchema = z.object({
 	omitMaxOutputTokens: z.boolean().optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	compat: OpenAICompatSchema.optional(),
+	compactionModel: z.string().min(1).optional(),
+	remoteCompaction: RemoteCompactionSchema.optional(),
 });
 
 export const ModelOverrideSchema = z.object({
@@ -170,12 +183,14 @@ export const ModelOverrideSchema = z.object({
 	omitMaxOutputTokens: z.boolean().optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	compat: OpenAICompatSchema.optional(),
+	compactionModel: z.string().min(1).optional(),
+	remoteCompaction: RemoteCompactionSchema.optional(),
 });
 
 export type ModelOverride = z.infer<typeof ModelOverrideSchema>;
 
 export const ProviderDiscoverySchema = z.object({
-	type: z.enum(["ollama", "llama.cpp", "lm-studio", "openai-models-list", "proxy"]),
+	type: z.enum(["ollama", "llama.cpp", "lm-studio", "openai-models-list", "proxy", "litellm"]),
 });
 
 export const ProviderAuthSchema = z.enum(["apiKey", "none", "oauth"]);
@@ -186,20 +201,10 @@ export type ProviderDiscovery = z.infer<typeof ProviderDiscoverySchema>;
 const ProviderConfigSchema = z.object({
 	baseUrl: z.string().min(1).optional(),
 	apiKey: z.string().min(1).optional(),
-	api: z
-		.enum([
-			"openai-completions",
-			"openai-responses",
-			"openai-codex-responses",
-			"azure-openai-responses",
-			"anthropic-messages",
-			"google-generative-ai",
-			"google-gemini-cli",
-			"google-vertex",
-		])
-		.optional(),
+	api: ApiSchema.optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	compat: OpenAICompatSchema.optional(),
+	remoteCompaction: RemoteCompactionSchema.optional(),
 	authHeader: z.boolean().optional(),
 	auth: ProviderAuthSchema.optional(),
 	discovery: ProviderDiscoverySchema.optional(),

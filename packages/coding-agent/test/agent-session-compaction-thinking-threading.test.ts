@@ -134,7 +134,7 @@ function expressionThreadsThinkingLevel(callExpression: string): boolean {
 	// override first (`candidate.thinkingLevel ?? this.thinkingLevel`), but the
 	// invariant is that the session's explicit thinking selection is threaded
 	// instead of allowing the compaction default to take over.
-	return /\bthinkingLevel\s*:\s*(?:[\w.]+\s*\?\?\s*)?this\.thinkingLevel\b/.test(callExpression);
+	return /\bthinkingLevel\s*:\s*(?:[\w.]+\s*\?\?\s*)*this\.thinkingLevel\b/.test(callExpression);
 }
 
 describe("agent-session.ts compaction threading (audit gate)", () => {

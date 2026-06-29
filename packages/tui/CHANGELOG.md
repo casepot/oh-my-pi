@@ -2,6 +2,166 @@
 
 ## [Unreleased]
 
+## [16.2.3] - 2026-06-28
+
+### Added
+
+- Added a desktop notification fallback for Linux terminals using D-Bus (via notify-send or gdbus), enabling completion and prompt notifications in VTE-family terminals (such as GNOME Terminal, Ptyxis, Tilix), Alacritty, and xterm. This is automatically skipped for terminals with native notification support (like VS Code and Warp) and can be disabled using the PI_NO_DESKTOP_NOTIFY=1 environment variable.
+
+### Fixed
+
+- Fixed slash skill autocomplete not opening when there is existing prompt text, ensuring mid-prompt slash lookups correctly display and insert skill commands.
+- Fixed modified Enter and keyboard shortcuts in fullscreen overlays for terminals using the xterm modifyOtherKeys fallback (such as iTerm2 when Kitty keyboard negotiation is unavailable).
+
+## [16.2.0] - 2026-06-27
+
+### Added
+
+- Added support for rendering HTML <code>, <hr>, and <blockquote> tags with proper theme styling, entity decoding, and layout consistency across Markdown transcripts, table cells, list items, and option labels.
+- Added first-class support for Warp terminal (TERM_PROGRAM=WarpTerminal), enabling true color, platform-specific Kitty graphics protocol negotiation for inline images, and safe defaults for OSC 8 hyperlinks and synchronized output.
+- Added SelectList.routeMouse() and shared SGR mouse input routing helpers to support fullscreen overlay hit-testing.
+
+### Fixed
+
+- Fixed issues where stray, unmatched, or raw HTML tags would leak into the rendered output.
+- Fixed render scheduling to yield behind queued terminal input, preventing delayed Escape key delivery during heavy streaming paints.
+
+## [16.1.20] - 2026-06-25
+
+### Fixed
+
+- Recognized Warp (`TERM_PROGRAM=WarpTerminal`) as a first-class terminal, enabling Kitty inline images on macOS/Linux while keeping Warp's unsafe OSC 8 hyperlinks and Windows Kitty graphics disabled ([#3471](https://github.com/can1357/oh-my-pi/issues/3471)).
+- Kept queued interrupt keys ahead of ordinary repaints so a slow long-transcript frame cannot consume the Ctrl+C/Esc double-press window before the second key is handled.
+
+## [16.1.19] - 2026-06-25
+
+### Fixed
+
+- Fixed bordered `Editor` rendering 1–2 cells past the terminal width when the end-of-line cursor glyph landed past a wide trailing grapheme (CJK comma `，`, emoji, etc.), wrapping the bottom-right corner (`╯`) to its own row. The right chrome (padding + `─` + corner) now shrinks by the exact cursor overflow cell count instead of a 1-cell boolean, so the box stays inside `width` for any `paddingX` ([#3431](https://github.com/can1357/oh-my-pi/issues/3431)).
+
+## [16.1.17] - 2026-06-24
+
+### Added
+
+- Added runtime resolution of the Hangul Compatibility Jamo (U+3131..U+318E) display width for terminals known to disagree with the platform default (e.g. Ghostty, which renders these at 2 cells). Fixes doubled/ghosted jamo during Korean IME composition; the resolved width is pushed into the native width engine before the first paint. Other terminals keep the platform default (macOS narrow, otherwise UAX#11), so the override is a no-op outside Ghostty. A runtime DSR/CPR probe for unknown terminals is tracked separately.
+- Added `setHangulCompatibilityJamoWidth` / `getHangulCompatibilityJamoWidth` to set the jamo width profile (`"platform" | "unicode" | 1 | 2`); the profile is mirrored into the native `setHangulCompatJamoWidthOverride`.
+
+### Fixed
+
+- Removed the 30-second OSC 11 background-color poll that ran on terminals without DEC Mode 2031 support (macOS Terminal.app, Warp, VS Code's built-in terminal, older Alacritty/WezTerm). Each poll's OSC 11 + DA1 write wiped the user's active text selection on several of those terminals, causing intermittent "can't copy" failures whenever a poll fired mid-drag — most visibly during the Ask tool dialog when the user wants to quote text back from the conversation ([#3297](https://github.com/can1357/oh-my-pi/issues/3297)). Theme detection now relies on the initial startup probe plus Mode 2031 push notifications; affected terminals pick up OS-theme changes on next launch.
+- Fixed `@`-path autocomplete failing on Windows for paths outside the cwd. Windows absolute paths (e.g. `C:\\Users\\...`) were not detected as absolute — only `/` was checked — so they were incorrectly joined with the base directory, producing invalid search paths and empty suggestions. Path-join calls also introduced backslashes into suggestion values, breaking round-trip insertion. Absolute path detection now uses `path.isAbsolute()` (handles drive letters) and suggestion paths are normalized to forward slashes (valid on all platforms).
+- Fixed settings rows crashing native text truncation when a malformed config value reaches the renderer as a non-string ([#3338](https://github.com/can1357/oh-my-pi/issues/3338)).
+- Fixed desktop notifications being silently lost under tmux on the common stack of tmux + kitty/ghostty/wezterm/iTerm2. `TERMINAL_ID` resolves to the inner terminal (whose markers leak into the tmux session env), which maps to `NotifyProtocol.Osc9` / `NotifyProtocol.Osc99`, and `sendNotification()` wrote that raw OSC straight to stdout — tmux dropped it on the floor and `monitor-bell` / `monitor-activity` never fired, so a backgrounded omp pane had no way to flag completion or `ask` blockage. Under `TMUX`, OSC-protocol notifications are now wrapped in tmux's `\x1bPtmux;…\x1b\\` DCS passthrough envelope (so users with `set -g allow-passthrough on` still get the real toast on the outer terminal) and followed by a `\x07` BEL (so `set -g monitor-bell on` reliably flags the window otherwise). The OSC 99 capability probe in `terminal.ts` is wrapped the same way so rich notifications keep working across tmux. `NotifyProtocol.Bell` paths are unchanged. ([#3395](https://github.com/can1357/oh-my-pi/issues/3395))
+
+## [16.1.10] - 2026-06-21
+
+### Fixed
+
+- Fixed streaming output being lost from native scrollback below a commit-unstable "barrier" block (a provisional/collapsed tool preview, a displaceable `job` poll, or a reflowing-markdown reply) once the content under it overflowed the viewport. The engine committed native scrollback only up to the barrier's seam, so rows that scrolled above the window under the barrier were committed nowhere and repainted nowhere — they vanished, and a later shift/finalize/removal of the barrier silently dropped the rows beneath it. The append-only commit floor is now `windowTop` in every non-frozen paint path (ordinary update, shrink re-slice, full paint), so whatever scrolls above the window always reaches history; the seam boundaries now only classify which committed rows stay byte-stable-audited vs. durable-exempt. The committed-prefix audit is range-aware: it audits the forced-overflow suffix in full (re-anchoring — duplication, never loss — when a barrier finalizes), exempts the durable middle (a streaming table re-aligning its columns) from re-anchor spray, and runs a full hard scan of rows a frame newly marks permanent so a single-row finalize edit far above the commit boundary still re-anchors instead of being dropped.
+
+## [16.1.8] - 2026-06-20
+
+### Added
+
+- Added an optional synchronous dynamic description hook for slash-command autocomplete items.
+
+### Fixed
+
+- Fixed Markdown component to strip inline `<span>` and `<text>` tags while preserving their contents and unescaping nested HTML entities (`&lt;`, `&gt;`, `&quot;`, `&apos;`, `&amp;`), preventing raw LLM block/inline formatting residues from leaking into rendered TUI output.
+
+## [16.1.7] - 2026-06-20
+
+### Fixed
+
+- Fixed slash command autocomplete, inline hints, and Enter completion when the slash command is preceded by leading whitespace ([#3095](https://github.com/can1357/oh-my-pi/issues/3095)).
+- Fixed empty `/` autocomplete burying user skill commands below every built-in command, so installed skills appear in the initial slash popup ([#2875](https://github.com/can1357/oh-my-pi/issues/2875)).
+
+## [16.1.0] - 2026-06-19
+
+### Added
+
+- `Box` now accepts an optional `border` (box-drawing glyphs + colorizer) and exposes `setBorder()`, drawing a colored outline around its padded/background content. The border is automatically dropped at widths too narrow to frame so a bordered box never overflows its given width.
+
+## [16.0.11] - 2026-06-19
+
+### Breaking Changes
+
+- Removed `getIndentation` and `getIndentationNoescape` exported utilities
+- Tab-related operations no longer respect per-file or globally configured indentation settings
+
+### Changed
+
+- Standardized tab expansion to use a fixed display width instead of configurable settings
+- Removed support for custom tab width configuration in text rendering and input handling
+
+### Fixed
+
+- Corrected logic in string truncation to prevent improper truncation of short strings
+- Fixed a one-frame transcript flash during a non-multiplexer resize drag: while the drag borrowed the alternate screen and painted only the viewport, any ordinary (non-forced) render from a still-animating block — a tool spinner tick, a streamed token, a cursor blink — fell through to the deferred geometry-rebuild full paint, which left the alternate screen to repaint the whole transcript on the normal screen for a single frame before the next SIGWINCH re-entered the viewport fast path, so a live tool block flashed in and vanished. Ordinary renders mid-drag now stay on the viewport fast path; only forced renders (tool finalization, reset, image reconciliation) still preempt it.
+
+## [16.0.10] - 2026-06-18
+
+### Fixed
+
+- Fixed Markdown renderer rendering raw HTML tags (like `<br>`, `<li>`, `<ul>`, `<ol>`, and `<p>`) literally in the terminal by parsing and converting them to appropriate terminal formatting, preserving repeated HTML line breaks, nested HTML list indentation, ordered list numbering, paragraph-wrapped list item markers, paragraph separation, and table sizing after HTML line breaks.
+- Fixed animated working-message loader frames repainting at 30fps on terminals without synchronized-output support, which could cause visible flicker during normal prompt rendering ([#2771](https://github.com/can1357/oh-my-pi/issues/2771)).
+
+## [16.0.9] - 2026-06-18
+
+### Fixed
+
+- Fixed bottom-anchored fullscreen overlays keeping their body rows but clipping off footer actions when terminal-height clamping is applied, restoring plan-mode approval options on short or stale-size terminals ([#2957](https://github.com/can1357/oh-my-pi/issues/2957)).
+
+## [16.0.8] - 2026-06-18
+
+### Fixed
+
+- Fixed bracketed paste under kitty+tmux leaking `[27;5;106~` escape tails throughout the pasted text (newlines became visible garbage instead of line breaks). tmux's default `extended-keys-format=xterm` re-encodes paste control bytes as `modifyOtherKeys` sequences (`ESC[27;5;<code>~`), which the paste sanitizer did not decode — only the sibling `csi-u` form (`ESC[<code>;5u`) was handled. Both forms are now decoded back to their literal control byte (Ctrl+J → "\n") before control-character stripping, and the decoder is shared by the multi-line editor and the single-line modal input.
+
+## [16.0.5] - 2026-06-17
+
+### Added
+
+- Added tight layout support (`setTuiTight`/`getPaddingX`) to dynamically remove 1-character horizontal padding from Text, Markdown, Box, and TruncatedText components.
+
+### Changed
+
+- Coalesced byte-adjacent SGR sequences in emitted lines into a single `CSI … m`. The component tree styles each span as `<set>text<reset>`, so adjacent spans emit runs of back-to-back SGR sequences (e.g. a `CSI 39 m` fg-reset immediately followed by the next span's `CSI 38;2;r;g;b m`); merging the run is behavior-preserving because SGR parameters apply left-to-right regardless of framing. On a real transcript this drops ~30-40% of all SGR sequences, cutting the per-frame byte volume and SGR-dispatch count a slow terminal engine (e.g. xterm.js/WebGL under a large viewport) must process. Each emitted sequence is capped at 16 parameter tokens so a long adjacent run is split across several valid CSIs instead of overflowing a terminal's parameter buffer (xterm.js caps at 32 and silently truncates, corrupting colors). A run is never extended past a parameter list that ends in an incomplete semicolon-form extended color (`38/48/58;2` missing a channel or `;5` missing the index), so a following code can't be absorbed as the missing component. Disable with `PI_NO_SGR_COALESCE=1`.
+
+### Fixed
+
+- Fixed image cache invalidation when terminal image protocol, Kitty placeholder mode, or cell dimensions change, preventing stale rendered output
+- Fixed direct inline-image placements leaving the cursor inside the reserved image block, which let following chat rows overwrite the middle of rendered screenshots ([#2863](https://github.com/can1357/oh-my-pi/issues/2863)).
+- Fixed inline-image replay after startup or resume fallback paints by invalidating cached image rows when the terminal image protocol, Kitty placeholder mode, or cell dimensions change.
+
+## [16.0.3] - 2026-06-16
+
+### Added
+
+- Added `\tfrac` support to stacked display-math rendering so it now displays as a vertical fraction in `latexToBlock` output
+- Added markdown parsing for own-line display-math blocks (`$$...$$` and `\[...\]`) and delimiter-free `\begin{...}...\end{...}` math environments so block equations render via LaTeX-to-Unicode
+- Added stacked rendering of display-math fractions (`\frac`, `\dfrac`, `\cfrac`): the numerator is drawn over a horizontal bar over the denominator, with surrounding terms and `align`/`equation`-style environment rows aligned to the bar. Triggered for own-line `$$`/`\[` blocks, bare `\begin{...}` environments, and a paragraph whose sole content is a single display-math span; inline `$...$` fractions stay single-line (`½`, `(a+b)/c`)
+- Added bare math auto-rendering in `renderMathInText` for math-shaped lines and math environment blocks that omit `$`/`\(` delimiters
+- Added LaTeX-to-Unicode rendering for markdown math spans, converting `$$...$$`, `$...$`, `\(...\)`, and `\[...\]` into readable Unicode in Markdown output
+- Exported LaTeX conversion helpers from the package entrypoint so consumers can call `latexToUnicode`, `latexToBlock`, `renderMathInText`, `inlineMathSpanEnd`, and `isBareMathEnvironment` directly
+- Expanded LaTeX-to-Unicode conversion coverage for additional math fonts, delimiters, extensible arrows, layout environments, cancel/brace annotations, references, and AMS symbols
+- Added ANSI color rendering for LaTeX `\textcolor`, scoped `\color`, `\colorbox`, and `\fcolorbox`, including xcolor/CSS color parsing and truecolor/256-color terminal output
+- Added an optional `maxWidth` parameter to `MarkdownTheme.resolveMermaidAscii` to allow diagram resolvers to fit ASCII output to the available content width
+
+### Changed
+
+- Changed markdown math rendering to preserve multiline layout for display equations, keeping `\\` row breaks as separate output lines (including inside list items)
+
+### Fixed
+
+- Fixed `alignat`/`alignedat`/`gatheredat` rendering in `latexToBlock` so the required `{n}` preamble is not rendered as visible math content
+- Fixed math parsing to leave non-math LaTeX snippets (for example `\begin{itemize}`) and fenced code blocks as literal text instead of rendering them as math
+- Fixed `renderInlineMarkdown` to handle top-level display-math tokens so raw `$$...$$` delimiters are no longer leaked
+- Fixed inline math span detection so escaped dollars and currency-like patterns (such as `$5` and `$10`) are not converted as math
+- Fixed Mermaid diagram rendering in Markdown code blocks to clip each ASCII line to content width before wrapping, preventing preformatted diagram rows from fragmenting
+- Fixed fullscreen overlays losing keyboard focus to hidden prompt surfaces, which could make settings unresponsive while a background approval request was pending ([#2789](https://github.com/can1357/oh-my-pi/issues/2789)).
+- Fixed `bun test` runs inside a real terminal leaking TUI output: `ProcessTerminal` now honors a headless test-runtime default, so frame paints, `start()` capability probes (OSC 11 / DA1 / kitty), the progress keepalive, notifications, and teardown escapes no longer reach the developer's terminal, and stdin raw mode is never engaged. Previously `#safeWrite` only skipped on `!process.stdout.isTTY`, so a developer running the suite in an interactive terminal saw stray status/editor boxes and probe queries. Terminal-contract suites opt back into real I/O via `setTerminalHeadless(false)`
+
 ## [16.0.2] - 2026-06-16
 
 ### Fixed

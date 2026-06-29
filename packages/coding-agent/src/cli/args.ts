@@ -1,11 +1,10 @@
 /**
  * CLI argument parsing and help display
  */
-import { type Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
-import { parseEffort } from "../thinking";
-import { BUILTIN_TOOL_NAMES } from "../tools/builtin-names";
+import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
+import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -28,11 +27,13 @@ export interface Args {
 	smol?: string;
 	slow?: string;
 	plan?: string;
+	maxTime?: number;
 	apiKey?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
-	thinking?: Effort;
+	thinking?: ConfiguredThinkingLevel;
 	hideThinking?: boolean;
+	advisor?: boolean;
 	continue?: boolean;
 	resume?: string | true;
 	help?: boolean;
@@ -55,6 +56,7 @@ export interface Args {
 	noExtensions?: boolean;
 	pluginDirs?: string[];
 	print?: boolean;
+	printThoughts?: boolean;
 	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
@@ -87,9 +89,10 @@ export interface Args {
  */
 const PARSE_DEPS: ParseDeps = {
 	logger,
-	parseEffort,
+	parseThinking: parseCliThinkingLevel,
 	builtinToolNames: BUILTIN_TOOL_NAMES,
-	thinkingEfforts: THINKING_EFFORTS,
+	normalizeToolNames,
+	thinkingEfforts: CLI_THINKING_LEVELS,
 };
 
 export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { type: "boolean" | "string" }>): Args {
@@ -197,8 +200,12 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPty = true;
 		} else if (arg === "--hide-thinking") {
 			result.hideThinking = true;
+		} else if (arg === "--advisor") {
+			result.advisor = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
+		} else if (arg === "--print-thoughts") {
+			result.printThoughts = true;
 		} else if (arg === "--no-extensions") {
 			result.noExtensions = true;
 		} else if (arg === "--no-skills") {
@@ -210,7 +217,13 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		} else if (arg === "--auto-approve" || arg === "--yolo") {
 			result.autoApprove = true;
 		} else if (arg.startsWith("@")) {
-			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
+			let filePath = arg.slice(1);
+			if (filePath.startsWith('"') && filePath.endsWith('"') && filePath.length > 1) {
+				filePath = filePath.slice(1, -1);
+			} else if (filePath.startsWith("'") && filePath.endsWith("'") && filePath.length > 1) {
+				filePath = filePath.slice(1, -1);
+			}
+			result.fileArgs.push(filePath);
 		} else if (!arg.startsWith("-") || arg === "-") {
 			// Plain positional or lone `-` (stdin marker) — pass through as a
 			// message rather than flagging it.
@@ -288,7 +301,6 @@ export function getExtraHelpText(): string {
   OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
   CURSOR_ACCESS_TOKEN        - Cursor AI models
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
-  WAFER_PASS_API_KEY         - Wafer Pass (flat-rate subscription; GLM-5.1, Qwen3.5)
   WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)
 
   ${chalk.dim("# Cloud Providers")}
@@ -302,6 +314,8 @@ export function getExtraHelpText(): string {
   PERPLEXITY_API_KEY         - Perplexity web search API key (optional; anonymous fallback)
   PERPLEXITY_COOKIES         - Perplexity web search (session cookie)
   TAVILY_API_KEY             - Tavily web search
+  TINYFISH_API_KEY           - TinyFish web search
+  FIRECRAWL_API_KEY          - Firecrawl web search
   ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)
   ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)
 
@@ -322,7 +336,7 @@ ${chalk.bold("Available Tools (default-enabled unless noted):")}
   edit          - Edit files with find/replace
   write         - Write files (creates/overwrites)
   grep          - Search file contents
-  find          - Find files by glob pattern
+  glob          - Find files by glob pattern
   lsp           - Language server protocol (code intelligence)
   python        - Execute Python code (requires: ${APP_NAME} setup python)
   notebook      - Edit Jupyter notebooks

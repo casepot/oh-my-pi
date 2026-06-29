@@ -87,6 +87,8 @@ Returns a compact status summary and structured details containing the goal, sta
 
 <critical>
 Invalid uses:
+- If `get` shows a paused goal, call `resume` before continuing work on it.
+- NEVER call `complete` because a budget is low or a turn is ending. Call it only when the parent goal is actually done and verified.
 - NEVER call `checkpoint` for fatigue, low budget, partial work, or arbitrary phase boundaries. Checkpoint only when the current target is actually closed with evidence.
 - NEVER treat `checkpoint` or `resolve_checkpoint` as parent completion.
 - NEVER call `complete` while a checkpoint is pending. Resolve it first; if the resolution is `parent_completion_candidate`, immediately call `complete`.

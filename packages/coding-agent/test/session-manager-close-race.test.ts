@@ -31,6 +31,7 @@ import {
 	type SessionStorage,
 	type SessionStorageWriter,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
 class CloseHoldingStorage implements SessionStorage {
 	readonly #inner = new MemorySessionStorage();
@@ -84,6 +85,9 @@ class CloseHoldingStorage implements SessionStorage {
 	}
 	writeChunksSync(p: string, chunks: Iterable<string>): void {
 		this.#inner.writeChunksSync(p, chunks);
+	}
+	updateSessionTitle(p: string, title: SessionTitleUpdate): Promise<void> {
+		return this.#inner.updateSessionTitle(p, title);
 	}
 	statSync(p: string) {
 		return this.#inner.statSync(p);

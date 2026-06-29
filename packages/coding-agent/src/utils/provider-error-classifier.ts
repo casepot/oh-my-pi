@@ -1,4 +1,4 @@
-import { isUsageLimitError } from "@oh-my-pi/pi-ai";
+import { matchesUsageLimitText } from "@oh-my-pi/pi-ai";
 
 export type ProviderFailureCategory =
 	| "auth"
@@ -57,7 +57,7 @@ export function classifyProviderFailure(error: unknown): ProviderFailureClassifi
 	}
 
 	if (
-		isUsageLimitError(message) ||
+		matchesUsageLimitText(message) ||
 		lower.includes("rate limit") ||
 		lower.includes("too many requests") ||
 		/\b429\b/.test(lower)

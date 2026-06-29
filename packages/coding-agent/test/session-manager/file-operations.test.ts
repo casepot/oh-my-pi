@@ -10,7 +10,7 @@ import {
 import { findMostRecentSession, resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getConfigRootDir, getSessionsDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getSessionsDir, removeSyncWithRetries, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -21,7 +21,7 @@ describe("loadEntriesFromFile", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	it("loads valid session file", async () => {
@@ -59,7 +59,7 @@ describe("findMostRecentSession", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	it("returns single valid session file", async () => {
@@ -103,7 +103,7 @@ describe("resolveResumableSession", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	function writeSession(fileName: string, headerCwd: string, id: string = Snowflake.next()): string {
@@ -189,7 +189,7 @@ describe("SessionManager temp cwd session dirs", () => {
 			setAgentDir(fallbackAgentDir);
 			delete process.env.PI_CODING_AGENT_DIR;
 		}
-		fs.rmSync(testAgentDir, { recursive: true, force: true });
+		removeSyncWithRetries(testAgentDir);
 	});
 
 	it("stores temp-root cwd sessions under -tmp-prefixed directories", () => {
@@ -255,7 +255,7 @@ describe("SessionManager legacy session migration persistence", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		removeSyncWithRetries(tempDir);
 	});
 
 	it("keeps legacy migration in memory until later persisted activity rewrites the file", async () => {

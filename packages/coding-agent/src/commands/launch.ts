@@ -2,12 +2,12 @@
  * Root command for the coding agent CLI.
  */
 
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { parseArgs } from "../cli/args";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
+import { CLI_THINKING_LEVELS } from "../thinking";
 
 export default class Index extends Command {
 	static description = "AI coding assistant";
@@ -100,11 +100,14 @@ export default class Index extends Command {
 			description: "Comma-separated list of tools to enable (default: all)",
 		}),
 		thinking: Flags.string({
-			description: `Set thinking level: ${THINKING_EFFORTS.join(", ")}`,
-			options: [...THINKING_EFFORTS],
+			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,
+			options: [...CLI_THINKING_LEVELS],
 		}),
 		"hide-thinking": Flags.boolean({
 			description: "Hide thinking blocks in TUI output (display only, does not disable model thinking)",
+		}),
+		advisor: Flags.boolean({
+			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),
 		hook: Flags.string({
 			description: "Load a hook/extension file (can be used multiple times)",
@@ -132,6 +135,12 @@ export default class Index extends Command {
 		}),
 		"no-title": Flags.boolean({
 			description: "Disable title auto-generation",
+		}),
+		"print-thoughts": Flags.boolean({
+			description: "Include thinking blocks in print mode text output",
+		}),
+		"max-time": Flags.string({
+			description: "Stop the session after this many seconds",
 		}),
 		// `--auto-approve` / `--yolo`: declared here so oclif's auto-generated `--help` lists it.
 		// Runtime parsing happens in `cli/args.ts parseArgs` (line 176 in that file) — `runRootCommand`

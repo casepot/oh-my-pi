@@ -7,8 +7,9 @@
  * as one-liners. No system prompt, no tool catalog, no config sections.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { INTENT_FIELD } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { escapeXmlText } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
 	BashExecutionMessage,
 	BranchSummaryMessage,
@@ -26,6 +27,25 @@ export interface HistoryFormatOptions {
 	includeThinking?: boolean;
 	/** Render tool intent comment before tool call lines. */
 	includeToolIntent?: boolean;
+	/** Render watched-session roles as inline `**agent**:` / `**user**:` labels (collapsing consecutive same-role messages) instead of `## ` headings, so a primary transcript embedded inside an advisor turn stays visually distinct. */
+	watchedRoles?: boolean;
+	/**
+	 * Expand the primary agent's injected constraint context — plan mode's rules
+	 * (`plan-mode-context`) and the approved plan it implements
+	 * (`plan-mode-reference`) — verbatim instead of as a truncated one-liner,
+	 * wrapped in a `<primary-context>` tag so a reviewer reads it as the primary's
+	 * instructions, not its own. The advisor sets this: a truncated rule (plan
+	 * mode's "NEVER create files … except the plan file") makes it raise false
+	 * blockers. See {@link PRIMARY_CONTEXT_CUSTOM_TYPES}. Other custom messages
+	 * still collapse to a one-liner.
+	 */
+	expandPrimaryContext?: boolean;
+	/**
+	 * Append the full unified diff (from a tool result's `details.diff`) below
+	 * edit/apply_patch tool lines, instead of just the path. The advisor sets
+	 * this so it sees what changed without re-reading the file.
+	 */
+	expandEditDiffs?: boolean;
 }
 
 /** Max length of the primary-arg summary inside `→ tool(...)` lines. */
@@ -43,6 +63,7 @@ const PRIMARY_ARG_KEYS = [
 	"query",
 	"prompt",
 	"assignment",
+	"note",
 	"message",
 	"op",
 	"name",
@@ -71,15 +92,40 @@ function lineCount(text: string): number {
 	return text.split("\n").length;
 }
 
+function primaryArgValue(value: unknown): string {
+	if (typeof value === "string" && value.length > 0) return value;
+	if (Array.isArray(value) && value.length > 0 && value.every(v => typeof v === "string")) {
+		return value.join(", ");
+	}
+	return "";
+}
+
 /** Pick the most informative scalar argument of a tool call. */
-function primaryArg(args: Record<string, unknown> | undefined): string {
+function primaryArg(name: string, args: Record<string, unknown> | undefined): string {
 	if (!args || typeof args !== "object") return "";
+	// Advisor note is the most informative summary; preserve severity too.
+	if (name === "advise") {
+		const note = typeof args.note === "string" ? args.note : "";
+		const severity = typeof args.severity === "string" ? args.severity : "";
+		if (note && severity) return oneLine(`${severity}: ${note}`);
+		if (note) return oneLine(note);
+		if (severity) return oneLine(severity);
+	}
+	if (name === "grep") {
+		const pattern = primaryArgValue(args.pattern);
+		const paths = primaryArgValue(args.paths);
+		if (pattern && paths) return oneLine(`${pattern} @ ${paths}`);
+		if (pattern) return oneLine(pattern);
+		if (paths) return oneLine(paths);
+	}
+	if (name === "glob") {
+		const paths = primaryArgValue(args.paths);
+		if (paths) return oneLine(paths);
+	}
 	for (const key of PRIMARY_ARG_KEYS) {
 		const value = args[key];
-		if (typeof value === "string" && value.length > 0) return oneLine(value);
-		if (Array.isArray(value) && value.length > 0 && value.every(v => typeof v === "string")) {
-			return oneLine(value.join(", "));
-		}
+		const summary = primaryArgValue(value);
+		if (summary) return oneLine(summary);
 	}
 	// Fallback: first non-intent string arg, then a compact JSON of the args.
 	const rest: Record<string, unknown> = {};
@@ -91,12 +137,23 @@ function primaryArg(args: Record<string, unknown> | undefined): string {
 		rest[key] = value;
 		restCount++;
 	}
-	if (restCount === 0) return "";
+	if (restCount === 0) return "{}";
 	try {
 		return oneLine(JSON.stringify(rest));
 	} catch {
 		return "";
 	}
+}
+
+/**
+ * Wrap a diff body in a backtick fence sized to outlast the longest backtick
+ * run inside it, so a diff that touches markdown (triple backticks) can't break
+ * out of the fence. Info string `diff` for syntax highlighting.
+ */
+function fenceDiff(diff: string): string {
+	const longest = diff.match(/`+/g)?.reduce((m, run) => Math.max(m, run.length), 0) ?? 0;
+	const fence = "`".repeat(Math.max(3, longest + 1));
+	return `${fence}diff\n${diff}\n${fence}`;
 }
 
 /** One line per tool call: `→ read(src/foo.ts:50-80) ⇒ ok · 31 lines`. */
@@ -105,8 +162,9 @@ function toolCallLine(
 	args: Record<string, unknown> | undefined,
 	result: ToolResultMessage | undefined,
 	includeToolIntent?: boolean,
+	expandEditDiffs?: boolean,
 ): string {
-	const head = `→ ${name}(${primaryArg(args)})`;
+	const head = `→ ${name}(${primaryArg(name, args)})`;
 	let base: string;
 	if (!result) {
 		base = `${head} ⇒ pending`;
@@ -122,10 +180,17 @@ function toolCallLine(
 		}
 	}
 
+	if (expandEditDiffs) {
+		const diff = (result?.details as { diff?: unknown } | undefined)?.diff;
+		if (typeof diff === "string" && diff.trim()) {
+			base = `${base}\n${fenceDiff(diff)}`;
+		}
+	}
+
 	const intent = includeToolIntent ? args?.[INTENT_FIELD] : undefined;
 	if (typeof intent === "string" && intent.trim()) {
 		const formattedIntent = oneLine(intent, 80);
-		return `# ${formattedIntent}\n${base}`;
+		return `// ${formattedIntent}\n${base}`;
 	}
 	return base;
 }
@@ -144,6 +209,21 @@ function executionLine(
 	const lines = lineCount(msg.output);
 	return `→ ${kind}! ${oneLine(source)} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
 }
+
+/**
+ * Hidden custom messages that inject the primary agent's operative *constraints*
+ * — plan mode's rules and the approved plan it implements. A reviewer (the
+ * advisor) must read these verbatim; truncating them hides load-bearing
+ * exceptions (e.g. plan mode permits exactly one plan file). Every other custom
+ * type stays a one-liner.
+ *
+ * Deliberately excludes `goal-mode-context`: its body carries live budget
+ * counters (tokens/seconds used) that change every turn, so it can neither be
+ * deduped against a prior copy nor expanded each turn without flooding the
+ * reviewer — and its constraints don't drive the file-write misreads this
+ * targets.
+ */
+export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
 
 /** One-liner for custom/hook messages: `[irc] A → B: body…`. */
 function customOneLiner(msg: CustomMessage | HookMessage): string {
@@ -191,6 +271,11 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 		}
 	}
 	const consumed = new Set<string>();
+	// In watched mode, consecutive same-role messages collapse under one label
+	// (the watched agent emits one assistant message per tool call, so otherwise
+	// every call repeats `**agent**:`). Cleared whenever a
+	// non-role-labeled line is emitted so the next turn re-labels.
+	let lastWatchedLabel: string | undefined;
 
 	for (const msg of typed) {
 		switch (msg.role) {
@@ -198,7 +283,17 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "developer": {
 				const text = contentToText(msg.content);
 				if (!text.trim()) break;
-				lines.push(`## ${msg.role}`, "", text, "");
+				if (opts?.watchedRoles) {
+					const label = `**${msg.role}**:`;
+					if (lastWatchedLabel === label) {
+						lines.push(text, "");
+					} else {
+						lines.push(label, text, "");
+						lastWatchedLabel = label;
+					}
+				} else {
+					lines.push(`## ${msg.role}`, "", text, "");
+				}
 				break;
 			}
 			case "assistant": {
@@ -210,52 +305,84 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 					} else if (block.type === "toolCall") {
 						const result = resultsByCallId.get(block.id);
 						if (result) consumed.add(block.id);
-						body.push(toolCallLine(block.name, block.arguments, result, opts?.includeToolIntent));
+						body.push(
+							toolCallLine(block.name, block.arguments, result, opts?.includeToolIntent, opts?.expandEditDiffs),
+						);
 					} else if (opts?.includeThinking && block.type === "thinking" && block.thinking.trim()) {
 						body.push(`_thinking:_ ${block.thinking}`);
 					}
 					// redactedThinking elided entirely (no readable text)
 				}
 				if (body.length === 0) break;
-				lines.push("## assistant", "", ...body, "");
+				if (opts?.watchedRoles) {
+					const label = "**agent**:";
+					if (lastWatchedLabel === label) {
+						lines.push(...body, "");
+					} else {
+						lines.push(label, ...body, "");
+						lastWatchedLabel = label;
+					}
+				} else {
+					lines.push("## assistant", "", ...body, "");
+				}
 				break;
 			}
 			case "toolResult": {
 				// Normally consumed by its toolCall; orphans (e.g. truncated history) get their own line.
 				if (consumed.has(msg.toolCallId)) break;
-				lines.push(toolCallLine(msg.toolName, undefined, msg, opts?.includeToolIntent), "");
+				lines.push(toolCallLine(msg.toolName, undefined, msg, opts?.includeToolIntent, opts?.expandEditDiffs), "");
+				lastWatchedLabel = undefined;
 				break;
 			}
 			case "bashExecution": {
 				const bashMsg = msg as BashExecutionMessage;
 				if (bashMsg.excludeFromContext) break;
 				lines.push(executionLine("bash", bashMsg.command, bashMsg), "");
+				lastWatchedLabel = undefined;
 				break;
 			}
 			case "pythonExecution": {
 				const pythonMsg = msg as PythonExecutionMessage;
 				if (pythonMsg.excludeFromContext) break;
 				lines.push(executionLine("python", pythonMsg.code, pythonMsg), "");
+				lastWatchedLabel = undefined;
 				break;
 			}
 			case "custom":
 			case "hookMessage": {
-				lines.push(customOneLiner(msg as CustomMessage | HookMessage), "");
+				const custom = msg as CustomMessage | HookMessage;
+				if (opts?.expandPrimaryContext && PRIMARY_CONTEXT_CUSTOM_TYPES.has(custom.customType)) {
+					const text = contentToText(custom.content).trim();
+					if (text) {
+						lines.push(
+							`<primary-context kind="${custom.customType}">`,
+							escapeXmlText(text),
+							"</primary-context>",
+							"",
+						);
+					}
+				} else {
+					lines.push(customOneLiner(custom), "");
+				}
+				lastWatchedLabel = undefined;
 				break;
 			}
 			case "branchSummary": {
 				const branchMsg = msg as BranchSummaryMessage;
 				lines.push(`[branch] from ${branchMsg.fromId}: ${oneLine(branchMsg.summary)}`, "");
+				lastWatchedLabel = undefined;
 				break;
 			}
 			case "compactionSummary": {
 				const compactMsg = msg as CompactionSummaryMessage;
 				lines.push(`[compaction] ${oneLine(compactMsg.summary)}`, "");
+				lastWatchedLabel = undefined;
 				break;
 			}
 			case "fileMention": {
 				const fileMsg = msg as FileMentionMessage;
 				lines.push(`[file-mention] ${oneLine(fileMsg.files.map(f => f.path).join(", "))}`, "");
+				lastWatchedLabel = undefined;
 				break;
 			}
 		}

@@ -15,7 +15,7 @@ import {
 	type UsageReport,
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai";
-import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
@@ -150,9 +150,9 @@ function collectIdentityStrings(reports: UsageReport[], accounts: UsageAccountId
 
 type LimitStatus = NonNullable<UsageLimit["status"]>;
 
-function resolveStatus(limit: UsageLimit): LimitStatus {
+function resolveStatus(limit: UsageLimit, nowMs: number): LimitStatus {
 	if (limit.status && limit.status !== "unknown") return limit.status;
-	const fraction = resolveUsedFraction(limit);
+	const fraction = resolveUsedFraction(limit, nowMs);
 	if (fraction === undefined) return "unknown";
 	if (fraction >= 1) return "exhausted";
 	if (fraction >= 0.8) return "warning";
@@ -167,8 +167,8 @@ const STATUS_COLOR: Record<LimitStatus, (text: string) => string> = {
 };
 
 /** Worst-of aggregation: exhausted > warning > ok > unknown. */
-function aggregateStatus(limits: UsageLimit[]): LimitStatus {
-	const statuses = limits.map(resolveStatus);
+function aggregateStatus(limits: UsageLimit[], nowMs: number): LimitStatus {
+	const statuses = limits.map(limit => resolveStatus(limit, nowMs));
 	if (statuses.includes("exhausted")) return "exhausted";
 	if (statuses.includes("warning")) return "warning";
 	if (statuses.includes("ok")) return "ok";
@@ -197,7 +197,7 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	unknown: "",
 };
 
-function describeAmount(limit: UsageLimit): string {
+function describeAmount(limit: UsageLimit, nowMs: number): string {
 	const amount = limit.amount;
 	const parts: string[] = [];
 	const absoluteUnit = amount.unit !== "percent" && amount.unit !== "unknown";
@@ -208,7 +208,7 @@ function describeAmount(limit: UsageLimit): string {
 	} else if (absoluteUnit && amount.remaining !== undefined) {
 		parts.push(`${formatUnitValue(amount.remaining, amount.unit)}${UNIT_SUFFIX[amount.unit]} left`);
 	}
-	const fraction = resolveUsedFraction(limit);
+	const fraction = resolveUsedFraction(limit, nowMs);
 	if (fraction !== undefined) {
 		parts.push(`${(fraction * 100).toFixed(1)}% used`);
 	} else if (amount.remainingFraction !== undefined) {
@@ -218,12 +218,12 @@ function describeAmount(limit: UsageLimit): string {
 	return parts.join(" · ");
 }
 
-function renderBar(limit: UsageLimit): string {
-	const fraction = resolveUsedFraction(limit);
+function renderBar(limit: UsageLimit, nowMs: number): string {
+	const fraction = resolveUsedFraction(limit, nowMs);
 	if (fraction === undefined) return chalk.dim("·".repeat(BAR_WIDTH));
 	const clamped = Math.min(Math.max(fraction, 0), 1);
 	const filled = Math.round(clamped * BAR_WIDTH);
-	const color = STATUS_COLOR[resolveStatus(limit)];
+	const color = STATUS_COLOR[resolveStatus(limit, nowMs)];
 	return color("█".repeat(filled)) + chalk.dim("░".repeat(BAR_WIDTH - filled));
 }
 
@@ -319,14 +319,33 @@ function formatAccountHeader(
 	nowMs: number,
 	redaction?: Map<string, string>,
 ): string {
-	const status = aggregateStatus(report.limits);
+	const status = aggregateStatus(report.limits, nowMs);
 	const icon = STATUS_COLOR[status]("●");
 	const label = reportAccountLabel(report, index);
 	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
 	const savedResets = report.resetCredits?.availableCount ?? 0;
-	if (savedResets > 0) header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
+	if (savedResets > 0) {
+		header += chalk.cyan(` · ✦ ${savedResets} saved reset${savedResets === 1 ? "" : "s"}`);
+		const credits = report.resetCredits?.credits;
+		if (credits) {
+			const expiries = credits
+				.filter(c => c.expiresAt)
+				.map(c => ({ date: c.expiresAt!, ms: Date.parse(c.expiresAt!) }))
+				.filter(c => !Number.isNaN(c.ms))
+				.sort((a, b) => a.ms - b.ms);
+			const upcoming = expiries.find(c => c.ms > nowMs);
+			if (upcoming) {
+				header += chalk.dim(
+					` · soonest expires in ${formatDuration(upcoming.ms - nowMs)} (${upcoming.date.slice(0, 10)})`,
+				);
+			} else {
+				const lastExpired = expiries.at(-1);
+				if (lastExpired) header += chalk.dim(` · expired (${lastExpired.date.slice(0, 10)})`);
+			}
+		}
+	}
 	if (report.fetchedAt && nowMs - report.fetchedAt > 90_000) {
 		header += chalk.dim(` · fetched ${formatDuration(nowMs - report.fetchedAt)} ago`);
 	}
@@ -334,16 +353,16 @@ function formatAccountHeader(
 }
 
 function formatLimitLine(limit: UsageLimit, labelWidth: number, nowMs: number): string[] {
-	const status = resolveStatus(limit);
+	const status = resolveStatus(limit, nowMs);
 	const title = limitTitle(limit);
 	const padded = title.padEnd(labelWidth);
-	const details: string[] = [describeAmount(limit)];
+	const details: string[] = [describeAmount(limit, nowMs)];
 	const resetsAt = limit.window?.resetsAt;
 	if (resetsAt !== undefined && resetsAt > nowMs) {
 		details.push(`resets in ${formatDuration(resetsAt - nowMs)}`);
 	}
 	const lines = [
-		`      ${STATUS_COLOR[status]("●")} ${padded}  ${renderBar(limit)}  ${chalk.dim(details.join(" · "))}`,
+		`      ${STATUS_COLOR[status]("●")} ${padded}  ${renderBar(limit, nowMs)}  ${chalk.dim(details.join(" · "))}`,
 	];
 	if (limit.notes && limit.notes.length > 0) {
 		lines.push(`        ${chalk.dim(limit.notes.join(" · "))}`);
@@ -372,12 +391,12 @@ export interface ProviderWindowStat {
  * several meters on the same window (tiered/metered limits), the most-burned
  * one is what binds.
  */
-export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
+export function computeProviderWindowStats(reports: UsageReport[], nowMs = Date.now()): ProviderWindowStat[] {
 	const buckets = new Map<string, { window: string; durationMs?: number; fractions: number[] }>();
 	for (const report of reports) {
 		const accountMax = new Map<string, number>();
 		for (const limit of report.limits) {
-			const fraction = resolveUsedFraction(limit);
+			const fraction = resolveUsedFraction(limit, nowMs);
 			if (fraction === undefined) continue;
 			const durationMs = limit.window?.durationMs;
 			const key =
@@ -450,6 +469,10 @@ export function formatUsageBreakdown(
 		lines.push(
 			`${chalk.bold.cyan(formatProviderName(provider))} ${chalk.dim(`— ${accountCount} ${accountCount === 1 ? "account" : "accounts"}`)}`,
 		);
+		// Provider-wide disclaimers render once per provider, not per limit.
+		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
+		for (const note of providerNotes)
+			lines.push(`  ${chalk.dim(sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  ")))}`);
 
 		const labelWidth = providerReports
 			.flatMap(report => report.limits)
@@ -471,7 +494,7 @@ export function formatUsageBreakdown(
 			lines.push(`  ${chalk.dim("○")} ${chalk.dim(`${redaction?.get(label) ?? label} — no usage data`)}`);
 		}
 
-		const stats = computeProviderWindowStats(providerReports);
+		const stats = computeProviderWindowStats(providerReports, nowMs);
 		if (stats.length > 0) {
 			const parts = stats.map(
 				stat =>
@@ -646,6 +669,28 @@ function collectStoredAccounts(authStorage: AuthStorage): UsageAccountIdentity[]
 	return accounts;
 }
 
+/**
+ * Keep only accounts worth a usage row: those whose provider has a usage
+ * provider, so a missing report is a real gap rather than the absence of any
+ * usage concept. Providers with no usage endpoint (web-search keys, local /
+ * keyless servers, inference providers without a usage API) would only ever
+ * render as noise, so they are dropped.
+ *
+ * `hasUsageProvider` is injected (in practice {@link AuthStorage.usageProviderFor})
+ * so custom/broker resolvers stay authoritative — no provider list is duplicated
+ * here. An explicit `--provider` request bypasses the cull, so
+ * `omp usage --provider xai` can still confirm the stored credential has no
+ * usage endpoint.
+ */
+export function selectReportableAccounts(
+	accounts: UsageAccountIdentity[],
+	hasUsageProvider: (provider: string) => boolean,
+	explicitProvider?: string,
+): UsageAccountIdentity[] {
+	if (explicitProvider) return accounts;
+	return accounts.filter(account => hasUsageProvider(account.provider));
+}
+
 /** Apply a redaction mask to an optional identity field. */
 function maskIdentity(redaction: Map<string, string>, value: string | undefined): string | undefined {
 	return value === undefined ? undefined : (redaction.get(value) ?? value);
@@ -717,7 +762,12 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			(await authStorage.fetchUsageReports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
 			})) ?? [];
-		let accounts = collectStoredAccounts(authStorage);
+		const storedAccounts = collectStoredAccounts(authStorage);
+		let accounts = selectReportableAccounts(
+			storedAccounts,
+			provider => authStorage.usageProviderFor(provider) !== undefined,
+			cmd.provider,
+		);
 		let filteredReports = reports;
 		if (cmd.provider) {
 			const wanted = cmd.provider.toLowerCase();
@@ -745,7 +795,10 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			const capacity: Record<string, ProviderWindowStat[]> = {};
 			for (const report of filteredReports) {
 				if (capacity[report.provider]) continue;
-				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
+				const stats = computeProviderWindowStats(
+					filteredReports.filter(peer => peer.provider === report.provider),
+					Date.now(),
+				);
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
 			const payload = {
@@ -760,9 +813,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 
 		if (filteredReports.length === 0 && accounts.length === 0) {
 			const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
-			process.stderr.write(
-				chalk.yellow(`No credentials found${scope}. Run \`omp\` and use /login to add accounts.\n`),
-			);
+			// Credentials exist but every one is for a provider without a usage
+			// endpoint — say so rather than implying nothing is logged in.
+			const message =
+				storedAccounts.length > 0
+					? `No usage data${scope}. Stored credentials are for providers without a usage endpoint.\n`
+					: `No credentials found${scope}. Run \`omp\` and use /login to add accounts.\n`;
+			process.stderr.write(chalk.yellow(message));
 			process.exitCode = 1;
 			return;
 		}

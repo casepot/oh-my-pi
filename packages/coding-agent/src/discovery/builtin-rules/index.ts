@@ -33,6 +33,7 @@ import tsImportType from "./ts-import-type.md" with { type: "text" };
 import tsNoAny from "./ts-no-any.md" with { type: "text" };
 import tsNoDeprecatedLeftovers from "./ts-no-deprecated-leftovers.md" with { type: "text" };
 import tsNoDynamicImport from "./ts-no-dynamic-import.md" with { type: "text" };
+import tsNoInlineCastAccess from "./ts-no-inline-cast-access.md" with { type: "text" };
 import tsNoReturnType from "./ts-no-return-type.md" with { type: "text" };
 import tsNoTestTimers from "./ts-no-test-timers.md" with { type: "text" };
 import tsNoTinyFunctions from "./ts-no-tiny-functions.md" with { type: "text" };
@@ -56,6 +57,7 @@ export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
 	{ name: "ts-no-any", content: tsNoAny, pack: "global" },
 	{ name: "ts-no-deprecated-leftovers", content: tsNoDeprecatedLeftovers, pack: "global" },
 	{ name: "ts-no-dynamic-import", content: tsNoDynamicImport, pack: "global" },
+	{ name: "ts-no-inline-cast-access", content: tsNoInlineCastAccess, pack: "global" },
 	{ name: "ts-no-return-type", content: tsNoReturnType, pack: "global" },
 	{ name: "ts-no-test-timers", content: tsNoTestTimers, pack: "global" },
 	{ name: "ts-no-tiny-functions", content: tsNoTinyFunctions, pack: "global" },

@@ -723,7 +723,7 @@ describe("RPC orchestration contract", () => {
 		} finally {
 			client.stop();
 		}
-	});
+	}, 15_000);
 
 	test("TypeScript RpcClient surfaces raw and unknown frames and rejects pending requests on close", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-client-"));

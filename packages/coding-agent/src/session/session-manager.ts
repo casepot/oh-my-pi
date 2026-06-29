@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ImageContent, Message, MessageAttribution, ServiceTier, TextContent, Usage } from "@oh-my-pi/pi-ai";
-import { getBlobsDir, getProjectDir, getSessionsDir, isEnoent, logger, toError } from "@oh-my-pi/pi-utils";
+import {
+	directoryExists,
+	getBlobsDir,
+	getProjectDir,
+	getSessionsDir,
+	isEnoent,
+	logger,
+	toError,
+} from "@oh-my-pi/pi-utils";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
 import {
@@ -39,14 +47,18 @@ import {
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
+	type SessionTitleSlotEntry,
+	type SessionTitleSource,
 	type SessionTreeNode,
 	type ThinkingLevelChangeEntry,
+	TITLE_CHANGE_ENTRY_TYPE,
+	type TitleChangeEntry,
 	type TtsrInjectionEntry,
 	type UsageStatistics,
 } from "./session-entries";
 
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
-import { loadEntriesFromFile, resolveBlobRefsInEntries } from "./session-loader";
+import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
 import { compactLegacyGoalPersistence, generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -61,6 +73,7 @@ import {
 	type SessionStorage,
 	type SessionStorageWriter,
 } from "./session-storage";
+import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 export type { ModeChangeEntry } from "./session-entries";
 export { getLatestCompactionEntry };
@@ -81,6 +94,27 @@ function fileSafeTimestamp(iso: string): string {
 
 function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	return sessionFile ? sessionFile.slice(0, -JSONL_SUFFIX_LENGTH) : null;
+}
+
+/**
+ * Resolve a breadcrumb's recorded session file to its interactive root. Subagent
+ * (and other artifact) sessions live inside a parent session's artifacts dir —
+ * `<parent>.jsonl` strips its suffix to `<parent>/`, and a child writes
+ * `<parent>/<agentId>.jsonl`. A breadcrumb that points at such a child — a
+ * pre-fix poisoned crumb left by a subagent that opened in the parent's TTY, or
+ * any nested artifact — must resolve back up to the top-level session so
+ * `--continue` resumes the real conversation instead of a subagent transcript.
+ */
+function resolveBreadcrumbToInteractiveRoot(sessionFile: string): string {
+	let current = path.resolve(sessionFile);
+	// Walk up while the containing dir is itself a session's artifacts dir
+	// (`<dir>.jsonl` exists). Capped to defend against pathological layouts.
+	for (let depth = 0; depth < 8; depth++) {
+		const parentSessionFile = `${path.dirname(current)}.jsonl`;
+		if (!fs.existsSync(parentSessionFile)) return current;
+		current = parentSessionFile;
+	}
+	return current;
 }
 
 function emptyUsageStatistics(): UsageStatistics {
@@ -306,8 +340,10 @@ interface SessionManagerStateSnapshot {
 	sessionDir: string;
 	sessionId: string;
 	sessionName: string | undefined;
-	titleSource: "auto" | "user" | undefined;
+	titleSource: SessionTitleSource | undefined;
 	sessionFile: string | undefined;
+	titleUpdatedAt: string;
+	hasTitleSlot: boolean;
 	onDisk: boolean;
 	needsRewrite: boolean;
 	header: SessionHeader;
@@ -342,9 +378,11 @@ export class SessionManager {
 
 	#sessionId = "";
 	#sessionName: string | undefined;
-	#titleSource: "auto" | "user" | undefined;
+	#titleSource: SessionTitleSource | undefined;
 	#sessionFile: string | undefined;
 	#header!: SessionHeader;
+	#titleUpdatedAt = "";
+	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
 	#index = new SessionEntryIndex();
 
@@ -479,7 +517,16 @@ export class SessionManager {
 		return `${JSON.stringify(prepareEntryForPersistence(entry, this.#blobs))}\n`;
 	}
 
+	#titleSlotLine(): string {
+		return serializeTitleSlot({
+			title: this.#sessionName,
+			source: this.#titleSource,
+			updatedAt: this.#titleUpdatedAt || this.#header.timestamp,
+		});
+	}
+
 	*#fileLines(): IterableIterator<string> {
+		yield this.#titleSlotLine();
 		yield this.#lineFor(this.#header);
 		for (const entry of this.#entries) yield this.#lineFor(entry);
 	}
@@ -494,11 +541,11 @@ export class SessionManager {
 
 	/**
 	 * Synchronously rewrite the whole file (header + entries) and keep no open
-	 * writer; the next append re-opens one. `writeTextSync` returns with the
+	 * writer; the next append re-opens one. `writeChunksSync` returns with the
 	 * bytes in the kernel page cache, so the file is software-crash durable.
 	 */
 	#rewriteSynchronously(): void {
-		if (!this.#persist || !this.#sessionFile) return;
+		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
 
 		try {
 			this.#diskEpoch++;
@@ -507,6 +554,7 @@ export class SessionManager {
 			this.#storage.writeChunksSync(this.#sessionFile, this.#fileLines());
 			this.#fileIsCurrent = true;
 			this.#rewriteRequired = false;
+			this.#hasTitleSlot = true;
 		} catch (err) {
 			this.#noteDiskFailure(err);
 		}
@@ -529,6 +577,7 @@ export class SessionManager {
 				await this.#storage.writeChunksAtomic(sessionFile, this.#fileLines());
 				this.#fileIsCurrent = true;
 				this.#rewriteRequired = false;
+				this.#hasTitleSlot = true;
 			},
 			{ epoch },
 		);
@@ -567,12 +616,67 @@ export class SessionManager {
 		}
 	}
 
+	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
+		if (!this.#persist || !this.#sessionFile) return;
+		if (this.#diskFailure) throw this.#diskFailure;
+
+		if (!this.#shouldHaveSessionFile()) {
+			this.#fileIsCurrent = false;
+			return;
+		}
+
+		if (
+			!this.#fileIsCurrent ||
+			this.#rewriteRequired ||
+			!this.#hasTitleSlot ||
+			!this.#storage.existsSync(this.#sessionFile)
+		) {
+			await this.#rewriteAtomically();
+			return;
+		}
+
+		const epoch = this.#diskEpoch;
+		const line = this.#lineFor(entry);
+		await this.#scheduleDiskWork(
+			async () => {
+				const sessionFile = this.#sessionFile;
+				if (!sessionFile) return;
+				try {
+					await this.#appendWriter().append(line);
+					await this.#storage.updateSessionTitle(sessionFile, update);
+					this.#fileIsCurrent = true;
+				} catch {
+					await this.#closeWriterHandle();
+					await this.#storage.writeChunksAtomic(sessionFile, this.#fileLines());
+					this.#clearDiskError();
+					this.#fileIsCurrent = true;
+					this.#rewriteRequired = false;
+					this.#hasTitleSlot = true;
+				}
+			},
+			{ epoch },
+		);
+	}
+
+	#notifyEntryAppended(entry: SessionEntry): void {
+		const callback = this.onEntryAppended;
+		if (callback) {
+			try {
+				callback(entry);
+			} catch (err) {
+				logger.warn("collab entry hook failed", { error: String(err) });
+			}
+		}
+	}
+
 	#resetToNewSession(options?: NewSessionOptions, forcedSessionFile?: string): string | undefined {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 		this.#sessionId = mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
+		this.#titleUpdatedAt = "";
+		this.#hasTitleSlot = true;
 
 		const timestamp = nowIso();
 		this.#header = {
@@ -583,6 +687,7 @@ export class SessionManager {
 			cwd: this.#cwd,
 			parentSession: options?.parentSession,
 		};
+		this.#titleUpdatedAt = timestamp;
 
 		this.#entries = [];
 		this.#index.clear();
@@ -617,6 +722,7 @@ export class SessionManager {
 		this.#sessionId = header.id;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
+		this.#titleUpdatedAt = header.timestamp;
 		this.#index.rebuild(entries);
 	}
 
@@ -632,15 +738,7 @@ export class SessionManager {
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		this.#appendToSessionFile(entry);
-
-		const callback = this.onEntryAppended;
-		if (callback) {
-			try {
-				callback(entry);
-			} catch (err) {
-				logger.warn("collab entry hook failed", { error: String(err) });
-			}
-		}
+		this.#notifyEntryAppended(entry);
 	}
 
 	#draftPath(): string | null {
@@ -699,6 +797,8 @@ export class SessionManager {
 			sessionId: this.#sessionId,
 			sessionName: this.#sessionName,
 			titleSource: this.#titleSource,
+			titleUpdatedAt: this.#titleUpdatedAt,
+			hasTitleSlot: this.#hasTitleSlot,
 			sessionFile: this.#sessionFile,
 			onDisk: this.#fileIsCurrent,
 			needsRewrite: this.#rewriteRequired,
@@ -723,6 +823,8 @@ export class SessionManager {
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#sessionName = snapshot.sessionName;
 		this.#titleSource = snapshot.titleSource;
+		this.#titleUpdatedAt = snapshot.titleUpdatedAt;
+		this.#hasTitleSlot = snapshot.hasTitleSlot;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
@@ -736,11 +838,16 @@ export class SessionManager {
 		this.#clearDiskError();
 
 		const resolvedSessionFile = path.resolve(sessionFile);
+		const titleSlot = await readTitleSlotFromFile(resolvedSessionFile, this.#storage);
 		const fileEntries = await loadEntriesFromFile(resolvedSessionFile, this.#storage);
-		await this.#adoptSessionFileEntries(resolvedSessionFile, fileEntries);
+		await this.#adoptSessionFileEntries(resolvedSessionFile, fileEntries, titleSlot);
 	}
 
-	async #adoptSessionFileEntries(resolvedSessionFile: string, fileEntries: FileEntry[]): Promise<void> {
+	async #adoptSessionFileEntries(
+		resolvedSessionFile: string,
+		fileEntries: FileEntry[],
+		titleSlot?: SessionTitleSlotEntry,
+	): Promise<void> {
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
@@ -762,15 +869,20 @@ export class SessionManager {
 
 		// Adopt the loaded session's working directory. Sessions live in a dir
 		// keyed by their cwd, so resuming a session from another project must
-		// re-point cwd/sessionDir at that project.
+		// re-point cwd/sessionDir at that project — unless that project directory
+		// no longer exists on disk, in which case adopting it (and the process
+		// chdir interactive mode then performs) would fail with ENOENT. Keep the
+		// current cwd so the resumed session stays where the user already is.
 		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#cwd)) {
+		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryExists(headerCwd))) {
 			this.#cwd = headerCwd;
 			this.#sessionDir = path.dirname(resolvedSessionFile);
 			this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 		}
 
 		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
+		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
 		this.#rewriteRequired = migrated || compacted;
 		this.#forceFileCreation = true;
@@ -824,6 +936,8 @@ export class SessionManager {
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
+		this.#titleUpdatedAt = timestamp;
+		this.#hasTitleSlot = true;
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = true;
@@ -977,8 +1091,10 @@ export class SessionManager {
 	async close(): Promise<void> {
 		if (!this.#persist) return;
 		await this.#scheduleDiskWork(async () => {
+			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();
-			this.#fileIsCurrent = true;
+			if (hadWriter || (this.#sessionFile && this.#storage.existsSync(this.#sessionFile)))
+				this.#fileIsCurrent = true;
 		});
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
@@ -1095,7 +1211,7 @@ export class SessionManager {
 	}
 
 	/** The source that set the session name: "user" (manual/RPC) or "auto" (generated title). */
-	get titleSource(): "auto" | "user" | undefined {
+	get titleSource(): SessionTitleSource | undefined {
 		return this.#titleSource;
 	}
 
@@ -1115,20 +1231,33 @@ export class SessionManager {
 	 * @param source "user" for explicit renames; "auto" for generated titles.
 	 *   Auto titles are ignored once the user has set a name.
 	 */
-	async setSessionName(name: string, source: "auto" | "user" = "auto"): Promise<boolean> {
+	async setSessionName(name: string, source: SessionTitleSource = "auto", trigger?: string): Promise<boolean> {
 		if (this.#titleSource === "user" && source === "auto") return false;
 
 		const title = SessionManager.#cleanTitle(name);
 		if (!title) return false;
 
+		const previousTitle = this.#sessionName;
+		const timestamp = nowIso();
 		this.#sessionName = title;
 		this.#titleSource = source;
+		this.#titleUpdatedAt = timestamp;
 		this.#header.title = title;
 		this.#header.titleSource = source;
 
-		if (this.#persist && this.#sessionFile && this.#storage.existsSync(this.#sessionFile)) {
-			await this.#rewriteAtomically();
-		}
+		const entry: TitleChangeEntry = {
+			type: TITLE_CHANGE_ENTRY_TYPE,
+			...this.#freshEntryFields(),
+			timestamp,
+			title,
+			source,
+		};
+		if (previousTitle) entry.previousTitle = previousTitle;
+		if (trigger) entry.trigger = trigger;
+		this.#entries.push(entry);
+		this.#index.insert(entry);
+		this.#notifyEntryAppended(entry);
+		await this.#persistTitleChangeEntry(entry, { title, source, updatedAt: timestamp });
 
 		this.#notifySessionNameListeners();
 		return true;
@@ -1170,11 +1299,13 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendThinkingLevelChange(thinkingLevel?: string): string {
+	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
+	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			...this.#freshEntryFields(),
 			thinkingLevel: thinkingLevel ?? null,
+			configured: configured ?? null,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -1215,7 +1346,14 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendSessionInit(init: { systemPrompt: string; task: string; tools: string[]; outputSchema?: unknown }): string {
+	appendSessionInit(init: {
+		systemPrompt: string;
+		task: string;
+		tools: string[];
+		outputSchema?: unknown;
+		spawns?: string;
+		readSummarize?: boolean;
+	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
 		return entry.id;
@@ -1549,6 +1687,8 @@ export class SessionManager {
 		this.#sessionId = newSessionId;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
+		this.#titleUpdatedAt = timestamp;
+		this.#hasTitleSlot = true;
 		this.#index.rebuild(this.#entries);
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
@@ -1589,6 +1729,28 @@ export class SessionManager {
 	}
 
 	/**
+	 * Create a fresh empty session file in the default session directory for
+	 * `cwd`, writing the fixed-width title slot plus session header. The returned
+	 * path can be passed to `setSessionFile` / `AgentSession.switchSession` when a
+	 * caller explicitly needs a brand-new persisted session at a cwd-derived path.
+	 */
+	static createEmptySessionFile(cwd: string, storage: SessionStorage = new FileSessionStorage()): string {
+		const sessionDir = SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const id = mintSessionId();
+		const timestamp = nowIso();
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id,
+			timestamp,
+			cwd: path.resolve(cwd),
+		};
+		const file = path.join(sessionDir, `${fileSafeTimestamp(timestamp)}_${id}.jsonl`);
+		storage.writeTextSync(file, `${serializeTitleSlot({ updatedAt: timestamp })}${JSON.stringify(header)}\n`);
+		return file;
+	}
+
+	/**
 	 * Fork a session into the current project directory: copy history from another
 	 * session file while creating a fresh session file in this sessionDir.
 	 *
@@ -1619,6 +1781,8 @@ export class SessionManager {
 		manager.#header.titleSource = sourceHeader?.titleSource;
 		manager.#sessionName = manager.#header.title;
 		manager.#titleSource = manager.#header.titleSource;
+		manager.#titleUpdatedAt = nowIso();
+		manager.#hasTitleSlot = true;
 		manager.#entries = history;
 		manager.#index.rebuild(history);
 		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
@@ -1636,16 +1800,85 @@ export class SessionManager {
 		filePath: string,
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
-		options?: { initialCwd?: string },
+		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
 	): Promise<SessionManager> {
 		const resolvedFilePath = path.resolve(filePath);
 		const loaded = await loadEntriesFromFile(resolvedFilePath, storage);
 		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
-		const cwd = header?.cwd ?? options?.initialCwd ?? getProjectDir();
-		const dir = sessionDir ?? path.dirname(resolvedFilePath);
+		// Resume into the session's recorded cwd only when that directory still
+		// exists. A deleted project dir would make the constructor's #cwd — and the
+		// `setProjectDir` chdir interactive mode runs next — point at (and fail on)
+		// a missing path, so fall back to the launch cwd and anchor /new and /branch
+		// there too, keeping the resumed session where the user already is.
+		const recordedCwd = header?.cwd;
+		const recordedCwdUsable = !!recordedCwd && (await directoryExists(recordedCwd));
+		const cwd = recordedCwdUsable ? recordedCwd : (options?.initialCwd ?? getProjectDir());
+		const dir =
+			sessionDir ??
+			(recordedCwd && !recordedCwdUsable
+				? SessionManager.getDefaultSessionDir(cwd, undefined, storage)
+				: path.dirname(resolvedFilePath));
 		const manager = new SessionManager(cwd, dir, true, storage);
-		await manager.#adoptSessionFileEntries(resolvedFilePath, loaded);
+		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
+		const titleSlot = await readTitleSlotFromFile(resolvedFilePath, storage);
+		await manager.#adoptSessionFileEntries(resolvedFilePath, loaded, titleSlot);
 		return manager;
+	}
+
+	/**
+	 * Lock-free peek for cold subagent revival: returns the recorded working
+	 * directory (session header) and the latest `session_init` contract (system
+	 * prompt / tools / output schema) WITHOUT taking the single-writer lock that
+	 * {@link open} acquires — the caller re-opens for the actual revive. Returns
+	 * null when the file can't be read; `init` is null for files written before
+	 * `session_init` was recorded (no faithful contract to rebuild from).
+	 */
+	static async peekSessionInit(
+		filePath: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<{
+		cwd: string;
+		init: {
+			systemPrompt: string;
+			task: string;
+			tools: string[];
+			outputSchema?: unknown;
+			spawns?: string;
+			readSummarize?: boolean;
+		} | null;
+	} | null> {
+		let loaded: FileEntry[];
+		try {
+			loaded = await loadEntriesFromFile(filePath, storage);
+		} catch {
+			return null;
+		}
+		// A missing/empty file has no usable session — nothing to revive from.
+		if (loaded.length === 0) return null;
+		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
+		let init: {
+			systemPrompt: string;
+			task: string;
+			tools: string[];
+			outputSchema?: unknown;
+			spawns?: string;
+			readSummarize?: boolean;
+		} | null = null;
+		for (let index = loaded.length - 1; index >= 0; index--) {
+			const entry = loaded[index];
+			if (entry.type === "session_init") {
+				init = {
+					systemPrompt: entry.systemPrompt,
+					task: entry.task,
+					tools: entry.tools,
+					outputSchema: entry.outputSchema,
+					readSummarize: entry.readSummarize,
+					spawns: entry.spawns,
+				};
+				break;
+			}
+		}
+		return { cwd: header?.cwd ?? getProjectDir(), init };
 	}
 
 	/** Continue the most recent session, or create a new one if none exists. */
@@ -1660,6 +1893,9 @@ export class SessionManager {
 		let chosenSession: string | null | undefined;
 
 		if (breadcrumb) {
+			// Recover stale crumbs: a subagent open (pre-fix) may have pointed this
+			// terminal's breadcrumb at an artifact child; resume the parent instead.
+			breadcrumb.sessionFile = resolveBreadcrumbToInteractiveRoot(breadcrumb.sessionFile);
 			const breadcrumbCwd = path.resolve(breadcrumb.cwd);
 			if (breadcrumbCwd === resolvedCwd) {
 				chosenSession = breadcrumb.sessionFile;
@@ -1693,7 +1929,12 @@ export class SessionManager {
 					(newestInTargetDir === null || (newestIsBreadcrumb && !currentProjectAlreadyHasSession));
 				if (looksLikeMovedProject) {
 					logger.info("Re-rooting moved session", { from: breadcrumbCwd, to: resolvedCwd });
-					const manager = await SessionManager.open(breadcrumb.sessionFile, undefined, storage);
+					// Anchor at the gone breadcrumb cwd so the moveTo below relocates the
+					// session: open() now falls back to the launch cwd for a missing
+					// recorded cwd, which would no-op moveTo when it equals `cwd`.
+					const manager = await SessionManager.open(breadcrumb.sessionFile, undefined, storage, {
+						initialCwd: breadcrumbCwd,
+					});
 					await manager.moveTo(cwd, sessionDir);
 					return manager;
 				}
@@ -1736,5 +1977,28 @@ export class SessionManager {
 	/** List all sessions across all project directories. */
 	static listAll(storage: SessionStorage = new FileSessionStorage()): Promise<SessionInfo[]> {
 		return listAllSessions(storage);
+	}
+}
+
+/**
+ * If the current session was created by `/move` and contains no real
+ * user/assistant messages, delete it so empty move sessions don't accumulate.
+ */
+export async function cleanupEmptyMoveSession(
+	sessionManager: SessionManager,
+	movedFromEmptySessionFile: string | undefined,
+): Promise<void> {
+	const sessionFile = sessionManager.getSessionFile();
+	if (!sessionFile || !movedFromEmptySessionFile) return;
+	if (path.resolve(sessionFile) !== path.resolve(movedFromEmptySessionFile)) return;
+	const entries = sessionManager.getEntries();
+	const hasRealMessages = entries.some(
+		e => e.type === "message" && (e.message.role === "user" || e.message.role === "assistant"),
+	);
+	if (hasRealMessages) return;
+	try {
+		await sessionManager.dropSession(sessionFile);
+	} catch (err) {
+		logger.warn("Failed to clean up empty move session", { sessionFile, error: String(err) });
 	}
 }

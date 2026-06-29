@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, hasFsCode, isEnoent, Snowflake } from "@oh-my-pi/pi-utils";
+import { $which, hasFsCode, isEisdir, isEnoent, isEnotdir, Snowflake } from "@oh-my-pi/pi-utils";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
 	parseFileDiffs,
@@ -376,7 +376,8 @@ async function writeTempPatch(content: string): Promise<string> {
 type EntryType = "directory" | "file";
 
 function shouldRetry(err: unknown, n: number) {
-	if (isEnoent(err) || hasFsCode(err, "ENFILE") || hasFsCode(err, "EMFILE")) return false;
+	if (isEnoent(err) || isEisdir(err) || isEnotdir(err) || hasFsCode(err, "ENFILE") || hasFsCode(err, "EMFILE"))
+		return false;
 	if (hasFsCode(err, "EINTR")) return n < EINTR_MAX_RETRIES;
 	if (n > EINTR_MAX_RETRIES) throw err;
 	throw err;
@@ -1709,6 +1710,19 @@ export const repo = {
 		const repository = resolveRepositorySync(cwd);
 		if (!repository) return null;
 		return primaryRootFromRepositorySync(repository);
+	},
+
+	/**
+	 * Linked-worktree metadata for `cwd`, or `null` when `cwd` is the primary
+	 * checkout (or outside a repository). `root` is the worktree's own checkout
+	 * root; `primaryRoot` is the shared main checkout that names the project.
+	 * Resolves purely via on-disk `.git`/`commondir` walking — no subprocess —
+	 * so the status line may call it on every render.
+	 */
+	linkedWorktreeSync(cwd: string): { root: string; primaryRoot: string } | null {
+		const repository = resolveRepositorySync(cwd);
+		if (!repository || !isLinkedWorktree(repository)) return null;
+		return { root: repository.repoRoot, primaryRoot: primaryRootFromRepositorySync(repository) };
 	},
 
 	/** Full GitRepository metadata (sync). */

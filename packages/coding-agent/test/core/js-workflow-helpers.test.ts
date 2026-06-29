@@ -6,6 +6,7 @@ import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-
 import { executeJs, type JsResult } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import * as z from "zod/v4";
 
 // JS eval cold-starts a Bun worker; under --isolate + high CI concurrency that startup
@@ -158,7 +159,7 @@ describe("executeJs workflow helpers", () => {
 		const seen: unknown[] = [];
 		const captureSchema = z
 			.object({
-				_i: z.string().optional(),
+				[INTENT_FIELD]: z.string().optional(),
 				skip: z.number().optional(),
 				intentional: z.null().optional(),
 			})
@@ -185,7 +186,7 @@ describe("executeJs workflow helpers", () => {
 		});
 
 		expect(result.exitCode).toBe(0);
-		expect(JSON.parse(result.output.trim())).toEqual({ _i: "js prelude", intentional: null });
-		expect(seen).toEqual([{ _i: "js prelude", intentional: null }]);
+		expect(JSON.parse(result.output.trim())).toEqual({ [INTENT_FIELD]: "js prelude", intentional: null });
+		expect(seen).toEqual([{ [INTENT_FIELD]: "js prelude", intentional: null }]);
 	});
 });

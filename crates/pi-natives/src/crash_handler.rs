@@ -8,8 +8,11 @@
 //! Without these hooks, Bun receives only the bare
 //! `memory allocation of N bytes failed` line and aborts with no stack —
 //! see issue #2211 ("Windows crash: Rust allocator failure after tasklist.exe
-//! popup"). The hooks do not change the abort behavior (the cdylib release
-//! profile uses `panic = "abort"`); they make the next crash diagnosable.
+//! popup"). The cdylib builds with `panic = "unwind"`, so a panic in vendored
+//! uutils code unwinds to the shell boundary and is recovered as a failed
+//! command; such recoverable panics are logged to disk only, while fatal
+//! crashes (allocation failure, or panics with no active uutils scope) still
+//! get the stderr dump + process exit. Either way the record stays diagnosable.
 //!
 //! Notes:
 //! - Backtraces are captured via [`Backtrace::force_capture`], so they work
@@ -44,6 +47,7 @@ const DEFAULT_CONFIG_DIR: &str = ".omp";
 
 /// App name used as the XDG-root subdirectory (`$XDG_STATE_HOME/omp/`),
 /// matching `APP_NAME` in `packages/utils/src/dirs.ts`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const APP_NAME: &str = "omp";
 
 static INSTALL: Once = Once::new();
@@ -55,8 +59,16 @@ pub fn install() {
 		let prev_panic = std::panic::take_hook();
 		std::panic::set_hook(Box::new(move |info| {
 			let report = format_panic_report(info);
-			persist(&report, CrashKind::Panic);
-			prev_panic(info);
+			// A panic raised while a uutils scope is active is caught at the
+			// uutils boundary (pi-shell `run_uutil`): the command fails with a
+			// non-zero exit instead of crashing the host. Record it to the log
+			// for diagnosis, but keep the recovered panic out of the user-facing
+			// stderr crash dump and skip the default abort hook.
+			let recoverable = pi_uutils_ctx::is_active();
+			persist(&report, CrashKind::Panic, !recoverable);
+			if !recoverable {
+				prev_panic(info);
+			}
 		}));
 
 		std::alloc::set_alloc_error_hook(|layout| {
@@ -69,7 +81,7 @@ pub fn install() {
 				process::abort();
 			}
 			let report = format_alloc_report(layout);
-			persist(&report, CrashKind::Alloc);
+			persist(&report, CrashKind::Alloc, true);
 			process::abort();
 		});
 	});
@@ -156,10 +168,13 @@ fn panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
 	}
 }
 
-fn persist(report: &str, kind: CrashKind) {
-	// Echo to stderr unconditionally so the user still sees something even
-	// when the file write fails (read-only home, missing $HOME, etc.).
-	let _ = writeln!(std::io::stderr(), "{report}");
+fn persist(report: &str, kind: CrashKind, echo_stderr: bool) {
+	// Echo to stderr so the user sees something even when the file write fails
+	// (read-only home, missing $HOME, …). Suppressed for recoverable uutils
+	// panics, which surface as a failed command instead of a crash.
+	if echo_stderr {
+		let _ = writeln!(std::io::stderr(), "{report}");
+	}
 
 	let Some(path) = crash_log_path(kind) else {
 		return;
@@ -171,7 +186,10 @@ fn persist(report: &str, kind: CrashKind) {
 		let _ = f.write_all(report.as_bytes());
 		let _ = f.flush();
 		let _ = f.sync_data();
-		let _ = writeln!(std::io::stderr(), "pi-natives crash report written to {}", path.display());
+		if echo_stderr {
+			let _ =
+				writeln!(std::io::stderr(), "pi-natives crash report written to {}", path.display());
+		}
 	}
 }
 
@@ -234,6 +252,7 @@ fn xdg_state_logs_from_env(_home: &Path, _config_dir_override: Option<&OsStr>) -
 /// Pure XDG-eligibility computation extracted for unit testing — no env
 /// reads, no fs reads. `omp_dir_exists` decides whether the candidate
 /// `<xdg_state_home>/omp` actually lives on disk.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn xdg_state_logs(
 	xdg_state_home: Option<&OsStr>,
 	agent_dir_override: Option<&OsStr>,
@@ -256,7 +275,7 @@ fn xdg_state_logs(
 	}
 	Some(omp_dir.join("logs"))
 }
-
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn default_agent_dir(home: &Path, config_dir_override: Option<&OsStr>) -> PathBuf {
 	let config_dir = config_dir_override
 		.filter(|s| !s.is_empty())
@@ -384,6 +403,7 @@ mod tests {
 		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.omp-dev/logs"));
 	}
 
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn xdg_state_logs_ignores_empty_agent_dir_override() {
 		// An empty PI_CODING_AGENT_DIR is "unset", not a divergent override; it
@@ -414,6 +434,7 @@ mod tests {
 		assert_eq!(dir, PathBuf::from("/xdg/state/omp/logs"));
 	}
 
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn xdg_state_logs_resolves_when_dir_exists_and_no_agent_override() {
 		let dir = xdg_state_logs(
@@ -425,6 +446,7 @@ mod tests {
 		assert_eq!(dir, Some(PathBuf::from("/xdg/state/omp/logs")));
 	}
 
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn xdg_state_logs_skipped_when_omp_dir_missing() {
 		let dir = xdg_state_logs(
@@ -436,6 +458,7 @@ mod tests {
 		assert_eq!(dir, None);
 	}
 
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn xdg_state_logs_skipped_when_xdg_state_home_unset_or_empty() {
 		let default_agent = Path::new("/tmp/pi-natives-test-home/.omp/agent");
@@ -443,6 +466,7 @@ mod tests {
 		assert_eq!(xdg_state_logs(Some(OsStr::new("")), None, default_agent, |_p| true), None);
 	}
 
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn xdg_state_logs_skipped_when_agent_dir_overridden() {
 		// `PI_CODING_AGENT_DIR` pointing elsewhere mirrors the JS `isDefault === false`
@@ -456,6 +480,7 @@ mod tests {
 		assert_eq!(dir, None);
 	}
 
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn xdg_state_logs_honored_when_agent_override_matches_default() {
 		let default_agent = std::path::absolute(Path::new("./.omp/agent")).unwrap();
@@ -468,12 +493,13 @@ mod tests {
 		assert_eq!(dir, Some(PathBuf::from("/xdg/state/omp/logs")));
 	}
 
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn default_agent_dir_uses_dot_omp_by_default() {
 		let dir = default_agent_dir(Path::new("/tmp/pi-natives-test-home"), None);
 		assert_eq!(dir, PathBuf::from("/tmp/pi-natives-test-home/.omp/agent"));
 	}
-
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	#[test]
 	fn default_agent_dir_respects_pi_config_dir() {
 		let dir =

@@ -9,6 +9,7 @@ import { disableProvider, enableProvider } from "@oh-my-pi/pi-coding-agent/capab
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 const PLUGIN_AGENT_MD = [
 	"---",
@@ -58,7 +59,7 @@ describe("discoverAgents — claude-plugins disabled provider", () => {
 	});
 
 	afterEach(() => {
-		fs.rmSync(tempHome, { recursive: true, force: true });
+		removeSyncWithRetries(tempHome);
 		// Restore global state so other tests in the suite are not affected.
 		enableProvider("claude-plugins");
 		clearFsCache();

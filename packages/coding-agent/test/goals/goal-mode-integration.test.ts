@@ -35,13 +35,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
-import {
-	createTools,
-	type TodoPhase,
-	type Tool,
-	type ToolSession,
-	USER_TODO_EDIT_CUSTOM_TYPE,
-} from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, type Tool, type ToolSession, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
@@ -819,6 +814,39 @@ describe("InteractiveMode goal mode integration", () => {
 		streaming = false;
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "cleanup" }));
 		await waiter.inputPromise;
+	});
+
+	it("includes escaped live todo state in hidden goal context during continuations", async () => {
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const phases: TodoPhase[] = [
+			{
+				name: "Planning </todo_context> & prep",
+				tasks: [
+					{ content: "Identify gaps", status: "completed" },
+					{ content: "Choose <next> & slice </todo_context>", status: "in_progress" },
+				],
+			},
+			{
+				name: "Verification",
+				tasks: [{ content: "Run focused checks", status: "pending" }],
+			},
+		];
+		harness.session.setTodoPhases(phases);
+		const sendCustomMessage = vi.spyOn(harness.session, "sendCustomMessage").mockResolvedValue(false);
+
+		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
+
+		const message = sendCustomMessage.mock.calls[0]?.[0];
+		const content = typeof message?.content === "string" ? message.content : "";
+		expect(message?.customType).toBe("goal-mode-context");
+		expect(content).toContain("<todo_context>");
+		expect(content).toContain("Overall: 1/3 done, 2 open.");
+		expect(content).toContain("- Planning &lt;/todo_context&gt; &amp; prep");
+		expect(content).toContain("- [completed] Identify gaps");
+		expect(content).toContain("- [in_progress] Choose &lt;next&gt; &amp; slice &lt;/todo_context&gt;");
+		expect(content).toContain("- [pending] Run focused checks");
+		expect(content).toContain("call the `todo` tool first");
+		expect(content.match(/<\/todo_context>/g)).toHaveLength(1);
 	});
 
 	it("drops a goal continuation tick while the agent is streaming", async () => {
@@ -1885,6 +1913,7 @@ describe("InteractiveMode goal mode integration", () => {
 	it("refreshes compaction preserveData from the latest goal state after target transitions", async () => {
 		harness.authStorage.setRuntimeApiKey("anthropic", "test-key");
 		harness.settings.set("compaction.keepRecentTokens", 1);
+		harness.settings.set("compaction.strategy", "context-full");
 		await harness.mode.handleGoalModeCommand("Improve release reliability");
 		const goalTool = await activeGoalTool(harness);
 		await goalTool.execute("target-source-link", {
@@ -1997,6 +2026,7 @@ describe("InteractiveMode goal mode integration", () => {
 	it("exercises a Gateway-like release flow through checkpoint, compaction, verifier repair, and final completion", async () => {
 		harness.authStorage.setRuntimeApiKey("anthropic", "test-key");
 		harness.settings.set("compaction.keepRecentTokens", 1);
+		harness.settings.set("compaction.strategy", "context-full");
 		const compactSpy = installCompactionMock();
 		const goalTool = new GoalTool(harness.toolSession);
 
@@ -2266,15 +2296,16 @@ describe("InteractiveMode goal mode integration", () => {
 		if (!checkpointId) throw new Error("expected checkpoint id");
 		appendCompactableHistory(harness);
 		const handoffSpy = vi
-			.spyOn(compactionModule, "generateHandoff")
+			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue from handoff");
 
 		const result = await harness.session.handoff();
 		expect(result?.document).toBe("## Goal\nContinue from handoff");
 		const handoffCall = handoffSpy.mock.calls[0];
 		if (!handoffCall) throw new Error("expected handoff call");
-		expect(handoffCall[3].customInstructions).toContain("<goal_mode_compaction_context>");
-		expect(handoffCall[3].customInstructions).toContain("awaiting-checkpoint-resolution");
+		const handoffContextText = JSON.stringify(handoffCall[0]);
+		expect(handoffContextText).toContain("<goal_mode_compaction_context>");
+		expect(handoffContextText).toContain("awaiting-checkpoint-resolution");
 		expect(harness.session.getGoalModeState()?.goal.pendingCheckpointId).toBe(checkpointId);
 		expect(harness.session.getActiveToolNames()).toContain("goal");
 

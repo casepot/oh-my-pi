@@ -22,7 +22,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `input` | `string` | Yes | One or more file sections. Anchored sections must start with `[PATH#TAG]`; `TAG` is the four-hex snapshot tag emitted by the latest `read`/`search`/`write`/successful `edit`. Optional `*** Begin Patch` / `*** End Patch` envelope is ignored if present. |
+| `input` | `string` | Yes | One or more file sections. Anchored sections must start with `[PATH#TAG]`; `TAG` is the four-hex snapshot tag emitted by the latest `read`/`grep`/`write`/successful `edit`. Optional `*** Begin Patch` / `*** End Patch` envelope is ignored if present. |
 
 Patch language inside `input`:
 
@@ -34,7 +34,8 @@ Patch language inside `input`:
   - `DEL.BLK N` — delete the whole tree-sitter block beginning on line N (resolved like `SWAP.BLK N`, with the same decorator/comment caveat). No body. On success the result echoes the matched span (`DEL.BLK N → resolved lines A-B`). Same resolution failure modes and `DEL N.=M` fallback.
   - `INS.PRE N:` — insert body rows immediately before line N.
   - `INS.POST N:` — insert body rows immediately after line N.
-  - `INS.BLK.POST N:` — insert body rows after the last line of the tree-sitter block beginning on line N. Point N at the line that opens the construct, never its closing delimiter / last visible line; if you can see the last line already, use plain `INS.POST M:`. Same resolution failure modes and `INS.POST M:` fallback.
+  - `INS.BLK.POST N:` — insert body rows after the last line of the tree-sitter block beginning on line N. Point N at the line that opens the construct, never its closing delimiter / last visible line; if you can see the last line already, use plain `INS.POST M:`. An anchor that can't resolve to a block is lowered to plain `INS.POST N:` with a warning instead of failing the patch.
+  - **Markdown sections**: tree-sitter-md nests a heading and its body (including deeper subsections) in one `section` node, so all three block ops anchored on a `#`/`##`/`###` heading line resolve the whole section — heading through every nested deeper heading, up to the next same-or-higher heading. `DEL.BLK` drops the section, `SWAP.BLK` rewrites it, `INS.BLK.POST` lands after it. A heading with no body resolves to a single line and falls back to the plain op like any other single-line block.
   - `INS.HEAD:` — insert body rows at the start of the file.
   - `INS.TAIL:` — insert body rows at the end of the file.
 - **Body rows**:
@@ -44,7 +45,7 @@ Patch language inside `input`:
   - There is no repeat row kind. To keep a line, leave it out of every range; split edits into multiple hunks when needed.
   - `-` rows are invalid. Literal text beginning with `-` or `+` must be written as `+-text` / `++text`.
 
-Anchors come from `read`/`search` output. `read` emits a `[PATH#TAG]` header from the session snapshot store and lines as `LINE:TEXT`; copy the header into the edit section and copy only the line number into hunk headers.
+Anchors come from `read`/`grep` output. `read` emits a `[PATH#TAG]` header from the session snapshot store and lines as `LINE:TEXT`; copy the header into the edit section and copy only the line number into hunk headers.
 
 ### Tolerated input shapes (lenient parsing)
 
@@ -53,7 +54,7 @@ The canonical grammar is strict, but the hand parser accepts a few non-dangerous
 - `SWAP N:` — accepted as `SWAP N.=N:`.
 - `DEL N` — accepted as single-line delete.
 - Missing trailing colon on `SWAP` or `INS` — accepted.
-- `SWAP N-M:`, `SWAP N…M:`, `SWAP N M:`, and legacy `SWAP N.=M:` — accepted as `SWAP N.=M:`.
+- `SWAP N-M:`, `SWAP N…M:`, `SWAP N M:`, and legacy `SWAP N..M:` — accepted as `SWAP N.=M:`.
 - Bare body rows with no `+` prefix are auto-prepended with `+` and a `BARE_BODY_AUTO_PIPED_WARNING` is appended.
 - `*** Begin Patch` / `*** End Patch` envelopes are silently consumed. `*** Abort` terminates parsing silently — ops parsed before the marker still apply, no warning surfaced.
 - Some malformed bracketed headers are recovered after stripping apply-patch path noise such as `Update File:` / `Add File:` and extra `***`, but the recovered header still needs a valid four-hex tag for the patcher to apply it.
@@ -61,9 +62,9 @@ The canonical grammar is strict, but the hand parser accepts a few non-dangerous
 - `@@`-bracketed hunk headers are rejected with guidance to write a verb header.
 - Bare `N` and bare `N M` / `N.=M` headers are rejected with guidance to write `SWAP` or `DEL`.
 - `DEL N.=M:` and any body rows under `DEL` / `DEL.BLK` are rejected.
-- Empty `SWAP` / `INS` / `SWAP.BLK` hunks are rejected.
+- Empty `INS` / `SWAP.BLK` hunks are rejected; an empty `SWAP N.=M:` (no body rows) is treated as `DEL N.=M`.
 - `-` body rows are rejected with `MINUS_ROW_REJECTED`.
-- `SWAP.BLK N:` / `DEL.BLK N` / `INS.BLK.POST N:` require a wired tree-sitter resolver; `SWAP.BLK` and `INS.BLK.POST` additionally need at least one `+TEXT` body row, while `DEL.BLK` takes none. An unresolvable block (unsupported language, blank/closing-delimiter line, no node beginning on N, or a syntax error in the resolved block) is rejected on the apply/final-preview path; the streaming preview silently drops it instead. Exception: `INS.BLK.POST N:` anchored on a pure closing-delimiter line is lowered to plain `INS.POST N:` with a warning — line N is the end of a block, and inserting after that end is exactly what the plain form does.
+- `SWAP.BLK N:` / `DEL.BLK N` / `INS.BLK.POST N:` require a wired tree-sitter resolver; `SWAP.BLK` and `INS.BLK.POST` additionally need at least one `+TEXT` body row, while `DEL.BLK` takes none. An unresolvable block (unsupported language, blank/closing-delimiter line, no node beginning on N, or a syntax error in the resolved block) rejects a `SWAP.BLK` / `DEL.BLK` on the apply/final-preview path (the streaming preview silently drops it instead). `INS.BLK.POST N:` is never rejected this way — it is lowered to plain `INS.POST N:` with a warning: a closing-delimiter-anchor warning when line N is a pure closer (inserting after that end is exactly what the plain form does), a generic unresolved-anchor warning otherwise.
 
 ## Outputs
 - Single-shot tool result; hashline mode does not use a `resolve` preview/apply handshake.
@@ -160,21 +161,20 @@ DEL 20
 - Missing section header:
   - `input must begin with "[PATH#HASH]" on the first non-blank line for anchored edits; got: ...`
 - Missing tag for any section:
-  - `Missing hashline snapshot tag for edit to <path>; use \`[<path>#tag]\` from your latest read/search output. To create a new file, use the write tool.`
+  - `Missing hashline snapshot tag for <path>; use \`[<path>#tag]\` from your latest read/search output. To create a new file, use the write tool.`
 - Stray payload line:
   - `line N: payload line has no preceding hunk header. Use \`SWAP N.=M:\`, \`DEL N.=M\`, or \`INS.PRE|POST|HEAD|TAIL:\` above the body. Got "...".`
 - Minus row:
-  - ``line N: `-` rows are not valid; hashline ranges already name the lines being changed. To insert a literal line starting with `-`, write `+-…`.``
+  - ``line N: `-` rows are not valid; the range already names the lines being changed. For a literal `-` line, write `+-…`.``
 - Empty body-bearing hunk:
-  - `line N: \`SWAP N.=M:\` needs at least one \`+TEXT\` body row. To delete lines, use \`DEL N.=M\`.`
   - `line N: \`INS\` needs at least one \`+TEXT\` body row.`
   - `line N: \`SWAP.BLK N:\` needs at least one \`+TEXT\` body row. To delete a block, use \`DEL.BLK N\`.`
-- Unresolvable block anchor (apply / final-preview path only):
-  - `line N: \`SWAP.BLK X:\` could not resolve a syntactic block beginning on line X. The language may be unsupported, the line may be blank or a closing delimiter, or the block may not parse. Use \`SWAP X.=M:\` with the block's explicit end line instead.` — followed by a blank line and numbered `*`-marked context rows around line X (same shape as the mismatch preview).
-  - `line N: \`INS.BLK.POST X:\` could not resolve a syntactic block beginning on line X. The language may be unsupported, the line may be blank or a closing delimiter, or the block may not parse. Use \`INS.POST M:\` with the block's explicit last line instead.` — same context preview.
+- Unresolvable block anchor — `SWAP.BLK` / `DEL.BLK` only (apply / final-preview path; the streaming preview silently drops the op instead):
+  - `line N: \`SWAP.BLK X:\` could not resolve a syntactic block beginning on line X (unsupported language, blank/closer line, or parse error). Use \`SWAP X.=M:\` with explicit lines.` — followed by a blank line and numbered `*`-marked context rows around line X (same shape as the mismatch preview). `DEL.BLK X` produces the same message with a `DEL X.=M` fallback.
+  - `INS.BLK.POST X:` never reaches this error — an unresolvable anchor is lowered to plain `INS.POST X:` with a warning (see Tolerated input shapes).
 - Delete with body:
   - `line N: \`DEL N.=M\` does not take body rows. Remove the body, or use \`SWAP N.=M:\`.`
-  - `line N: \`DEL.BLK N\` does not take body rows. Remove the body, or use \`SWAP.BLK N:\` to replace the block.`
+  - `line N: \`DEL.BLK N\` does not take body rows. Remove the body, or use \`SWAP.BLK N:\`.`
 - Range out of order:
   - `line N: range A.=B ends before it starts.`
 - Overlapping hunks on the same anchor:
