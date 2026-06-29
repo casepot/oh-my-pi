@@ -559,13 +559,23 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				throw new Error(output.errorMessage ?? "An unknown error occurred");
 			}
 
-			output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, nativeOutputItems);
+			const responseIncomplete = output.stopDetails?.category === "response.incomplete";
+			if (!responseIncomplete) {
+				output.providerPayload = createOpenAIResponsesHistoryPayload(
+					model.provider,
+					filterOpenAIResponsesHistoryItemsForPersistence(nativeOutputItems),
+				);
+			}
 			if (providerSessionState) providerSessionState.nativeHistoryReplayWarmed = true;
 			if (chainState) {
-				chainState.lastParams = structuredCloneJSON(stripTrailingScaffolding(params, trailingScaffoldingItems));
-				if (output.responseId) {
+				if (responseIncomplete) {
+					resetOpenAIResponsesChainState(chainState);
+				} else {
+					chainState.lastParams = structuredCloneJSON(stripTrailingScaffolding(params, trailingScaffoldingItems));
+				}
+				if (!responseIncomplete && output.responseId) {
 					chainState.lastResponseId = output.responseId;
-					chainState.lastResponseItems = sanitizeOpenAIResponsesHistoryItemsForReplay(
+					chainState.lastResponseItems = sanitizeOpenAIResponsesHistoryItemsForReplayPayload(
 						structuredCloneJSON(nativeOutputItems),
 					);
 					chainState.canAppend = true;
@@ -768,6 +778,30 @@ export function buildParams(
 	return { params, trailingScaffoldingItems };
 }
 
+function isIncompleteOpenAIResponsesHistoryItem(item: Record<string, unknown>): boolean {
+	return item.status === "incomplete";
+}
+
+function filterOpenAIResponsesHistoryItemsForPersistence(
+	items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	return items.filter(item => !isIncompleteOpenAIResponsesHistoryItem(item));
+}
+
+function sanitizeOpenAIResponsesHistoryItemsForReplayPayload(items: Array<Record<string, unknown>>): ResponseInput {
+	return sanitizeOpenAIResponsesHistoryItemsForReplay(filterOpenAIResponsesHistoryItemsForPersistence(items));
+}
+
+function sanitizeOpenAIResponsesAssistantMessageForReplay(message: AssistantMessage): AssistantMessage {
+	if (message.stopReason !== "length" || !message.content.some(block => block.type === "toolCall")) {
+		return message;
+	}
+	return {
+		...message,
+		content: message.content.filter(block => block.type !== "toolCall"),
+	};
+}
+
 function convertConversationMessages(
 	model: Model<"openai-responses">,
 	context: Context,
@@ -797,11 +831,16 @@ function convertConversationMessages(
 				}) ??
 					false);
 			if (historyItems && shouldReplayPayloadItems) {
-				messages.push(...sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems)));
-				knownCallIds = collectKnownCallIds(messages);
-				for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
-				msgIndex++;
-				continue;
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesHistoryItemsForReplayPayload(
+					filterReasoning(historyItems),
+				);
+				if (sanitizedHistoryItems.length > 0) {
+					messages.push(...sanitizedHistoryItems);
+					knownCallIds = collectKnownCallIds(messages);
+					for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
+					msgIndex++;
+					continue;
+				}
 			}
 			const content = convertResponsesInputContent(msg.content, model.input.includes("image"));
 			if (!content) continue;
@@ -817,20 +856,24 @@ function convertConversationMessages(
 					: undefined;
 			const historyItems = providerPayload?.items;
 			if (historyItems) {
-				const sanitizedHistoryItems = sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems));
-				if (providerPayload?.dt) {
-					messages.push(...sanitizedHistoryItems);
-				} else {
-					messages.splice(0, messages.length, ...sanitizedHistoryItems);
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesHistoryItemsForReplayPayload(
+					filterReasoning(historyItems),
+				);
+				if (sanitizedHistoryItems.length > 0) {
+					if (providerPayload?.dt) {
+						messages.push(...sanitizedHistoryItems);
+					} else {
+						messages.splice(0, messages.length, ...sanitizedHistoryItems);
+					}
+					knownCallIds = collectKnownCallIds(messages);
+					for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
+					msgIndex++;
+					continue;
 				}
-				knownCallIds = collectKnownCallIds(messages);
-				for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
-				msgIndex++;
-				continue;
 			}
 
 			const outputItems = convertResponsesAssistantMessage(
-				assistantMsg,
+				sanitizeOpenAIResponsesAssistantMessageForReplay(assistantMsg),
 				model,
 				msgIndex,
 				knownCallIds,

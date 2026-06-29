@@ -12,7 +12,9 @@
 
 ### Fixed
 
+- Fixed OpenAI Responses and Codex Responses incomplete outputs to preserve provider incomplete details, avoid persisting/replaying incomplete native history items, and reset Codex turn state after incomplete responses.
 - Fixed broker-backed auth reloads leaving session stickiness and usage-limit backoff attached to stale credential indices after login/logout or snapshot topology changes, allowing newly available sibling Codex accounts to be selected immediately.
+- Fixed Codex multi-account rotation and usage displays treating stale usage reports whose reset time had already elapsed or whose status contradicted remaining numeric quota as still exhausted, and made definitive preflight OAuth refresh failures disable the bad credential before stale access tokens are selected. These could leave a recovered sibling account blocked or repeatedly fail on another account's usage-limit/invalid-token state.
 - Fixed Codex SSE pre-response timeout handling so the first-event watchdog is cleared after response headers arrive instead of aborting long active response bodies later with a generic operation timeout.
 
 ## [16.0.2] - 2026-06-16

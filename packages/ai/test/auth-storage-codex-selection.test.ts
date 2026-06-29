@@ -267,6 +267,40 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(apiKey).toBe("api-acct-healthy");
 	});
 
+	test("does not let stale elapsed exhaustion block sibling rotation", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-current", "current@example.com") },
+			{ type: "oauth", ...createCredential("acct-stale", "stale@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-current",
+			createCodexUsageReport({
+				accountId: "acct-current",
+				primary: { usedFraction: 0.1, resetInMs: 20 * 60 * 1000 },
+				secondary: { usedFraction: 0.1, resetInMs: 3 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-stale",
+			createCodexUsageReport({
+				accountId: "acct-stale",
+				primary: { usedFraction: 1, resetInMs: -60 * 1000 },
+				secondary: { usedFraction: 0.1, resetInMs: 3 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+
+		const apiKey = await authStorage.getApiKey("openai-codex", "session-stale-elapsed");
+		expect(apiKey).toBe("api-acct-current");
+
+		const outcome = await authStorage.markUsageLimitReached("openai-codex", "session-stale-elapsed", {
+			retryAfterMs: 30 * 60 * 1000,
+		});
+		expect(outcome).toEqual({ switched: true });
+	});
+
 	test("clears index-based usage backoff when broker reload changes credential topology", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
@@ -301,6 +335,36 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "session-after-reload");
 		expectWeightedPreference(counts, "api-acct-new", "api-acct-fallback");
+	});
+
+	test("trusts remaining amount over contradictory exhausted status", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-current", "current@example.com") },
+			{ type: "oauth", ...createCredential("acct-contradictory", "contradictory@example.com") },
+		]);
+
+		usageByAccount.set(
+			"acct-current",
+			createCodexUsageReport({
+				accountId: "acct-current",
+				primary: { usedFraction: 1, resetInMs: 20 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 3 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+		const contradictoryReport = createCodexUsageReport({
+			accountId: "acct-contradictory",
+			primary: { usedFraction: 0.1, resetInMs: 20 * 60 * 1000 },
+			secondary: { usedFraction: 0.39, resetInMs: 3 * 24 * 60 * 60 * 1000 },
+		});
+		for (const limit of contradictoryReport.limits) {
+			limit.status = "exhausted";
+		}
+		usageByAccount.set("acct-contradictory", contradictoryReport);
+
+		const apiKey = await authStorage.getApiKey("openai-codex", "session-contradictory");
+		expect(apiKey).toBe("api-acct-contradictory");
 	});
 
 	test("falls back to earliest-unblocking account when all exhausted", async () => {
@@ -585,6 +649,53 @@ describe("AuthStorage codex oauth ranking", () => {
 		// refreshes never overlap (peak in-flight stays 1). A wall-clock bound here was
 		// flaky on loaded CI runners, so maxConcurrent is the authoritative signal.
 		expect(maxConcurrent).toBe(3);
+	});
+
+	test("disables definitively failed preflight refreshes before selecting a stale token", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async (_provider, credential) => {
+			if (credential.accountId === "acct-invalid") {
+				throw new Error("OpenAI Codex token refresh failed: 401 [object Object]");
+			}
+			return {
+				...credential,
+				access: `refreshed-${credential.accountId}`,
+				expires: Date.now() + HOUR_MS,
+			};
+		});
+
+		const expiredAt = Date.now() - HOUR_MS;
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-invalid", "invalid@example.com"), expires: expiredAt },
+			{ type: "oauth", ...createCredential("acct-valid", "valid@example.com"), expires: expiredAt },
+		]);
+
+		usageByAccount.set(
+			"acct-invalid",
+			createCodexUsageReport({
+				accountId: "acct-invalid",
+				primary: { usedFraction: 0.1, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.1, resetInMs: 5 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-valid",
+			createCodexUsageReport({
+				accountId: "acct-valid",
+				primary: { usedFraction: 0.2, resetInMs: 30 * 60 * 1000 },
+				secondary: { usedFraction: 0.2, resetInMs: 5 * 24 * 60 * 60 * 1000 },
+			}),
+		);
+
+		const apiKey = await authStorage.getApiKey("openai-codex");
+
+		expect(apiKey).toBe("api-acct-valid");
+		expect(
+			store
+				?.listAuthCredentials("openai-codex")
+				.map(row => (row.credential.type === "oauth" ? row.credential.accountId : undefined)),
+		).toEqual(["acct-valid"]);
 	});
 });
 

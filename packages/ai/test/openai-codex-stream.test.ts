@@ -2124,6 +2124,93 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
+	it("clears Codex turn state and drops incomplete function calls after response.incomplete", async () => {
+		const token = createCodexTestToken();
+		const incompleteSse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", id: "fc_inc", call_id: "call_inc", name: "write", arguments: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_inc", output_index: 0, delta: '{"path":"/tmp/huge.ts","content":"partial' })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", id: "fc_inc", call_id: "call_inc", name: "write", status: "incomplete", arguments: '{"path":"/tmp/huge.ts","content":"partial' } })}`,
+			`data: ${JSON.stringify({ type: "response.incomplete", response: { id: "resp_inc", status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, usage: { input_tokens: 5, output_tokens: 9, total_tokens: 14, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const completedSse = createCompletedCodexSse("Recovered");
+		const followUpBodies: Array<{ input?: unknown[] }> = [];
+		let fetchCount = 0;
+		const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+			const headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+			const bodyText = typeof init?.body === "string" ? init.body : "{}";
+			const body = JSON.parse(bodyText) as { input?: unknown[] };
+			fetchCount++;
+			if (fetchCount === 1) {
+				expect(headers.has("x-codex-turn-state")).toBe(false);
+				return new Response(incompleteSse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream", "x-codex-turn-state": "turn-state-after-incomplete" },
+				});
+			}
+			expect(headers.has("x-codex-turn-state")).toBe(false);
+			followUpBodies.push(body);
+			return new Response(completedSse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const first = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			fetch: fetchMock as FetchImpl,
+			apiKey: token,
+			sessionId: "incomplete-turn-state-session",
+			providerSessionState,
+		}).result();
+
+		expect(first.stopReason).toBe("length");
+		expect(first.stopDetails).toMatchObject({
+			type: "max_output_tokens",
+			category: "response.incomplete",
+			status: "incomplete",
+			visibleTextChars: 0,
+			outputTokens: 9,
+			turnStateReset: true,
+		});
+		const providerPayload = first.providerPayload as { items?: Array<Record<string, unknown>> } | undefined;
+		expect((providerPayload?.items ?? []).some(item => item.type === "function_call")).toBe(false);
+
+		await streamOpenAICodexResponses(
+			model,
+			{
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [
+					...createCodexTestContext().messages,
+					first,
+					{
+						role: "toolResult",
+						toolCallId: "call_inc|fc_inc",
+						toolName: "write",
+						content: [{ type: "text", text: "Tool call was not executed because stop_reason: length." }],
+						isError: true,
+						timestamp: Date.now(),
+					},
+				],
+			},
+			{
+				fetch: fetchMock as FetchImpl,
+				apiKey: token,
+				sessionId: "incomplete-turn-state-session",
+				providerSessionState,
+			},
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const followUpInput = followUpBodies[0]?.input ?? [];
+		expect(
+			followUpInput.some(item => {
+				const record = item as Record<string, unknown>;
+				return (
+					(record.type === "function_call" || record.type === "function_call_output") &&
+					record.call_id === "call_inc"
+				);
+			}),
+		).toBe(false);
+	});
+
 	it("includes service_tier in websocket payloads when requested", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());

@@ -42,6 +42,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
+	sanitizeOpenAIResponsesHistoryItemsForReplay,
 } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
@@ -1706,6 +1707,7 @@ function handleResponseCompleted(
 					output_tokens_details?: { reasoning_tokens?: number };
 				};
 				status?: string;
+				incomplete_details?: { reason?: string | null } | null;
 				service_tier?: ServiceTier | "default";
 				end_turn?: boolean;
 			};
@@ -1717,9 +1719,28 @@ function handleResponseCompleted(
 		output.responseId = response.id;
 	}
 
+	const responseStatus = response?.status as ResponseStatus | undefined;
+	const responseIncompleteReason =
+		typeof response?.incomplete_details?.reason === "string" && response.incomplete_details.reason.length > 0
+			? response.incomplete_details.reason
+			: undefined;
+	const responseIncomplete = responseStatus === "incomplete";
 	const state = runtime.websocketState;
 	if (state) {
-		if (runtime.transport !== "websocket") {
+		if (responseIncomplete) {
+			resetCodexIncompleteResponseState(state);
+			logCodexDebug("codex incomplete response reset turn state", {
+				transport: runtime.transport,
+				reason: responseIncompleteReason ?? null,
+				nativeOutputItems: runtime.nativeOutputItems.length,
+				contentBlocks: output.content.length,
+				toolCallBlocks: output.content.filter(block => block.type === "toolCall").length,
+				visibleTextChars: output.content.reduce(
+					(total, block) => total + (block.type === "text" ? block.text.length : 0),
+					0,
+				),
+			});
+		} else if (runtime.transport !== "websocket") {
 			// SSE turns never chain (previous_response_id is websocket-only on this
 			// endpoint); a completed SSE turn also invalidates any websocket append
 			// baseline, which no longer matches the transcript.
@@ -1728,7 +1749,9 @@ function handleResponseCompleted(
 			state.lastRequest = structuredCloneJSON(runtime.requestBodyForState);
 			if (typeof response?.id === "string" && response.id.length > 0) {
 				state.lastResponseId = response.id;
-				state.lastResponseItems = stripInputItemIds(structuredCloneJSON(runtime.nativeOutputItems));
+				state.lastResponseItems = stripInputItemIds(
+					structuredCloneJSON(filterCodexHistoryItemsForPersistence(runtime.nativeOutputItems)),
+				);
 				state.canAppend = rawEvent.type === "response.done" || rawEvent.type === "response.completed";
 			} else {
 				// Without a response id the append baseline cannot be trusted.
@@ -1757,7 +1780,25 @@ function handleResponseCompleted(
 
 	calculateCost(model, output.usage);
 	applyCodexServiceTierPricing(model, output.usage, response?.service_tier, runtime.requestBodyForState.service_tier);
-	output.stopReason = mapOpenAIResponsesStopReason(response?.status as ResponseStatus | undefined);
+	output.stopReason = mapOpenAIResponsesStopReason(responseStatus);
+	if (responseIncomplete) {
+		const visibleTextChars = output.content.reduce(
+			(total, block) => total + (block.type === "text" ? block.text.length : 0),
+			0,
+		);
+		output.stopDetails = {
+			type: responseIncompleteReason ?? "response_incomplete",
+			category: "response.incomplete",
+			explanation: responseIncompleteReason
+				? `Codex response incomplete: ${responseIncompleteReason}. Codex controls per-response output caps; OMP does not send max_output_tokens for this backend.`
+				: "Codex response incomplete. Codex controls per-response output caps; OMP does not send max_output_tokens for this backend.",
+			status: responseStatus,
+			visibleTextChars,
+			outputTokens: output.usage.output,
+			reasoningTokens: output.usage.reasoningTokens,
+			turnStateReset: Boolean(state),
+		};
+	}
 	if (output.content.some(block => block.type === "toolCall") && output.stopReason === "stop") {
 		output.stopReason = "toolUse";
 	}
@@ -2111,7 +2152,12 @@ function finalizeCodexResponse(
 		throw new Error("Codex response failed");
 	}
 
-	output.providerPayload = createOpenAIResponsesHistoryPayload(context.model.provider, runtime.nativeOutputItems);
+	if (output.stopDetails?.category !== "response.incomplete") {
+		output.providerPayload = createOpenAIResponsesHistoryPayload(
+			context.model.provider,
+			filterCodexHistoryItemsForPersistence(runtime.nativeOutputItems),
+		);
+	}
 	output.duration = Date.now() - context.startTime;
 	if (completion.firstTokenTime) {
 		output.ttft = completion.firstTokenTime - context.startTime;
@@ -2340,6 +2386,11 @@ function resetCodexWebSocketAppendState(state: CodexWebSocketSessionState): void
 function resetCodexSessionMetadata(state: CodexWebSocketSessionState): void {
 	state.turnState = undefined;
 	state.modelsEtag = undefined;
+}
+
+function resetCodexIncompleteResponseState(state: CodexWebSocketSessionState): void {
+	resetCodexWebSocketAppendState(state);
+	state.turnState = undefined;
 }
 
 function recordCodexWebSocketFailure(state: CodexWebSocketSessionState, activateFallback: boolean): void {
@@ -3306,6 +3357,28 @@ function getAccountId(accessToken: string): string {
 	return accountId;
 }
 
+function isIncompleteCodexHistoryItem(item: Record<string, unknown>): boolean {
+	return item.status === "incomplete";
+}
+
+function filterCodexHistoryItemsForPersistence(items: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+	return items.filter(item => !isIncompleteCodexHistoryItem(item));
+}
+
+function sanitizeCodexHistoryItemsForReplay(items: Array<Record<string, unknown>>): ResponseInput {
+	return sanitizeOpenAIResponsesHistoryItemsForReplay(filterCodexHistoryItemsForPersistence(items));
+}
+
+function sanitizeCodexAssistantMessageForReplay(message: AssistantMessage): AssistantMessage {
+	if (message.stopReason !== "length" || !message.content.some(block => block.type === "toolCall")) {
+		return message;
+	}
+	return {
+		...message,
+		content: message.content.filter(block => block.type !== "toolCall"),
+	};
+}
+
 function convertMessages(model: Model<"openai-codex-responses">, context: Context): ResponseInput {
 	const messages: ResponseInput = [];
 
@@ -3335,19 +3408,20 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider) as
-				| Array<ResponseInput[number]>
-				| undefined;
+			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
 			if (historyItems) {
-				for (const item of historyItems) {
-					const maybe = item as { type?: string; call_id?: string };
-					if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
-						customCallIds.add(maybe.call_id);
+				const sanitizedHistoryItems = sanitizeCodexHistoryItemsForReplay(historyItems);
+				if (sanitizedHistoryItems.length > 0) {
+					for (const item of sanitizedHistoryItems) {
+						const maybe = item as { type?: string; call_id?: string };
+						if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
+							customCallIds.add(maybe.call_id);
+						}
 					}
+					messages.push(...sanitizedHistoryItems);
+					msgIndex += 1;
+					continue;
 				}
-				messages.push(...historyItems);
-				msgIndex += 1;
-				continue;
 			}
 
 			const normalizedContent = normalizeInputMessageContent(model, msg.content);
@@ -3366,26 +3440,29 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				assistantMsg.api === model.api && assistantMsg.model === model.id
 					? getOpenAIResponsesHistoryPayload(assistantMsg.providerPayload, model.provider, assistantMsg.provider)
 					: undefined;
-			const historyItems = providerPayload?.items as Array<ResponseInput[number]> | undefined;
+			const historyItems = providerPayload?.items;
 			if (historyItems) {
-				for (const item of historyItems) {
-					const maybe = item as { type?: string; call_id?: string };
-					if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
-						customCallIds.add(maybe.call_id);
+				const sanitizedHistoryItems = sanitizeCodexHistoryItemsForReplay(historyItems);
+				if (sanitizedHistoryItems.length > 0) {
+					for (const item of sanitizedHistoryItems) {
+						const maybe = item as { type?: string; call_id?: string };
+						if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
+							customCallIds.add(maybe.call_id);
+						}
 					}
+					if (providerPayload?.dt) {
+						messages.push(...sanitizedHistoryItems);
+					} else {
+						messages.splice(0, messages.length, ...sanitizedHistoryItems);
+						// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
+					}
+					msgIndex += 1;
+					continue;
 				}
-				if (providerPayload?.dt) {
-					messages.push(...historyItems);
-				} else {
-					messages.splice(0, messages.length, ...historyItems);
-					// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
-				}
-				msgIndex += 1;
-				continue;
 			}
 
 			const outputItems = convertResponsesAssistantMessage(
-				msg as AssistantMessage,
+				sanitizeCodexAssistantMessageForReplay(assistantMsg),
 				model,
 				msgIndex,
 				knownCallIds,

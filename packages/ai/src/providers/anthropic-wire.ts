@@ -241,6 +241,11 @@ export type StopDetails = {
 	type: string;
 	category?: string | null;
 	explanation?: string | null;
+	status?: string | null;
+	visibleTextChars?: number;
+	outputTokens?: number;
+	reasoningTokens?: number;
+	turnStateReset?: boolean;
 };
 
 export type MessageDelta = {

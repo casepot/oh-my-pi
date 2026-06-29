@@ -443,6 +443,78 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
+	it("drops incomplete native history items and replays useful text through completed assistant encoding", async () => {
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		await captureResponsesPayload(
+			model,
+			{ messages: [{ role: "user", content: "warm replay", timestamp: Date.now() }] },
+			providerSessionState,
+		);
+		markResponsesProviderSessionStateWarmed(providerSessionState);
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "initial", timestamp: Date.now() },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Partial visible answer" }],
+					api: "openai-responses",
+					provider: "openai",
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "length",
+					providerPayload: createOpenAIResponsesHistoryPayload("openai", [
+						{
+							type: "message",
+							role: "assistant",
+							id: "msg_incomplete",
+							status: "incomplete",
+							content: [{ type: "output_text", text: "poison native text" }],
+						},
+						{
+							type: "function_call",
+							id: "fc_incomplete",
+							call_id: "call_incomplete",
+							name: "write",
+							status: "incomplete",
+							arguments: '{"path":"/tmp/out","content":"partial',
+						},
+					]),
+					timestamp: Date.now(),
+				},
+				{ role: "user", content: "continue", timestamp: Date.now() },
+			],
+		};
+
+		const payload = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+		const serialized = JSON.stringify(payload.input);
+		expect(serialized).not.toContain("incomplete");
+		expect(serialized).not.toContain("call_incomplete");
+		expect(containsAssistantOutputText(payload.input, "Partial visible answer")).toBe(true);
+		const assistantMessage = (payload.input ?? []).find(item => {
+			if (!item || typeof item !== "object") return false;
+			const candidate = item as { type?: unknown; role?: unknown; content?: unknown };
+			return (
+				candidate.type === "message" &&
+				candidate.role === "assistant" &&
+				Array.isArray(candidate.content) &&
+				candidate.content.some(part => {
+					if (!part || typeof part !== "object") return false;
+					const content = part as { text?: unknown };
+					return content.text === "Partial visible answer";
+				})
+			);
+		}) as { status?: unknown } | undefined;
+		expect(assistantMessage?.status).toBe("completed");
+	});
+
 	it("does not warm GitHub Copilot replay when only OpenAI replay state is warmed", async () => {
 		const openAiModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const copilotModel = getBundledModel("github-copilot", "gpt-5.4") as Model<"openai-responses">;

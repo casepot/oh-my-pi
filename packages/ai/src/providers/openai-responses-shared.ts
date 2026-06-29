@@ -951,9 +951,15 @@ export async function processResponsesStream<TApi extends Api>(
 			calculateCost(model, output.usage);
 			output.stopReason = mapOpenAIResponsesStopReason(response?.status);
 			if (response?.status === "failed" || response?.status === "cancelled") {
-				const error = response?.error ?? (response as any)?.status_details?.error;
+				const responseWithStatusDetails = response as typeof response & {
+					status_details?: {
+						error?: { code?: string | null; message?: string | null } | null;
+						reason?: string | null;
+					} | null;
+				};
+				const error = response?.error ?? responseWithStatusDetails?.status_details?.error;
 				const details = response?.incomplete_details;
-				const statusDetailsReason = (response as any)?.status_details?.reason;
+				const statusDetailsReason = responseWithStatusDetails?.status_details?.reason;
 				const message = error
 					? `${error.code || "unknown"}: ${error.message || "no message"}`
 					: details?.reason
@@ -968,6 +974,22 @@ export async function processResponsesStream<TApi extends Api>(
 				// mapping it to "length" would route the agent loop into "shorten your
 				// output" recovery against a filtered prompt.
 				throw new Error("incomplete: content_filter");
+			}
+			if (response?.status === "incomplete") {
+				const reason = response.incomplete_details?.reason;
+				const visibleTextChars = countVisibleAssistantTextChars(output);
+				output.stopDetails = {
+					type: typeof reason === "string" && reason.length > 0 ? reason : "response_incomplete",
+					category: "response.incomplete",
+					explanation:
+						typeof reason === "string" && reason.length > 0
+							? `OpenAI Responses response incomplete: ${reason}.`
+							: "OpenAI Responses response incomplete.",
+					status: response.status,
+					visibleTextChars,
+					outputTokens: output.usage.output,
+					reasoningTokens: output.usage.reasoningTokens,
+				};
 			}
 			if (output.content.some(block => block.type === "toolCall") && output.stopReason === "stop") {
 				output.stopReason = "toolUse";
@@ -1007,6 +1029,10 @@ export async function processResponsesStream<TApi extends Api>(
 			throw new Error(message);
 		}
 	}
+}
+
+function countVisibleAssistantTextChars(output: AssistantMessage): number {
+	return output.content.reduce((total, block) => total + (block.type === "text" ? block.text.length : 0), 0);
 }
 
 export function mapOpenAIResponsesStopReason(status: ResponseStatus | undefined): StopReason {

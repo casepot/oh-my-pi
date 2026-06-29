@@ -2414,14 +2414,18 @@ export class AuthStorage {
 		return deduped;
 	}
 
-	#isUsageLimitExhausted(limit: UsageLimit): boolean {
-		if (limit.status === "exhausted") return true;
+	#isUsageLimitExhausted(limit: UsageLimit, nowMs = Date.now()): boolean {
+		const resetsAt = limit.window?.resetsAt;
+		if (typeof resetsAt === "number" && Number.isFinite(resetsAt) && resetsAt <= nowMs) {
+			return false;
+		}
 		const amount = limit.amount;
-		if (amount.usedFraction !== undefined && amount.usedFraction >= 1) return true;
-		if (amount.remainingFraction !== undefined && amount.remainingFraction <= 0) return true;
-		if (amount.used !== undefined && amount.limit !== undefined && amount.used >= amount.limit) return true;
-		if (amount.remaining !== undefined && amount.remaining <= 0) return true;
-		if (amount.unit === "percent" && amount.used !== undefined && amount.used >= 100) return true;
+		if (amount.usedFraction !== undefined) return amount.usedFraction >= 1;
+		if (amount.remainingFraction !== undefined) return amount.remainingFraction <= 0;
+		if (amount.used !== undefined && amount.limit !== undefined) return amount.used >= amount.limit;
+		if (amount.remaining !== undefined) return amount.remaining <= 0;
+		if (amount.unit === "percent" && amount.used !== undefined) return amount.used >= 100;
+		if (limit.status === "exhausted") return true;
 		return false;
 	}
 
@@ -3137,14 +3141,36 @@ export class AuthStorage {
 					candidate.selection.credential = updated;
 					this.#replaceCredentialAt(provider, candidate.selection.index, updated);
 				} catch (error) {
-					// Recovery for definitive failures (incl. peer rotation) lives in
-					// #tryOAuthCredential; log instead of swallowing silently — a bare
-					// catch here hid stale-refresh-token replays from concurrent
-					// sessions (one-turn 401 "Invalid authentication credentials").
+					const errorMsg = String(error);
+					if (isDefinitiveOAuthFailure(errorMsg)) {
+						const disabled = this.#tryDisableCredentialAtIfMatches(
+							provider,
+							candidate.selection.index,
+							candidate.selection.credential,
+							`oauth preflight refresh failed: ${errorMsg}`,
+						);
+						if (disabled) {
+							logger.warn("OAuth preflight refresh failed definitively; credential disabled", {
+								provider,
+								index: candidate.selection.index,
+								error: errorMsg,
+							});
+							return;
+						}
+						logger.debug("OAuth preflight refresh disable lost CAS; reloading after peer rotation", {
+							provider,
+							index: candidate.selection.index,
+						});
+						await this.reload();
+						return;
+					}
+					// Non-definitive recovery lives in #tryOAuthCredential; log instead
+					// of swallowing silently — a bare catch here hid stale-refresh-token
+					// replays from concurrent sessions (one-turn 401 "Invalid authentication credentials").
 					logger.debug("OAuth preflight refresh failed", {
 						provider,
 						index: candidate.selection.index,
-						error: String(error),
+						error: errorMsg,
 					});
 				}
 			}),

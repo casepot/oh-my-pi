@@ -118,6 +118,13 @@ describe("processResponsesStream: terminal events", () => {
 		expect(output.usage.output).toBe(9);
 		expect(output.usage.totalTokens).toBe(16);
 		expect(output.content).toEqual([expect.objectContaining({ type: "text", text: "Hello, trunc" })]);
+		expect(output.stopDetails).toMatchObject({
+			type: "max_output_tokens",
+			category: "response.incomplete",
+			status: "incomplete",
+			visibleTextChars: "Hello, trunc".length,
+			outputTokens: 9,
+		});
 	});
 
 	test("persists final custom tool input on the block and drops the accumulation buffer", async () => {

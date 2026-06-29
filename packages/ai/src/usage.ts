@@ -91,7 +91,9 @@ export interface UsageReport {
  * amount fields the provider populated. Precedence mirrors the usage UIs:
  * explicit fraction > used/limit > percent-unit used > inverted remaining.
  */
-export function resolveUsedFraction(limit: UsageLimit): number | undefined {
+export function resolveUsedFraction(limit: UsageLimit, nowMs = Date.now()): number | undefined {
+	const resetsAt = limit.window?.resetsAt;
+	if (typeof resetsAt === "number" && Number.isFinite(resetsAt) && resetsAt <= nowMs) return 0;
 	const amount = limit.amount;
 	if (amount.usedFraction !== undefined) return amount.usedFraction;
 	if (amount.used !== undefined && amount.limit !== undefined && amount.limit > 0) {
