@@ -8,6 +8,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { serializeGoalModeState, type GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getLatestCompactionEntry, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -50,6 +51,26 @@ function compactionFromPreparation(preparation: CompactionPreparation, summary: 
 		firstKeptEntryId: preparation.firstKeptEntryId,
 		tokensBefore: preparation.tokensBefore,
 		details: {},
+	};
+}
+
+function activeGoalState(): GoalModeState {
+	const now = Date.now();
+	return {
+		enabled: true,
+		mode: "active",
+		runMode: "working-target",
+		stateVersion: 1,
+		parentFrameVersion: 0,
+		goal: {
+			id: "goal-compaction-race",
+			objective: "Keep goal state safe through compaction",
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: now,
+			updatedAt: now,
+		},
 	};
 }
 
@@ -307,6 +328,68 @@ describe("AgentSession stale-safe compaction commits", () => {
 
 		expect(result.status).toBe("stale");
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+	});
+
+	it("appends provider compaction after goal bookkeeping entries race the base leaf", async () => {
+		appendSeedTurn("goal bookkeeping suffix");
+		const activeSession = createSession();
+		const calls = blockCompactions();
+		const compactRun = activeSession.compact();
+		await waitFor(() => calls.length === 1);
+
+		const goalState = activeGoalState();
+		const serializedState = serializeGoalModeState(goalState);
+		const snapshotId = sessionManager.appendGoalStateSnapshot({
+			goalId: goalState.goal.id,
+			stateVersion: goalState.stateVersion,
+			schemaVersion: serializedState.schemaVersion,
+			reason: "semantic",
+			state: serializedState,
+		});
+		const modeChangeId = sessionManager.appendModeChange("goal", {
+			goalId: goalState.goal.id,
+			stateVersion: goalState.stateVersion,
+			snapshotEntryId: snapshotId,
+		});
+
+		calls[0].resolve("summary after goal bookkeeping");
+		await compactRun;
+
+		expect(compactionEntries()).toHaveLength(1);
+		expect(compactionEntries()[0].summary).toBe("summary after goal bookkeeping");
+		expect(compactionEntries()[0].parentId).toBe(modeChangeId);
+		expect(
+			sessionManager
+				.buildSessionContext()
+				.messages.some(message => JSON.stringify(message).includes(goalState.goal.objective)),
+		).toBe(false);
+	});
+
+	it("discards provider compaction after an ordinary user message races the base leaf", async () => {
+		appendSeedTurn("provider unsafe suffix");
+		const activeSession = createSession();
+		const calls = blockCompactions();
+		const compactRun = activeSession.compact();
+		await waitFor(() => calls.length === 1);
+
+		sessionManager.appendMessage({
+			role: "user",
+			content: "new user input should still force a fresh provider compaction snapshot",
+			timestamp: Date.now(),
+		});
+
+		calls[0].resolve("stale provider summary");
+		await compactRun.then(
+			() => {
+				throw new Error("Expected provider compaction to reject as stale");
+			},
+			error => {
+				expect(error).toBeInstanceOf(Error);
+				expect((error as Error).message).toContain("stale");
+			},
+		);
+
+		expect(compactionEntries()).toHaveLength(0);
 	});
 
 	it("discards a manual compaction summary when the branch mutates before append", async () => {

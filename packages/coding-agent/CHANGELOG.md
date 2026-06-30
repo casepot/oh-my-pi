@@ -69,6 +69,7 @@
 - Changed goal-mode continuation, compaction, and handoff to preserve run mode, parent frame, pending checkpoint, verifier-repair state, non-claims, gates, and the exact next local action.
 
 ### Fixed
+- Fixed goal-mode compaction append races where persisted `goal_state_snapshot` and `mode_change` bookkeeping could make a finished provider-call compaction look stale and get discarded.
 - Fixed inline compaction progress checks so stale pre-compaction provider usage no longer emits a false no-headroom warning after the compacted prompt already fits.
 - Fixed incomplete-output recovery so length-truncated tool calls are rewound locally, partial text is continued, empty output is retried with direct guidance, and repeated failures surface diagnostics instead of triggering auto-compaction solely because output ended incomplete.
 - Fixed provider-call compaction races where append-only background results, agent refs, or goal usage deltas landed while the summary was running and repeatedly caused stale compaction failures.

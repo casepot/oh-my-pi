@@ -6958,12 +6958,24 @@ export class AgentSession {
 		return extra + (fragments.length > 0 ? countTokens(fragments) : 0);
 	}
 
+	// Provider-message-neutral bookkeeping can be appended while compaction is
+	// prepared. The compaction entry lands after those rows, so the next context
+	// rebuild still sees the latest session/goal state without discarding the
+	// already-generated summary.
 	#isAppendOnlyCompactionRaceEntry(entry: SessionEntry): boolean {
-		if (entry.type === "custom" || entry.type === "goal_usage_delta") return true;
+		if (
+			entry.type === "custom" ||
+			entry.type === "goal_state_snapshot" ||
+			entry.type === "goal_usage_delta" ||
+			entry.type === "mode_change"
+		) {
+			return true;
+		}
 		if (entry.type === "message") {
 			return entry.message.role === "user" && entry.message.attribution === "agent";
 		}
 		if (entry.type !== "custom_message" || entry.attribution !== "agent") return false;
+		if (entry.includeInContext === false) return true;
 		return (
 			entry.customType === "async-result" ||
 			entry.customType === "lsp-late-diagnostic" ||
