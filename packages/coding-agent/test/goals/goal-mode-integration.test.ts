@@ -731,7 +731,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(renderedChat).toContain("[goal-rubric]");
 		expect(renderedChat).toContain("ctrl+o to expand");
 		expect(showStatus.mock.calls.map(call => String(call[0])).join("\n")).not.toContain("Strict test rubric");
-		expect(rubricCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
+		expect(rubricCall?.agent.tools).toEqual(["read", "grep", "glob", "yield"]);
 		expect(rubricCall?.task).toContain("<full_transcript_file>");
 		expect(rubricCall?.task).toContain("Ship the release");
 		if (!rubricCall?.contextFile) throw new Error("expected rubric side agent context file");
@@ -1420,7 +1420,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(goalSideAgentCalls.map(call => call.agent.name)).toContain("goal-completion-verifier");
 		expect(goalSideAgentCalls.map(call => call.agent.name)).not.toContain("goal-continuation-compactor");
 		const verifierCall = goalSideAgentCalls.find(call => call.agent.name === "goal-completion-verifier");
-		expect(verifierCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
+		expect(verifierCall?.agent.tools).toEqual(["read", "grep", "glob", "yield"]);
 		expect(verifierCall?.strictToolNames).toBe(true);
 		expect(verifierCall?.task).toContain("<full_transcript_file>");
 		expect(verifierCall?.task).toContain("Strict test rubric");
@@ -1567,7 +1567,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(guidance?.prompt).toMatch(/decision:\s*"next_target"/);
 		expect(guidance?.prompt).toContain("NEVER use `pause_for_external_control` as a generic stop");
 		const guidanceCall = goalSideAgentCalls.find(call => call.agent.name === "goal-checkpoint-guidance");
-		expect(guidanceCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
+		expect(guidanceCall?.agent.tools).toEqual(["read", "grep", "glob", "yield"]);
 		expect(guidanceCall?.task).toContain("<goal_state_snapshot>");
 		const goalStateFile = /<goal_state_file>\n([^<]+)\n<\/goal_state_file>/.exec(guidanceCall?.task ?? "")?.[1];
 		if (!goalStateFile) throw new Error("expected checkpoint guidance goal state file");
@@ -2398,7 +2398,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(JSON.stringify(checkpointEntry.content)).toContain("Checkpoint rejected; target remains active");
 		expect(JSON.stringify(checkpointEntry.content)).not.toContain("Target closed; parent goal still active");
 		const reviewerCall = goalSideAgentCalls.find(call => call.agent.name === "goal-checkpoint-reviewer");
-		expect(reviewerCall?.agent.tools).toEqual(["read", "search", "find", "yield"]);
+		expect(reviewerCall?.agent.tools).toEqual(["read", "grep", "glob", "yield"]);
 		expect(reviewerCall?.task).toContain("<goal_state_snapshot>");
 	});
 

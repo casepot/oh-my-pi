@@ -47,6 +47,7 @@ function createMockSession(
 		emit: (event: AgentSessionEvent) => void;
 		state: { messages: AssistantMessage[] };
 	}) => void | Promise<void>,
+	activeToolNames: string[] = ["read", "yield"],
 ): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const state = { messages: [] as AssistantMessage[] };
@@ -64,7 +65,7 @@ function createMockSession(
 		sessionManager: {
 			appendSessionInit: () => {},
 		},
-		getActiveToolNames: () => ["read", "yield"],
+		getActiveToolNames: () => activeToolNames,
 		setActiveToolsByName: async (_toolNames: string[]) => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
@@ -701,6 +702,35 @@ describe("runSubprocess yield reminders", () => {
 		expect(result.exitCode).toBe(1);
 		expect(result.stderr).toMatch(/options\.authStorage.*modelRegistry\.authStorage/);
 		expect(createAgentSessionSpy).not.toHaveBeenCalled();
+	});
+
+	it("normalizes legacy builtin aliases before strict allowlist comparison", async () => {
+		const session = createMockSession(
+			({ emit }) => {
+				emit({
+					type: "tool_execution_end",
+					toolCallId: "tool-legacy-strict-yield",
+					toolName: "yield",
+					result: {
+						content: [{ type: "text", text: "Result submitted." }],
+						details: { status: "success", data: { ok: true } },
+					},
+					isError: false,
+				});
+			},
+			["read", "grep", "glob", "yield", "irc"],
+		);
+		const createAgentSessionSpy = mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-legacy-strict-tools",
+			agent: { ...baseAgent, tools: ["read", "search", "find", "yield"] },
+			strictToolNames: true,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob", "yield", "irc"]);
 	});
 
 	it("logs reminder-loop aborts at debug, not error (issue #1623)", async () => {

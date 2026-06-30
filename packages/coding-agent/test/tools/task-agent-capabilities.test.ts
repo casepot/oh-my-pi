@@ -163,7 +163,7 @@ describe("task agent capability descriptions", () => {
 
 		const options = runSpy.mock.calls[0]?.[0];
 		expect(options?.agent.systemPrompt).toContain("Plan mode active");
-		expect(options?.agent.tools).toEqual(["read", "search", "find", "lsp", "web_search"]);
+		expect(options?.agent.tools).toEqual(["read", "grep", "glob", "lsp", "web_search"]);
 		expect(options?.agent.spawns).toBeUndefined();
 		expect(options?.planReference).toBeUndefined();
 		expect(options?.targetPlanReference).toBeUndefined();

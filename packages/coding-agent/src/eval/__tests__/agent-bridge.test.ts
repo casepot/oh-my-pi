@@ -239,7 +239,7 @@ describe("runEvalAgent", () => {
 		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession({ planMode: true }) });
 		expect(result.text).toBe("task");
 		expect(runSpy.mock.calls[0]?.[0].agent.systemPrompt).toContain("Plan mode active");
-		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "search", "find", "lsp", "web_search"]);
+		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "grep", "glob", "lsp", "web_search"]);
 		expect(runSpy.mock.calls[0]?.[0].agent.spawns).toBeUndefined();
 	});
 
@@ -255,7 +255,7 @@ describe("runEvalAgent", () => {
 		expect(result.text).toBe("task");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].agent.systemPrompt).toContain("Plan mode active");
-		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "search", "find", "lsp", "web_search"]);
+		expect(runSpy.mock.calls[0]?.[0].agent.tools).toEqual(["read", "grep", "glob", "lsp", "web_search"]);
 		expect(runSpy.mock.calls[0]?.[0].agent.spawns).toBeUndefined();
 	});
 

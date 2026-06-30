@@ -43,7 +43,7 @@ export const EVAL_AGENT_MAX_DEPTH = 3;
 
 const DEFAULT_AGENT_TYPE = "task";
 const DEFAULT_AGENT_LABEL = "EvalAgent";
-const PLAN_MODE_AGENT_BASE_TOOLS = ["read", "search", "find", "lsp", "web_search"];
+const PLAN_MODE_AGENT_BASE_TOOLS = ["read", "grep", "glob", "lsp", "web_search"];
 const PLAN_MODE_AGENT_TOOL_ALLOWLIST: ReadonlySet<string> = new Set(["ast_grep", "report_finding"]);
 
 const agentArgsSchema = type({

@@ -45,6 +45,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/mess
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import type { ContextFileEntry, ToolSession } from "../tools";
+import { normalizeToolNames } from "../tools/builtin-names";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/irc";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
@@ -1925,6 +1926,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
+	if (toolNames) {
+		toolNames = normalizeToolNames(toolNames);
+	}
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;
@@ -2320,11 +2324,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
 			if (options.strictToolNames && toolNames) {
-				const expected = [...new Set(toolNames.map(name => name.toLowerCase()))].sort();
-				const actual = session
-					.getActiveToolNames()
-					.map(name => name.toLowerCase())
-					.sort();
+				const expected = normalizeToolNames(toolNames).sort();
+				const actual = normalizeToolNames(session.getActiveToolNames()).sort();
 				if (expected.join("\0") !== actual.join("\0")) {
 					throw new Error(
 						`strict subagent tool allowlist mismatch: expected ${expected.join(", ")}, got ${actual.join(", ")}`,

@@ -30,7 +30,7 @@ import type {
 	GoalVerificationGap,
 } from "./state";
 
-export const GOAL_SIDE_AGENT_TOOLS = ["read", "search", "find", "yield"] as const;
+export const GOAL_SIDE_AGENT_TOOLS = ["read", "grep", "glob", "yield"] as const;
 
 const deliverableMapItemSchema = {
 	properties: {
