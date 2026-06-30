@@ -47,6 +47,7 @@ import type {
 	GoalTokenUsage,
 	GoalVerificationAperture,
 	GoalVerificationAttempt,
+	GoalVerificationCommandRecord,
 	GoalVerificationGap,
 	GoalVerificationRepairState,
 	GoalVerificationSignal,
@@ -70,6 +71,11 @@ import {
 } from "./state";
 import { collectTargetPlanGraphDiagnostics, lintDiagnostic } from "./target-plan-lint";
 import { implementationFanoutRequired } from "./tool-details";
+import {
+	classifyTargetMutation,
+	classifyVerificationCommand,
+	type ObservedToolResultForFreshness,
+} from "./verification-freshness";
 
 export type GoalPersistenceReason = "semantic" | "terminal" | "recovery" | "budget-limited";
 
@@ -858,6 +864,7 @@ export interface GoalContextSurface {
 	target_plan?: GoalPromptObject;
 	target_execution_guardrails?: Record<string, unknown>;
 	workstream_batch?: GoalPromptObject;
+	verification_freshness?: GoalPromptObject;
 	checkpoint?: GoalPromptObject;
 	latest_resolution?: GoalPromptObject;
 	parent_completion?: GoalPromptObject;
@@ -917,6 +924,7 @@ function compactWorkstreamBatchForPrompt(batch: GoalWorkstreamBatch | undefined)
 			historyUrl: run.historyUrl,
 			outputUrl: run.outputUrl,
 			summary: run.summary,
+			latestActivity: run.latestActivity,
 			blockers: run.blockers,
 		})),
 	};
@@ -1472,6 +1480,8 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 			checkpointDetails: checkpoint ? `goal({op:"get"}) checkpoint ${checkpoint.id}` : undefined,
 		},
 	};
+	const verificationFreshness = compactVerificationFreshnessForPrompt(goal, currentTarget);
+	if (verificationFreshness && runMode !== "planning-target") surface.verification_freshness = verificationFreshness;
 	if (runMode === "working-target") {
 		const currentBatch = goal.currentWorkstreamBatch;
 		const activeBatch =
@@ -1539,6 +1549,7 @@ export function renderGoalStateSnapshot(state: GoalModeState | undefined, goal: 
 		deliverableMap: compactDeliverableMap(goal.deliverableMap),
 		currentTarget: compactTarget(goal.currentTarget),
 		currentWorkstreamBatch: compactWorkstreamBatchForPrompt(goal.currentWorkstreamBatch),
+		verificationFreshness: compactVerificationFreshnessForPrompt(goal, goal.currentTarget),
 		pendingCheckpoint: compactCheckpoint(latestCheckpoint(goal)),
 		latestCheckpointResolution: compactResolution(latestResolution(goal)),
 		lastCheckpointRejection: goal.lastCheckpointRejection
@@ -2319,6 +2330,46 @@ function terminalWorkstreamStatusFromProgress(
 	return undefined;
 }
 
+const WORKSTREAM_TASK_SUMMARY_MAX_LENGTH = 600;
+
+function compactWorkstreamTaskText(value: string | undefined): string | undefined {
+	const lines =
+		value
+			?.split(/\r?\n/)
+			.map(line => line.trim())
+			.filter(Boolean)
+			.slice(0, 6) ?? [];
+	if (lines.length === 0) return undefined;
+	const summary = lines.join(" ");
+	return summary.length <= WORKSTREAM_TASK_SUMMARY_MAX_LENGTH
+		? summary
+		: `${summary.slice(0, WORKSTREAM_TASK_SUMMARY_MAX_LENGTH - 1)}…`;
+}
+
+function workstreamResultSummary(result: TaskToolDetails["results"][number] | undefined): string | undefined {
+	if (!result) return undefined;
+	if (result.aborted) return compactWorkstreamTaskText(`Task aborted: ${result.abortReason ?? "no reason reported"}`);
+	const failure = result.error ?? result.retryFailure?.errorMessage;
+	if (failure) return compactWorkstreamTaskText(`Task failed: ${failure}`);
+	return (
+		compactWorkstreamTaskText(result.output) ??
+		compactWorkstreamTaskText(result.description) ??
+		compactWorkstreamTaskText(result.assignment) ??
+		compactWorkstreamTaskText(result.task)
+	);
+}
+
+function workstreamLatestActivity(
+	result: TaskToolDetails["results"][number] | undefined,
+	progress: NonNullable<TaskToolDetails["progress"]>[number] | undefined,
+): string | undefined {
+	return (
+		compactWorkstreamTaskText(result?.lastIntent) ??
+		compactWorkstreamTaskText(progress?.lastIntent) ??
+		compactWorkstreamTaskText(progress?.recentOutput.at(-1))
+	);
+}
+
 function updateWorkstreamBatchStatus(batch: GoalWorkstreamBatch, now: number): void {
 	if (batch.status === "closed" || batch.status === "superseded") return;
 	const statuses = batch.workstreams.map(run => run.status);
@@ -2337,6 +2388,77 @@ function updateWorkstreamBatchStatus(batch: GoalWorkstreamBatch, now: number): v
 		batch.status = "pending-launch";
 	}
 	batch.updatedAt = now;
+}
+
+const GOAL_VERIFICATION_COMMAND_RECORD_LIMIT = 10;
+
+export interface GoalObservedToolResultInput extends ObservedToolResultForFreshness {
+	toolCallId: string;
+	source?: "main-agent" | "task";
+}
+
+function targetFreshnessTrackingActive(state: GoalModeState): boolean {
+	if (!state.enabled || state.mode !== "active") return false;
+	if (state.goal.status !== "active" || !state.goal.currentTarget) return false;
+	return state.runMode === "working-target" || state.runMode === "awaiting-verification-repair";
+}
+
+function nextVerificationCommandSequence(records: GoalVerificationCommandRecord[] | undefined): number {
+	let sequence = 0;
+	for (const record of records ?? []) {
+		if (record.sequence > sequence) sequence = record.sequence;
+	}
+	return sequence + 1;
+}
+
+function effectiveVerificationFreshness(
+	record: GoalVerificationCommandRecord,
+	currentEpoch: number,
+): GoalVerificationCommandRecord["freshness"] {
+	if (record.status !== "passed") return "unknown";
+	return record.workEpoch === currentEpoch ? "fresh" : "stale";
+}
+
+function compactVerificationFreshnessForPrompt(
+	goal: Goal,
+	currentTarget: GoalTarget | undefined,
+): GoalPromptObject | undefined {
+	const targetId = currentTarget?.id;
+	const records = (goal.verificationCommands ?? [])
+		.filter(record => !targetId || record.targetId === targetId)
+		.slice(-GOAL_VERIFICATION_COMMAND_RECORD_LIMIT);
+	if (!records.length && !goal.lastMutation) return undefined;
+	const currentEpoch = goal.workEpoch ?? 0;
+	return {
+		workEpoch: currentEpoch,
+		latestMutation: goal.lastMutation
+			? {
+					epoch: goal.lastMutation.epoch,
+					toolName: goal.lastMutation.toolName,
+					paths: goal.lastMutation.paths,
+					reason: goal.lastMutation.reason,
+					occurredAt: goal.lastMutation.occurredAt,
+				}
+			: undefined,
+		commands: records.map(record => {
+			const freshness = effectiveVerificationFreshness(record, currentEpoch);
+			return {
+				id: record.id,
+				command: record.command,
+				cwd: record.cwd,
+				kind: record.kind,
+				status: record.status,
+				freshness,
+				workEpoch: record.workEpoch,
+				recordedAt: record.recordedAt,
+				staleReason:
+					freshness === "stale" ? (record.staleReason ?? "target changed after this command") : undefined,
+			};
+		}),
+		guidance: records.some(record => effectiveVerificationFreshness(record, currentEpoch) !== "fresh")
+			? "Do not use stale or failed verification as final checkpoint evidence; rerun focused verification after integration."
+			: undefined,
+	};
 }
 
 export class GoalRuntime {
@@ -2496,7 +2618,8 @@ export class GoalRuntime {
 					run.outputUrl = `agent://${agentId}`;
 				}
 				run.jobId = spawn?.jobId ?? run.jobId;
-				run.summary = result?.lastIntent ?? run.summary;
+				run.summary = workstreamResultSummary(result) ?? run.summary;
+				run.latestActivity = workstreamLatestActivity(result, progress) ?? run.latestActivity;
 				run.blockers =
 					status === "failed"
 						? [
@@ -2786,6 +2909,69 @@ export class GoalRuntime {
 	async onGoalToolCompleted(): Promise<void> {
 		if (!this.#hasAccountingState()) return;
 		await this.flushUsage("suppressed");
+	}
+
+	async recordObservedToolResult(input: GoalObservedToolResultInput): Promise<void> {
+		await this.#withAccounting(async () => {
+			const state = this.#getStateClone();
+			if (!state || !targetFreshnessTrackingActive(state)) return;
+			if (input.toolName === "goal") return;
+			const observed = {
+				toolName: input.toolName,
+				args: input.args,
+				result: input.result,
+				isError: input.isError,
+			};
+			const mutation = classifyTargetMutation(observed);
+			const verification = classifyVerificationCommand(observed);
+			if (!mutation && !verification) return;
+			const now = this.#now();
+			if (mutation) {
+				const nextEpoch = (state.goal.workEpoch ?? 0) + 1;
+				const changedPaths = mutation.paths?.slice(0, 5);
+				const staleReason = changedPaths?.length
+					? `${mutation.reason}: ${changedPaths.join(", ")}`
+					: mutation.reason;
+				state.goal.workEpoch = nextEpoch;
+				state.goal.lastMutation = {
+					epoch: nextEpoch,
+					toolName: mutation.toolName,
+					paths: changedPaths,
+					reason: mutation.reason,
+					occurredAt: now,
+				};
+				for (const record of state.goal.verificationCommands ?? []) {
+					if (record.status !== "passed" || record.workEpoch >= nextEpoch) continue;
+					record.freshness = "stale";
+					record.staleAt = now;
+					record.staleReason = staleReason;
+				}
+			}
+			if (verification) {
+				const workEpoch = state.goal.workEpoch ?? 0;
+				const sequence = nextVerificationCommandSequence(state.goal.verificationCommands);
+				const record: GoalVerificationCommandRecord = {
+					id: `${state.goal.id}-verification-command-${sequence}`,
+					sequence,
+					targetId: state.goal.currentTarget?.id,
+					targetPlanId: state.goal.currentTargetPlan?.id,
+					targetPlanRevision: state.goal.currentTargetPlan?.revision,
+					command: verification.command,
+					cwd: verification.cwd,
+					kind: verification.kind,
+					status: verification.status,
+					freshness: verification.status === "passed" ? "fresh" : "unknown",
+					workEpoch,
+					recordedAt: now,
+					source: input.source ?? "main-agent",
+				};
+				state.goal.verificationCommands = [...(state.goal.verificationCommands ?? []), record].slice(
+					-GOAL_VERIFICATION_COMMAND_RECORD_LIMIT,
+				);
+			}
+			this.#bumpState(state);
+			await this.#commitState(state, { persist: "goal", reason: "semantic" });
+		});
 	}
 
 	async onAgentEnd(options?: { turnCompleted?: boolean; currentUsage?: GoalTokenUsage }): Promise<void> {

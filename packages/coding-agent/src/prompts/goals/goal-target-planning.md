@@ -3,8 +3,6 @@ Goal target planning is active. Produce a decision-complete execution spec for t
 <goal_context_surface>
 {{goalContextSurface}}
 </goal_context_surface>
-
-
 <target_plan_submit_identity>
 {{targetPlanSubmitIdentity}}
 </target_plan_submit_identity>

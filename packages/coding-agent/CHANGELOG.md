@@ -6,6 +6,7 @@
 - Added a reusable `plan-review` skill and target-planning prompt guidance for explicit planning review evidence.
 - Added goal target-plan linting, target cards, scenario-matrix metadata, and a live target status panel for goal planning.
 - Added durable goal-mode parallel workstream batches with approved-plan task scaffolds, task dispatch status tracking, checkpoint closure, and compaction-safe continuation context.
+- Added goal-mode verification freshness tracking so passed commands are marked stale after later known target mutations.
 
 - Added explicit model selectors for compaction, handoff generation, branch summaries, and goal-mode side agents so those maintenance flows can use a different model than the default interactive session.
 - Added autonomous goal target planning with verification-aperture review before target execution.
@@ -72,6 +73,7 @@
 - Fixed goal-mode compaction append races where persisted `goal_state_snapshot` and `mode_change` bookkeeping could make a finished provider-call compaction look stale and get discarded.
 - Fixed inline compaction progress checks so stale pre-compaction provider usage no longer emits a false no-headroom warning after the compacted prompt already fits.
 - Fixed incomplete-output recovery so length-truncated tool calls are rewound locally, partial text is continued, empty output is retried with direct guidance, and repeated failures surface diagnostics instead of triggering auto-compaction solely because output ended incomplete.
+- Fixed goal-mode workstream batches to preserve completed task result summaries separately from latest activity labels.
 - Fixed provider-call compaction races where append-only background results, agent refs, or goal usage deltas landed while the summary was running and repeatedly caused stale compaction failures.
 - Fixed provider-call context maintenance to rerun compaction from the fresh branch when a long-running stale compaction is correctly discarded, avoiding a visible maintenance error when the next branch snapshot can compact successfully.
 - Fixed resumed sessions to restore persisted subagent references as parked/aborted transcript records, keeping async job liveness process-local while allowing resumable agents to wake through IRC.

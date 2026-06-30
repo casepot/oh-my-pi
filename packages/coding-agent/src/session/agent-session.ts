@@ -2148,6 +2148,7 @@ export class AgentSession {
 	 *  These are folded into the matched tool call's `toolResult` content as an
 	 *  in-band system reminder, instead of spawning a separate follow-up turn. */
 	#perToolTtsrInjections = new Map<string, Rule[]>();
+	#toolExecutionArgsById = new Map<string, { toolName: string; args: Record<string, unknown> }>();
 	#ttsrAbortPending = false;
 	#ttsrRetryToken = 0;
 	#ttsrResumePromise: Promise<void> | undefined = undefined;
@@ -3675,6 +3676,13 @@ export class AgentSession {
 				cacheWrite: usage.cacheWrite,
 			});
 		}
+		if (event.type === "tool_execution_start") {
+			const args =
+				typeof event.args === "object" && event.args !== null && !Array.isArray(event.args)
+					? (event.args as Record<string, unknown>)
+					: {};
+			this.#toolExecutionArgsById.set(event.toolCallId, { toolName: event.toolName, args });
+		}
 
 		try {
 			await this.#emitSessionEvent(displayEvent);
@@ -3702,6 +3710,25 @@ export class AgentSession {
 				this.#toolChoiceQueue.reject(msg.stopReason === "error" ? "error" : "aborted");
 			} else {
 				this.#toolChoiceQueue.resolve();
+			}
+		}
+		if (event.type === "tool_execution_end") {
+			const started = this.#toolExecutionArgsById.get(event.toolCallId);
+			this.#toolExecutionArgsById.delete(event.toolCallId);
+			try {
+				await this.#goalRuntime.recordObservedToolResult({
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					args: started?.args ?? {},
+					result: event.result,
+					isError: event.isError ?? false,
+					source: "main-agent",
+				});
+			} catch (error) {
+				logger.debug("Goal verification freshness recording failed", {
+					toolName: event.toolName,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
 		if (event.type === "tool_execution_end") {

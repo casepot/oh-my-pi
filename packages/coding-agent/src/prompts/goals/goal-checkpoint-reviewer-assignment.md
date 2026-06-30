@@ -32,6 +32,7 @@ Check:
 - if target has accepted `verificationSignals`, every required signal has current evidence;
 - reject aperture abuse: essential same-signal work hidden in `not_claimed` or deferred work;
 - if `currentWorkstreamBatch` exists, reject partial fanout closure: non-doc workstreams must be completed/accepted or clearly replaced by equivalent serial evidence; failed/aborted/blocked workstreams need repaired evidence before acceptance;
+- if `verificationFreshness` marks a check stale/unknown/failed, NEVER count that check as current evidence unless newer equivalent evidence is supplied;
 
 Return structured output:
 - `status`: `accepted` or `rejected`.

@@ -49,6 +49,7 @@ import type {
 	GoalToolDetails,
 	GoalToolGoalSummary,
 	GoalToolStateSummary,
+	GoalVerificationCommandRecord,
 	GoalWorkstreamBatch,
 } from "../state";
 import { normalizeParentFrame } from "../state";
@@ -2155,8 +2156,37 @@ function renderWorkstreamBatchText(batch: GoalWorkstreamBatch | undefined): stri
 		const job = run.jobId ? ` job:${run.jobId}` : "";
 		const task = run.scaffoldTaskId ? ` task:${run.scaffoldTaskId}` : "";
 		text += `\n  - ${run.workstreamId}: ${run.status}${task}${agent}${job}`;
+		if (run.summary) text += ` — ${run.summary}`;
+		if (run.latestActivity) text += ` (latest: ${run.latestActivity})`;
 	}
 	return text;
+}
+
+function renderVerificationFreshnessText(goal: Goal): string {
+	const currentEpoch = goal.workEpoch ?? 0;
+	const targetId = goal.currentTarget?.id;
+	const records = (goal.verificationCommands ?? [])
+		.filter(record => !targetId || record.targetId === targetId)
+		.slice(-5);
+	if (!records.length && !goal.lastMutation) return "";
+	let text = `\nVerification freshness:`;
+	text += `\n  work_epoch: ${currentEpoch}`;
+	if (goal.lastMutation) {
+		const paths = goal.lastMutation.paths?.length ? ` (${goal.lastMutation.paths.join(", ")})` : "";
+		text += `\n  latest mutation: ${goal.lastMutation.toolName} — ${goal.lastMutation.reason}${paths}`;
+	}
+	for (const record of records) {
+		const freshness = renderVerificationRecordFreshness(record, currentEpoch);
+		const reason = freshness === "stale" ? ` (${record.staleReason ?? "target changed after this command"})` : "";
+		text += `\n  - ${record.command}: ${freshness}${reason}`;
+	}
+	return text;
+}
+
+function renderVerificationRecordFreshness(record: GoalVerificationCommandRecord, currentEpoch: number): string {
+	if (record.status === "failed") return "failed";
+	if (record.workEpoch === currentEpoch) return "fresh";
+	return "stale";
 }
 
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
@@ -2207,6 +2237,7 @@ function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"])
 				: `\nWorkstream batch: ${goal.currentTarget.workstreamBatchId}`;
 		}
 	}
+	text += renderVerificationFreshnessText(goal);
 	if (goal.currentTargetPlan) {
 		text += `\nTarget plan: ${goal.currentTargetPlan.status} ${goal.currentTargetPlan.planFilePath}`;
 		const identity =

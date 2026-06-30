@@ -13,7 +13,7 @@ export type GoalRunMode =
 	| "awaiting-parent-completion"
 	| "awaiting-verification-repair"
 	| "awaiting-user-input";
-export const GOAL_MODE_SCHEMA_VERSION = 6;
+export const GOAL_MODE_SCHEMA_VERSION = 7;
 export type GoalDeliverableStatus = "pending" | "partial" | "satisfied" | "blocked" | "stale";
 
 export type GoalTargetPlanStatus = "drafting" | "reviewing" | "revision-required" | "approved" | "failed" | "stale";
@@ -150,6 +150,7 @@ export interface GoalWorkstreamRun {
 	historyUrl?: string;
 	outputUrl?: string;
 	summary?: string;
+	latestActivity?: string;
 	evidenceRefs?: GoalRef[];
 	blockers?: string[];
 	updatedAt: number;
@@ -260,6 +261,36 @@ export interface GoalVerificationAttempt {
 	createdAt: number;
 	workEpoch: number;
 	sideAgentTokensUsed?: number;
+}
+
+export type GoalVerificationCommandStatus = "passed" | "failed";
+export type GoalVerificationFreshness = "fresh" | "stale" | "unknown";
+export type GoalVerificationCommandKind = "test" | "typecheck" | "lint" | "format-check" | "build" | "check" | "other";
+
+export interface GoalTargetMutationRecord {
+	epoch: number;
+	toolName: string;
+	paths?: string[];
+	reason: string;
+	occurredAt: number;
+}
+
+export interface GoalVerificationCommandRecord {
+	id: string;
+	sequence: number;
+	targetId?: string;
+	targetPlanId?: string;
+	targetPlanRevision?: number;
+	command: string;
+	cwd?: string;
+	kind: GoalVerificationCommandKind;
+	status: GoalVerificationCommandStatus;
+	freshness: GoalVerificationFreshness;
+	workEpoch: number;
+	recordedAt: number;
+	staleAt?: number;
+	staleReason?: string;
+	source: "main-agent" | "task";
 }
 
 export type GoalParentFrameKind = "plain" | "claim-gated";
@@ -880,6 +911,8 @@ export interface Goal {
 	rubric?: string;
 	deliverableMap?: GoalDeliverableMapItem[];
 	workEpoch?: number;
+	lastMutation?: GoalTargetMutationRecord;
+	verificationCommands?: GoalVerificationCommandRecord[];
 	totalVerificationAttempts?: number;
 	verificationAttempts?: GoalVerificationAttempt[];
 	failedCompletionAttempts?: number;
@@ -1664,6 +1697,7 @@ function cloneWorkstreamRun(run: GoalWorkstreamRun): GoalWorkstreamRun {
 		contractOutputs: [...run.contractOutputs],
 		evidenceRefs: run.evidenceRefs ? cloneRefs(run.evidenceRefs) : undefined,
 		blockers: run.blockers ? [...run.blockers] : undefined,
+		latestActivity: run.latestActivity,
 	};
 }
 
@@ -1963,9 +1997,19 @@ export function cloneVerificationRepair(
 	};
 }
 
+function cloneTargetMutationRecord(record: GoalTargetMutationRecord | undefined): GoalTargetMutationRecord | undefined {
+	if (!record) return undefined;
+	return {
+		...record,
+		paths: record.paths ? [...record.paths] : undefined,
+	};
+}
+
 export function cloneGoal(goal: Goal): Goal {
 	return {
 		...goal,
+		lastMutation: cloneTargetMutationRecord(goal.lastMutation),
+		verificationCommands: goal.verificationCommands?.map(record => ({ ...record })),
 		verificationAttempts: goal.verificationAttempts?.map(attempt => ({
 			...attempt,
 			structuredFeedback: cloneStructuredFeedback(attempt.structuredFeedback),
@@ -2516,6 +2560,7 @@ function normalizeWorkstreamRun(value: unknown): GoalWorkstreamRun | undefined {
 		historyUrl: optionalString(value.historyUrl),
 		outputUrl: optionalString(value.outputUrl),
 		summary: optionalString(value.summary),
+		latestActivity: optionalString(value.latestActivity),
 		evidenceRefs: normalizeRefs(value.evidenceRefs),
 		blockers: Array.isArray(value.blockers) ? stringArray(value.blockers) : undefined,
 		updatedAt: value.updatedAt,
@@ -2565,6 +2610,98 @@ function normalizeWorkstreamBatch(value: unknown): GoalWorkstreamBatch | undefin
 	};
 }
 
+function normalizeVerificationFreshness(value: unknown): GoalVerificationFreshness {
+	switch (value) {
+		case "fresh":
+		case "stale":
+		case "unknown":
+			return value;
+		default:
+			return "unknown";
+	}
+}
+
+function normalizeVerificationCommandStatus(value: unknown): GoalVerificationCommandStatus | undefined {
+	switch (value) {
+		case "passed":
+		case "failed":
+			return value;
+		default:
+			return undefined;
+	}
+}
+
+function normalizeVerificationCommandKind(value: unknown): GoalVerificationCommandKind {
+	switch (value) {
+		case "test":
+		case "typecheck":
+		case "lint":
+		case "format-check":
+		case "build":
+		case "check":
+		case "other":
+			return value;
+		default:
+			return "other";
+	}
+}
+
+function normalizeTargetMutationRecord(value: unknown): GoalTargetMutationRecord | undefined {
+	if (!isRecord(value)) return undefined;
+	if (typeof value.epoch !== "number" || typeof value.toolName !== "string" || typeof value.reason !== "string") {
+		return undefined;
+	}
+	return {
+		epoch: value.epoch,
+		toolName: value.toolName,
+		paths: Array.isArray(value.paths)
+			? value.paths.filter((path): path is string => typeof path === "string")
+			: undefined,
+		reason: value.reason,
+		occurredAt: optionalNumber(value.occurredAt) ?? 0,
+	};
+}
+
+function normalizeVerificationCommandRecord(value: unknown): GoalVerificationCommandRecord | undefined {
+	if (!isRecord(value)) return undefined;
+	const status = normalizeVerificationCommandStatus(value.status);
+	if (
+		typeof value.id !== "string" ||
+		typeof value.sequence !== "number" ||
+		typeof value.command !== "string" ||
+		!status ||
+		typeof value.workEpoch !== "number" ||
+		typeof value.recordedAt !== "number"
+	) {
+		return undefined;
+	}
+	return {
+		id: value.id,
+		sequence: value.sequence,
+		targetId: optionalString(value.targetId),
+		targetPlanId: optionalString(value.targetPlanId),
+		targetPlanRevision: optionalNumber(value.targetPlanRevision),
+		command: value.command,
+		cwd: optionalString(value.cwd),
+		kind: normalizeVerificationCommandKind(value.kind),
+		status,
+		freshness: normalizeVerificationFreshness(value.freshness),
+		workEpoch: value.workEpoch,
+		recordedAt: value.recordedAt,
+		staleAt: optionalNumber(value.staleAt),
+		staleReason: optionalString(value.staleReason),
+		source: value.source === "task" ? "task" : "main-agent",
+	};
+}
+
+function normalizeVerificationCommandRecords(value: unknown): GoalVerificationCommandRecord[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const records = value
+		.map(record => normalizeVerificationCommandRecord(record))
+		.filter((record): record is GoalVerificationCommandRecord => record !== undefined);
+	return records.length ? records : undefined;
+}
+
 export function normalizeGoal(value: unknown): Goal | undefined {
 	if (!isRecord(value)) return undefined;
 	if (
@@ -2589,6 +2726,8 @@ export function normalizeGoal(value: unknown): Goal | undefined {
 		rubric: optionalString(value.rubric),
 		deliverableMap: normalizeDeliverableMap(value.deliverableMap ?? value.deliverable_map),
 		workEpoch: optionalNumber(value.workEpoch),
+		lastMutation: normalizeTargetMutationRecord(value.lastMutation),
+		verificationCommands: normalizeVerificationCommandRecords(value.verificationCommands),
 		totalVerificationAttempts: optionalNumber(value.totalVerificationAttempts),
 		verificationAttempts: normalizeVerificationAttempts(value.verificationAttempts),
 		failedCompletionAttempts: optionalNumber(value.failedCompletionAttempts),

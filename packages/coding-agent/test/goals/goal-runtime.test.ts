@@ -28,6 +28,7 @@ import type {
 import { cloneGoalModeState, parseGoalModeState, serializeGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { escapeXmlText } from "@oh-my-pi/pi-utils";
 import { buildGoalCompactionContext } from "../../src/goals/compaction-continuation";
+import { classifyTargetMutation, classifyVerificationCommand } from "../../src/goals/verification-freshness";
 import systemPromptTemplate from "../../src/prompts/system/system-prompt.md" with { type: "text" };
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
@@ -387,6 +388,134 @@ describe("goal runtime", () => {
 		).toBe(8);
 	});
 
+	it("classifies freshness verification commands and obvious workspace mutators", () => {
+		expect(
+			classifyVerificationCommand({
+				toolName: "bash",
+				args: { command: "cargo check -p automation-adapter-sdk" },
+				result: { content: [], details: { exitCode: 0 } },
+				isError: false,
+			}),
+		).toMatchObject({ kind: "check", status: "passed" });
+		expect(
+			classifyVerificationCommand({
+				toolName: "bash",
+				args: { command: "bun --cwd=packages/coding-agent run check:types" },
+				result: { content: [], details: { exitCode: 1 } },
+				isError: true,
+			}),
+		).toMatchObject({ kind: "typecheck", status: "failed" });
+		expect(
+			classifyVerificationCommand({
+				toolName: "bash",
+				args: { command: "bun run gen:models && bun run check" },
+				result: { content: [], details: { exitCode: 0 } },
+				isError: false,
+			}),
+		).toBeUndefined();
+		expect(
+			classifyTargetMutation({
+				toolName: "bash",
+				args: { command: "cargo fmt --all" },
+				result: { content: [], details: { exitCode: 0 } },
+				isError: false,
+			}),
+		).toMatchObject({ reason: "cargo fmt may rewrite source files" });
+	});
+
+	it("tracks goal verification freshness across target mutations", async () => {
+		const harness = createHarness();
+		await harness.runtime.createGoal({ objective: "Keep verification current" });
+		await startApprovedTarget(harness, {
+			title: "Implement route checks",
+			desiredFutureClaim: "Route checks are implemented.",
+			closureStandard: "Focused verification has current evidence.",
+			expectedParentContribution: "Route check implementation closes the target.",
+			baselineRefs: [],
+			gateRefs: ["gate-route"],
+			evidenceExpectation: ["Run the route package check after edits."],
+			nonGoals: [],
+			forbiddenClaims: [],
+			staleIf: [],
+		});
+
+		await harness.runtime.recordObservedToolResult({
+			toolCallId: "bash-1",
+			toolName: "bash",
+			args: { command: "cargo check -p automation-adapter-sdk" },
+			result: { content: [], details: { exitCode: 0 } },
+			isError: false,
+		});
+		let state = harness.getState();
+		if (!state) throw new Error("expected goal state after verification");
+		expect(state.goal.workEpoch).toBe(0);
+		expect(state.goal.verificationCommands).toHaveLength(1);
+		expect(state.goal.verificationCommands?.[0]).toMatchObject({
+			command: "cargo check -p automation-adapter-sdk",
+			freshness: "fresh",
+			status: "passed",
+			workEpoch: 0,
+		});
+		expect(renderGoalPromptSurface(state, state.goal)).toContain("verification_freshness");
+		expect(renderGoalPromptSurface(state, state.goal)).toContain("cargo check -p automation-adapter-sdk");
+
+		harness.advance(25);
+		await harness.runtime.recordObservedToolResult({
+			toolCallId: "edit-1",
+			toolName: "edit",
+			args: {},
+			result: {
+				content: [],
+				details: {
+					path: "crates/automation-adapter-sdk/src/lib.rs",
+					diff: "--- before\n+++ after",
+				},
+			},
+			isError: false,
+		});
+		state = harness.getState();
+		if (!state) throw new Error("expected goal state after mutation");
+		expect(state.goal.workEpoch).toBe(1);
+		expect(state.goal.lastMutation).toMatchObject({
+			epoch: 1,
+			toolName: "edit",
+			reason: "edit changed workspace files",
+			paths: ["crates/automation-adapter-sdk/src/lib.rs"],
+		});
+		expect(state.goal.verificationCommands?.[0]).toMatchObject({
+			freshness: "stale",
+			staleReason: "edit changed workspace files: crates/automation-adapter-sdk/src/lib.rs",
+		});
+		expect(renderGoalPromptSurface(state, state.goal)).toContain("stale");
+
+		const serialized = serializeGoalModeState(state);
+		const restored = parseGoalModeState(serialized);
+		if (!restored) throw new Error("expected serialized freshness state to restore");
+		expect(restored.goal.lastMutation).toMatchObject({ toolName: "edit" });
+		expect(restored.goal.verificationCommands?.[0]?.freshness).toBe("stale");
+
+		harness.advance(25);
+		await harness.runtime.recordObservedToolResult({
+			toolCallId: "bash-2",
+			toolName: "bash",
+			args: { command: "bun --cwd=packages/coding-agent run check" },
+			result: { content: [], details: { exitCode: 0 } },
+			isError: false,
+		});
+		state = harness.getState();
+		if (!state) throw new Error("expected goal state after fresh verification");
+		expect(state.goal.verificationCommands).toHaveLength(2);
+		expect(state.goal.verificationCommands?.[1]).toMatchObject({
+			command: "bun --cwd=packages/coding-agent run check",
+			freshness: "fresh",
+			workEpoch: 1,
+		});
+		const surface = buildGoalContextSurface(state, state.goal);
+		expect(surface.verification_freshness).toMatchObject({
+			workEpoch: 1,
+		});
+	});
+
 	it("persists approved parallel workstream batches through summaries and compaction context", async () => {
 		const harness = createHarness({
 			state: { enabled: true, mode: "active", goal: createGoal() },
@@ -484,7 +613,38 @@ describe("goal runtime", () => {
 			toolCallId: "task-call-1",
 			details: {
 				projectAgentsDir: null,
-				results: [],
+				results: [
+					{
+						index: 0,
+						id: "BackendAgent",
+						agent: "task",
+						agentSource: "bundled",
+						task: "backend",
+						lastIntent: "Checking backend preference handler",
+						exitCode: 0,
+						output: "Backend preference save implemented.\nEvidence: backend check passed.",
+						stderr: "",
+						truncated: false,
+						durationMs: 1,
+						tokens: 0,
+						requests: 0,
+					},
+					{
+						index: 1,
+						id: "UiAgent",
+						agent: "task",
+						agentSource: "bundled",
+						task: "ui",
+						lastIntent: "Checking UI preference state",
+						exitCode: 0,
+						output: "UI preference state implemented.\nEvidence: UI check passed.",
+						stderr: "",
+						truncated: false,
+						durationMs: 1,
+						tokens: 0,
+						requests: 0,
+					},
+				],
 				totalDurationMs: 0,
 				progress: [
 					{
@@ -523,12 +683,32 @@ describe("goal runtime", () => {
 		});
 		batch = harness.getState()?.goal.currentWorkstreamBatch;
 		expect(batch?.status).toBe("ready-for-integration");
-		expect(
-			batch?.workstreams.map(run => `${run.workstreamId}:${run.status}:${run.historyUrl}:${run.outputUrl}`),
-		).toEqual([
-			"backend-api:completed:history://BackendAgent:agent://BackendAgent",
-			"ui-state:completed:history://UiAgent:agent://UiAgent",
-		]);
+		expect(batch?.workstreams[0]).toMatchObject({
+			status: "completed",
+			historyUrl: "history://BackendAgent",
+			outputUrl: "agent://BackendAgent",
+			summary: "Backend preference save implemented. Evidence: backend check passed.",
+			latestActivity: "Checking backend preference handler",
+		});
+		expect(batch?.workstreams[1]).toMatchObject({
+			status: "completed",
+			historyUrl: "history://UiAgent",
+			outputUrl: "agent://UiAgent",
+			summary: "UI preference state implemented. Evidence: UI check passed.",
+			latestActivity: "Checking UI preference state",
+		});
+		const stateAfterResult = harness.getState();
+		if (!stateAfterResult) throw new Error("expected goal state after workstream result");
+		const restoredAfterResult = parseGoalModeState(serializeGoalModeState(stateAfterResult), true);
+		expect(restoredAfterResult?.goal.currentWorkstreamBatch?.workstreams[0]).toMatchObject({
+			summary: "Backend preference save implemented. Evidence: backend check passed.",
+			latestActivity: "Checking backend preference handler",
+		});
+		const resultSurface = JSON.parse(renderGoalPromptSurface(stateAfterResult, stateAfterResult.goal));
+		expect(resultSurface.workstream_batch.workstreams[0]).toMatchObject({
+			summary: "Backend preference save implemented. Evidence: backend check passed.",
+			latestActivity: "Checking backend preference handler",
+		});
 
 		const candidate = harness.runtime.buildCheckpointCandidate({
 			status: "closed_with_evidence",
