@@ -4,6 +4,8 @@ Run [DeepSWE](https://github.com/datacurve-ai/deep-swe) through [Pier](https://g
 
 This package mirrors `packages/terminal-bench` but uses Pier because DeepSWE v1.1 grades in a separate verifier environment and Pier exposes the installed-agent/network-allowlist behavior DeepSWE depends on.
 
+For the operational runbook and failure interpretation guide, see [`OPERATIONS.md`](./OPERATIONS.md).
+
 ## What it does
 
 - Validates a local DeepSWE checkout (`deep-swe/tasks`, not a single task directory).
