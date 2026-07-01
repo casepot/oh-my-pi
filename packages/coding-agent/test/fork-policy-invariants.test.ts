@@ -45,6 +45,7 @@ describe("fork policy invariants", () => {
 			"packages/tui/package.json",
 			"packages/utils/package.json",
 			"packages/typescript-edit-benchmark/package.json",
+			"packages/rust-maintainer-benchmark/package.json",
 		];
 
 		for (const packagePath of packagePaths) {

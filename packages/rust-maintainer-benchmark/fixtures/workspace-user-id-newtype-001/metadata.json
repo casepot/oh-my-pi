@@ -1,0 +1,16 @@
+{
+  "category": "workspace-migration",
+  "difficulty": "hard",
+  "difficulty_score": 6,
+  "crate_root": ".",
+  "file_path": "crates/user-core/src/lib.rs",
+  "verification": {
+    "rustfmt": true,
+    "exact_match": "preferred",
+    "allowed_changed_files": ["crates/user-core/src/lib.rs", "crates/user-app/src/lib.rs"],
+    "commands": [
+      { "name": "cargo check", "args": ["check", "--workspace", "--color", "never"] },
+      { "name": "cargo test", "args": ["test", "--workspace", "--color", "never"] }
+    ]
+  }
+}

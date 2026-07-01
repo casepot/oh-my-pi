@@ -55,6 +55,7 @@ const PROMPT_GLOBS = [
 	"packages/agent/src/compaction/prompts/*.md",
 	"packages/ai/src/prompts/*.md",
 	"packages/typescript-edit-benchmark/src/prompts/*.md",
+	"packages/rust-maintainer-benchmark/src/prompts/*.md",
 	"packages/hashline/src/prompt.md",
 ];
 

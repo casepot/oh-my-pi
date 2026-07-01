@@ -84,6 +84,7 @@ const nativeAndIntegrationPackages = [
 	"packages/tui",
 	"packages/collab-web",
 	"packages/typescript-edit-benchmark",
+	"packages/rust-maintainer-benchmark",
 ];
 
 const codingAgentNativePathPatterns = [

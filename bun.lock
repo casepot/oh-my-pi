@@ -135,6 +135,16 @@
         "@types/react-dom": "catalog:",
       },
     },
+    "packages/deepswe-bench": {
+      "name": "@oh-my-pi/deepswe-bench",
+      "version": "0.0.1",
+      "bin": {
+        "deepswe": "src/runner.ts",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/hashline": {
       "name": "@oh-my-pi/hashline",
       "version": "16.2.5",
@@ -177,6 +187,24 @@
       "version": "16.2.5",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/rust-maintainer-benchmark": {
+      "name": "@oh-my-pi/rust-maintainer-benchmark",
+      "version": "0.0.1",
+      "bin": {
+        "rust-maintainer-benchmark": "src/index.ts",
+      },
+      "dependencies": {
+        "@oh-my-pi/pi-agent-core": "catalog:",
+        "@oh-my-pi/pi-ai": "catalog:",
+        "@oh-my-pi/pi-coding-agent": "catalog:",
+        "@oh-my-pi/pi-tui": "catalog:",
+        "@oh-my-pi/pi-utils": "catalog:",
+        "diff": "catalog:",
+      },
+      "devDependencies": {
         "@types/bun": "catalog:",
       },
     },
@@ -734,6 +762,8 @@
 
     "@oh-my-pi/collab-web": ["@oh-my-pi/collab-web@workspace:packages/collab-web"],
 
+    "@oh-my-pi/deepswe-bench": ["@oh-my-pi/deepswe-bench@workspace:packages/deepswe-bench"],
+
     "@oh-my-pi/hashline": ["@oh-my-pi/hashline@workspace:packages/hashline"],
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@workspace:packages/stats"],
@@ -755,6 +785,8 @@
     "@oh-my-pi/pi-utils": ["@oh-my-pi/pi-utils@workspace:packages/utils"],
 
     "@oh-my-pi/pi-wire": ["@oh-my-pi/pi-wire@workspace:packages/wire"],
+
+    "@oh-my-pi/rust-maintainer-benchmark": ["@oh-my-pi/rust-maintainer-benchmark@workspace:packages/rust-maintainer-benchmark"],
 
     "@oh-my-pi/snapcompact": ["@oh-my-pi/snapcompact@workspace:packages/snapcompact"],
 

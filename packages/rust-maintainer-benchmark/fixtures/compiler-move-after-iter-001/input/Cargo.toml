@@ -1,0 +1,8 @@
+[package]
+name = "compiler_move_after_iter_001"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+
+[workspace]

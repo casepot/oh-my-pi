@@ -1,0 +1,16 @@
+{
+  "category": "error-handling",
+  "difficulty": "medium",
+  "difficulty_score": 4,
+  "crate_root": ".",
+  "file_path": "src/lib.rs",
+  "verification": {
+    "rustfmt": true,
+    "exact_match": "preferred",
+    "allowed_changed_files": ["src/lib.rs"],
+    "commands": [
+      { "name": "cargo check", "args": ["check", "--color", "never"] },
+      { "name": "cargo test", "args": ["test", "--lib", "--color", "never"] }
+    ]
+  }
+}

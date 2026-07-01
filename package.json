@@ -148,6 +148,8 @@
     "ci:release:publish-native-leaf": "bun scripts/ci-release-publish.ts --native-leaf",
     "bench:gen-fixtures": "bun --cwd=packages/typescript-edit-benchmark run src/generate.ts --typescript-dir /tmp/typescript-source --count-per-type 8",
     "bench:edit": "bun --cwd=packages/typescript-edit-benchmark run start",
+    "bench:rust": "bun --cwd=packages/rust-maintainer-benchmark run start",
+    "bench:rust:check-fixtures": "bun --cwd=packages/rust-maintainer-benchmark run start --check-fixtures",
     "stats:sync": "python3 scripts/session-stats/sync.py",
     "stats:tools": "python3 scripts/session-stats/analyze.py tools",
     "stats:edits": "python3 scripts/session-stats/analyze.py edits",

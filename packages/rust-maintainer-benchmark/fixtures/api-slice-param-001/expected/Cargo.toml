@@ -1,0 +1,8 @@
+[package]
+name = "api_slice_param_001"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+
+[workspace]
