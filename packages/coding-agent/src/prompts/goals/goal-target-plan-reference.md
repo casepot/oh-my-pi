@@ -1,12 +1,7 @@
 Approved goal target plan reference.
 
-{{#if approvedPlanMarkdown}}
-<approved_target_plan_markdown path="{{planFilePath}}">
-{{approvedPlanMarkdown}}
-</approved_target_plan_markdown>
-{{/if}}
 
-<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
+<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" payload_hash="{{payloadHash}}" payload_bytes="{{payloadBytes}}" />
 
 <execution_context>
 {{#if planDepth}}
@@ -26,15 +21,13 @@ Approved goal target plan reference.
 - payload_sidecar: `{{payloadFilePath}}`
 </execution_context>
 
-{{#if executionGuardrails}}
-<approved_target_execution_guardrails>
-{{executionGuardrails}}
-</approved_target_execution_guardrails>
-{{/if}}
+<approved_target_execution_contract>
+{{executionContract}}
+</approved_target_execution_contract>
 
 <instruction>
-Use the approved Markdown plan as authority for the current target only.
+Use the execution contract as the active authority for the current target only.
+Read the approved Markdown plan or payload sidecar only when the contract says the missing detail is needed.
 If `parallel_workstream_batch` is present, the harness has not spawned it automatically; call `task` yourself when fanout is safe.
-Use the execution guardrails as structured guardrails, not a replacement for the plan.
-If current goal state no longer matches this target, ignore this reference and call `goal({op:"get"})`.
+If current goal state no longer matches this target, ignore this reference and call `goal({op:"get", view:"active_plan"})`.
 </instruction>

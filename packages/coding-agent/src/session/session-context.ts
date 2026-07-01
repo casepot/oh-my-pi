@@ -1,13 +1,16 @@
+import * as fs from "node:fs";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ProviderPayload, ServiceTier } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { parseGoalModeState, serializeGoalModeState } from "../goals/state";
+import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages";
 import {
 	type CompactionEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
+	type GoalStateSnapshotRef,
 	type ModeChangeEntry,
 	type SessionEntry,
 } from "./session-entries";
@@ -95,6 +98,38 @@ function readCompactGoalModeData(data: Record<string, unknown> | undefined): Com
 	};
 }
 
+function readGoalStateSnapshotSidecar(
+	ref: GoalStateSnapshotRef,
+	options: BuildSessionContextOptions | undefined,
+): Record<string, unknown> | undefined {
+	if (!options?.localProtocolOptions) return undefined;
+	const filePath = resolveLocalUrlToPath(ref.path, options.localProtocolOptions);
+	const content = fs.readFileSync(filePath, "utf8");
+	const bytes = new Blob([content]).size;
+	if (bytes !== ref.bytes) {
+		throw new Error(`goal state snapshot sidecar byte mismatch for ${ref.path}`);
+	}
+	const hash = Bun.hash(content).toString(16);
+	if (hash !== ref.hash) {
+		throw new Error(`goal state snapshot sidecar hash mismatch for ${ref.path}`);
+	}
+	const parsed: unknown = JSON.parse(content);
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error(`goal state snapshot sidecar is not an object for ${ref.path}`);
+	}
+	const parsedRecord = parsed as Record<string, unknown>;
+	return parsedRecord;
+}
+
+function readGoalStateSnapshotSource(
+	entry: { state?: Record<string, unknown>; stateRef?: GoalStateSnapshotRef },
+	options: BuildSessionContextOptions | undefined,
+): Record<string, unknown> | undefined {
+	if (entry.state) return entry.state;
+	if (!entry.stateRef) return undefined;
+	return readGoalStateSnapshotSidecar(entry.stateRef, options);
+}
+
 export interface BuildSessionContextOptions {
 	/**
 	 * Build the display transcript instead of the LLM context. By default this
@@ -105,6 +140,8 @@ export interface BuildSessionContextOptions {
 	transcript?: boolean;
 	/** In transcript mode, elide entries replaced by the latest compaction. */
 	collapseCompactedHistory?: boolean;
+	/** Resolves local:// sidecars referenced by entries on this branch. */
+	localProtocolOptions?: LocalProtocolOptions;
 }
 
 const TRIMMED_AUTO_CONTINUE_PROMPT = autoContinuePrompt.trim();
@@ -338,7 +375,7 @@ export function buildSessionContext(
 		const snapshot = compact ? goalSnapshots.get(compact.snapshotEntryId) : undefined;
 		const sourceData =
 			compact && snapshot && snapshot.pathIndex < latestGoalModeMarker.pathIndex
-				? snapshot.entry.state
+				? readGoalStateSnapshotSource(snapshot.entry, options)
 				: marker.data;
 		const restored = sourceData ? parseGoalModeState(sourceData, mode === "goal") : undefined;
 		if (restored && (!compact || restored.goal.id === compact.goalId)) {

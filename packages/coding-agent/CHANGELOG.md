@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added non-context goal context metrics and queryable proof-graph projection records for goal-mode storage/context sizing.
 - Added a reusable `plan-review` skill and target-planning prompt guidance for explicit planning review evidence.
 - Added goal target-plan linting, target cards, scenario-matrix metadata, and a live target status panel for goal planning.
 - Added durable goal-mode parallel workstream batches with approved-plan task scaffolds, task dispatch status tracking, checkpoint closure, and compaction-safe continuation context.
@@ -25,6 +26,8 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed goal-mode context persistence to write goal-state sidecar refs, routing capsules, narrow `goal({op:"get"})` views, and approved-plan execution contracts instead of replaying full proof/planning bodies in active context.
+- Changed goal checkpoint evidence to carry stable signal, scenario-row, workstream, verification-command, and evidence refs so proof projections can dedupe checkpoint support without replaying full evidence bodies.
 - Allowed goal target planning turns to use temporary todos, restoring the pre-planning todo list when an approved target plan enters execution.
 - Changed goal target-planning context to stop repeating full target-plan JSON, schema shapes, and enum catalogs; planners now use `target_plan_schema` as the single schema authority while target-plan artifacts stay UI/storage-only.
 - Changed oversized failed bash results to keep compact head/tail diagnostics inline with exit details and a full raw-output artifact pointer.

@@ -1344,7 +1344,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 			summary: "Installer smoke target closed.",
 			localClaims: ["Installer smoke has bounded current evidence"],
 			evidence: [
-				{ claim: "Installer smoke has bounded current evidence", evidence: "Observed smoke output", current: true },
+				{
+					claim: "Installer smoke has bounded current evidence",
+					evidence: "Observed smoke output",
+					current: true,
+					signalIds: ["signal-primary"],
+				},
 			],
 			notClaimed: ["Parent goal is complete"],
 			remainingQuestions: ["Which target follows?"],
@@ -1413,12 +1418,16 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(state?.goal.checkpointResolutions?.length ?? 0).toBe(0);
 		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
 		if (compactionEntry?.type !== "compaction") throw new Error("expected compaction entry");
-		expect(JSON.stringify(compactionEntry.preserveData?.goalMode)).toContain(
-			'"runMode":"awaiting-checkpoint-resolution"',
-		);
-		expect(JSON.stringify(compactionEntry.preserveData?.goalContinuationPacket)).toContain(
-			'"transition":"target-checkpoint"',
-		);
+		expect(compactionEntry.preserveData?.goalMode).toBeUndefined();
+		expect(compactionEntry.preserveData?.goalStateRef).toMatchObject({
+			stateVersion: state?.stateVersion,
+			goalId: state?.goal.id,
+		});
+		expect(compactionEntry.preserveData?.goalContinuationPacket).toBeUndefined();
+		expect(compactionEntry.preserveData?.goalRoutingCapsule).toMatchObject({
+			transition: "target-checkpoint",
+			pendingCheckpointId: checkpointId,
+		});
 		expect(getRuntimeSignals()).toContain("compaction:start:overflow");
 	});
 

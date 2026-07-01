@@ -8,7 +8,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { serializeGoalModeState, type GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { type GoalModeState, serializeGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getLatestCompactionEntry, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";

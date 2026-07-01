@@ -92,6 +92,26 @@ const evidenceItemSchema = {
 		evidence: { type: "string" },
 		current: { type: "boolean" },
 	},
+	optionalProperties: {
+		id: { type: "string" },
+		signalIds: { elements: { type: "string" } },
+		scenarioRowIds: { elements: { type: "string" } },
+		workstreamIds: { elements: { type: "string" } },
+		verificationCommandIds: { elements: { type: "string" } },
+		evidenceRefs: {
+			elements: {
+				properties: {
+					id: { type: "string" },
+					kind: { enum: ["doc", "issue", "artifact", "test", "commit", "external-record", "other"] },
+				},
+				optionalProperties: {
+					label: { type: "string" },
+					uri: { type: "string" },
+				},
+			},
+		},
+		staleIf: { elements: { type: "string" } },
+	},
 } as const;
 
 const deliverableResultSchema = {

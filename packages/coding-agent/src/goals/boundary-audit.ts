@@ -2,7 +2,13 @@ import type { GoalModeState, GoalRunMode } from "./state";
 
 export const GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE = "goal_boundary_audit";
 
-export const GOAL_OWNED_COMPACTION_PRESERVE_KEYS = ["goalMode", "goalContinuationPacket", "goalBoundaryRef"] as const;
+export const GOAL_OWNED_COMPACTION_PRESERVE_KEYS = [
+	"goalMode",
+	"goalStateRef",
+	"goalContinuationPacket",
+	"goalRoutingCapsule",
+	"goalBoundaryRef",
+] as const;
 
 export type GoalBoundaryPurpose = "compaction" | "handoff" | "checkpoint" | "target-plan" | "error" | "approved-plan";
 
@@ -56,6 +62,8 @@ export interface GoalBoundaryAuditRecord {
 
 const goalOwnedPreserveKeys: Record<string, true> = {
 	goalMode: true,
+	goalStateRef: true,
+	goalRoutingCapsule: true,
 	goalContinuationPacket: true,
 	goalBoundaryRef: true,
 };
@@ -133,7 +141,8 @@ export function collectGoalCompactionPreserveMismatches(
 ): string[] {
 	const mismatches: string[] = [];
 	const goalMode = isRecord(preserveData?.goalMode) ? preserveData.goalMode : undefined;
-	const packet = isRecord(preserveData?.goalContinuationPacket) ? preserveData.goalContinuationPacket : undefined;
+	const goalStateRef = isRecord(preserveData?.goalStateRef) ? preserveData.goalStateRef : undefined;
+	const routingCapsule = isRecord(preserveData?.goalRoutingCapsule) ? preserveData.goalRoutingCapsule : undefined;
 	const boundaryRef = isRecord(preserveData?.goalBoundaryRef) ? preserveData.goalBoundaryRef : undefined;
 	const activeState =
 		state?.enabled && state.goal.status !== "complete" && state.goal.status !== "dropped" ? state : undefined;
@@ -145,69 +154,75 @@ export function collectGoalCompactionPreserveMismatches(
 		return mismatches;
 	}
 
-	if (!goalMode) mismatches.push("goalMode:missing");
-	if (!packet) mismatches.push("goalContinuationPacket:missing");
+	if (!goalMode && !goalStateRef) mismatches.push("goalStateRef:missing");
 	if (!boundaryRef) mismatches.push("goalBoundaryRef:missing");
+	if (!routingCapsule) mismatches.push("goalRoutingCapsule:missing");
 
 	const plan = activeState.goal.currentTargetPlan;
-	const serializedGoal = nestedRecord(goalMode, "goal");
-	const serializedTarget = nestedRecord(serializedGoal, "currentTarget");
-	const serializedPlan = nestedRecord(serializedGoal, "currentTargetPlan");
+	if (goalStateRef) {
+		compareNumber(
+			mismatches,
+			"goalStateRef.stateVersion",
+			readNumber(goalStateRef, "stateVersion"),
+			activeState.stateVersion,
+		);
+		compareString(mismatches, "goalStateRef.goalId", readString(goalStateRef, "goalId"), activeState.goal.id);
+	}
+	if (routingCapsule) {
+		compareNumber(
+			mismatches,
+			"goalRoutingCapsule.stateVersion",
+			readNumber(routingCapsule, "stateVersion"),
+			activeState.stateVersion,
+		);
+		compareRunMode(
+			mismatches,
+			"goalRoutingCapsule.runMode",
+			readRunMode(routingCapsule, "runMode"),
+			activeState.runMode,
+		);
+		compareString(mismatches, "goalRoutingCapsule.goalId", readString(routingCapsule, "goalId"), activeState.goal.id);
+		compareNumber(
+			mismatches,
+			"goalRoutingCapsule.parentFrameVersion",
+			readNumber(routingCapsule, "parentFrameVersion"),
+			activeState.parentFrameVersion,
+		);
+	}
 
-	compareNumber(mismatches, "goalMode.stateVersion", readNumber(goalMode, "stateVersion"), activeState.stateVersion);
-	compareRunMode(mismatches, "goalMode.runMode", readRunMode(goalMode, "runMode"), activeState.runMode);
-	compareNumber(
-		mismatches,
-		"goalMode.parentFrameVersion",
-		readNumber(goalMode, "parentFrameVersion"),
-		activeState.parentFrameVersion,
-	);
-	compareString(mismatches, "goalMode.goal.id", readString(serializedGoal, "id"), activeState.goal.id);
-	compareString(
-		mismatches,
-		"goalMode.goal.currentTarget.id",
-		readString(serializedTarget, "id"),
-		activeState.goal.currentTarget?.id,
-	);
-	compareString(mismatches, "goalMode.goal.currentTargetPlan.id", readString(serializedPlan, "id"), plan?.id);
-	compareNumber(
-		mismatches,
-		"goalMode.goal.currentTargetPlan.revision",
-		readNumber(serializedPlan, "revision"),
-		plan?.revision,
-	);
+	if (goalMode) {
+		const serializedGoal = nestedRecord(goalMode, "goal");
+		const serializedTarget = nestedRecord(serializedGoal, "currentTarget");
+		const serializedPlan = nestedRecord(serializedGoal, "currentTargetPlan");
 
-	compareNumber(
-		mismatches,
-		"goalContinuationPacket.stateVersion",
-		readNumber(packet, "stateVersion"),
-		activeState.stateVersion,
-	);
-	compareRunMode(mismatches, "goalContinuationPacket.runMode", readRunMode(packet, "runMode"), activeState.runMode);
-	compareString(
-		mismatches,
-		"goalContinuationPacket.parentGoalId",
-		readString(packet, "parentGoalId"),
-		activeState.goal.id,
-	);
-	compareNumber(
-		mismatches,
-		"goalContinuationPacket.parentFrameVersion",
-		readNumber(packet, "parentFrameVersion"),
-		activeState.parentFrameVersion,
-	);
-	compareString(
-		mismatches,
-		"goalContinuationPacket.currentTargetId",
-		readString(packet, "currentTargetId"),
-		activeState.goal.currentTarget?.id,
-	);
-	compareString(
-		mismatches,
-		"goalContinuationPacket.pendingCheckpointId",
-		readString(packet, "pendingCheckpointId"),
-		activeState.goal.pendingCheckpointId,
-	);
+		compareNumber(
+			mismatches,
+			"goalMode.stateVersion",
+			readNumber(goalMode, "stateVersion"),
+			activeState.stateVersion,
+		);
+		compareRunMode(mismatches, "goalMode.runMode", readRunMode(goalMode, "runMode"), activeState.runMode);
+		compareNumber(
+			mismatches,
+			"goalMode.parentFrameVersion",
+			readNumber(goalMode, "parentFrameVersion"),
+			activeState.parentFrameVersion,
+		);
+		compareString(mismatches, "goalMode.goal.id", readString(serializedGoal, "id"), activeState.goal.id);
+		compareString(
+			mismatches,
+			"goalMode.goal.currentTarget.id",
+			readString(serializedTarget, "id"),
+			activeState.goal.currentTarget?.id,
+		);
+		compareString(mismatches, "goalMode.goal.currentTargetPlan.id", readString(serializedPlan, "id"), plan?.id);
+		compareNumber(
+			mismatches,
+			"goalMode.goal.currentTargetPlan.revision",
+			readNumber(serializedPlan, "revision"),
+			plan?.revision,
+		);
+	}
 
 	compareNumber(
 		mismatches,
@@ -256,7 +271,12 @@ export function goalCompactionOmittedFields(
 	state: GoalModeState | undefined,
 ): string[] {
 	if (!state?.enabled || state.goal.status === "complete" || state.goal.status === "dropped") return [];
-	return GOAL_OWNED_COMPACTION_PRESERVE_KEYS.filter(key => !preserveData || !(key in preserveData));
+	const omitted: string[] = [];
+	if (!preserveData || (!("goalMode" in preserveData) && !("goalStateRef" in preserveData)))
+		omitted.push("goalStateRef");
+	if (!preserveData || !("goalRoutingCapsule" in preserveData)) omitted.push("goalRoutingCapsule");
+	if (!preserveData || !("goalBoundaryRef" in preserveData)) omitted.push("goalBoundaryRef");
+	return omitted;
 }
 
 export function goalCompactionPreservedFields(preserveData: Record<string, unknown> | undefined): string[] {

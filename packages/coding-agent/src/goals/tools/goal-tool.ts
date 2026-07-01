@@ -15,6 +15,7 @@ import { formatErrorDetail, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { renderStatusLine, truncateToWidth } from "../../tui";
 import {
+	buildGoalToolViewEnvelope,
 	completionBudgetReport,
 	currentTargetPlanSubmitIdentity,
 	type GoalCheckpointInput,
@@ -34,6 +35,7 @@ import type {
 	GoalCheckpointReview,
 	GoalCompletionVerificationDetails,
 	GoalGateStatus,
+	GoalGetViewName,
 	GoalModeState,
 	GoalParentFrame,
 	GoalParentStateDelta,
@@ -49,6 +51,7 @@ import type {
 	GoalToolDetails,
 	GoalToolGoalSummary,
 	GoalToolStateSummary,
+	GoalToolViewEnvelope,
 	GoalVerificationCommandRecord,
 	GoalWorkstreamBatch,
 } from "../state";
@@ -184,9 +187,16 @@ const parentFrameSchema = z
 
 const evidenceSchema = z
 	.object({
+		id: z.string().optional(),
 		claim: z.string(),
 		evidence: z.string(),
 		current: z.boolean(),
+		signal_ids: z.array(z.string()).optional(),
+		scenario_row_ids: z.array(z.string()).optional(),
+		workstream_ids: z.array(z.string()).optional(),
+		verification_command_ids: z.array(z.string()).optional(),
+		evidence_refs: z.array(refSchema).optional(),
+		stale_if: z.array(z.string()).optional(),
 	})
 	.strict();
 
@@ -608,7 +618,22 @@ const createSchema = z
 		parent_frame: parentFrameSchema.optional(),
 	})
 	.strict();
-const getSchema = z.object({ op: z.literal("get") }).strict();
+const getViewSchema = z.enum([
+	"full",
+	"routing",
+	"state",
+	"proof",
+	"active_plan",
+	"proof_path",
+	"unresolved",
+	"diff",
+	"state_size",
+	"parent_burndown",
+	"evidence_status",
+]);
+type GoalGetView = GoalGetViewName;
+
+const getSchema = z.object({ op: z.literal("get"), view: getViewSchema.optional() }).strict();
 const resumeSchema = z.object({ op: z.literal("resume") }).strict();
 const dropSchema = z.object({ op: z.literal("drop") }).strict();
 const completeSchema = z.object({ op: z.literal("complete") }).strict();
@@ -917,6 +942,7 @@ export interface GoalToolResponse extends GoalToolDetailSource {
 	targetPlan?: GoalTargetPlanRecord;
 	targetPlanReviews?: GoalTargetPlanReview[];
 	targetPlanApproval?: GoalTargetPlanApprovedDetails;
+	view?: GoalToolViewEnvelope;
 }
 
 export function buildGoalToolResponse(
@@ -932,6 +958,7 @@ export function buildGoalToolResponse(
 		targetPlanReviews?: GoalTargetPlanReview[];
 		targetPlanApproval?: GoalTargetPlanApprovedDetails;
 		targetPlanLint?: GoalTargetPlanLintResult;
+		view?: GoalGetView;
 	},
 ): GoalToolResponse {
 	const resolvedGoal = goal ?? null;
@@ -942,6 +969,7 @@ export function buildGoalToolResponse(
 			: options?.includeCompletionReport && resolvedGoal?.status === "complete"
 				? completionBudgetReport(resolvedGoal)
 				: null;
+	const view = options?.view ? buildGoalToolViewEnvelope(options.state ?? null, options.view) : undefined;
 	return {
 		goal: resolvedGoal,
 		state: options?.state,
@@ -955,6 +983,7 @@ export function buildGoalToolResponse(
 		targetPlanReviews: options?.targetPlanReviews,
 		targetPlanApproval: options?.targetPlanApproval,
 		targetPlanLint: options?.targetPlanLint,
+		view,
 	};
 }
 
@@ -1028,7 +1057,18 @@ function mapCheckpointInput(params: z.infer<typeof checkpointSchema>): GoalCheck
 		status: params.status,
 		summary: params.summary,
 		localClaims: params.local_claims,
-		evidence: params.evidence.map(item => ({ ...item })),
+		evidence: params.evidence.map(item => ({
+			id: item.id,
+			claim: item.claim,
+			evidence: item.evidence,
+			current: item.current,
+			signalIds: item.signal_ids,
+			scenarioRowIds: item.scenario_row_ids,
+			workstreamIds: item.workstream_ids,
+			verificationCommandIds: item.verification_command_ids,
+			evidenceRefs: item.evidence_refs?.map(ref => ({ ...ref, kind: ref.kind as GoalRefKind })),
+			staleIf: item.stale_if,
+		})),
 		notClaimed: params.not_claimed,
 		remainingQuestions: params.remaining_questions,
 		checksRun: params.checks_run,
@@ -2022,8 +2062,9 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				: await runtime.createGoal(createInput);
 			response = buildGoalToolResponse(created.goal, { state: created });
 		} else if (params.op === "get") {
+			const getParams = getSchema.parse(params);
 			const state = this.#session.getGoalModeState?.();
-			response = buildGoalToolResponse(state?.goal ?? null, { state: state ?? null });
+			response = buildGoalToolResponse(state?.goal ?? null, { state: state ?? null, view: getParams.view });
 		} else if (params.op === "resume") {
 			const resumed = await runtime.resumeGoal();
 			response = buildGoalToolResponse(resumed.goal, { state: resumed });
@@ -2189,7 +2230,95 @@ function renderVerificationRecordFreshness(record: GoalVerificationCommandRecord
 	return "stale";
 }
 
+function renderGoalGetViewText(response: GoalToolResponse, view: GoalToolViewEnvelope): string {
+	const goal = response.goal;
+	if (!goal) return "No active goal.";
+	const payload = view.payload;
+	if (view.name === "state") {
+		let text = `Goal state: ${goal.id}\nStatus: ${goal.status}`;
+		text += `\nRun mode: ${String(payload.runMode ?? "none")}`;
+		text += `\nState version: ${String(payload.stateVersion ?? "unknown")}`;
+		text += `\nParent frame version: ${String(payload.parentFrameVersion ?? 0)}`;
+		text += `\nTokens: ${String(payload.tokensUsed ?? 0)} used`;
+		if (payload.tokenBudget !== undefined) text += ` / ${String(payload.tokenBudget)} budget`;
+		if (payload.currentTargetId) text += `\nCurrent target: ${String(payload.currentTargetId)}`;
+		if (payload.currentTargetPlanId) text += `\nTarget plan: ${String(payload.currentTargetPlanId)}`;
+		if (payload.pendingCheckpointId) text += `\nPending checkpoint: ${String(payload.pendingCheckpointId)}`;
+		return text;
+	}
+	if (view.name === "routing") {
+		let text = `Goal routing: ${goal.id}\nRun mode: ${String(payload.runMode ?? "none")}`;
+		text += `\nNext action: ${String(payload.nextAction ?? "No active goal.")}`;
+		if (payload.requiredOperation) text += `\nRequired operation: ${String(payload.requiredOperation)}`;
+		const allowedCount = Array.isArray(payload.allowedNextActs) ? payload.allowedNextActs.length : 0;
+		const disallowedCount = Array.isArray(payload.disallowedNextActs) ? payload.disallowedNextActs.length : 0;
+		text += `\nAllowed acts: ${allowedCount}`;
+		text += `\nDisallowed acts: ${disallowedCount}`;
+		if (payload.currentTargetTitle || payload.currentTargetId) {
+			text += `\nCurrent target: ${String(payload.currentTargetTitle ?? payload.currentTargetId)}`;
+		}
+		if (payload.currentTargetPlanPath) text += `\nTarget plan: ${String(payload.currentTargetPlanPath)}`;
+		if (payload.workstreamBatchId) text += `\nWorkstream batch: ${String(payload.workstreamBatchId)}`;
+		if (payload.pendingCheckpointId) text += `\nPending checkpoint: ${String(payload.pendingCheckpointId)}`;
+		return text;
+	}
+	if (view.name === "proof") {
+		const parentClaims = payload.parentClaims;
+		const claimText =
+			parentClaims && typeof parentClaims === "object" && !Array.isArray(parentClaims)
+				? JSON.stringify(parentClaims)
+				: "{}";
+		let text = `Goal proof: ${goal.id}`;
+		text += `\nParent claims: ${claimText}`;
+		text += `\nBoundaries: ${String(payload.boundaries ?? 0)}`;
+		text += `\nResiduals: ${String(payload.residuals ?? 0)}`;
+		text += `\nCheckpoints: ${String(payload.checkpoints ?? 0)}`;
+		text += `\nPending checkpoint: ${String(payload.pendingCheckpointId ?? "none")}`;
+		return text;
+	}
+	if (view.name === "active_plan") {
+		const currentTarget = isRecordValue(payload.currentTarget) ? payload.currentTarget : undefined;
+		const currentPlan = isRecordValue(payload.currentTargetPlan) ? payload.currentTargetPlan : undefined;
+		let text = `Goal active plan: ${goal.id}`;
+		if (currentTarget?.title) text += `\nTarget: ${String(currentTarget.title)}`;
+		if (currentTarget?.status) text += `\nTarget status: ${String(currentTarget.status)}`;
+		if (currentPlan?.id) text += `\nPlan: ${String(currentPlan.id)}`;
+		if (currentPlan?.revision !== undefined) text += ` revision ${String(currentPlan.revision)}`;
+		if (currentPlan?.planFilePath) text += `\nPlan file: ${String(currentPlan.planFilePath)}`;
+		if (payload.executionContract) text += "\nExecution contract: details.view.payload.executionContract";
+		return text;
+	}
+	if (view.name === "proof_path") {
+		const checkpoints = Array.isArray(payload.checkpoints) ? payload.checkpoints.length : 0;
+		const accepted = Array.isArray(payload.acceptedClaims) ? payload.acceptedClaims.length : 0;
+		const candidates = Array.isArray(payload.candidateClaims) ? payload.candidateClaims.length : 0;
+		return `Goal proof path: ${goal.id}\nAccepted claims: ${accepted}\nCandidate claims: ${candidates}\nCheckpoints: ${checkpoints}\nPending checkpoint: ${String(payload.pendingCheckpointId ?? "none")}`;
+	}
+	if (view.name === "unresolved") {
+		const residuals = Array.isArray(payload.parentResiduals) ? payload.parentResiduals.length : 0;
+		const questions = Array.isArray(payload.remainingQuestions) ? payload.remainingQuestions.length : 0;
+		const blockedState = isRecordValue(payload.blockedState) ? payload.blockedState : undefined;
+		let text = `Goal unresolved work: ${goal.id}\nParent residuals: ${residuals}\nRemaining questions: ${questions}`;
+		if (blockedState?.id) text += `\nBlocked state: ${String(blockedState.id)}`;
+		if (payload.pendingCheckpointId) text += `\nPending checkpoint: ${String(payload.pendingCheckpointId)}`;
+		return text;
+	}
+	if (view.name === "diff")
+		return `Goal state diff anchors: ${goal.id}\nState version: ${String(payload.stateVersion ?? "unknown")}\nParent frame version: ${String(payload.parentFrameVersion ?? 0)}\nLatest resolution: ${String(payload.latestResolutionId ?? "none")}`;
+	if (view.name === "state_size")
+		return `Goal state size: ${goal.id}\nSerialized bytes: ${String(payload.serializedBytes ?? 0)}\nPrompt surface bytes: ${String(payload.promptSurfaceBytes ?? 0)}\nProof graph bytes: ${String(payload.proofGraphBytes ?? 0)}`;
+	if (view.name === "parent_burndown")
+		return `Goal parent burndown: ${goal.id}\nAccepted claims: ${String(payload.acceptedClaims ?? 0)}\nResiduals: ${String(payload.residuals ?? 0)}\nGates: ${String(payload.gates ?? 0)}\nLatest resolution: ${String(payload.latestResolutionId ?? "none")}`;
+	if (view.name === "evidence_status") {
+		const requiredSignals = Array.isArray(payload.requiredSignals) ? payload.requiredSignals.length : 0;
+		return `Goal evidence status: ${goal.id}\nRequired signals: ${requiredSignals}\nCurrent evidence: ${String(payload.currentEvidenceCount ?? 0)}\nStale evidence: ${String(payload.staleEvidenceCount ?? 0)}\nVerification commands: ${String(payload.verificationCommands ?? 0)}`;
+	}
+	return renderGoalToolText(response, "get");
+}
+
 function renderGoalToolText(response: GoalToolResponse, op: GoalToolInput["op"]): string {
+	if (op === "get" && response.view && response.view.name !== "full")
+		return renderGoalGetViewText(response, response.view);
 	const goal = response.goal;
 	if (!goal) return "No active goal.";
 	let text = `Goal: ${visibleGoalObjective(goal, op)}\nStatus: ${goal.status}`;

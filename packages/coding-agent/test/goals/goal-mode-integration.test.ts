@@ -9,6 +9,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { targetPlanPayloadFilePath } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import {
 	type GoalContinuationFocus,
+	type GoalModeState,
 	parseGoalModeState,
 	serializeGoalModeState,
 } from "@oh-my-pi/pi-coding-agent/goals/state";
@@ -38,6 +39,27 @@ import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import { createTools, type Tool, type ToolSession, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools";
 import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
+
+async function readGoalModeFromPreserveData(
+	sessionManager: SessionManager,
+	preserveData: Record<string, unknown> | undefined,
+): Promise<GoalModeState | undefined> {
+	if (!preserveData) return undefined;
+	const inlineState = parseGoalModeState(preserveData.goalMode);
+	if (inlineState) return inlineState;
+	const ref = preserveData.goalStateRef;
+	if (ref === null || typeof ref !== "object" || Array.isArray(ref)) return undefined;
+	const refRecord: Record<string, unknown> = ref as Record<string, unknown>;
+	if (typeof refRecord.path !== "string") return undefined;
+	const content = await Bun.file(
+		resolveLocalUrlToPath(refRecord.path, {
+			getArtifactsDir: () => sessionManager.getArtifactsDir(),
+			getSessionId: () => sessionManager.getSessionId(),
+		}),
+	).text();
+	const parsed = JSON.parse(content) as unknown;
+	return parseGoalModeState(parsed);
+}
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -307,6 +329,12 @@ async function activeGoalTool(harness: GoalHarness): Promise<Tool> {
 	);
 	if (!goalTool) throw new Error("Expected goal tool to be active");
 	return goalTool;
+}
+
+function currentPrimarySignalIds(harness: GoalHarness): string[] {
+	const targetId = harness.session.getGoalModeState()?.goal.currentTarget?.id;
+	if (!targetId) throw new Error("expected current target");
+	return [`signal-${targetId}`];
 }
 
 async function writeAndSubmitApprovedTargetPlan(
@@ -925,18 +953,19 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(approval.payloadFilePath).toBe(targetPlanPayloadFilePath(approval.planFilePath));
 		expect(approvedPrompt).toContain(approval.payloadFilePath);
 		expect(approvedPrompt).toContain(`payload_path="${approval.payloadFilePath}"`);
+		if (!approval.payloadHash) throw new Error("expected target plan payload hash");
 		expect(approvedPrompt).toContain(approval.planHash);
-		expect(approvedPrompt).toContain("<approved_target_plan_markdown");
-		expect(approvedPrompt).toContain("# Approved target plan");
-		const planBlockIndex = approvedPrompt.indexOf("<approved_target_plan_markdown");
+		expect(approvedPrompt).toContain(approval.payloadHash);
+		expect(approvedPrompt).toContain(`payload_hash="${approval.payloadHash}"`);
+		expect(approvedPrompt).toContain("<approved_target_execution_contract>");
+		expect(approvedPrompt).not.toContain("<approved_target_plan_markdown");
+		expect(approvedPrompt).not.toContain("# Approved target plan");
+		expect(approvedPrompt).not.toContain("<approved_target_execution_guardrails>");
 		const refIndex = approvedPrompt.indexOf("<approved_target_plan_ref");
-		const guardrailsIndex = approvedPrompt.indexOf("<approved_target_execution_guardrails>");
-		expect(planBlockIndex).toBeGreaterThan(-1);
+		const contractIndex = approvedPrompt.indexOf("<approved_target_execution_contract>");
 		expect(refIndex).toBeGreaterThan(-1);
-		expect(guardrailsIndex).toBeGreaterThan(-1);
-		expect(planBlockIndex).toBeLessThan(refIndex);
-		expect(planBlockIndex).toBeLessThan(guardrailsIndex);
-		expect(approvedPrompt).toContain("<approved_target_execution_guardrails>");
+		expect(contractIndex).toBeGreaterThan(-1);
+		expect(refIndex).toBeLessThan(contractIndex);
 		expect(approvedPrompt).not.toContain("<approved_target_execution_summary>");
 		expect(approvedPrompt).toContain(
 			"Fresh execution context: planning/reviewer transcript was removed from model context.",
@@ -951,7 +980,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(approvedPrompt).not.toContain('"scopeCalibration"');
 		expect(approvedPrompt).not.toContain('"scenarioRowsInScope"');
 		expect(approvedPrompt).not.toContain('"concernChecks"');
-		expect(approvedPrompt).not.toContain('"concernIds"');
+		expect(approvedPrompt).toContain('"concernIds"');
 		expect(approvedPrompt).not.toContain("## Verification Signal Aperture");
 		expect(approvedPrompt).not.toContain("Primary signal: focused target evidence.");
 		const state = harness.session.getGoalModeState();
@@ -963,7 +992,12 @@ describe("InteractiveMode goal mode integration", () => {
 				summary: "Current smoke output exists.",
 				localClaims: ["Source-link install exercises smoke path"],
 				evidence: [
-					{ claim: "Source-link install exercises smoke path", evidence: "Observed smoke output", current: true },
+					{
+						claim: "Source-link install exercises smoke path",
+						evidence: "Observed smoke output",
+						current: true,
+						signalIds: currentPrimarySignalIds(harness),
+					},
 				],
 				notClaimed: ["Release is ready"],
 				remainingQuestions: [],
@@ -1051,9 +1085,10 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(contextText).toContain(
 			"Goal target plan approved; planning and reviewer transcript intentionally removed from execution context.",
 		);
-		expect(contextText).toContain("<approved_target_plan_markdown");
-		expect(contextText).toContain("<approved_target_execution_guardrails>");
-		expect(contextText).toContain("APPROVED_PLAN_SENTINEL_REACHES_EXECUTION_CONTEXT");
+		expect(contextText).toContain("<approved_target_execution_contract>");
+		expect(contextText).not.toContain("<approved_target_plan_markdown");
+		expect(contextText).not.toContain("<approved_target_execution_guardrails>");
+		expect(contextText).not.toContain("APPROVED_PLAN_SENTINEL_REACHES_EXECUTION_CONTEXT");
 		expect(contextText).toContain("implementation code review lens");
 		expect(contextText).toContain("confidenceIfSatisfied");
 		expect(contextText).not.toContain("<goal_context>");
@@ -1517,6 +1552,7 @@ describe("InteractiveMode goal mode integration", () => {
 					claim: "Source-link install exercises smoke path",
 					evidence: "Observed smoke output",
 					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
 				},
 			],
 			not_claimed: ["Release is ready"],
@@ -1685,6 +1721,7 @@ describe("InteractiveMode goal mode integration", () => {
 					claim: "Source-link install exercises smoke path",
 					evidence: "Observed smoke output",
 					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
 				},
 			],
 			not_claimed: ["Release is ready"],
@@ -1768,6 +1805,7 @@ describe("InteractiveMode goal mode integration", () => {
 					claim: "Committed checkpoint artifacts are recoverable",
 					evidence: "Runtime state stores the committed checkpoint packet.",
 					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
 				},
 			],
 			not_claimed: ["Parent goal is complete"],
@@ -1891,7 +1929,14 @@ describe("InteractiveMode goal mode integration", () => {
 			status: "closed_with_evidence",
 			summary: "Menu checkpoint is pending.",
 			local_claims: ["Menu checkpoint has current evidence"],
-			evidence: [{ claim: "Menu checkpoint has current evidence", evidence: "Observed output", current: true }],
+			evidence: [
+				{
+					claim: "Menu checkpoint has current evidence",
+					evidence: "Observed output",
+					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
+				},
+			],
 			not_claimed: ["Parent goal is complete"],
 			remaining_questions: ["Which target follows?"],
 		});
@@ -1958,7 +2003,12 @@ describe("InteractiveMode goal mode integration", () => {
 			summary: "Source-link smoke passed.",
 			local_claims: ["Source-link smoke has current bounded evidence"],
 			evidence: [
-				{ claim: "Source-link smoke has current bounded evidence", evidence: "Observed output", current: true },
+				{
+					claim: "Source-link smoke has current bounded evidence",
+					evidence: "Observed output",
+					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
+				},
 			],
 			not_claimed: ["Tarball smoke is verified"],
 			remaining_questions: ["Should tarball smoke be next?"],
@@ -1990,17 +2040,21 @@ describe("InteractiveMode goal mode integration", () => {
 
 		appendCompactableHistory(harness);
 		const compacted = await harness.session.compact();
-		const preservedGoalMode = parseGoalModeState(compacted.preserveData?.goalMode);
+		const preservedGoalMode = await readGoalModeFromPreserveData(
+			harness.session.sessionManager,
+			compacted.preserveData,
+		);
 		expect(preservedGoalMode?.stateVersion).toBe(latestState.stateVersion);
 		expect(preservedGoalMode?.goal.currentTarget?.id).toBe(latestTarget.id);
 		expect(preservedGoalMode?.goal.currentTargetPlan?.id).toBe(latestPlan.id);
-		const packet = compacted.preserveData?.goalContinuationPacket;
-		if (!packet || typeof packet !== "object" || Array.isArray(packet)) {
-			throw new Error("expected goal continuation packet");
+		expect(compacted.preserveData?.goalContinuationPacket).toBeUndefined();
+		const capsule = compacted.preserveData?.goalRoutingCapsule;
+		if (!capsule || typeof capsule !== "object" || Array.isArray(capsule)) {
+			throw new Error("expected goal routing capsule");
 		}
-		const packetRecord = packet as Record<string, unknown>;
-		expect(packetRecord.stateVersion).toBe(latestState.stateVersion);
-		expect(packetRecord.currentTargetId).toBe(latestTarget.id);
+		const capsuleRecord = capsule as Record<string, unknown>;
+		expect(capsuleRecord.stateVersion).toBe(latestState.stateVersion);
+		expect(capsuleRecord.currentTarget).toMatchObject({ id: latestTarget.id });
 		const boundaryRef = compacted.preserveData?.goalBoundaryRef;
 		if (!boundaryRef || typeof boundaryRef !== "object" || Array.isArray(boundaryRef)) {
 			throw new Error("expected goal boundary ref");
@@ -2095,6 +2149,7 @@ describe("InteractiveMode goal mode integration", () => {
 					claim: "Source-link installer flow exercises the smoke path",
 					evidence: "Observed focused source-link smoke output",
 					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
 				},
 			],
 			checks_run: ["bun test packages/coding-agent/test/goals/goal-mode-integration.test.ts"],
@@ -2185,15 +2240,20 @@ describe("InteractiveMode goal mode integration", () => {
 		const compactOptions = compactCall[5];
 		const extraContext = compactOptions?.extraContext?.join("\n") ?? "";
 		expect(extraContext).toContain("<goal_mode_compaction_context>");
+		expect(extraContext).toContain("<goal_routing_capsule>");
 		expect(extraContext).toContain("Prove tarball installer smoke");
-		expect(extraContext).toContain("Release is ready");
-		expect(extraContext).toContain("tarball-smoke-evidence");
-		expect(extraContext).toContain("Raw &lt;/goal_continuation_packet&gt; marker is data only");
-		expect(JSON.stringify(compacted.preserveData?.goalMode)).toContain('"runMode":"working-target"');
-		expect(JSON.stringify(compacted.preserveData?.goalMode)).toContain("Prove tarball installer smoke");
-		expect(JSON.stringify(compacted.preserveData?.goalContinuationPacket)).toContain(
-			'"transition":"context-compaction"',
+		expect(extraContext).not.toContain("<goal_continuation_packet>");
+		expect(extraContext).not.toContain("Raw &lt;/goal_continuation_packet&gt; marker is data only");
+		const preservedGoalMode = await readGoalModeFromPreserveData(
+			harness.session.sessionManager,
+			compacted.preserveData,
 		);
+		expect(JSON.stringify(preservedGoalMode)).toContain('"runMode":"working-target"');
+		expect(JSON.stringify(preservedGoalMode)).toContain("Prove tarball installer smoke");
+		expect(JSON.stringify(preservedGoalMode)).toContain("Release is ready");
+		expect(JSON.stringify(preservedGoalMode)).toContain("tarball-smoke-evidence");
+		expect(compacted.preserveData?.goalContinuationPacket).toBeUndefined();
+		expect(JSON.stringify(compacted.preserveData?.goalRoutingCapsule)).toContain('"transition":"context-compaction"');
 		const postCompactDispatch = await harness.session.prepareGoalContinuationDispatch();
 		expect(postCompactDispatch?.kind).toBe("post-compaction");
 		expect(postCompactDispatch?.customType).toBe(GOAL_POST_COMPACTION_MESSAGE_TYPE);
@@ -2234,7 +2294,12 @@ describe("InteractiveMode goal mode integration", () => {
 			summary: "Tarball smoke evidence was gathered for verifier repair.",
 			local_claims: ["Tarball smoke evidence is current"],
 			evidence: [
-				{ claim: "Tarball smoke evidence is current", evidence: "Observed tarball smoke output", current: true },
+				{
+					claim: "Tarball smoke evidence is current",
+					evidence: "Observed tarball smoke output",
+					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
+				},
 			],
 			not_claimed: ["Parent goal is complete"],
 			remaining_questions: ["Can the parent verifier accept completion now?"],
@@ -2287,6 +2352,7 @@ describe("InteractiveMode goal mode integration", () => {
 					claim: "Source-link smoke has current evidence before handoff",
 					evidence: "Observed output",
 					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
 				},
 			],
 			not_claimed: ["Release is ready"],
@@ -2370,13 +2436,19 @@ describe("InteractiveMode goal mode integration", () => {
 			closure_standard: "Current smoke output exists.",
 		});
 		await writeAndSubmitApprovedTargetPlan(harness, goalTool);
-
 		const checkpoint = await goalTool.execute("checkpoint", {
 			op: "checkpoint",
 			status: "closed_with_evidence",
 			summary: "Weak source-link smoke evidence.",
 			local_claims: ["Source-link install exercises smoke path"],
-			evidence: [{ claim: "Source-link install exercises smoke path", evidence: "File changed", current: true }],
+			evidence: [
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "File changed",
+					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
+				},
+			],
 			not_claimed: ["Release is ready"],
 			remaining_questions: ["Need stronger evidence."],
 		});
@@ -2481,7 +2553,12 @@ describe("InteractiveMode goal mode integration", () => {
 			summary: "Fresh verifier evidence was gathered.",
 			local_claims: ["Missing verifier evidence is current"],
 			evidence: [
-				{ claim: "Missing verifier evidence is current", evidence: "Observed focused proof", current: true },
+				{
+					claim: "Missing verifier evidence is current",
+					evidence: "Observed focused proof",
+					current: true,
+					signal_ids: currentPrimarySignalIds(harness),
+				},
 			],
 			not_claimed: ["Parent goal is complete"],
 			remaining_questions: ["Should completion be retried?"],

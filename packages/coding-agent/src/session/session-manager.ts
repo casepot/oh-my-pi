@@ -40,6 +40,7 @@ import {
 	type MCPToolSelectionEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
+	type NewGoalStateSnapshotInput,
 	type NewSessionOptions,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
@@ -1323,7 +1324,7 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendGoalStateSnapshot(input: Omit<GoalStateSnapshotEntry, keyof SessionEntryBase | "type">): string {
+	appendGoalStateSnapshot(input: NewGoalStateSnapshotInput): string {
 		const entry: GoalStateSnapshotEntry = { type: "goal_state_snapshot", ...this.#freshEntryFields(), ...input };
 		this.#recordEntry(entry);
 		return entry.id;
@@ -1569,7 +1570,13 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
+			...options,
+			localProtocolOptions: options?.localProtocolOptions ?? {
+				getArtifactsDir: () => this.getArtifactsDir(),
+				getSessionId: () => this.getSessionId(),
+			},
+		});
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */

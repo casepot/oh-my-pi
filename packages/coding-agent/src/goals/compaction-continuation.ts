@@ -19,6 +19,116 @@ export interface GoalCompactionContext {
 	preserveData: Record<string, unknown>;
 }
 
+export interface GoalRoutingCapsule {
+	schemaVersion: 1;
+	goalId: string;
+	objective: string;
+	stateVersion: number;
+	parentFrameVersion: number;
+	runMode: GoalModeState["runMode"];
+	transition: GoalContinuationPacket["transition"];
+	reason: string;
+	continuationGuidanceSummary: string;
+	nextAction: string;
+	currentTarget?: {
+		id: string;
+		title: string;
+		desiredFutureClaim: string;
+	};
+	currentTargetPlan?: {
+		id: string;
+		targetId: string;
+		revision: number;
+		planFilePath: string;
+		payloadFilePath?: string;
+	};
+	pendingCheckpointId?: string;
+	workstreamBatch?: {
+		id: string;
+		status: string;
+		workstreamCount: number;
+		statusCounts: Record<string, number>;
+	};
+	blockedState?: {
+		reason: string;
+	};
+	createdAt: number;
+}
+
+function countWorkstreamStatuses(state: GoalModeState): Record<string, number> {
+	const counts: Record<string, number> = {};
+	for (const workstream of state.goal.currentWorkstreamBatch?.workstreams ?? []) {
+		counts[workstream.status] = (counts[workstream.status] ?? 0) + 1;
+	}
+	return counts;
+}
+
+function nextActionForCompaction(state: GoalModeState, packet: GoalContinuationPacket): string {
+	if (state.runMode === "planning-target") return "Continue target planning; do not implement before approval.";
+	if (state.runMode === "awaiting-checkpoint-resolution")
+		return "Prepare checkpoint guidance, then resolve_checkpoint.";
+	if (state.runMode === "awaiting-parent-completion") return 'Call goal({ op: "complete" }).';
+	if (state.runMode === "awaiting-verification-repair") return "Repair verifier blockers with fresh evidence.";
+	if (state.runMode === "awaiting-user-input") return "Wait for user or recover blocked state explicitly.";
+	if (packet.transition === "context-compaction") return "Resume the same open target.";
+	return packet.continuationGuidanceSummary;
+}
+
+export function buildGoalRoutingCapsule(
+	state: GoalModeState,
+	continuationPacket: GoalContinuationPacket,
+	createdAt = Date.now(),
+): GoalRoutingCapsule {
+	const target = state.goal.currentTarget;
+	const plan = state.goal.currentTargetPlan;
+	const batch = state.goal.currentWorkstreamBatch;
+	return {
+		schemaVersion: 1,
+		goalId: state.goal.id,
+		objective: state.goal.objective,
+		stateVersion: state.stateVersion,
+		parentFrameVersion: state.parentFrameVersion,
+		runMode: state.runMode,
+		transition: continuationPacket.transition,
+		reason: continuationPacket.reason,
+		continuationGuidanceSummary: continuationPacket.continuationGuidanceSummary,
+		nextAction: nextActionForCompaction(state, continuationPacket),
+		...(target
+			? {
+					currentTarget: {
+						id: target.id,
+						title: target.title,
+						desiredFutureClaim: target.desiredFutureClaim,
+					},
+				}
+			: {}),
+		...(plan
+			? {
+					currentTargetPlan: {
+						id: plan.id,
+						targetId: plan.targetId,
+						revision: plan.revision,
+						planFilePath: plan.planFilePath,
+						payloadFilePath: continuationPacket.currentTargetPlanPayloadFilePath,
+					},
+				}
+			: {}),
+		...(state.goal.pendingCheckpointId ? { pendingCheckpointId: state.goal.pendingCheckpointId } : {}),
+		...(batch
+			? {
+					workstreamBatch: {
+						id: batch.id,
+						status: batch.status,
+						workstreamCount: batch.workstreams.length,
+						statusCounts: countWorkstreamStatuses(state),
+					},
+				}
+			: {}),
+		...(state.goal.currentBlockedState ? { blockedState: { reason: state.goal.currentBlockedState.message } } : {}),
+		createdAt,
+	};
+}
+
 function buildGoalContinuationPacketForCompaction(state: GoalModeState): GoalContinuationPacket {
 	let transition: GoalContinuationPacket["transition"] = "context-compaction";
 	let reason =
@@ -83,17 +193,17 @@ export function buildGoalCompactionContext(state: GoalModeState | undefined): Go
 	if (state.goal.status === "complete" || state.goal.status === "dropped") return undefined;
 	const continuationPacket = buildGoalContinuationPacketForCompaction(state);
 	const serializedState = serializeGoalModeState(state);
+	const routingCapsule = buildGoalRoutingCapsule(state, continuationPacket);
 	const context = prompt.render(goalCompactionContextTemplate, {
 		transition: continuationPacket.transition,
 		reason: continuationPacket.reason,
-		stateSnapshot: renderGoalPromptSurface(state, state.goal),
-		continuationPacket: escapeXmlText(JSON.stringify(continuationPacket, null, 2)),
+		routingCapsule: escapeXmlText(JSON.stringify(routingCapsule, null, 2)),
 	});
 	return {
 		context,
 		preserveData: {
 			goalMode: serializedState,
-			goalContinuationPacket: continuationPacket,
+			goalRoutingCapsule: routingCapsule,
 			goalBoundaryRef: buildGoalBoundaryStateRef(state, "compaction"),
 		},
 	};

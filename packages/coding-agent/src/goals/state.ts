@@ -16,6 +16,31 @@ export type GoalRunMode =
 export const GOAL_MODE_SCHEMA_VERSION = 7;
 export type GoalDeliverableStatus = "pending" | "partial" | "satisfied" | "blocked" | "stale";
 
+export type GoalContextMetricKind =
+	| "state_snapshot"
+	| "prompt_surface"
+	| "compaction_preserve"
+	| "approved_plan_contract"
+	| "checkpoint_packet"
+	| "proof_graph";
+
+export interface GoalContextMetric {
+	kind: GoalContextMetricKind;
+	goalId: string;
+	stateVersion: number;
+	parentFrameVersion: number;
+	targetId?: string;
+	targetPlanId?: string;
+	checkpointId?: string;
+	serializedBytes: number;
+	promptBytes?: number;
+	sidecarBytes?: number;
+	jsonlBytes?: number;
+	counts: Record<string, number>;
+	largestSections?: Array<{ section: string; bytes: number }>;
+	createdAt: number;
+}
+
 export type GoalTargetPlanStatus = "drafting" | "reviewing" | "revision-required" | "approved" | "failed" | "stale";
 export type GoalTargetPlanReviewStatus = "accepted" | "rejected" | "failed" | "stale";
 export type GoalTargetPlanReviewLens = "aperture" | "execution-readiness";
@@ -731,6 +756,58 @@ export interface GoalTargetPlanExecutionSummary {
 	taskBatchScaffold?: GoalTaskBatchScaffold;
 }
 
+export interface GoalTargetPlanExecutionContractPlanRef {
+	targetPlanId: string;
+	revision: number;
+	planFilePath: string;
+	planHash?: string;
+	planBytes?: number;
+	payloadFilePath: string;
+	payloadHash?: string;
+	payloadBytes?: number;
+}
+
+export interface GoalTargetPlanExecutionContract {
+	schemaVersion: 1;
+	targetId: string;
+	targetPlanId: string;
+	revision: number;
+	planRef: GoalTargetPlanExecutionContractPlanRef;
+	target: {
+		title?: string;
+		desiredFutureClaim?: string;
+		closureStandard?: string;
+		capabilityClaim?: string;
+		userVisibleSurface?: string;
+	};
+	scope: {
+		planDepth?: GoalTargetPlanDepth;
+		primarySignalGroupId?: string;
+		implementationFanoutRequired?: boolean;
+		implementationFiles: string[];
+		sharedContract?: string;
+	};
+	workstreams?: Array<
+		Pick<GoalTargetWorkstream, "id" | "label" | "kind" | "role" | "files" | "contractInputs" | "contractOutputs">
+	>;
+	requiredSignals: GoalTargetPlanExecutionSignalSummary[];
+	scenarioRowsInScope?: GoalTargetPlanExecutionScenarioSummary[];
+	scenarioRowsLeftOpen?: GoalTargetPlanExecutionOpenScenarioSummary[];
+	branchEvidence?: GoalTargetPlanBranchEvidence[];
+	acceptanceRows?: GoalTargetCard["acceptanceRows"];
+	excludedWork: GoalTargetPlanExecutionExcludedWorkSummary[];
+	nonGoals: string[];
+	forbiddenClaims: string[];
+	knownLimits: string[];
+	checkpointEvidence: string[];
+	staleIf: string[];
+	reviewLenses?: string[];
+	postGreenReviewRequired: boolean;
+	readPlanFileWhen: string;
+	readPayloadFileWhen: string;
+	taskBatchScaffold?: GoalTaskBatchScaffold;
+}
+
 export interface GoalTargetPlanRecord {
 	id: string;
 	goalId: string;
@@ -739,6 +816,11 @@ export interface GoalTargetPlanRecord {
 	planFilePath: string;
 	status: GoalTargetPlanStatus;
 	revision: number;
+	planHash?: string;
+	planBytes?: number;
+	payloadFilePath?: string;
+	payloadHash?: string;
+	payloadBytes?: number;
 	stateVersionAtStart: number;
 	parentFrameVersionAtStart: number;
 	createdAt: number;
@@ -796,9 +878,16 @@ export interface GoalTarget {
 }
 
 export interface GoalCheckpointEvidenceItem {
+	id?: string;
 	claim: string;
 	evidence: string;
 	current: boolean;
+	signalIds?: string[];
+	scenarioRowIds?: string[];
+	workstreamIds?: string[];
+	verificationCommandIds?: string[];
+	evidenceRefs?: GoalRef[];
+	staleIf?: string[];
 }
 
 export type GoalCheckpointStatus = "closed_with_evidence";
@@ -982,6 +1071,8 @@ export interface GoalTargetPlanApprovedDetails {
 	revision?: number;
 	planHash?: string;
 	planBytes?: number;
+	payloadHash?: string;
+	payloadBytes?: number;
 	stateVersionAtApproval?: number;
 	parentFrameVersionAtApproval?: number;
 	planDepth?: GoalTargetPlanDepth;
@@ -1133,6 +1224,27 @@ export interface GoalTargetPlanLintResult {
 	};
 }
 
+export type GoalGetViewName =
+	| "full"
+	| "routing"
+	| "state"
+	| "proof"
+	| "active_plan"
+	| "proof_path"
+	| "unresolved"
+	| "diff"
+	| "state_size"
+	| "parent_burndown"
+	| "evidence_status";
+export interface GoalToolViewEnvelope {
+	name: GoalGetViewName;
+	goalId?: string;
+	stateVersion?: number;
+	parentFrameVersion?: number;
+	generatedAt: number;
+	payload: Record<string, unknown>;
+}
+
 export interface GoalToolDetails {
 	op:
 		| "create"
@@ -1148,6 +1260,7 @@ export interface GoalToolDetails {
 		| "target_plan_schema"
 		| "fail_target_plan"
 		| "recover_blocked_state";
+	view?: GoalToolViewEnvelope;
 	goal?: GoalToolGoalSummary | null;
 	state?: GoalToolStateSummary | null;
 	remainingTokens?: number | null;
@@ -1914,11 +2027,26 @@ export function cloneTarget(target: GoalTarget | undefined): GoalTarget | undefi
 	};
 }
 
+function cloneCheckpointEvidenceItem(item: GoalCheckpointEvidenceItem, index?: number): GoalCheckpointEvidenceItem {
+	const fallbackId = index === undefined ? undefined : `evidence-${index + 1}`;
+	const id = item.id?.trim() || fallbackId;
+	return {
+		...item,
+		id,
+		signalIds: item.signalIds ? [...item.signalIds] : undefined,
+		scenarioRowIds: item.scenarioRowIds ? [...item.scenarioRowIds] : undefined,
+		workstreamIds: item.workstreamIds ? [...item.workstreamIds] : undefined,
+		verificationCommandIds: item.verificationCommandIds ? [...item.verificationCommandIds] : undefined,
+		evidenceRefs: item.evidenceRefs ? cloneRefs(item.evidenceRefs) : undefined,
+		staleIf: item.staleIf ? [...item.staleIf] : undefined,
+	};
+}
+
 function cloneCheckpointReview(review: GoalCheckpointReview | undefined): GoalCheckpointReview | undefined {
 	if (!review) return undefined;
 	return {
 		...review,
-		evidenceChecked: review.evidenceChecked.map(item => ({ ...item })),
+		evidenceChecked: review.evidenceChecked.map((item, index) => cloneCheckpointEvidenceItem(item, index)),
 		blockers: review.blockers.map(blocker => ({ ...blocker })),
 		continuationFocus: review.continuationFocus ? cloneContinuationFocus(review.continuationFocus) : undefined,
 	};
@@ -1934,7 +2062,7 @@ export function cloneCheckpoint(packet: GoalCheckpointPacket | undefined): GoalC
 		baselineRefs: cloneRefs(packet.baselineRefs),
 		gateRefs: [...packet.gateRefs],
 		localClaims: [...packet.localClaims],
-		evidence: packet.evidence.map(item => ({ ...item })),
+		evidence: packet.evidence.map((item, index) => cloneCheckpointEvidenceItem(item, index)),
 		checksRun: [...packet.checksRun],
 		artifactsTouched: [...packet.artifactsTouched],
 		notClaimed: [...packet.notClaimed],

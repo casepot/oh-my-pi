@@ -2,7 +2,8 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildGoalContextSurface,
 	buildGoalContinuationPacket,
-	buildGoalTargetPlanExecutionGuardrails,
+	buildGoalProofGraphProjection,
+	buildGoalTargetPlanExecutionContract,
 	buildGoalTargetPlanExecutionSummary,
 	type GoalPersistenceReason,
 	GoalRuntime,
@@ -11,6 +12,12 @@ import {
 	type GoalTargetPlanApprovalInput,
 	type GoalUsagePersistenceEvent,
 	goalTokenDelta,
+	measureGoalCheckpointPacket,
+	measureGoalCompactionPreserve,
+	measureGoalExecutionContract,
+	measureGoalPromptSurface,
+	measureGoalProofGraph,
+	measureGoalSerializedState,
 	renderGoalPrompt,
 	renderGoalPromptSurface,
 	renderGoalStateSnapshot,
@@ -172,6 +179,12 @@ function createHarness(initial: { state?: TestGoalModeStateInput; usage?: GoalTo
 		usagePersists,
 		hiddenMessages,
 	};
+}
+
+function currentPrimarySignalIds(state: GoalModeState | undefined): string[] {
+	const targetId = state?.goal.currentTarget?.id;
+	if (!targetId) throw new Error("expected current target");
+	return [`signal-${targetId}`];
 }
 
 function acceptedTargetPlanReview(
@@ -560,7 +573,12 @@ describe("goal runtime", () => {
 			status: "pending-launch",
 		});
 		const compactionContext = buildGoalCompactionContext(approved);
-		expect(compactionContext?.context).toContain('"workstream_batch"');
+		expect(compactionContext?.context).toContain('"workstreamBatch"');
+		expect(compactionContext?.preserveData.goalRoutingCapsule).toMatchObject({
+			goalId: approved.goal.id,
+			stateVersion: approved.stateVersion,
+			workstreamBatch: { id: batch?.id, status: "pending-launch", workstreamCount: 2 },
+		});
 		expect(compactionContext?.context).toContain(batch?.id ?? "");
 	});
 
@@ -714,7 +732,15 @@ describe("goal runtime", () => {
 			status: "closed_with_evidence",
 			summary: "Preference save target is closed.",
 			localClaims: ["Preference changes are saved."],
-			evidence: [{ claim: "Focused preference check passes.", evidence: "bun test preference", current: true }],
+			evidence: [
+				{
+					claim: "Focused preference check passes.",
+					evidence: "bun test preference",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+					workstreamIds: ["backend-api", "ui-state"],
+				},
+			],
 			notClaimed: ["Parent goal complete"],
 			remainingQuestions: ["Parent completion remains open."],
 		});
@@ -731,6 +757,39 @@ describe("goal runtime", () => {
 			"accepted",
 			"accepted",
 		]);
+	});
+
+	it("rejects plan-backed checkpoint evidence that misses required coverage ids", async () => {
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+		});
+		const planning = await harness.runtime.startTarget({
+			title: "Save preference",
+			desiredFutureClaim: "Preference changes are saved.",
+			closureStandard: "Backend and UI preference paths both satisfy the focused check.",
+			evidenceExpectation: ["Focused preference check passes."],
+			nonGoals: ["Parent completion"],
+			forbiddenClaims: ["Parent goal complete"],
+			staleIf: ["Preference schema changes."],
+			parallelWorkstreamRequirement: {
+				required: true,
+				source: "operator",
+				rationale: "Backend and UI can progress independently but share a response contract.",
+			},
+		});
+		await harness.runtime.approveCurrentTargetPlan(buildParallelWorkstreamApprovalInput(planning));
+		expect(() =>
+			harness.runtime.buildCheckpointCandidate({
+				status: "closed_with_evidence",
+				summary: "Preference save target is closed.",
+				localClaims: ["Preference changes are saved."],
+				evidence: [{ claim: "Focused preference check passes.", evidence: "bun test preference", current: true }],
+				notClaimed: ["Parent goal complete"],
+				remainingQuestions: ["Parent completion remains open."],
+			}),
+		).toThrow(
+			"checkpoint evidence coverage missing: signal_ids=signal-goal-1-target-1; workstream_ids=backend-api,ui-state",
+		);
 	});
 
 	it("omits compaction goal preserve data when goal mode is disabled", () => {
@@ -1193,7 +1252,14 @@ describe("goal runtime", () => {
 			status: "closed_with_evidence",
 			summary: "Target closed",
 			localClaims: ["Target claim"],
-			evidence: [{ claim: "Target claim", evidence: "focused test", current: true }],
+			evidence: [
+				{
+					claim: "Target claim",
+					evidence: "focused test",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+				},
+			],
 			checksRun: ["bun test focused"],
 			artifactsTouched: ["src/example.ts"],
 			notClaimed: ["Parent complete"],
@@ -1218,6 +1284,157 @@ describe("goal runtime", () => {
 		expect(snapshot).not.toContain("targetSnapshot");
 		expect(snapshot).not.toContain(objective);
 		expect(snapshot.length).toBeLessThan(6_000);
+	});
+
+	it("measures goal context surfaces without copying prompt or proof bodies", async () => {
+		const harness = createHarness();
+		const initialState = await harness.runtime.createGoal({
+			objective: "Measure compact goal context",
+			parentFrame: createParentFrame({ desiredFuture: "Measured future" }),
+		});
+		await harness.runtime.setGoalRubric(initialState.goal.id, "Private rubric body", [
+			{ id: "D1", summary: "Measured deliverable.", status: "pending", nextRelevantTarget: "Close measured target" },
+		]);
+		await startApprovedTarget(harness, {
+			title: "Close measured target",
+			desiredFutureClaim: "Measured target closes.",
+			closureStandard: "Focused evidence closes target.",
+			evidenceExpectation: ["Collect focused metric evidence."],
+			forbiddenClaims: ["Parent complete"],
+			staleIf: ["Metric schema changes"],
+		});
+		const candidate = harness.runtime.buildCheckpointCandidate({
+			status: "closed_with_evidence",
+			summary: "Measured target closed",
+			localClaims: ["Measured target closes."],
+			evidence: [
+				{
+					claim: "Measured target closes.",
+					evidence: "focused metric evidence",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+				},
+			],
+			checksRun: ["bun test focused"],
+			artifactsTouched: ["src/metric.ts"],
+			notClaimed: ["Parent complete"],
+			remainingQuestions: ["Next measured target"],
+			risksOrCaveats: ["Metric-only assertion"],
+			staleIf: ["Metric schema changes"],
+			suggestedControllerQuestions: [],
+		});
+		const state = await harness.runtime.commitCheckpoint(candidate, {
+			status: "accepted",
+			feedback: "Metric checkpoint accepted.",
+			evidenceChecked: candidate.evidence,
+			blockers: [],
+			reviewedAt: 10,
+		});
+		const executionSummary = buildGoalTargetPlanExecutionSummary(
+			state.goal.currentTargetPlan,
+			state.goal.currentTarget,
+			state.goal.currentWorkstreamBatch,
+		);
+		const executionContract = buildGoalTargetPlanExecutionContract(executionSummary, {
+			planHash: "plan-hash",
+			planBytes: 123,
+			payloadHash: "payload-hash",
+			payloadBytes: 456,
+		});
+		const compactionContext = buildGoalCompactionContext(state);
+		if (!compactionContext) throw new Error("expected goal compaction context");
+
+		const metrics = [
+			measureGoalSerializedState(state, 123),
+			measureGoalPromptSurface(state, 123),
+			measureGoalProofGraph(state, 123),
+			measureGoalExecutionContract(executionContract, {
+				goalId: state.goal.id,
+				stateVersion: state.stateVersion,
+				parentFrameVersion: state.parentFrameVersion,
+				targetId: state.goal.currentTarget?.id,
+				targetPlanId: state.goal.currentTargetPlan?.id,
+				createdAt: 123,
+			}),
+			measureGoalCompactionPreserve(state, compactionContext.preserveData, 123),
+			measureGoalCheckpointPacket(state, state.goal.checkpoints?.at(-1) ?? candidate, 123),
+		];
+
+		expect(metrics.map(metric => metric.kind)).toEqual([
+			"state_snapshot",
+			"prompt_surface",
+			"proof_graph",
+			"approved_plan_contract",
+			"compaction_preserve",
+			"checkpoint_packet",
+		]);
+		for (const metric of metrics) {
+			expect(metric).toMatchObject({
+				goalId: state.goal.id,
+				stateVersion: state.stateVersion,
+				parentFrameVersion: state.parentFrameVersion,
+				createdAt: 123,
+			});
+			expect(metric.serializedBytes).toBeGreaterThan(0);
+			expect(Object.values(metric.counts).every(count => Number.isFinite(count))).toBe(true);
+			const metricJson = JSON.stringify(metric);
+			expect(metricJson).not.toContain("Private rubric body");
+			expect(metricJson).not.toContain("focused metric evidence");
+			expect(metricJson).not.toContain("Measured target closes.");
+		}
+		expect(metrics.find(metric => metric.kind === "prompt_surface")?.promptBytes).toBeGreaterThan(0);
+		expect(metrics.find(metric => metric.kind === "proof_graph")?.counts.requiredSignals).toBeGreaterThan(0);
+	});
+
+	it("builds a queryable proof graph projection with deduped refs", () => {
+		const sharedRef = { id: "ref-shared", kind: "artifact" as const, uri: "artifact://proof" };
+		const state = createGoalModeState({
+			goal: createGoal({
+				parentFrame: createParentFrame({
+					baselineRefs: [sharedRef, sharedRef],
+					acceptedClaims: [
+						{
+							id: "claim-1",
+							claim: "Shared proof is accepted.",
+							status: "accepted",
+							evidenceRefs: [sharedRef],
+						},
+					],
+					boundaries: [
+						{
+							id: "boundary-1",
+							kind: "unsupported",
+							statement: "No parent completion claim.",
+							refs: [sharedRef],
+						},
+					],
+				}),
+			}),
+		});
+
+		const projection = buildGoalProofGraphProjection(state, 123);
+		expect(projection.refs).toEqual([sharedRef]);
+		expect(projection.duplicateRefObjects).toBe(3);
+		expect(projection.refOwners.map(owner => owner.ownerId)).toEqual([
+			"/parentFrame/baselineRefs/0",
+			"/parentFrame/baselineRefs/1",
+			"/parentFrame/acceptedClaims/0/evidenceRefs/0",
+			"/parentFrame/boundaries/0/refs/0",
+		]);
+		const parentFrame = projection.parentFrame;
+		if (!parentFrame || typeof parentFrame !== "object" || Array.isArray(parentFrame)) {
+			throw new Error("expected compact parent frame object");
+		}
+		const parentFrameRecord: Record<string, unknown> = parentFrame as Record<string, unknown>;
+		expect(parentFrameRecord.boundaries).toEqual([
+			{
+				id: "boundary-1",
+				kind: "unsupported",
+				statement: "No parent completion claim.",
+				refs: [{ refId: "ref-shared" }],
+			},
+		]);
+		expect(parentFrameRecord.baselineRefs).toEqual([{ refId: "ref-shared" }, { refId: "ref-shared" }]);
 	});
 
 	it("surfaces target aperture guidance without the full rubric", () => {
@@ -1315,6 +1532,7 @@ describe("goal runtime", () => {
 					claim: "Target claim",
 					evidence: "FULL CHECKPOINT EVIDENCE DETAIL SHOULD STAY IN AUDIT STATE",
 					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
 				},
 			],
 			checksRun: ["FULL CHECKS LIST SHOULD STAY IN AUDIT STATE"],
@@ -1407,9 +1625,11 @@ describe("goal runtime", () => {
 			parentDeliverableIds: ["D1"],
 		});
 		const workingSurface = buildGoalContextSurface(working, working.goal);
-		expect(workingSurface.target_execution_guardrails).toMatchObject({
-			targetTitle: "Prove source-link smoke",
-			closureStandard: "Smoke output is observed.",
+		expect(workingSurface.target_execution_contract).toMatchObject({
+			target: {
+				title: "Prove source-link smoke",
+				closureStandard: "Smoke output is observed.",
+			},
 			requiredSignals: [
 				expect.objectContaining({
 					method: "Run the focused check.",
@@ -1419,8 +1639,10 @@ describe("goal runtime", () => {
 			excludedWork: [expect.objectContaining({ item: "Parent completion" })],
 		});
 		expect(workingSurface).not.toHaveProperty("target_execution_summary");
+		expect(workingSurface).not.toHaveProperty("target_execution_guardrails");
 		const workingSurfaceText = renderGoalPromptSurface(working, working.goal);
-		expect(workingSurfaceText).toContain('"target_execution_guardrails"');
+		expect(workingSurfaceText).toContain('"target_execution_contract"');
+		expect(workingSurfaceText).not.toContain('"target_execution_guardrails"');
 		expect(workingSurfaceText).not.toContain('"target_execution_summary"');
 		expect(workingSurfaceText).not.toContain('"verificationAperture"');
 		expect(workingSurfaceText).not.toContain('"scopeCalibration"');
@@ -1430,7 +1652,12 @@ describe("goal runtime", () => {
 			summary: "Source-link smoke passed.",
 			localClaims: ["Source-link install exercises smoke path"],
 			evidence: [
-				{ claim: "Source-link install exercises smoke path", evidence: "Observed smoke output", current: true },
+				{
+					claim: "Source-link install exercises smoke path",
+					evidence: "Observed smoke output",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+				},
 			],
 			notClaimed: ["Tarball path is verified"],
 			remainingQuestions: ["Check tarball path next?"],
@@ -1999,19 +2226,32 @@ describe("goal runtime", () => {
 		expect(executionSummary?.scopeCalibration?.deferredRelatedWork[0]?.rationale).toBe(
 			"Parent verification needs broader evidence.",
 		);
-		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
-		expect(executionGuardrails).toMatchObject({
-			payloadFilePath: targetPlanPayloadFilePath(approved.goal.currentTargetPlan?.planFilePath ?? "missing-plan.md"),
+		const executionContract = buildGoalTargetPlanExecutionContract(executionSummary, {
+			planHash: "plan-hash",
+			planBytes: 123,
+			payloadHash: "payload-hash",
+			payloadBytes: 456,
+		});
+		expect(executionContract).toMatchObject({
+			planRef: {
+				payloadFilePath: targetPlanPayloadFilePath(
+					approved.goal.currentTargetPlan?.planFilePath ?? "missing-plan.md",
+				),
+				planHash: "plan-hash",
+				payloadHash: "payload-hash",
+			},
 			requiredSignals: [
 				expect.objectContaining({
 					method: approval.verificationSignals[0]?.method,
 					confidenceIfSatisfied: approval.verificationSignals[0]?.confidenceIfSatisfied,
 				}),
 			],
+			postGreenReviewRequired: true,
 		});
-		expect(executionGuardrails).not.toHaveProperty("verificationAperture");
-		expect(executionGuardrails).not.toHaveProperty("concernChecks");
-		expect(executionGuardrails).not.toHaveProperty("scopeCalibration");
+		expect(executionContract?.scope).toHaveProperty("implementationFiles");
+		expect(executionContract).not.toHaveProperty("verificationAperture");
+		expect(executionContract).not.toHaveProperty("concernChecks");
+		expect(executionContract).not.toHaveProperty("scopeCalibration");
 	});
 
 	it("rejects target plans whose primary signal is not required", async () => {
@@ -2547,7 +2787,12 @@ describe("goal runtime", () => {
 			summary: "Smoke evidence recorded.",
 			localClaims: ["Smoke exercises worker startup"],
 			evidence: [
-				{ claim: "Smoke exercises worker startup", evidence: "Observed focused smoke output", current: true },
+				{
+					claim: "Smoke exercises worker startup",
+					evidence: "Observed focused smoke output",
+					current: true,
+					signalIds: currentPrimarySignalIds(startHarness.getState()),
+				},
 			],
 			notClaimed: ["Release is ready"],
 			remainingQuestions: ["Which installer surface is next?"],
@@ -2608,7 +2853,12 @@ describe("goal runtime", () => {
 			summary: "Release evidence recorded.",
 			localClaims: ["Release smoke exercises worker startup"],
 			evidence: [
-				{ claim: "Release smoke exercises worker startup", evidence: "Observed smoke output", current: true },
+				{
+					claim: "Release smoke exercises worker startup",
+					evidence: "Observed smoke output",
+					current: true,
+					signalIds: currentPrimarySignalIds(completionHarness.getState()),
+				},
 			],
 			notClaimed: ["Release is verified"],
 			remainingQuestions: ["Parent verifier should decide."],
@@ -2801,6 +3051,7 @@ describe("goal runtime", () => {
 					claim: "Smoke exercises worker startup",
 					evidence: "Observed focused smoke output",
 					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
 				},
 			],
 			notClaimed: ["Release is ready"],
@@ -2857,7 +3108,14 @@ describe("goal runtime", () => {
 			status: "closed_with_evidence",
 			summary: "Evidence is weak.",
 			localClaims: ["Smoke exercises worker startup"],
-			evidence: [{ claim: "Smoke exercises worker startup", evidence: "A file changed", current: true }],
+			evidence: [
+				{
+					claim: "Smoke exercises worker startup",
+					evidence: "A file changed",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+				},
+			],
 			notClaimed: ["Release is ready"],
 			remainingQuestions: ["What next?"],
 		});
@@ -2921,6 +3179,7 @@ describe("goal runtime", () => {
 					claim: "Source-link install exercises smoke path",
 					evidence: "Observed smoke output",
 					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
 				},
 			],
 			notClaimed: ["Tarball path is verified"],
@@ -3021,7 +3280,15 @@ describe("goal runtime", () => {
 			status: "closed_with_evidence",
 			summary: "Source-link smoke passed.",
 			localClaims: ["Source-link smoke evidence exists."],
-			evidence: [{ claim: "Source-link smoke evidence exists.", evidence: "Observed smoke output", current: true }],
+			evidence: [
+				{
+					claim: "Source-link smoke evidence exists.",
+					evidence: "Observed smoke output",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+					evidenceRefs: [{ id: "source-smoke-artifact", kind: "artifact" }],
+				},
+			],
 			notClaimed: ["Tarball smoke is proven."],
 			remainingQuestions: ["Check tarball path next?"],
 		});
@@ -3071,9 +3338,11 @@ describe("goal runtime", () => {
 		expect(resolved.parentFrameVersion).toBe(committed.parentFrameVersion);
 		expect(resolved.goal.parentFrame?.lastParentDeltaId).toBeUndefined();
 		expect(resolved.goal.deliverableMap?.find(item => item.id === "D1")?.status).toBe("partial");
-		expect(resolved.goal.deliverableMap?.find(item => item.id === "D1")?.evidenceRefs?.[0]?.id).toBe(
+		expect(resolved.goal.deliverableMap?.find(item => item.id === "D1")?.evidenceRefs?.map(ref => ref.id)).toEqual([
 			`checkpoint:${candidate.id}`,
-		);
+			`checkpoint:${candidate.id}#evidence:evidence-1`,
+			"source-smoke-artifact",
+		]);
 		expect(resolved.goal.currentTarget?.parentDeliverableIds).toEqual(["D2"]);
 		expect(resolved.goal.currentTarget?.parentFrameVersion).toBe(committed.parentFrameVersion);
 	});
@@ -3095,6 +3364,7 @@ describe("goal runtime", () => {
 					claim: "Source-link install exercises smoke path",
 					evidence: "Observed smoke output",
 					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
 				},
 			],
 			notClaimed: ["Release is ready"],
@@ -3174,7 +3444,14 @@ describe("goal runtime", () => {
 				status: "closed_with_evidence",
 				summary: "Bounded evidence exists.",
 				localClaims: ["Checkpoint evidence is bounded"],
-				evidence: [{ claim: "Checkpoint evidence is bounded", evidence: "Observed evidence", current: true }],
+				evidence: [
+					{
+						claim: "Checkpoint evidence is bounded",
+						evidence: "Observed evidence",
+						current: true,
+						signalIds: currentPrimarySignalIds(harness.getState()),
+					},
+				],
 				notClaimed: ["Parent goal is complete"],
 				remainingQuestions: ["Which controller action follows?"],
 			});
@@ -3231,6 +3508,7 @@ describe("goal runtime", () => {
 					claim: "Source-link install exercises smoke path",
 					evidence: "Observed smoke output",
 					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
 				},
 			],
 			notClaimed: ["Release is ready"],
@@ -3308,7 +3586,12 @@ describe("goal runtime", () => {
 			summary: "Tarball smoke evidence was collected.",
 			localClaims: ["Tarball install evidence is current"],
 			evidence: [
-				{ claim: "Tarball install evidence is current", evidence: "Observed tarball smoke output", current: true },
+				{
+					claim: "Tarball install evidence is current",
+					evidence: "Observed tarball smoke output",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+				},
 			],
 			notClaimed: ["Parent goal is complete"],
 			remainingQuestions: ["Can parent completion be retried?"],
@@ -3364,7 +3647,12 @@ describe("goal runtime", () => {
 			summary: "Source smoke evidence was collected.",
 			localClaims: ["Source install evidence is current"],
 			evidence: [
-				{ claim: "Source install evidence is current", evidence: "Observed source smoke output", current: true },
+				{
+					claim: "Source install evidence is current",
+					evidence: "Observed source smoke output",
+					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
+				},
 			],
 			notClaimed: ["Parent goal is complete"],
 			remainingQuestions: ["Which verifier blocker remains?"],
@@ -3435,6 +3723,7 @@ describe("goal runtime", () => {
 					claim: "Source-link install exercises smoke path",
 					evidence: "Observed smoke output",
 					current: true,
+					signalIds: currentPrimarySignalIds(harness.getState()),
 				},
 			],
 			notClaimed: ["Release is ready"],

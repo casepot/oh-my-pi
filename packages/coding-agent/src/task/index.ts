@@ -21,6 +21,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { buildGoalTargetPlanExecutionContract } from "../goals/runtime";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -1213,27 +1214,41 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			: this.session.getGoalTargetPlanReference?.();
 		let targetPlanReference: { path: string; content: string } | undefined;
 		if (goalTargetPlanReferenceDetails) {
-			const loadedTargetPlan = await loadOverallPlanReference(
-				goalTargetPlanReferenceDetails.planFilePath,
-				localProtocolOptions,
-			);
-			if (loadedTargetPlan) {
-				targetPlanReference = {
-					path: goalTargetPlanReferenceDetails.planFilePath,
-					content: [
-						"Approved goal target plan markdown:",
-						loadedTargetPlan.content,
-						"",
-						"Approved target execution summary:",
-						JSON.stringify(goalTargetPlanReferenceDetails.executionSummary ?? {}, null, 2),
-					].join("\n"),
-				};
-			} else if (goalTargetPlanReferenceDetails.executionSummary !== undefined) {
-				targetPlanReference = {
-					path: goalTargetPlanReferenceDetails.planFilePath,
-					content: JSON.stringify(goalTargetPlanReferenceDetails.executionSummary, null, 2),
-				};
-			}
+			const executionContract = buildGoalTargetPlanExecutionContract(
+				goalTargetPlanReferenceDetails.executionSummary,
+				{
+					planHash: goalTargetPlanReferenceDetails.planHash,
+					planBytes: goalTargetPlanReferenceDetails.planBytes,
+					payloadHash: goalTargetPlanReferenceDetails.payloadHash,
+					payloadBytes: goalTargetPlanReferenceDetails.payloadBytes,
+					postGreenReviewRequired: true,
+				},
+			) ?? {
+				targetId: goalTargetPlanReferenceDetails.targetId,
+				targetPlanId: goalTargetPlanReferenceDetails.targetPlanId,
+				revision: goalTargetPlanReferenceDetails.revision ?? "unknown",
+				planRef: {
+					planFilePath: goalTargetPlanReferenceDetails.planFilePath,
+					payloadFilePath: goalTargetPlanReferenceDetails.payloadFilePath,
+					planHash: goalTargetPlanReferenceDetails.planHash,
+					planBytes: goalTargetPlanReferenceDetails.planBytes,
+					payloadHash: goalTargetPlanReferenceDetails.payloadHash,
+					payloadBytes: goalTargetPlanReferenceDetails.payloadBytes,
+				},
+				readPlanFileWhen:
+					"Exact edit order, file/symbol details, command text, or recovery detail is missing from this contract.",
+				readPayloadFileWhen:
+					"Exact matrix, proof graph, payload-only contract, or recovery detail is missing from this contract.",
+			};
+			targetPlanReference = {
+				path: goalTargetPlanReferenceDetails.planFilePath,
+				content: [
+					"Approved goal target execution contract:",
+					JSON.stringify(executionContract, null, 2),
+					"",
+					`Read approved plan ${goalTargetPlanReferenceDetails.planFilePath} or payload ${goalTargetPlanReferenceDetails.payloadFilePath} only when the contract says the missing detail is needed.`,
+				].join("\n"),
+			};
 		}
 
 		try {

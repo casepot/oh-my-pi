@@ -35,6 +35,7 @@ export interface GoalToolDetailSource {
 	targetPlan?: GoalTargetPlanRecord;
 	targetPlanReviews?: GoalTargetPlanReview[];
 	targetPlanLint?: GoalTargetPlanLintResult;
+	view?: GoalToolDetails["view"];
 }
 
 export function summarizeTarget(target: GoalTarget | undefined): GoalToolTargetSummary | undefined {
@@ -219,6 +220,7 @@ export function summarizeRecovery(recovery: GoalRecoveryRecord | undefined): Goa
 export function buildGoalToolDetails(op: GoalToolDetails["op"], source: GoalToolDetailSource): GoalToolDetails {
 	return {
 		op,
+		view: source.view,
 		goal: summarizeGoal(source.goal),
 		state: summarizeState(source.state),
 		remainingTokens: source.remainingTokens,

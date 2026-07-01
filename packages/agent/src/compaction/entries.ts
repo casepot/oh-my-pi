@@ -118,14 +118,34 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
-export interface GoalStateSnapshotEntry extends SessionEntryBase {
+export interface GoalStateSnapshotRef {
+	kind: "goal_state_snapshot_ref";
+	goalId: string;
+	stateVersion: number;
+	schemaVersion: number;
+	path: string;
+	hash: string;
+	bytes: number;
+	createdAt: number;
+}
+
+export interface GoalStateSnapshotEntryBase extends SessionEntryBase {
 	type: "goal_state_snapshot";
 	goalId: string;
 	stateVersion: number;
 	schemaVersion: number;
 	reason: "semantic" | "terminal" | "recovery" | "budget-limited";
-	state: Record<string, unknown>;
 }
+
+export type GoalStateSnapshotEntry =
+	| (GoalStateSnapshotEntryBase & {
+			state: Record<string, unknown>;
+			stateRef?: GoalStateSnapshotRef;
+	  })
+	| (GoalStateSnapshotEntryBase & {
+			state?: undefined;
+			stateRef: GoalStateSnapshotRef;
+	  });
 
 export interface GoalUsageDeltaEntry extends SessionEntryBase {
 	type: "goal_usage_delta";

@@ -1,12 +1,6 @@
 Goal target plan approved. Execute this approved current-target plan.
 
-{{#if approvedPlanMarkdown}}
-<approved_target_plan_markdown path="{{planFilePath}}">
-{{approvedPlanMarkdown}}
-</approved_target_plan_markdown>
-{{/if}}
-
-<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" />
+<approved_target_plan_ref target_id="{{targetId}}" target_plan_id="{{targetPlanId}}" revision="{{revision}}" path="{{planFilePath}}" payload_path="{{payloadFilePath}}" hash="{{planHash}}" bytes="{{planBytes}}" payload_hash="{{payloadHash}}" payload_bytes="{{payloadBytes}}" />
 
 <execution_context>
 {{#if contextPreserved}}
@@ -37,11 +31,9 @@ Goal target plan approved. Execute this approved current-target plan.
 {{/if}}
 </execution_context>
 
-{{#if executionGuardrails}}
-<approved_target_execution_guardrails>
-{{executionGuardrails}}
-</approved_target_execution_guardrails>
-{{/if}}
+<approved_target_execution_contract>
+{{executionContract}}
+</approved_target_execution_contract>
 
 <instruction>
 You MUST execute the approved current target. Goal mode remains active.
@@ -49,18 +41,19 @@ You MAY implement only target `{{targetId}}` using plan `{{targetPlanId}}` revis
 Target-plan approval is not checkpoint completion.
 Target completion is not parent completion.
 {{#has tools "todo"}}
-Before execution, initialize todo tracking from the approved Markdown plan first if `todo` remains allowed.
-Use the execution guardrails to check closure signals and fanout.
+Before execution, initialize todo tracking from `approved_target_execution_contract`; read `{{planFilePath}}` or `{{payloadFilePath}}` only when the contract says the exact plan/payload detail is needed.
+Use the execution contract to check closure signals, stale boundaries, non-goals, and fanout.
 After each completed step, immediately update `todo`.
 {{/has}}
-Use target card/matrix summaries as execution guardrails; the approved Markdown plan remains authority.
+The execution contract is the active authority; the approved Markdown plan and payload sidecar are durable references to read only when the contract says detail is missing.
 </instruction>
+
 
 <critical>
 - Execute only the approved current target.
 - Satisfy every required verification signal before checkpointing.
 - If a workstream batch exists, integrate or replace every required workstream with equivalent serial evidence before checkpointing; checkpoint review will reject partial batch closure.
-- Code/behavior changes require post-green code review before commit/checkpoint; use execution guardrails `reviewLenses` when present.
+- Code/behavior changes require post-green code review before commit/checkpoint; use `reviewLenses` from the execution contract when present.
 - Call `goal({op:"checkpoint"})` only after the closure standard is met with current evidence.
 - NEVER call parent completion because this target plan was approved.
 - Keep going until the target checkpoint is accepted or goal mode asks for another controller action.

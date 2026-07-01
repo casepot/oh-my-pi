@@ -2,12 +2,11 @@
 Transition: {{transition}}
 Reason: {{reason}}
 
-The following controller surface is authoritative for next-action routing. Full audit state remains in preserve data and `goal({op:"get"})`.
+The following routing capsule is authoritative for next-action routing. Full audit state remains in sidecar refs, preserve data, and `goal({op:"get"})`.
 
-{{stateSnapshot}}
-<goal_continuation_packet>
-{{continuationPacket}}
-</goal_continuation_packet>
+<goal_routing_capsule>
+{{routingCapsule}}
+</goal_routing_capsule>
 
 Compaction policy:
 - `working-target`: preserve and resume the same current target.

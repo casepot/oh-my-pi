@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { Goal, GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { parseGoalModeState, serializeGoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	BranchSummaryEntry,
@@ -13,6 +14,7 @@ import type {
 	SessionMessageEntry,
 	ThinkingLevelChangeEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../../src/prompts/system/manual-continue.md" with { type: "text" };
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
@@ -567,6 +569,65 @@ describe("buildSessionContext", () => {
 			expect(restored?.goal.id).toBe("compact-goal");
 			expect(restored?.stateVersion).toBe(5);
 			expect(restored?.goal.tokensUsed).toBe(3);
+		});
+
+		it("restores compact goal mode markers through a ref-only snapshot sidecar", async () => {
+			const tempDir = TempDir.createSync("@pi-goal-snapshot-ref-");
+			try {
+				const state = goalModeState("ref-goal", {
+					stateVersion: 7,
+					goal: { tokensUsed: 4, timeUsedSeconds: 8, updatedAt: 30 },
+				});
+				const serialized = serializeGoalModeState(state);
+				const content = `${JSON.stringify(serialized)}\n`;
+				const hash = Bun.hash(content).toString(16);
+				const refPath = `local://goal-state-snapshots/ref-goal/${state.stateVersion}-${hash}.json`;
+				const localProtocolOptions = {
+					getArtifactsDir: () => tempDir.path(),
+					getSessionId: () => "goal-snapshot-ref-test",
+				};
+				await Bun.write(resolveLocalUrlToPath(refPath, localProtocolOptions), content);
+				const refOnlySnapshot: GoalStateSnapshotEntry = {
+					type: "goal_state_snapshot" as const,
+					id: "snapshot-ref",
+					parentId: null,
+					timestamp: "2025-01-01T00:00:00Z",
+					goalId: state.goal.id,
+					stateVersion: state.stateVersion,
+					schemaVersion: serialized.schemaVersion,
+					reason: "semantic" as const,
+					stateRef: {
+						kind: "goal_state_snapshot_ref" as const,
+						goalId: state.goal.id,
+						stateVersion: state.stateVersion,
+						schemaVersion: serialized.schemaVersion,
+						path: refPath,
+						hash,
+						bytes: new Blob([content]).size,
+						createdAt: 1,
+					},
+				};
+				const entries: SessionEntry[] = [
+					refOnlySnapshot,
+					goalMode("mode-ref", "snapshot-ref", "goal", {
+						goalId: state.goal.id,
+						stateVersion: state.stateVersion,
+						snapshotEntryId: "snapshot-ref",
+					}),
+				];
+
+				const missingOptions = buildSessionContext(entries);
+				const ctx = buildSessionContext(entries, undefined, undefined, { localProtocolOptions });
+				const restored = parseGoalModeState(ctx.modeData);
+
+				expect(missingOptions.modeData).toBeUndefined();
+				expect(ctx.mode).toBe("goal");
+				expect(restored?.goal.id).toBe("ref-goal");
+				expect(restored?.stateVersion).toBe(7);
+				expect(restored?.goal.tokensUsed).toBe(4);
+			} finally {
+				await tempDir.remove();
+			}
 		});
 
 		it("ignores newer orphan snapshots after the compact mode marker", () => {

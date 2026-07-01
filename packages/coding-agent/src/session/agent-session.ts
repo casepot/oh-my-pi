@@ -244,7 +244,8 @@ import {
 } from "../goals/compaction-continuation";
 import {
 	buildGoalContinuationPacket,
-	buildGoalTargetPlanExecutionGuardrails,
+	buildGoalProofGraphProjection,
+	buildGoalTargetPlanExecutionContract,
 	buildGoalTargetPlanExecutionSummary,
 	completionBudgetReport,
 	currentTargetPlanSubmitIdentity,
@@ -256,6 +257,12 @@ import {
 	type GoalSubmitTargetPlanInput,
 	type GoalTargetPlanApprovalInput,
 	type GoalTargetPlanFailureInput,
+	measureGoalCheckpointPacket,
+	measureGoalCompactionPreserve,
+	measureGoalExecutionContract,
+	measureGoalPromptSurface,
+	measureGoalProofGraph,
+	measureGoalSerializedState,
 	remainingTokens,
 	renderGoalPrompt,
 	renderGoalPromptSurface,
@@ -288,6 +295,7 @@ import type {
 	GoalCheckpointReview,
 	GoalCompletionVerificationDetails,
 	GoalCompletionVerifierStructuredOutput,
+	GoalContextMetric,
 	GoalContinuationFocus,
 	GoalDeliverableMapItem,
 	GoalModeState,
@@ -295,6 +303,7 @@ import type {
 	GoalRef,
 	GoalRefKind,
 	GoalTargetPlanApprovedDetails,
+	GoalTargetPlanExecutionContract,
 	GoalTargetPlanRecord,
 	GoalTargetPlanReview,
 	GoalTargetUnitRule,
@@ -450,7 +459,7 @@ import {
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, CompactionEntry, GoalStateSnapshotRef, NewSessionOptions } from "./session-entries";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
@@ -461,6 +470,52 @@ import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-
 import { YieldQueue } from "./yield-queue";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
+export const GOAL_PROOF_GRAPH_CUSTOM_TYPE = "goal_proof_graph_projection";
+export const GOAL_CONTEXT_METRIC_CUSTOM_TYPE = "goal_context_metric";
+
+function buildApprovedTargetPlanExecutionContract(
+	input: GoalTargetPlanApprovedDetails,
+): GoalTargetPlanExecutionContract {
+	const summary =
+		input.executionSummary ??
+		({
+			targetId: input.targetId,
+			targetPlanId: input.targetPlanId,
+			planFilePath: input.planFilePath,
+			payloadFilePath: input.payloadFilePath,
+			revision: input.revision ?? 0,
+			targetTitle: input.title,
+			planDepth: input.planDepth,
+			primarySignalGroupId: input.primarySignalGroupId,
+			implementationFanoutRequired: input.implementationFanoutRequired,
+			implementationFiles: [],
+			workstreams: input.workstreamSummary?.map(workstream => ({
+				...workstream,
+				contractInputs: [],
+				contractOutputs: [],
+			})),
+			requiredSignals: [],
+			excludedWork: [],
+			nonGoals: [],
+			forbiddenClaims: [],
+			knownLimits: [],
+			checkpointEvidence: [],
+			staleIf: [],
+			readPlanFileWhen:
+				"Exact edit order, file/symbol details, command text, or recovery detail is missing from this contract.",
+		} satisfies NonNullable<GoalTargetPlanApprovedDetails["executionSummary"]>);
+	const contract = buildGoalTargetPlanExecutionContract(summary, {
+		planHash: input.planHash,
+		planBytes: input.planBytes,
+		payloadHash: input.payloadHash,
+		payloadBytes: input.payloadBytes,
+		postGreenReviewRequired: true,
+	});
+	if (!contract) {
+		throw new Error("approved target plan execution contract could not be built");
+	}
+	return contract;
+}
 
 /** Abort reason for the Gemini reasoning-header runaway interrupt. Surfaced on the
  *  discarded assistant turn only; never reaches the model. */
@@ -1980,6 +2035,7 @@ export class AgentSession {
 		>
 	> = [];
 	#lastGoalModeChangeSignature: string | undefined;
+	#lastGoalProofGraphProjectionHash: string | undefined;
 	#advisorEnabled = false;
 	#advisorTools?: AgentTool[];
 	#advisorWatchdogPrompt?: string;
@@ -2585,8 +2641,8 @@ export class AgentSession {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
 				}
 			},
-			persist: (mode, state, reason) => {
-				this.#persistGoalModeChange(mode, state, reason ?? "semantic");
+			persist: async (mode, state, reason) => {
+				await this.#persistGoalModeChange(mode, state, reason ?? "semantic");
 			},
 			persistUsage: event => {
 				this.#appendGoalUsageDelta(event);
@@ -7322,29 +7378,66 @@ export class AgentSession {
 		this.sessionManager.appendModeChange(mode, data);
 	}
 
-	#persistGoalModeChange(
+	async #writeGoalStateSnapshotSidecar(
+		state: Record<string, unknown>,
+		identity: {
+			goalId: string;
+			stateVersion: number;
+			schemaVersion: number;
+		},
+	): Promise<GoalStateSnapshotRef> {
+		const content = `${JSON.stringify(state)}\n`;
+		const hash = Bun.hash(content).toString(16);
+		const bytes = new Blob([content]).size;
+		const safeGoalId = identity.goalId.replace(/[^A-Za-z0-9_-]/g, "_");
+		const refPath = `local://goal-state-snapshots/${safeGoalId}/${identity.stateVersion}-${hash}.json`;
+		const filePath = resolveLocalUrlToPath(refPath, this.#localProtocolOptions());
+		await Bun.write(filePath, content);
+		return {
+			kind: "goal_state_snapshot_ref",
+			goalId: identity.goalId,
+			stateVersion: identity.stateVersion,
+			schemaVersion: identity.schemaVersion,
+			path: refPath,
+			hash,
+			bytes,
+			createdAt: Date.now(),
+		};
+	}
+
+	async #persistGoalModeChange(
 		mode: "goal" | "goal_paused" | "none",
 		state: GoalModeState | undefined,
 		reason: GoalPersistenceReason,
-	): void {
+	): Promise<void> {
 		if (mode === "none") {
 			this.#appendGoalModeChange("none");
 			return;
 		}
 		if (!state) return;
 		const serialized = serializeGoalModeState(state);
+		const stateRef = await this.#writeGoalStateSnapshotSidecar(serialized, {
+			goalId: state.goal.id,
+			stateVersion: state.stateVersion,
+			schemaVersion: serialized.schemaVersion,
+		});
 		const snapshotEntryId = this.sessionManager.appendGoalStateSnapshot({
 			goalId: state.goal.id,
 			stateVersion: state.stateVersion,
 			schemaVersion: serialized.schemaVersion,
 			reason,
 			state: serialized,
+			stateRef,
 		});
 		this.#appendGoalModeChange(mode, {
 			goalId: state.goal.id,
 			stateVersion: state.stateVersion,
 			snapshotEntryId,
 		});
+		this.#appendGoalContextMetric(measureGoalSerializedState(state));
+		this.#appendGoalContextMetric(measureGoalPromptSurface(state));
+		this.#appendGoalContextMetric(measureGoalProofGraph(state));
+		this.#appendGoalProofGraphProjection(state);
 	}
 
 	#appendGoalUsageDelta(event: {
@@ -7541,6 +7634,7 @@ export class AgentSession {
 				? await this.#goalRuntime.commitCheckpoint(candidate, review)
 				: await this.#goalRuntime.rejectCheckpoint(candidate, review);
 		const checkpoint = review.status === "accepted" ? state.goal.checkpoints?.at(-1) : candidate;
+		if (checkpoint) this.#appendGoalContextMetric(measureGoalCheckpointPacket(state, checkpoint));
 		if (checkpoint) await this.#publishGoalCheckpointArtifact(state.goal, checkpoint, review);
 		this.#appendGoalBoundaryAudit({
 			kind: "checkpoint",
@@ -7632,6 +7726,24 @@ export class AgentSession {
 			throw error;
 		}
 		if (!planContent.trim()) throw new ToolError("target plan file is missing or empty");
+		const payloadFilePath = targetPlanPayloadFilePath(currentPlan.planFilePath);
+		const resolvedPayloadPath = resolveLocalUrlToPath(
+			normalizeLocalScheme(payloadFilePath),
+			this.#localProtocolOptions(),
+		);
+		let payloadContent: string;
+		let payloadHash: string;
+		let payloadBytes: number;
+		try {
+			const payloadFile = Bun.file(resolvedPayloadPath);
+			payloadContent = await payloadFile.text();
+			payloadHash = Bun.hash(payloadContent).toString(16);
+			payloadBytes = payloadFile.size;
+		} catch (error) {
+			if (isEnoent(error)) throw new ToolError("target plan payload file is missing or empty");
+			throw error;
+		}
+		if (!payloadContent.trim()) throw new ToolError("target plan payload file is missing or empty");
 		const expected = this.#goalRuntime.captureTargetPlanExpectation();
 		const reviews = input.targetPlanReviews;
 		if (!this.#goalRuntime.canCommitTargetPlanResult(expected)) {
@@ -7653,7 +7765,7 @@ export class AgentSession {
 						targetPlanRevision: input.revision,
 					}),
 				],
-				preservedFields: ["targetId", "targetPlanId", "revision", "planHash"],
+				preservedFields: ["targetId", "targetPlanId", "revision", "planHash", "payloadHash"],
 				staleFields: ["target-plan-review"],
 				omittedFields: [],
 				recoveryInstruction: 'Refresh with goal({ op: "get" }) before resubmitting the target plan.',
@@ -7683,7 +7795,7 @@ export class AgentSession {
 						targetPlanRevision: rejectedPlan?.revision,
 					}),
 				],
-				preservedFields: ["targetId", "targetPlanId", "revision", "planHash"],
+				preservedFields: ["targetId", "targetPlanId", "revision", "planHash", "payloadHash"],
 				staleFields: [],
 				omittedFields: ["approved-plan-context"],
 				recoveryInstruction: "Revise the target plan against reviewer findings.",
@@ -7698,8 +7810,16 @@ export class AgentSession {
 				targetPlanReviews: reviews,
 			};
 		}
+		const approvalInput: GoalTargetPlanApprovalInput = {
+			...input,
+			reviews,
+			planHash,
+			planBytes,
+			payloadFilePath,
+			payloadHash,
+			payloadBytes,
+		};
 		let approvedState: GoalModeState;
-		const approvalInput: GoalTargetPlanApprovalInput = { ...input, reviews };
 		try {
 			approvedState = await this.#goalRuntime.approveCurrentTargetPlan(approvalInput);
 		} catch (error) {
@@ -7724,7 +7844,7 @@ export class AgentSession {
 						targetPlanRevision: rejectedPlan?.revision,
 					}),
 				],
-				preservedFields: ["targetId", "targetPlanId", "revision", "planHash"],
+				preservedFields: ["targetId", "targetPlanId", "revision", "planHash", "payloadHash"],
 				staleFields: [],
 				omittedFields: ["approved-plan-context"],
 				recoveryInstruction: "Revise the target plan against approval-gate feedback.",
@@ -7746,11 +7866,13 @@ export class AgentSession {
 					targetId: approvedPlan.targetId,
 					targetPlanId: approvedPlan.id,
 					planFilePath: approvedPlan.planFilePath,
-					payloadFilePath: targetPlanPayloadFilePath(approvedPlan.planFilePath),
+					payloadFilePath,
 					title: `goal-${sanitizeGoalPlanSlug(approvedPlan.goalId)}-target-${approvedPlan.targetSequence}`,
 					revision: approvedPlan.revision,
 					planHash,
 					planBytes,
+					payloadHash,
+					payloadBytes,
 					stateVersionAtApproval: approvedState.stateVersion,
 					parentFrameVersionAtApproval: approvedState.parentFrameVersion,
 					planDepth: approvedPlan.planDepth,
@@ -7788,10 +7910,13 @@ export class AgentSession {
 				"payloadFilePath",
 				"planHash",
 				"planBytes",
+				"payloadHash",
+				"payloadBytes",
 			],
 			staleFields: [],
 			omittedFields: ["fullPlanContent"],
-			recoveryInstruction: "Read the plan file only if exact execution details are needed.",
+			recoveryInstruction:
+				"Use the execution contract; read plan or payload files only if exact execution details are needed.",
 			action: "accepted",
 		});
 		return {
@@ -8899,15 +9024,18 @@ export class AgentSession {
 	}
 
 	async prepareGoalTargetPlanExecutionContext(details: GoalTargetPlanApprovedDetails): Promise<string> {
-		this.setGoalTargetPlanReference(details);
-
 		const resolvedPlanPath = resolveLocalUrlToPath(
 			normalizeLocalScheme(details.planFilePath),
 			this.#localProtocolOptions(),
 		);
 		let approvedPlanMarkdown: string;
+		let planHash = details.planHash;
+		let planBytes = details.planBytes;
 		try {
-			approvedPlanMarkdown = await Bun.file(resolvedPlanPath).text();
+			const planFile = Bun.file(resolvedPlanPath);
+			approvedPlanMarkdown = await planFile.text();
+			planHash ??= Bun.hash(approvedPlanMarkdown).toString(16);
+			planBytes ??= planFile.size;
 		} catch (error) {
 			if (isEnoent(error)) throw new ToolError("approved target plan file is missing or empty");
 			throw error;
@@ -8915,30 +9043,76 @@ export class AgentSession {
 		if (!approvedPlanMarkdown.trim()) {
 			throw new ToolError("approved target plan file is missing or empty");
 		}
+		const resolvedPayloadPath = resolveLocalUrlToPath(
+			normalizeLocalScheme(details.payloadFilePath),
+			this.#localProtocolOptions(),
+		);
+		let payloadHash = details.payloadHash;
+		let payloadBytes = details.payloadBytes;
+		let approvedPayloadContent: string;
+		try {
+			const payloadFile = Bun.file(resolvedPayloadPath);
+			approvedPayloadContent = await payloadFile.text();
+			payloadHash ??= Bun.hash(approvedPayloadContent).toString(16);
+			payloadBytes ??= payloadFile.size;
+		} catch (error) {
+			if (isEnoent(error)) throw new ToolError("approved target plan payload file is missing or empty");
+			throw error;
+		}
+		if (!approvedPayloadContent.trim()) {
+			throw new ToolError("approved target plan payload file is missing or empty");
+		}
+		const executionDetails: GoalTargetPlanApprovedDetails = {
+			...details,
+			planHash,
+			planBytes,
+			payloadHash,
+			payloadBytes,
+		};
+		this.setGoalTargetPlanReference(executionDetails);
 
 		const contextBefore = this.buildDisplaySessionContext();
 		const tokensBefore = contextBefore.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
 		const boundaryBefore = buildGoalBoundaryStateRef(this.#goalModeState, "approved-plan");
-		const goalCompactionRefresh = this.#refreshGoalCompactionPreserveData(undefined, boundaryBefore);
+		const goalCompactionRefresh = await this.#refreshGoalCompactionPreserveData(undefined, boundaryBefore);
 		this.sessionManager.appendCompaction(
-			"Goal target plan approved; planning and reviewer transcript intentionally removed from execution context. Execute from the approved plan prompt, compact guardrails, and current goal state.",
+			"Goal target plan approved; planning and reviewer transcript intentionally removed from execution context. Execute from the approved execution contract and current goal state; read approved plan or payload artifacts only on demand.",
 			"Target plan approved; execution context reset.",
 			"__goal_target_plan_execution_context_reset__",
 			tokensBefore,
 			{
 				kind: "goal-target-plan-execution-context-reset",
 				contextReset: true,
-				targetId: details.targetId,
-				targetPlanId: details.targetPlanId,
-				revision: details.revision,
-				planFilePath: details.planFilePath,
-				payloadFilePath: details.payloadFilePath,
-				planHash: details.planHash,
+				targetId: executionDetails.targetId,
+				targetPlanId: executionDetails.targetPlanId,
+				revision: executionDetails.revision,
+				planFilePath: executionDetails.planFilePath,
+				payloadFilePath: executionDetails.payloadFilePath,
+				planHash: executionDetails.planHash,
+				planBytes: executionDetails.planBytes,
+				payloadHash: executionDetails.payloadHash,
+				payloadBytes: executionDetails.payloadBytes,
 			},
 			false,
 			goalCompactionRefresh.preserveData,
 		);
 		this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, goalCompactionRefresh.auditRecord);
+		if (this.#goalModeState) {
+			this.#appendGoalContextMetric(
+				measureGoalCompactionPreserve(this.#goalModeState, goalCompactionRefresh.preserveData),
+			);
+		}
+		const executionContract = buildApprovedTargetPlanExecutionContract(executionDetails);
+		this.#appendGoalContextMetric(
+			measureGoalExecutionContract(executionContract, {
+				goalId: executionDetails.goalId,
+				stateVersion: executionDetails.stateVersionAtApproval ?? this.#goalModeState?.stateVersion ?? 0,
+				parentFrameVersion:
+					executionDetails.parentFrameVersionAtApproval ?? this.#goalModeState?.parentFrameVersion ?? 0,
+				targetId: executionDetails.targetId,
+				targetPlanId: executionDetails.targetPlanId,
+			}),
+		);
 
 		this.#resetProviderConversation("goal target plan execution context reset");
 		const sessionContext = this.buildDisplaySessionContext();
@@ -8946,16 +9120,15 @@ export class AgentSession {
 		this.#resetAllAdvisorRuntimes();
 
 		return this.renderGoalTargetPlanApprovedPrompt({
-			...details,
+			...executionDetails,
 			contextPreserved: false,
-			approvedPlanMarkdown,
 		});
 	}
 
 	renderGoalTargetPlanApprovedPrompt(
 		input: GoalTargetPlanApprovedDetails & { contextPreserved?: boolean; approvedPlanMarkdown?: string },
 	): string {
-		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(input.executionSummary);
+		const executionContract = buildApprovedTargetPlanExecutionContract(input);
 		const taskBatchScaffold = input.executionSummary?.taskBatchScaffold;
 		return prompt.render(goalTargetPlanApprovedPrompt, {
 			targetId: input.targetId,
@@ -8963,10 +9136,11 @@ export class AgentSession {
 			revision: input.revision ?? "unknown",
 			planHash: input.planHash ?? "unknown",
 			planBytes: input.planBytes ?? "unknown",
+			payloadHash: input.payloadHash ?? "unknown",
+			payloadBytes: input.payloadBytes ?? "unknown",
 			planFilePath: input.planFilePath,
 			payloadFilePath: input.payloadFilePath,
 			contextPreserved: input.contextPreserved === true,
-			approvedPlanMarkdown: input.approvedPlanMarkdown,
 			planDepth: input.planDepth,
 			primarySignalGroupId: input.primarySignalGroupId,
 			matrixRowCounts: input.matrixRowCounts
@@ -8978,7 +9152,7 @@ export class AgentSession {
 				: undefined,
 			taskBatchScaffold: taskBatchScaffold ? JSON.stringify(taskBatchScaffold, null, 2) : undefined,
 			taskBatchScaffoldRequired: taskBatchScaffold?.required === true,
-			executionGuardrails: executionGuardrails ? JSON.stringify(executionGuardrails, null, 2) : undefined,
+			executionContract: JSON.stringify(executionContract, null, 2),
 		});
 	}
 
@@ -9153,20 +9327,39 @@ export class AgentSession {
 
 		let planHash = reference.planHash;
 		let planBytes = reference.planBytes;
-		const resolvedPlanPath = resolveLocalUrlToPath(
-			normalizeLocalScheme(reference.planFilePath),
-			this.#localProtocolOptions(),
-		);
-		let planContent: string;
-		try {
-			const planFile = Bun.file(resolvedPlanPath);
-			planContent = await planFile.text();
-			if (!planContent.trim()) return null;
-			planHash ??= Bun.hash(planContent).toString(16);
-			planBytes ??= planFile.size;
-		} catch (error) {
-			if (isEnoent(error)) return null;
-			throw error;
+		if (planHash === undefined || planBytes === undefined) {
+			const resolvedPlanPath = resolveLocalUrlToPath(
+				normalizeLocalScheme(reference.planFilePath),
+				this.#localProtocolOptions(),
+			);
+			try {
+				const planFile = Bun.file(resolvedPlanPath);
+				const planContent = await planFile.text();
+				if (!planContent.trim()) return null;
+				planHash ??= Bun.hash(planContent).toString(16);
+				planBytes ??= planFile.size;
+			} catch (error) {
+				if (isEnoent(error)) return null;
+				throw error;
+			}
+		}
+		let payloadHash = reference.payloadHash;
+		let payloadBytes = reference.payloadBytes;
+		if (payloadHash === undefined || payloadBytes === undefined) {
+			const resolvedPayloadPath = resolveLocalUrlToPath(
+				normalizeLocalScheme(reference.payloadFilePath),
+				this.#localProtocolOptions(),
+			);
+			try {
+				const payloadFile = Bun.file(resolvedPayloadPath);
+				const payloadContent = await payloadFile.text();
+				if (!payloadContent.trim()) return null;
+				payloadHash ??= Bun.hash(payloadContent).toString(16);
+				payloadBytes ??= payloadFile.size;
+			} catch (error) {
+				if (isEnoent(error)) return null;
+				throw error;
+			}
 		}
 		const activeBatch =
 			state.goal.currentWorkstreamBatch?.targetPlanId === currentPlan.id &&
@@ -9176,7 +9369,14 @@ export class AgentSession {
 		const executionSummary =
 			reference.executionSummary ??
 			buildGoalTargetPlanExecutionSummary(currentPlan, state.goal.currentTarget, activeBatch);
-		const executionGuardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
+		const executionContract = buildApprovedTargetPlanExecutionContract({
+			...reference,
+			planHash,
+			planBytes,
+			payloadHash,
+			payloadBytes,
+			executionSummary,
+		});
 		const taskBatchScaffold = executionSummary?.taskBatchScaffold;
 		const parallelWorkstreamBatch = taskBatchScaffold
 			? {
@@ -9193,9 +9393,10 @@ export class AgentSession {
 			revision: reference.revision ?? currentPlan.revision,
 			planHash,
 			planBytes,
+			payloadHash,
+			payloadBytes,
 			planFilePath: reference.planFilePath,
 			payloadFilePath: reference.payloadFilePath,
-			approvedPlanMarkdown: planContent,
 			planDepth: reference.planDepth,
 			primarySignalGroupId: reference.primarySignalGroupId,
 			matrixRowCounts: reference.matrixRowCounts
@@ -9205,7 +9406,7 @@ export class AgentSession {
 			parallelWorkstreamBatch: parallelWorkstreamBatch
 				? JSON.stringify(parallelWorkstreamBatch, null, 2)
 				: undefined,
-			executionGuardrails: executionGuardrails ? JSON.stringify(executionGuardrails, null, 2) : undefined,
+			executionContract: JSON.stringify(executionContract, null, 2),
 		});
 		this.#appendGoalBoundaryAudit({
 			kind: "target-plan-reference",
@@ -9225,12 +9426,14 @@ export class AgentSession {
 				"planFilePath",
 				"planHash",
 				"planBytes",
-				"fullPlanContent",
+				"payloadFilePath",
+				"payloadHash",
+				"payloadBytes",
+				"executionContract",
 			],
 			staleFields: [],
-			omittedFields: [],
-			recoveryInstruction:
-				"Use the inlined approved plan; read the file only if the inline block is missing or corrupted.",
+			omittedFields: ["approvedPlanMarkdown"],
+			recoveryInstruction: "Use the execution contract; read plan or payload files only when the contract says to.",
 			action: "accepted",
 		});
 		reference.sent = true;
@@ -11955,7 +12158,10 @@ export class AgentSession {
 			if (compactionAbortController.signal.aborted) {
 				throw new CompactionCancelledError();
 			}
-			const goalCompactionRefresh = this.#refreshGoalCompactionPreserveData(preserveData, compactionBoundaryBefore);
+			const goalCompactionRefresh = await this.#refreshGoalCompactionPreserveData(
+				preserveData,
+				compactionBoundaryBefore,
+			);
 			preserveData = goalCompactionRefresh.preserveData;
 
 			const appendResult = this.sessionManager.tryAppendPreparedCompaction({
@@ -11985,6 +12191,9 @@ export class AgentSession {
 					action: "skipped",
 				});
 				throw new Error(`Compaction result is ${appendResult.status}; branch changed before append.`);
+			}
+			if (this.#goalModeState) {
+				this.#appendGoalContextMetric(measureGoalCompactionPreserve(this.#goalModeState, preserveData));
 			}
 			this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, goalCompactionRefresh.auditRecord);
 			const sessionContext = this.buildDisplaySessionContext();
@@ -12253,7 +12462,7 @@ export class AgentSession {
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
 			if (carriedGoalState) {
 				this.#goalModeState = carriedGoalState;
-				this.#persistGoalModeChange(
+				await this.#persistGoalModeChange(
 					carriedGoalState.enabled ? "goal" : "goal_paused",
 					carriedGoalState,
 					"recovery",
@@ -14009,24 +14218,122 @@ export class AgentSession {
 		this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, this.#buildGoalBoundaryAuditRecord(input));
 	}
 
-	#refreshGoalCompactionPreserveData(
+	#appendGoalContextMetric(metric: GoalContextMetric): void {
+		this.sessionManager.appendCustomEntry(GOAL_CONTEXT_METRIC_CUSTOM_TYPE, metric);
+	}
+
+	#appendGoalProofGraphProjection(state: GoalModeState): void {
+		const projection = buildGoalProofGraphProjection(state);
+		const graphPayload = {
+			targetId: projection.targetId,
+			targetPlanId: projection.targetPlanId,
+			pendingCheckpointId: projection.pendingCheckpointId,
+			refs: projection.refs,
+			refOwners: projection.refOwners,
+			parentFrame: projection.parentFrame,
+			currentTargetPlan: projection.currentTargetPlan,
+			checkpoints: projection.checkpoints,
+			verificationCommands: projection.verificationCommands,
+		};
+		const contentHash = Bun.hash(JSON.stringify(graphPayload)).toString(16);
+		if (contentHash === this.#lastGoalProofGraphProjectionHash) return;
+		this.#lastGoalProofGraphProjectionHash = contentHash;
+		this.sessionManager.appendCustomEntry(GOAL_PROOF_GRAPH_CUSTOM_TYPE, { ...projection, contentHash });
+	}
+
+	async #goalCompactionPreserveDataWithStateRef(
+		preserveData: Record<string, unknown> | undefined,
+	): Promise<Record<string, unknown> | undefined> {
+		if (!preserveData) return undefined;
+		const state = this.#goalModeState;
+		const goalMode = preserveData.goalMode;
+		if (!state?.enabled || !isRecord(goalMode)) return preserveData;
+		const schemaVersion =
+			typeof goalMode.schemaVersion === "number"
+				? goalMode.schemaVersion
+				: serializeGoalModeState(state).schemaVersion;
+		const stateRef = await this.#writeGoalStateSnapshotSidecar(goalMode, {
+			goalId: state.goal.id,
+			stateVersion: state.stateVersion,
+			schemaVersion,
+		});
+		const next: Record<string, unknown> = { ...preserveData, goalStateRef: stateRef };
+		delete next.goalMode;
+		return next;
+	}
+
+	async #collectGoalStateRefSidecarMismatches(refValue: unknown, state: GoalModeState | undefined): Promise<string[]> {
+		const mismatches: string[] = [];
+		if (!state?.enabled || !isRecord(refValue)) return mismatches;
+		const path = typeof refValue.path === "string" ? refValue.path : undefined;
+		const hash = typeof refValue.hash === "string" ? refValue.hash : undefined;
+		const bytes = typeof refValue.bytes === "number" ? refValue.bytes : undefined;
+		if (!path) {
+			mismatches.push("goalStateRef.path:missing");
+			return mismatches;
+		}
+		let content: string;
+		try {
+			content = await Bun.file(resolveLocalUrlToPath(path, this.#localProtocolOptions())).text();
+		} catch (error) {
+			if (isEnoent(error)) {
+				mismatches.push("goalStateRef.path:missing-sidecar");
+				return mismatches;
+			}
+			throw error;
+		}
+		const actualBytes = new Blob([content]).size;
+		if (bytes === undefined) mismatches.push("goalStateRef.bytes:missing");
+		else if (bytes !== actualBytes) mismatches.push("goalStateRef.bytes:mismatch");
+		const actualHash = Bun.hash(content).toString(16);
+		if (!hash) mismatches.push("goalStateRef.hash:missing");
+		else if (hash !== actualHash) mismatches.push("goalStateRef.hash:mismatch");
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(content);
+		} catch {
+			mismatches.push("goalStateRef.state:invalid-json");
+			return mismatches;
+		}
+		const parsedState = parseGoalModeState(parsed);
+		if (!parsedState) {
+			mismatches.push("goalStateRef.state:invalid-goal-state");
+			return mismatches;
+		}
+		if (parsedState.goal.id !== state.goal.id) mismatches.push("goalStateRef.state.goalId:mismatch");
+		if (parsedState.stateVersion !== state.stateVersion) {
+			mismatches.push("goalStateRef.state.stateVersion:mismatch");
+		}
+		return mismatches;
+	}
+
+	async #refreshGoalCompactionPreserveData(
 		preserveData: Record<string, unknown> | undefined,
 		before: GoalBoundaryStateRef | undefined,
-	): GoalCompactionRefreshResult {
+	): Promise<GoalCompactionRefreshResult> {
 		const hadGoalOwnedKeys = GOAL_OWNED_COMPACTION_PRESERVE_KEYS.some(
 			key => preserveData !== undefined && key in preserveData,
 		);
-		const freshGoalPreserveData = this.#buildGoalCompactionContext()?.preserveData;
+		const freshGoalPreserveData = await this.#goalCompactionPreserveDataWithStateRef(
+			this.#buildGoalCompactionContext()?.preserveData,
+		);
 		const merged = mergeGoalCompactionPreserveData(preserveData, freshGoalPreserveData);
-		const staleFields = collectGoalCompactionPreserveMismatches(merged, this.#goalModeState);
+		const preserveMismatches = collectGoalCompactionPreserveMismatches(merged, this.#goalModeState);
+		const sidecarMismatches = await this.#collectGoalStateRefSidecarMismatches(
+			merged?.goalStateRef,
+			this.#goalModeState,
+		);
+		const staleFields = [...preserveMismatches, ...sidecarMismatches];
 		const omittedFields = goalCompactionOmittedFields(merged, this.#goalModeState);
 		const auditRecord = this.#buildGoalBoundaryAuditRecord({
 			kind: "compaction",
 			before,
 			after: buildGoalBoundaryStateRef(this.#goalModeState, "compaction"),
 			carriers: [
+				buildGoalBoundaryCarrierAudit("goalStateRef", merged?.goalStateRef),
 				buildGoalBoundaryCarrierAudit("goalMode", merged?.goalMode),
 				buildGoalBoundaryCarrierAudit("goalContinuationPacket", merged?.goalContinuationPacket),
+				buildGoalBoundaryCarrierAudit("goalRoutingCapsule", merged?.goalRoutingCapsule),
 				buildGoalBoundaryCarrierAudit("goalBoundaryRef", merged?.goalBoundaryRef),
 			],
 			preservedFields: goalCompactionPreservedFields(merged),
@@ -14838,7 +15145,10 @@ export class AgentSession {
 				return COMPACTION_CHECK_NONE;
 			}
 
-			const goalCompactionRefresh = this.#refreshGoalCompactionPreserveData(preserveData, compactionBoundaryBefore);
+			const goalCompactionRefresh = await this.#refreshGoalCompactionPreserveData(
+				preserveData,
+				compactionBoundaryBefore,
+			);
 			preserveData = goalCompactionRefresh.preserveData;
 
 			const appendResult = this.sessionManager.tryAppendPreparedCompaction({
@@ -14882,6 +15192,9 @@ export class AgentSession {
 					skipped: true,
 				});
 				return COMPACTION_CHECK_NONE;
+			}
+			if (this.#goalModeState) {
+				this.#appendGoalContextMetric(measureGoalCompactionPreserve(this.#goalModeState, preserveData));
 			}
 			this.sessionManager.appendCustomEntry(GOAL_BOUNDARY_AUDIT_CUSTOM_TYPE, goalCompactionRefresh.auditRecord);
 			const sessionContext = this.buildDisplaySessionContext();

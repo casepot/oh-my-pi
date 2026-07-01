@@ -26,14 +26,14 @@ This session is executing an approved plan. Your assignment above is one part of
 {{/if}}
 
 {{#if targetPlanReference}}
-GOAL TARGET PLAN
+GOAL TARGET EXECUTION CONTRACT
 ===================================
 
-This session is executing an approved goal target plan. Your assignment is within that target only. Use the inlined approved plan as authority for scope, sequencing, and verification. Use the execution summary as a structured guardrail for closure standard, allowed scope, excluded work, fanout, and verification signals. Where the plan, summary, and assignment conflict, ask the main agent; NEVER widen the target silently.
+This session is executing an approved goal target plan. Your assignment is within that target only. Use the execution contract as the active authority for scope, stale boundaries, fanout, and verification signals. Read the approved plan or payload artifacts only when the contract says the missing detail is needed. Where the contract and assignment conflict, ask the main agent; NEVER widen the target silently.
 
-<target_plan path="{{targetPlanReferencePath}}">
+<target_execution_contract path="{{targetPlanReferencePath}}">
 {{targetPlanReference}}
-</target_plan>
+</target_execution_contract>
 {{/if}}
 
 COOP

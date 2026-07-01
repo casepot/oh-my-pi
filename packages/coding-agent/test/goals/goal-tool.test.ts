@@ -722,6 +722,26 @@ describe("GoalTool", () => {
 			remainingTokens: 6,
 			completionBudgetReport: null,
 		});
+		const routing = await tool.execute("call-get-routing", { op: "get", view: "routing" });
+		const routingText = routing.content[0]?.type === "text" ? routing.content[0].text : "";
+		expect(getGoalModeState).toHaveBeenCalledTimes(2);
+		expect(routing.details).toMatchObject({ op: "get", view: { name: "routing" } });
+		expect(routingText).toContain("Goal routing:");
+		expect(routingText).toContain("Next action: Resume the same open target.");
+		expect(routingText).not.toContain("Relevant deliverables:");
+		const activePlan = await tool.execute("call-get-active-plan", { op: "get", view: "active_plan" });
+		const activePlanText = activePlan.content[0]?.type === "text" ? activePlan.content[0].text : "";
+		expect(activePlan.details).toMatchObject({ op: "get", view: { name: "active_plan" } });
+		expect(activePlanText).toContain("Goal active plan:");
+		expect(activePlanText).not.toContain("{");
+		const legacyState = await tool.execute("call-get-state", { op: "get", view: "state" });
+		const legacyStateText = legacyState.content[0]?.type === "text" ? legacyState.content[0].text : "";
+		expect(legacyState.details).toMatchObject({ op: "get", view: { name: "state" } });
+		expect(legacyStateText).toContain("Goal state:");
+		const legacyProof = await tool.execute("call-get-proof", { op: "get", view: "proof" });
+		const legacyProofText = legacyProof.content[0]?.type === "text" ? legacyProof.content[0].text : "";
+		expect(legacyProof.details).toMatchObject({ op: "get", view: { name: "proof" } });
+		expect(legacyProofText).toContain("Goal proof:");
 		expect(runtime.completeGoalFromTool).not.toHaveBeenCalled();
 
 		const completed = await tool.execute("call-complete", { op: "complete" });
@@ -2725,6 +2745,7 @@ describe("GoalTool", () => {
 					claim: "Source-link install exercises smoke path",
 					evidence: "Observed smoke output",
 					current: true,
+					signal_ids: ["signal-primary"],
 				},
 			],
 			not_claimed: ["Release is ready"],
@@ -2859,7 +2880,14 @@ describe("GoalTool", () => {
 			status: "closed_with_evidence",
 			summary: "Compact target closed.",
 			local_claims: ["Compact target has direct evidence"],
-			evidence: [{ claim: "Compact target has direct evidence", evidence: "Observed checkpoint", current: true }],
+			evidence: [
+				{
+					claim: "Compact target has direct evidence",
+					evidence: "Observed checkpoint",
+					current: true,
+					signal_ids: ["signal-primary"],
+				},
+			],
 			not_claimed: ["Parent objective proven"],
 			remaining_questions: ["Which compact path is next?"],
 		});

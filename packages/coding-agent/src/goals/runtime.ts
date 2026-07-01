@@ -15,8 +15,10 @@ import type {
 	GoalCheckpointStatus,
 	GoalCompletionVerifierStructuredOutput,
 	GoalConcernCheck,
+	GoalContextMetric,
 	GoalDeliverableDelta,
 	GoalDeliverableMapItem,
+	GoalGetViewName,
 	GoalModeState,
 	GoalParallelWorkstreamRequirement,
 	GoalParentFrame,
@@ -34,6 +36,7 @@ import type {
 	GoalTargetPlanBranchEvidence,
 	GoalTargetPlanDepth,
 	GoalTargetPlanExcludedWorkReview,
+	GoalTargetPlanExecutionContract,
 	GoalTargetPlanExecutionSummary,
 	GoalTargetPlanFailure,
 	GoalTargetPlanFailureReason,
@@ -45,6 +48,7 @@ import type {
 	GoalTargetWorkstream,
 	GoalTaskBatchScaffold,
 	GoalTokenUsage,
+	GoalToolViewEnvelope,
 	GoalVerificationAperture,
 	GoalVerificationAttempt,
 	GoalVerificationCommandRecord,
@@ -65,6 +69,7 @@ import {
 	cloneTargetPlan,
 	isNonContinuingCheckpointDecision,
 	normalizeParentFrame,
+	serializeGoalModeState,
 	upsertBlockedState,
 	upsertRecoveryRecord,
 	upsertWorkstreamBatch,
@@ -95,7 +100,11 @@ export interface GoalRuntimeHost {
 	setState(state: GoalModeState | undefined): void;
 	getCurrentUsage(): GoalTokenUsage;
 	emit(event: GoalRuntimeEvent): void | Promise<void>;
-	persist(mode: "goal" | "goal_paused" | "none", state?: GoalModeState, reason?: GoalPersistenceReason): void;
+	persist(
+		mode: "goal" | "goal_paused" | "none",
+		state?: GoalModeState,
+		reason?: GoalPersistenceReason,
+	): void | Promise<void>;
 	persistUsage?(event: GoalUsagePersistenceEvent): void;
 	sendHiddenMessage(message: {
 		customType: string;
@@ -451,6 +460,11 @@ export interface GoalTargetPlanExpectation extends GoalSideAgentExpectation {
 
 export interface GoalTargetPlanApprovalInput extends GoalSubmitTargetPlanInput {
 	reviews: GoalTargetPlanReview[];
+	planHash?: string;
+	planBytes?: number;
+	payloadFilePath?: string;
+	payloadHash?: string;
+	payloadBytes?: number;
 }
 
 export interface GoalTargetPlanSubmitIdentity {
@@ -650,7 +664,30 @@ function latestResolution(goal: Goal): GoalCheckpointResolution | undefined {
 }
 
 function compactRefIds(refs: GoalRef[] | undefined): string[] {
-	return refs?.map(ref => ref.id) ?? [];
+	if (!refs?.length) return [];
+	const seen = new Set<string>();
+	const ids: string[] = [];
+	for (const ref of refs) {
+		if (seen.has(ref.id)) continue;
+		seen.add(ref.id);
+		ids.push(ref.id);
+	}
+	return ids;
+}
+
+function compactCheckpointEvidenceItem(item: GoalCheckpointEvidenceItem): Record<string, unknown> {
+	return {
+		id: item.id,
+		current: item.current,
+		signalIds: item.signalIds,
+		scenarioRowIds: item.scenarioRowIds,
+		workstreamIds: item.workstreamIds,
+		verificationCommandIds: item.verificationCommandIds,
+		evidenceRefIds: compactRefIds(item.evidenceRefs),
+		staleIf: item.staleIf,
+		claimPresent: Boolean(item.claim.trim()),
+		evidenceBytes: Buffer.byteLength(item.evidence, "utf8"),
+	};
 }
 
 function compactVerificationGaps(blockers: GoalVerificationGap[]): Record<string, unknown>[] {
@@ -771,11 +808,7 @@ function compactCheckpoint(checkpoint: GoalCheckpointPacket | undefined): Record
 		parentFrameVersion: checkpoint.parentFrameVersion,
 		summary: checkpoint.summary,
 		localClaims: checkpoint.localClaims,
-		evidence: checkpoint.evidence.map(item => ({
-			claim: item.claim,
-			evidence: item.evidence,
-			current: item.current,
-		})),
+		evidence: checkpoint.evidence.map(compactCheckpointEvidenceItem),
 		checksRun: checkpoint.checksRun,
 		artifactsTouched: checkpoint.artifactsTouched,
 		notClaimed: checkpoint.notClaimed,
@@ -786,10 +819,7 @@ function compactCheckpoint(checkpoint: GoalCheckpointPacket | undefined): Record
 			? {
 					status: checkpoint.review.status,
 					blockers: compactVerificationGaps(checkpoint.review.blockers),
-					evidenceChecked: checkpoint.review.evidenceChecked.map(item => ({
-						claim: item.claim,
-						current: item.current,
-					})),
+					evidenceChecked: checkpoint.review.evidenceChecked.map(compactCheckpointEvidenceItem),
 					feedback: checkpoint.review.status === "rejected" ? checkpoint.review.feedback : undefined,
 				}
 			: undefined,
@@ -862,7 +892,7 @@ export interface GoalContextSurface {
 	target_unit_rules?: GoalPromptObject[];
 	current_target?: GoalPromptObject;
 	target_plan?: GoalPromptObject;
-	target_execution_guardrails?: Record<string, unknown>;
+	target_execution_contract?: GoalTargetPlanExecutionContract;
 	workstream_batch?: GoalPromptObject;
 	verification_freshness?: GoalPromptObject;
 	checkpoint?: GoalPromptObject;
@@ -1096,6 +1126,601 @@ function uniqueStrings(values: string[]): string[] {
 	return output;
 }
 
+export interface GoalContextMetricIdentity {
+	goalId: string;
+	stateVersion: number;
+	parentFrameVersion: number;
+	targetId?: string;
+	targetPlanId?: string;
+	checkpointId?: string;
+	createdAt?: number;
+}
+
+function jsonByteLength(value: unknown): number {
+	return Buffer.byteLength(JSON.stringify(value) ?? "null", "utf8");
+}
+
+function textByteLength(value: string): number {
+	return Buffer.byteLength(value, "utf8");
+}
+
+function sectionBytes(sections: Record<string, unknown>, limit = 8): Array<{ section: string; bytes: number }> {
+	return Object.entries(sections)
+		.map(([section, value]) => ({ section, bytes: jsonByteLength(value) }))
+		.filter(item => item.bytes > 0)
+		.sort((left, right) => right.bytes - left.bytes || left.section.localeCompare(right.section))
+		.slice(0, limit);
+}
+
+export interface GoalProofGraphProjectionRefOwner {
+	refId: string;
+	ownerKind: "proof-path";
+	ownerId: string;
+}
+
+export interface GoalProofGraphProjection {
+	schemaVersion: 1;
+	projectionId: string;
+	goalId: string;
+	stateVersion: number;
+	parentFrameVersion: number;
+	targetId?: string;
+	targetPlanId?: string;
+	pendingCheckpointId?: string;
+	createdAt: number;
+	refs: GoalRef[];
+	duplicateRefObjects: number;
+	refOwners: GoalProofGraphProjectionRefOwner[];
+	parentFrame: unknown;
+	currentTargetPlan: unknown;
+	checkpoints: unknown;
+	verificationCommands: unknown;
+}
+
+interface GoalProofGraphRefDedupeState {
+	refs: GoalRef[];
+	refOwners: GoalProofGraphProjectionRefOwner[];
+	seenRefIds: Set<string>;
+	duplicateRefObjects: number;
+}
+
+const GOAL_REF_KIND_LOOKUP: Record<GoalRef["kind"], true> = {
+	doc: true,
+	issue: true,
+	artifact: true,
+	test: true,
+	commit: true,
+	"external-record": true,
+	other: true,
+};
+
+export function targetPlanRefId(targetPlanId: string, revision: number): string {
+	return `target-plan:${targetPlanId}@r${revision}`;
+}
+
+export function targetPlanMarkdownRefId(targetPlanId: string, revision: number, planHash?: string): string {
+	const hashSuffix = planHash ? `:${planHash}` : "";
+	return `${targetPlanRefId(targetPlanId, revision)}:markdown${hashSuffix}`;
+}
+
+export function targetPlanPayloadRefId(targetPlanId: string, revision: number, payloadHash?: string): string {
+	const hashSuffix = payloadHash ? `:${payloadHash}` : "";
+	return `${targetPlanRefId(targetPlanId, revision)}:payload${hashSuffix}`;
+}
+
+export function signalRefId(targetPlanId: string, revision: number, signalId: string): string {
+	return `${targetPlanRefId(targetPlanId, revision)}:signal:${signalId}`;
+}
+
+export function scenarioRowRefId(targetPlanId: string, revision: number, rowId: string): string {
+	return `${targetPlanRefId(targetPlanId, revision)}:scenario-row:${rowId}`;
+}
+
+export function workstreamRefId(targetPlanId: string, revision: number, workstreamId: string): string {
+	return `${targetPlanRefId(targetPlanId, revision)}:workstream:${workstreamId}`;
+}
+
+export function checkpointEvidenceRefId(checkpointId: string, evidenceId: string): string {
+	return `checkpoint:${checkpointId}#evidence:${evidenceId}`;
+}
+
+function isGoalRefKind(value: unknown): value is GoalRef["kind"] {
+	return typeof value === "string" && value in GOAL_REF_KIND_LOOKUP;
+}
+
+const GOAL_REF_KEYS: Record<keyof GoalRef, true> = {
+	id: true,
+	kind: true,
+	label: true,
+	uri: true,
+};
+
+function hasOnlyGoalRefKeys(record: Record<string, unknown>): boolean {
+	return Object.keys(record).every(key => key in GOAL_REF_KEYS);
+}
+
+function isGoalRefRecord(
+	record: Record<string, unknown>,
+): record is Record<string, unknown> & { id: string; kind: GoalRef["kind"]; label?: string; uri?: string } {
+	return (
+		typeof record.id === "string" &&
+		isGoalRefKind(record.kind) &&
+		hasOnlyGoalRefKeys(record) &&
+		(record.label === undefined || typeof record.label === "string") &&
+		(record.uri === undefined || typeof record.uri === "string")
+	);
+}
+
+function addProofGraphRef(state: GoalProofGraphRefDedupeState, ref: GoalRef, ownerId: string): string {
+	if (state.seenRefIds.has(ref.id)) {
+		state.duplicateRefObjects += 1;
+	} else {
+		state.seenRefIds.add(ref.id);
+		state.refs.push({ ...ref });
+	}
+	state.refOwners.push({ refId: ref.id, ownerKind: "proof-path", ownerId });
+	return ref.id;
+}
+
+function compactProofGraphRefs(value: unknown, state: GoalProofGraphRefDedupeState, path = ""): unknown {
+	if (Array.isArray(value)) return value.map((item, index) => compactProofGraphRefs(item, state, `${path}/${index}`));
+	if (!value || typeof value !== "object") return value;
+	const record: Record<string, unknown> = value as Record<string, unknown>;
+	if (isGoalRefRecord(record)) {
+		const refId = addProofGraphRef(
+			state,
+			{ id: record.id, kind: record.kind, label: record.label, uri: record.uri },
+			path || "/",
+		);
+		return { refId };
+	}
+	const output: Record<string, unknown> = {};
+	for (const [key, entryValue] of Object.entries(record)) {
+		output[key] = compactProofGraphRefs(entryValue, state, `${path}/${key}`);
+	}
+	return output;
+}
+
+function compactProofTargetPlan(
+	plan: GoalTargetPlanRecord | undefined,
+	state: GoalProofGraphRefDedupeState,
+): Record<string, unknown> | undefined {
+	if (!plan) return undefined;
+	addProofGraphRef(
+		state,
+		{ id: targetPlanRefId(plan.id, plan.revision), kind: "artifact", label: `Target plan ${plan.id}` },
+		"/currentTargetPlan",
+	);
+	addProofGraphRef(
+		state,
+		{
+			id: targetPlanMarkdownRefId(plan.id, plan.revision, plan.planHash),
+			kind: "artifact",
+			label: "Approved target plan Markdown",
+			uri: plan.planFilePath,
+		},
+		"/currentTargetPlan/planFilePath",
+	);
+	addProofGraphRef(
+		state,
+		{
+			id: targetPlanPayloadRefId(plan.id, plan.revision, plan.payloadHash),
+			kind: "artifact",
+			label: "Approved target plan payload",
+			uri: plan.payloadFilePath ?? targetPlanPayloadFilePath(plan.planFilePath),
+		},
+		"/currentTargetPlan/payloadFilePath",
+	);
+	return {
+		id: plan.id,
+		targetId: plan.targetId,
+		revision: plan.revision,
+		status: plan.status,
+		planRefId: targetPlanRefId(plan.id, plan.revision),
+		markdownRefId: targetPlanMarkdownRefId(plan.id, plan.revision, plan.planHash),
+		payloadRefId: targetPlanPayloadRefId(plan.id, plan.revision, plan.payloadHash),
+		requiredSignals:
+			plan.verificationSignals
+				?.filter(signal => signal.required)
+				.map(signal => {
+					const refId = signalRefId(plan.id, plan.revision, signal.id);
+					addProofGraphRef(
+						state,
+						{ id: refId, kind: "other", label: `Required signal ${signal.id}` },
+						`/currentTargetPlan/requiredSignals/${signal.id}`,
+					);
+					return {
+						id: signal.id,
+						refId,
+						role: signal.role,
+						layer: signal.layer,
+						concernIds: signal.concernIds,
+						staleIf: signal.staleIf,
+					};
+				}) ?? [],
+		scenarioRows:
+			plan.scenarioMatrix?.rowsInScope.map(row => {
+				const refId = scenarioRowRefId(plan.id, plan.revision, row.id);
+				addProofGraphRef(
+					state,
+					{ id: refId, kind: "other", label: `Scenario row ${row.id}` },
+					`/currentTargetPlan/scenarioRows/${row.id}`,
+				);
+				return {
+					id: row.id,
+					refId,
+					signalIds: row.signalIds,
+					concernIds: row.concernIds,
+					staleIf: row.staleIf,
+				};
+			}) ?? [],
+		workstreams:
+			plan.targetCard?.workstreams?.map(workstream => {
+				const refId = workstreamRefId(plan.id, plan.revision, workstream.id);
+				addProofGraphRef(
+					state,
+					{ id: refId, kind: "other", label: `Workstream ${workstream.id}` },
+					`/currentTargetPlan/workstreams/${workstream.id}`,
+				);
+				return {
+					id: workstream.id,
+					refId,
+					kind: workstream.kind,
+					files: workstream.files,
+				};
+			}) ?? [],
+		branchEvidence:
+			plan.branchEvidence?.map(item => ({
+				branch: item.branch,
+				required: item.required,
+				plannedSignalIds: item.plannedSignalIds,
+				rowIds: item.rowIds,
+			})) ?? [],
+	};
+}
+
+function compactProofCheckpoint(
+	checkpoint: GoalCheckpointPacket,
+	state: GoalProofGraphRefDedupeState,
+	index: number,
+): Record<string, unknown> {
+	return {
+		id: checkpoint.id,
+		targetId: checkpoint.targetId,
+		status: checkpoint.status,
+		evidence: checkpoint.evidence.map((item, evidenceIndex) => {
+			const id = normalizedCheckpointEvidenceId(item, evidenceIndex);
+			const refId = checkpointEvidenceRefId(checkpoint.id, id);
+			addProofGraphRef(
+				state,
+				{ id: refId, kind: "artifact", label: item.claim },
+				`/checkpoints/${index}/evidence/${id}`,
+			);
+			return {
+				id,
+				refId,
+				current: item.current,
+				signalIds: item.signalIds,
+				scenarioRowIds: item.scenarioRowIds,
+				workstreamIds: item.workstreamIds,
+				verificationCommandIds: item.verificationCommandIds,
+				evidenceRefs: compactRefIds(item.evidenceRefs),
+				staleIf: item.staleIf,
+			};
+		}),
+		review: checkpoint.review
+			? {
+					status: checkpoint.review.status,
+					evidenceIds: checkpoint.review.evidenceChecked.map((item, evidenceIndex) =>
+						normalizedCheckpointEvidenceId(item, evidenceIndex),
+					),
+					blockerIds: checkpoint.review.blockers.map(blocker => blocker.id),
+				}
+			: undefined,
+	};
+}
+
+export function buildGoalProofGraphProjection(state: GoalModeState, createdAt = Date.now()): GoalProofGraphProjection {
+	const dedupeState: GoalProofGraphRefDedupeState = {
+		refs: [],
+		refOwners: [],
+		seenRefIds: new Set(),
+		duplicateRefObjects: 0,
+	};
+	const goal = state.goal;
+	const parentFrame = compactProofGraphRefs(goal.parentFrame, dedupeState, "/parentFrame");
+	const currentTargetPlan = compactProofTargetPlan(goal.currentTargetPlan, dedupeState);
+	const checkpoints = (goal.checkpoints ?? []).map((checkpoint, index) =>
+		compactProofCheckpoint(checkpoint, dedupeState, index),
+	);
+	const verificationCommands =
+		goal.verificationCommands?.map(record => ({
+			id: record.id,
+			targetId: record.targetId,
+			targetPlanId: record.targetPlanId,
+			kind: record.kind,
+			status: record.status,
+			freshness: record.freshness,
+			workEpoch: record.workEpoch,
+			source: record.source,
+		})) ?? [];
+	return {
+		schemaVersion: 1,
+		projectionId: `${goal.id}:proof:${state.parentFrameVersion}:${state.stateVersion}`,
+		goalId: goal.id,
+		stateVersion: state.stateVersion,
+		parentFrameVersion: state.parentFrameVersion,
+		targetId: goal.currentTarget?.id,
+		targetPlanId: goal.currentTargetPlan?.id,
+		pendingCheckpointId: goal.pendingCheckpointId,
+		createdAt,
+		refs: dedupeState.refs,
+		duplicateRefObjects: dedupeState.duplicateRefObjects,
+		refOwners: dedupeState.refOwners,
+		parentFrame,
+		currentTargetPlan,
+		checkpoints,
+		verificationCommands,
+	};
+}
+
+function countArray(value: readonly unknown[] | undefined): number {
+	return value?.length ?? 0;
+}
+
+function countObjectKeys(value: Record<string, unknown> | undefined): number {
+	return value ? Object.keys(value).length : 0;
+}
+
+function metricFromState(
+	kind: GoalContextMetric["kind"],
+	state: GoalModeState,
+	serializedBytes: number,
+	counts: Record<string, number>,
+	createdAt: number,
+	extra: Partial<GoalContextMetric> = {},
+): GoalContextMetric {
+	return {
+		kind,
+		goalId: state.goal.id,
+		stateVersion: state.stateVersion,
+		parentFrameVersion: state.parentFrameVersion,
+		serializedBytes,
+		counts,
+		createdAt,
+		...extra,
+	};
+}
+
+export function measureGoalSerializedState(state: GoalModeState, createdAt = Date.now()): GoalContextMetric {
+	const serialized = serializeGoalModeState(state);
+	const goal = serialized.goal;
+	return metricFromState(
+		"state_snapshot",
+		state,
+		jsonByteLength(serialized),
+		{
+			targets: countArray(goal.targets),
+			targetPlans: countArray(goal.targetPlans),
+			checkpoints: countArray(goal.checkpoints),
+			checkpointResolutions: countArray(goal.checkpointResolutions),
+			verificationAttempts: countArray(goal.verificationAttempts),
+			verificationCommands: countArray(goal.verificationCommands),
+			workstreamBatches: countArray(goal.workstreamBatches),
+			deliverables: countArray(goal.deliverableMap),
+			parentAcceptedClaims: countArray(goal.parentFrame?.acceptedClaims),
+			parentCandidateClaims: countArray(goal.parentFrame?.candidateClaims),
+			parentRejectedClaims: countArray(goal.parentFrame?.rejectedOrStaleClaims),
+			parentGates: countArray(goal.parentFrame?.gates),
+			parentResiduals: countArray(goal.parentFrame?.residuals),
+			parentFrontier: countArray(goal.parentFrame?.frontier),
+		},
+		createdAt,
+		{
+			targetId: goal.currentTarget?.id,
+			targetPlanId: goal.currentTargetPlan?.id,
+			checkpointId: goal.pendingCheckpointId,
+			largestSections: sectionBytes({
+				goal,
+				parentFrame: goal.parentFrame,
+				currentTarget: goal.currentTarget,
+				currentTargetPlan: goal.currentTargetPlan,
+				targetPlans: goal.targetPlans,
+				checkpoints: goal.checkpoints,
+				verificationCommands: goal.verificationCommands,
+				workstreamBatches: goal.workstreamBatches,
+			}),
+		},
+	);
+}
+
+export function measureGoalPromptSurface(state: GoalModeState, createdAt = Date.now()): GoalContextMetric {
+	const surface = buildGoalContextSurface(state, state.goal);
+	const promptSurface = renderGoalPromptSurface(state, state.goal);
+	const surfaceRecord: Record<string, unknown> = { ...surface };
+	return metricFromState(
+		"prompt_surface",
+		state,
+		jsonByteLength(surface),
+		{
+			topLevelSections: countObjectKeys(surfaceRecord),
+			deliverables: countArray(state.goal.deliverableMap),
+			requiredSignals: countArray(
+				state.goal.currentTargetPlan?.verificationSignals?.filter(signal => signal.required),
+			),
+			scenarioRows: countArray(state.goal.currentTargetPlan?.scenarioMatrix?.rowsInScope),
+			workstreams: countArray(state.goal.currentWorkstreamBatch?.workstreams),
+		},
+		createdAt,
+		{
+			targetId: state.goal.currentTarget?.id,
+			targetPlanId: state.goal.currentTargetPlan?.id,
+			checkpointId: state.goal.pendingCheckpointId,
+			promptBytes: textByteLength(promptSurface),
+			largestSections: sectionBytes(surfaceRecord),
+		},
+	);
+}
+
+function readArrayCount(value: unknown): number {
+	return Array.isArray(value) ? value.length : 0;
+}
+
+export function measureGoalExecutionContract(
+	contract: unknown,
+	identity: GoalContextMetricIdentity,
+): GoalContextMetric {
+	const record =
+		contract && typeof contract === "object" && !Array.isArray(contract)
+			? Object.fromEntries(Object.entries(contract))
+			: {};
+	return {
+		kind: "approved_plan_contract",
+		goalId: identity.goalId,
+		stateVersion: identity.stateVersion,
+		parentFrameVersion: identity.parentFrameVersion,
+		targetId: identity.targetId,
+		targetPlanId: identity.targetPlanId,
+		checkpointId: identity.checkpointId,
+		serializedBytes: jsonByteLength(contract),
+		counts: {
+			requiredSignals: readArrayCount(record.requiredSignals),
+			scenarioRowsInScope: readArrayCount(record.scenarioRowsInScope),
+			scenarioRowsLeftOpen: readArrayCount(record.scenarioRowsLeftOpen),
+			workstreams: readArrayCount(record.workstreams),
+			checkpointEvidence: readArrayCount(record.checkpointEvidence),
+			refs: readArrayCount(record.refs),
+		},
+		largestSections: sectionBytes(record),
+		createdAt: identity.createdAt ?? Date.now(),
+	};
+}
+
+export function measureGoalCompactionPreserve(
+	state: GoalModeState,
+	preserveData: Record<string, unknown> | undefined,
+	createdAt = Date.now(),
+): GoalContextMetric {
+	const data = preserveData ?? {};
+	return metricFromState(
+		"compaction_preserve",
+		state,
+		jsonByteLength(data),
+		{
+			keys: countObjectKeys(data),
+			hasGoalMode: data.goalMode === undefined ? 0 : 1,
+			hasGoalStateRef: data.goalStateRef === undefined ? 0 : 1,
+			hasGoalContinuationPacket: data.goalContinuationPacket === undefined ? 0 : 1,
+			hasGoalRoutingCapsule: data.goalRoutingCapsule === undefined ? 0 : 1,
+			hasGoalBoundaryRef: data.goalBoundaryRef === undefined ? 0 : 1,
+		},
+		createdAt,
+		{
+			targetId: state.goal.currentTarget?.id,
+			targetPlanId: state.goal.currentTargetPlan?.id,
+			checkpointId: state.goal.pendingCheckpointId,
+			largestSections: sectionBytes(data),
+		},
+	);
+}
+
+export function measureGoalCheckpointPacket(
+	state: GoalModeState,
+	checkpoint: GoalCheckpointPacket,
+	createdAt = Date.now(),
+): GoalContextMetric {
+	return metricFromState(
+		"checkpoint_packet",
+		state,
+		jsonByteLength(checkpoint),
+		{
+			localClaims: checkpoint.localClaims.length,
+			evidenceItems: checkpoint.evidence.length,
+			checksRun: checkpoint.checksRun.length,
+			artifactsTouched: checkpoint.artifactsTouched.length,
+			notClaimed: checkpoint.notClaimed.length,
+			remainingQuestions: checkpoint.remainingQuestions.length,
+			risksOrCaveats: checkpoint.risksOrCaveats.length,
+			staleIf: checkpoint.staleIf.length,
+			reviewEvidenceChecked: checkpoint.review?.evidenceChecked.length ?? 0,
+			reviewBlockers: checkpoint.review?.blockers.length ?? 0,
+		},
+		createdAt,
+		{
+			targetId: checkpoint.targetId,
+			targetPlanId: state.goal.currentTargetPlan?.id,
+			checkpointId: checkpoint.id,
+			largestSections: sectionBytes({
+				targetSnapshot: checkpoint.targetSnapshot,
+				evidence: checkpoint.evidence,
+				review: checkpoint.review,
+				localClaims: checkpoint.localClaims,
+				remainingQuestions: checkpoint.remainingQuestions,
+			}),
+		},
+	);
+}
+
+export function measureGoalProofGraph(state: GoalModeState, createdAt = Date.now()): GoalContextMetric {
+	const goal = state.goal;
+	const parent = goal.parentFrame;
+	const currentPlan = goal.currentTargetPlan;
+	const checkpoints = goal.checkpoints ?? [];
+	const evidenceItems = checkpoints.flatMap(checkpoint => checkpoint.evidence);
+	const checkpointSignalIds = uniqueStrings(evidenceItems.flatMap(item => item.signalIds ?? []));
+	const checkpointScenarioRowIds = uniqueStrings(evidenceItems.flatMap(item => item.scenarioRowIds ?? []));
+	const checkpointWorkstreamIds = uniqueStrings(evidenceItems.flatMap(item => item.workstreamIds ?? []));
+	const projection = buildGoalProofGraphProjection(state, createdAt);
+	const proofSnapshot = {
+		refs: projection.refs,
+		refOwners: projection.refOwners,
+		parentFrame: projection.parentFrame,
+		currentTargetPlan: projection.currentTargetPlan,
+		checkpoints: projection.checkpoints,
+		verificationCommands: projection.verificationCommands,
+	};
+	return metricFromState(
+		"proof_graph",
+		state,
+		jsonByteLength(proofSnapshot),
+		{
+			refs: projection.refs.length,
+			uniqueRefs: projection.refs.length,
+			duplicateRefObjects: projection.duplicateRefObjects,
+			refOwners: projection.refOwners.length,
+			acceptedClaims: countArray(parent?.acceptedClaims),
+			candidateClaims: countArray(parent?.candidateClaims),
+			rejectedClaims: countArray(parent?.rejectedOrStaleClaims),
+			requiredSignals: countArray(currentPlan?.verificationSignals?.filter(signal => signal.required)),
+			scenarioRowsInScope: countArray(currentPlan?.scenarioMatrix?.rowsInScope),
+			workstreams: countArray(currentPlan?.targetCard?.workstreams),
+			checkpoints: checkpoints.length,
+			checkpointEvidenceItems: evidenceItems.length,
+			checkpointEvidenceRefs: evidenceItems.reduce((sum, item) => sum + countArray(item.evidenceRefs), 0),
+			checkpointSignalCoverage: checkpointSignalIds.length,
+			checkpointScenarioRowCoverage: checkpointScenarioRowIds.length,
+			checkpointWorkstreamCoverage: checkpointWorkstreamIds.length,
+			verificationCommands: countArray(goal.verificationCommands),
+			deliverables: countArray(goal.deliverableMap),
+			gates: countArray(parent?.gates),
+		},
+		createdAt,
+		{
+			targetId: goal.currentTarget?.id,
+			targetPlanId: currentPlan?.id,
+			checkpointId: goal.pendingCheckpointId,
+			largestSections: sectionBytes({
+				refs: projection.refs,
+				refOwners: projection.refOwners,
+				parentFrame: projection.parentFrame,
+				currentTargetPlan: projection.currentTargetPlan,
+				checkpoints: projection.checkpoints,
+				verificationCommands: projection.verificationCommands,
+			}),
+		},
+	);
+}
+
 export function buildGoalTargetPlanExecutionSummary(
 	plan: GoalTargetPlanRecord | undefined,
 	target: GoalTarget | undefined,
@@ -1132,7 +1757,7 @@ export function buildGoalTargetPlanExecutionSummary(
 		targetId: plan.targetId,
 		targetPlanId: plan.id,
 		planFilePath: plan.planFilePath,
-		payloadFilePath: targetPlanPayloadFilePath(plan.planFilePath),
+		payloadFilePath: plan.payloadFilePath ?? targetPlanPayloadFilePath(plan.planFilePath),
 		revision: plan.revision,
 		targetTitle: target?.title,
 		desiredFutureClaim: target?.desiredFutureClaim,
@@ -1218,6 +1843,301 @@ export function buildGoalTargetPlanExecutionSummary(
 		readPlanFileWhen:
 			"Exact edit order, file/symbol details, command text, or recovery detail is missing from this summary.",
 		taskBatchScaffold: buildTaskBatchScaffold(workstreamBatch),
+	};
+}
+
+export interface GoalTargetPlanExecutionContractIdentity {
+	planHash?: string;
+	planBytes?: number;
+	payloadHash?: string;
+	payloadBytes?: number;
+	postGreenReviewRequired?: boolean;
+}
+
+export function buildGoalTargetPlanExecutionContract(
+	summary: GoalTargetPlanExecutionSummary | undefined,
+	identity: GoalTargetPlanExecutionContractIdentity = {},
+): GoalTargetPlanExecutionContract | undefined {
+	if (!summary) return undefined;
+	return {
+		schemaVersion: 1,
+		targetId: summary.targetId,
+		targetPlanId: summary.targetPlanId,
+		revision: summary.revision,
+		planRef: {
+			targetPlanId: summary.targetPlanId,
+			revision: summary.revision,
+			planFilePath: summary.planFilePath,
+			planHash: identity.planHash,
+			planBytes: identity.planBytes,
+			payloadFilePath: summary.payloadFilePath,
+			payloadHash: identity.payloadHash,
+			payloadBytes: identity.payloadBytes,
+		},
+		target: {
+			title: summary.targetTitle,
+			desiredFutureClaim: summary.desiredFutureClaim,
+			closureStandard: summary.closureStandard,
+			capabilityClaim: summary.capabilityClaim,
+			userVisibleSurface: summary.userVisibleSurface,
+		},
+		scope: {
+			planDepth: summary.planDepth,
+			primarySignalGroupId: summary.primarySignalGroupId,
+			implementationFanoutRequired: summary.implementationFanoutRequired,
+			implementationFiles: [...summary.implementationFiles],
+			sharedContract: summary.sharedContract,
+		},
+		workstreams: summary.workstreams?.map(workstream => ({
+			id: workstream.id,
+			label: workstream.label,
+			kind: workstream.kind,
+			role: workstream.role,
+			files: [...workstream.files],
+			contractInputs: [...workstream.contractInputs],
+			contractOutputs: [...workstream.contractOutputs],
+		})),
+		requiredSignals: summary.requiredSignals.map(signal => ({
+			id: signal.id,
+			role: signal.role,
+			layer: signal.layer,
+			concernIds: [...signal.concernIds],
+			claim: signal.claim,
+			observation: signal.observation,
+			method: signal.method,
+			expectedOutcome: signal.expectedOutcome,
+			confidenceIfSatisfied: signal.confidenceIfSatisfied,
+			confidenceRationale: signal.confidenceRationale,
+			staleIf: [...signal.staleIf],
+		})),
+		scenarioRowsInScope: summary.scenarioRowsInScope?.map(row => ({
+			id: row.id,
+			branch: row.branch,
+			signalIds: [...row.signalIds],
+			acceptance: row.acceptance,
+			expectedOutcome: row.expectedOutcome,
+			staleIf: [...row.staleIf],
+		})),
+		scenarioRowsLeftOpen: summary.scenarioRowsLeftOpen?.map(row => ({
+			id: row.id,
+			branch: row.branch,
+			reason: row.reason,
+			rationale: row.rationale,
+			followUpHint: row.followUpHint,
+		})),
+		branchEvidence: summary.branchEvidence?.map(branch => ({
+			branch: branch.branch,
+			required: branch.required,
+			plannedSignalIds: [...branch.plannedSignalIds],
+			rowIds: branch.rowIds ? [...branch.rowIds] : undefined,
+			rationale: branch.rationale,
+		})),
+		acceptanceRows: summary.acceptanceRows
+			? {
+					closed: [...summary.acceptanceRows.closed],
+					open: [...summary.acceptanceRows.open],
+				}
+			: undefined,
+		excludedWork: summary.excludedWork.map(item => ({ ...item })),
+		nonGoals: [...summary.nonGoals],
+		forbiddenClaims: [...summary.forbiddenClaims],
+		knownLimits: [...summary.knownLimits],
+		checkpointEvidence: [...summary.checkpointEvidence],
+		staleIf: [...summary.staleIf],
+		reviewLenses: summary.reviewLenses ? [...summary.reviewLenses] : undefined,
+		postGreenReviewRequired: identity.postGreenReviewRequired ?? true,
+		readPlanFileWhen: summary.readPlanFileWhen,
+		readPayloadFileWhen:
+			"Exact matrix, proof graph, payload-only contract, or recovery detail is missing from this contract.",
+		taskBatchScaffold: summary.taskBatchScaffold,
+	};
+}
+
+function goalGetViewNextAction(state: GoalModeState | null | undefined): string {
+	if (!state) return "No active goal.";
+	if (state.runMode === "planning-target") return "Continue target planning; lint and submit before implementation.";
+	if (state.runMode === "awaiting-checkpoint-resolution")
+		return "Prepare checkpoint guidance, then resolve_checkpoint.";
+	if (state.runMode === "awaiting-parent-completion") return 'Call goal({ op: "complete" }).';
+	if (state.runMode === "awaiting-verification-repair") return "Repair verifier blockers with fresh evidence.";
+	if (state.runMode === "awaiting-user-input") return "Wait for input or recover_blocked_state.";
+	if (state.runMode === "completed") return "Goal completed.";
+	return "Resume the same open target.";
+}
+
+function goalGetViewRequiredOperation(state: GoalModeState | null | undefined): string | undefined {
+	if (!state) return undefined;
+	if (state.runMode === "planning-target") return "submit_target_plan";
+	if (state.runMode === "awaiting-checkpoint-resolution") return "resolve_checkpoint";
+	if (state.runMode === "awaiting-parent-completion") return "complete";
+	if (state.runMode === "awaiting-verification-repair") return "start_target";
+	if (state.runMode === "awaiting-user-input" && state.goal.currentBlockedState) return "recover_blocked_state";
+	if (state.runMode === "working-target" && !state.goal.currentTarget) return "start_target";
+	if (state.runMode === "working-target" && state.goal.currentTarget?.status === "active") return "checkpoint";
+	return undefined;
+}
+
+export function buildGoalToolViewEnvelope(
+	state: GoalModeState | null | undefined,
+	name: GoalGetViewName,
+	generatedAt = Date.now(),
+): GoalToolViewEnvelope {
+	const goal = state?.goal;
+	const activeBatch =
+		goal?.currentWorkstreamBatch &&
+		goal.currentWorkstreamBatch.targetId === goal.currentTarget?.id &&
+		goal.currentWorkstreamBatch.targetPlanId === goal.currentTargetPlan?.id &&
+		goal.currentWorkstreamBatch.targetPlanRevision === goal.currentTargetPlan?.revision
+			? goal.currentWorkstreamBatch
+			: undefined;
+	const executionSummary = buildGoalTargetPlanExecutionSummary(
+		goal?.currentTargetPlan,
+		goal?.currentTarget,
+		activeBatch,
+	);
+	const executionContract = buildGoalTargetPlanExecutionContract(executionSummary);
+	const frame = goal?.parentFrame;
+	const latestCheckpoint = goal?.checkpoints?.at(-1);
+	const policy = state ? goalRunModePolicy(state.runMode) : { allowedNextActs: [], disallowedNextActs: [] };
+	const viewRefs = {
+		fullState: 'goal({op:"get"})',
+		routing: 'goal({op:"get", view:"routing"})',
+		activePlan: 'goal({op:"get", view:"active_plan"})',
+		evidenceStatus: 'goal({op:"get", view:"evidence_status"})',
+		unresolved: 'goal({op:"get", view:"unresolved"})',
+		stateSize: 'goal({op:"get", view:"state_size"})',
+	};
+	const payloads: Record<GoalGetViewName, Record<string, unknown>> = {
+		full: { state: state ? serializeGoalModeState(state) : null },
+		routing: {
+			runMode: state?.runMode,
+			nextAction: goalGetViewNextAction(state),
+			requiredOperation: goalGetViewRequiredOperation(state),
+			allowedNextActs: policy.allowedNextActs,
+			disallowedNextActs: policy.disallowedNextActs,
+			currentTargetId: goal?.currentTarget?.id,
+			currentTargetTitle: goal?.currentTarget?.title,
+			currentTargetPlanId: goal?.currentTargetPlan?.id,
+			currentTargetPlanPath: goal?.currentTargetPlan?.planFilePath,
+			pendingCheckpointId: goal?.pendingCheckpointId,
+			workstreamBatchId: goal?.currentWorkstreamBatch?.id,
+			blockedStateId: goal?.currentBlockedState?.id,
+			refs: viewRefs,
+		},
+		state: {
+			runMode: state?.runMode,
+			stateVersion: state?.stateVersion,
+			parentFrameVersion: state?.parentFrameVersion,
+			tokensUsed: goal?.tokensUsed ?? 0,
+			tokenBudget: goal?.tokenBudget,
+			currentTargetId: goal?.currentTarget?.id,
+			currentTargetPlanId: goal?.currentTargetPlan?.id,
+			pendingCheckpointId: goal?.pendingCheckpointId,
+		},
+		active_plan: {
+			currentTarget: goal?.currentTarget
+				? {
+						id: goal.currentTarget.id,
+						title: goal.currentTarget.title,
+						status: goal.currentTarget.status,
+						desiredFutureClaim: goal.currentTarget.desiredFutureClaim,
+						closureStandard: goal.currentTarget.closureStandard,
+					}
+				: undefined,
+			currentTargetPlan: goal?.currentTargetPlan
+				? {
+						id: goal.currentTargetPlan.id,
+						status: goal.currentTargetPlan.status,
+						revision: goal.currentTargetPlan.revision,
+						planFilePath: goal.currentTargetPlan.planFilePath,
+					}
+				: undefined,
+			executionContract,
+		},
+		proof_path: {
+			acceptedClaims: frame?.acceptedClaims?.map(claim => claim.id) ?? [],
+			candidateClaims: frame?.candidateClaims?.map(claim => claim.id) ?? [],
+			rejectedOrStaleClaims: frame?.rejectedOrStaleClaims?.map(claim => claim.id) ?? [],
+			boundaries: frame?.boundaries?.map(boundary => boundary.id) ?? [],
+			residuals: frame?.residuals?.map(residual => residual.id) ?? [],
+			checkpoints: goal?.checkpoints?.map(checkpoint => checkpoint.id) ?? [],
+			pendingCheckpointId: goal?.pendingCheckpointId,
+		},
+		proof: {
+			parentClaims: {
+				accepted: frame?.acceptedClaims?.length ?? 0,
+				candidate: frame?.candidateClaims?.length ?? 0,
+				rejectedOrStale: frame?.rejectedOrStaleClaims?.length ?? 0,
+			},
+			boundaries: frame?.boundaries?.length ?? 0,
+			residuals: frame?.residuals?.length ?? 0,
+			checkpoints: goal?.checkpoints?.length ?? 0,
+			pendingCheckpointId: goal?.pendingCheckpointId,
+		},
+		unresolved: {
+			blockedState: goal?.currentBlockedState
+				? {
+						id: goal.currentBlockedState.id,
+						kind: goal.currentBlockedState.kind,
+						message: goal.currentBlockedState.message,
+						blockers: [...goal.currentBlockedState.blockers],
+					}
+				: undefined,
+			pendingCheckpointId: goal?.pendingCheckpointId,
+			remainingQuestions: latestCheckpoint?.remainingQuestions ?? [],
+			parentResiduals: frame?.residuals?.map(residual => ({
+				id: residual.id,
+				statement: residual.statement,
+				classification: residual.classification,
+			})),
+		},
+		diff: {
+			stateVersion: state?.stateVersion,
+			parentFrameVersion: state?.parentFrameVersion,
+			currentTargetId: goal?.currentTarget?.id,
+			currentTargetPlanId: goal?.currentTargetPlan?.id,
+			pendingCheckpointId: goal?.pendingCheckpointId,
+			latestResolutionId: goal?.checkpointResolutions?.at(-1)?.id,
+		},
+		state_size: {
+			serializedBytes: state ? jsonByteLength(serializeGoalModeState(state)) : 0,
+			promptSurfaceBytes: state ? jsonByteLength(buildGoalContextSurface(state, state.goal)) : 0,
+			checkpointCount: goal?.checkpoints?.length ?? 0,
+			targetPlanCount: goal?.targetPlans?.length ?? 0,
+			proofGraphBytes: state ? measureGoalProofGraph(state, generatedAt).serializedBytes : 0,
+		},
+		parent_burndown: {
+			acceptedClaims: frame?.acceptedClaims?.length ?? 0,
+			candidateClaims: frame?.candidateClaims?.length ?? 0,
+			rejectedOrStaleClaims: frame?.rejectedOrStaleClaims?.length ?? 0,
+			residuals: frame?.residuals?.length ?? 0,
+			boundaries: frame?.boundaries?.length ?? 0,
+			gates: frame?.gates?.length ?? 0,
+			latestResolutionId: goal?.checkpointResolutions?.at(-1)?.id,
+		},
+		evidence_status: {
+			requiredSignals:
+				executionSummary?.requiredSignals.map(signal => ({
+					id: signal.id,
+					role: signal.role,
+					layer: signal.layer,
+					staleIf: [...signal.staleIf],
+				})) ?? [],
+			currentEvidenceCount:
+				goal?.checkpoints?.flatMap(checkpoint => checkpoint.evidence).filter(item => item.current).length ?? 0,
+			staleEvidenceCount:
+				goal?.checkpoints?.flatMap(checkpoint => checkpoint.evidence).filter(item => !item.current).length ?? 0,
+			verificationCommands: goal?.verificationCommands?.length ?? 0,
+			latestCheckpointId: latestCheckpoint?.id,
+		},
+	};
+	return {
+		name,
+		goalId: goal?.id,
+		stateVersion: state?.stateVersion,
+		parentFrameVersion: state?.parentFrameVersion,
+		generatedAt,
+		payload: payloads[name],
 	};
 }
 
@@ -1494,7 +2414,8 @@ export function buildGoalContextSurface(state: GoalModeState | undefined, goal: 
 		surface.current_target = compactTargetForPrompt(currentTarget);
 		surface.workstream_batch = compactWorkstreamBatchForPrompt(activeBatch);
 		const executionSummary = buildGoalTargetPlanExecutionSummary(goal.currentTargetPlan, currentTarget, activeBatch);
-		surface.target_execution_guardrails = buildGoalTargetPlanExecutionGuardrails(executionSummary);
+		const executionContract = buildGoalTargetPlanExecutionContract(executionSummary);
+		if (executionContract) surface.target_execution_contract = executionContract;
 	} else if (runMode === "planning-target") {
 		surface.current_target = compactTargetForPrompt(currentTarget);
 		surface.target_plan = compactTargetPlanForPrompt(goal.currentTargetPlan);
@@ -1895,6 +2816,180 @@ function cloneRefs(refs: GoalRef[] | undefined): GoalRef[] {
 
 function cloneStringArray(value: string[] | undefined): string[] {
 	return value ? [...value] : [];
+}
+
+function normalizedCheckpointEvidenceId(item: GoalCheckpointEvidenceItem, index: number): string {
+	const id = item.id?.trim();
+	return id && id.length > 0 ? id : `evidence-${index + 1}`;
+}
+
+function checkpointEvidenceItemRefs(
+	checkpointId: string,
+	evidenceId: string,
+	item: GoalCheckpointEvidenceItem,
+): GoalRef[] {
+	const refs = [
+		{
+			id: checkpointEvidenceRefId(checkpointId, evidenceId),
+			kind: "artifact" as const,
+			label: item.claim,
+		},
+		...cloneRefs(item.evidenceRefs),
+	];
+	const output: GoalRef[] = [];
+	const seen = new Set<string>();
+	for (const ref of refs) {
+		if (seen.has(ref.id)) continue;
+		seen.add(ref.id);
+		output.push({ ...ref });
+	}
+	return output;
+}
+
+function normalizeCheckpointEvidenceItems(
+	evidence: GoalCheckpointEvidenceItem[],
+	checkpointId: string,
+): GoalCheckpointEvidenceItem[] {
+	return evidence.map((item, index) => {
+		const id = normalizedCheckpointEvidenceId(item, index);
+		const refs = checkpointEvidenceItemRefs(checkpointId, id, item);
+		return {
+			id,
+			claim: trimmed(item.claim, "evidence[].claim"),
+			evidence: trimmed(item.evidence, "evidence[].evidence"),
+			current: item.current,
+			signalIds: cloneStringArray(item.signalIds),
+			scenarioRowIds: cloneStringArray(item.scenarioRowIds),
+			workstreamIds: cloneStringArray(item.workstreamIds),
+			verificationCommandIds: cloneStringArray(item.verificationCommandIds),
+			evidenceRefs: refs,
+			staleIf: cloneStringArray(item.staleIf),
+		};
+	});
+}
+
+function approvedPlanForTarget(goal: Goal, targetId: string): GoalTargetPlanRecord | undefined {
+	if (goal.currentTargetPlan?.targetId === targetId && goal.currentTargetPlan.status === "approved") {
+		return goal.currentTargetPlan;
+	}
+	return goal.targetPlans?.find(plan => plan.targetId === targetId && plan.status === "approved");
+}
+
+function missingCheckpointCoverage(
+	requiredIds: string[],
+	evidence: GoalCheckpointEvidenceItem[],
+	key: keyof GoalCheckpointEvidenceItem,
+): string[] {
+	if (requiredIds.length === 0) return [];
+	const covered = new Set<string>();
+	for (const item of evidence) {
+		const values = item[key];
+		if (!Array.isArray(values)) continue;
+		for (const value of values) {
+			if (typeof value === "string" && value.trim()) covered.add(value);
+		}
+	}
+	return requiredIds.filter(id => !covered.has(id));
+}
+
+function assertCheckpointEvidenceCoversPlan(
+	goal: Goal,
+	target: GoalTarget,
+	evidence: GoalCheckpointEvidenceItem[],
+): void {
+	const plan = approvedPlanForTarget(goal, target.id);
+	if (!plan) return;
+	const requiredSignalIds = uniqueStrings(
+		plan.verificationSignals?.filter(signal => signal.required).map(signal => signal.id) ?? [],
+	);
+	const scenarioRowIds = uniqueStrings(plan.scenarioMatrix?.rowsInScope.map(row => row.id) ?? []);
+	const workstreamIds = uniqueStrings(plan.targetCard?.workstreams?.map(workstream => workstream.id) ?? []);
+	const missingSignals = missingCheckpointCoverage(requiredSignalIds, evidence, "signalIds");
+	const missingRows = missingCheckpointCoverage(scenarioRowIds, evidence, "scenarioRowIds");
+	const missingWorkstreams = missingCheckpointCoverage(workstreamIds, evidence, "workstreamIds");
+	if (missingSignals.length || missingRows.length || missingWorkstreams.length) {
+		const parts: string[] = [];
+		if (missingSignals.length) parts.push(`signal_ids=${missingSignals.join(",")}`);
+		if (missingRows.length) parts.push(`scenario_row_ids=${missingRows.join(",")}`);
+		if (missingWorkstreams.length) parts.push(`workstream_ids=${missingWorkstreams.join(",")}`);
+		throw new Error(`checkpoint evidence coverage missing: ${parts.join("; ")}`);
+	}
+}
+
+function checkpointEvidenceRefs(checkpoint: GoalCheckpointPacket): GoalRef[] {
+	return checkpoint.evidence.flatMap((item, index) =>
+		checkpointEvidenceItemRefs(checkpoint.id, normalizedCheckpointEvidenceId(item, index), item),
+	);
+}
+
+function replaceLegacyCheckpointRef(
+	refs: GoalRef[] | undefined,
+	checkpoint: GoalCheckpointPacket,
+): GoalRef[] | undefined {
+	if (!refs) return undefined;
+	const legacyId = `checkpoint:${checkpoint.id}`;
+	const evidenceRefs = checkpointEvidenceRefs(checkpoint);
+	const output: GoalRef[] = [];
+	const seen = new Set<string>();
+	for (const ref of refs) {
+		const replacements = ref.id === legacyId ? [{ ...ref }, ...evidenceRefs] : [{ ...ref }];
+		for (const replacement of replacements) {
+			if (seen.has(replacement.id)) continue;
+			seen.add(replacement.id);
+			output.push({ ...replacement });
+		}
+	}
+	return output;
+}
+
+function normalizeParentDeltaCheckpointEvidenceRefs(
+	delta: GoalParentStateDelta,
+	checkpoint: GoalCheckpointPacket,
+): GoalParentStateDelta {
+	return {
+		admittedClaims: delta.admittedClaims.map(claim => ({
+			...claim,
+			evidenceRefs: replaceLegacyCheckpointRef(claim.evidenceRefs, checkpoint),
+			nonImplications: claim.nonImplications ? [...claim.nonImplications] : undefined,
+		})),
+		candidateClaimsAdded: delta.candidateClaimsAdded.map(claim => ({
+			...claim,
+			evidenceRefs: replaceLegacyCheckpointRef(claim.evidenceRefs, checkpoint),
+			nonImplications: claim.nonImplications ? [...claim.nonImplications] : undefined,
+		})),
+		rejectedClaims: delta.rejectedClaims.map(claim => ({
+			...claim,
+			evidenceRefs: replaceLegacyCheckpointRef(claim.evidenceRefs, checkpoint),
+			nonImplications: claim.nonImplications ? [...claim.nonImplications] : undefined,
+		})),
+		boundariesAdded: delta.boundariesAdded.map(boundary => ({
+			...boundary,
+			refs: replaceLegacyCheckpointRef(boundary.refs, checkpoint),
+		})),
+		residualsAddedOrUpdated: delta.residualsAddedOrUpdated.map(residual => ({
+			...residual,
+			refs: replaceLegacyCheckpointRef(residual.refs, checkpoint),
+			requiredEvidence: residual.requiredEvidence ? [...residual.requiredEvidence] : undefined,
+			nonImplications: residual.nonImplications ? [...residual.nonImplications] : undefined,
+		})),
+		gateDeltas: delta.gateDeltas.map(gate => ({
+			...gate,
+			evidenceRefs: replaceLegacyCheckpointRef(gate.evidenceRefs, checkpoint),
+		})),
+		frontierDeltas: delta.frontierDeltas.map(item => ({
+			...item,
+			refs: replaceLegacyCheckpointRef(item.refs, checkpoint),
+			evidenceRequired: item.evidenceRequired ? [...item.evidenceRequired] : undefined,
+		})),
+		staleRefs: replaceLegacyCheckpointRef(delta.staleRefs, checkpoint) ?? [],
+		externalRecordRefs: replaceLegacyCheckpointRef(delta.externalRecordRefs, checkpoint) ?? [],
+		authorityDecisionRefs: replaceLegacyCheckpointRef(delta.authorityDecisionRefs, checkpoint),
+		deliverableDeltas: delta.deliverableDeltas?.map(item => ({
+			...item,
+			evidenceRefs: replaceLegacyCheckpointRef(item.evidenceRefs, checkpoint),
+			blockedBy: item.blockedBy ? [...item.blockedBy] : undefined,
+		})),
+	};
 }
 
 function cloneParallelWorkstreamRequirement(
@@ -2523,7 +3618,7 @@ export class GoalRuntime {
 		this.#host.setState(state ? cloneGoalModeState(state) : undefined);
 		if (options?.persist) {
 			const reason = options.reason ?? (state?.runMode === "completed" ? "terminal" : "semantic");
-			this.#host.persist(options.persist, state, reason);
+			await this.#host.persist(options.persist, state, reason);
 		}
 		if (options?.emit !== false) {
 			await this.#host.emit({ type: "goal_updated", goal: state ? cloneGoal(state.goal) : null, state });
@@ -3594,8 +4689,11 @@ export class GoalRuntime {
 			this.#assertCurrentTargetPlanApprovedForTarget(state, target);
 		}
 		const sequence = nextCheckpointSequence(state.goal);
+		const checkpointId = `${state.goal.id}-checkpoint-${sequence}`;
+		const evidence = normalizeCheckpointEvidenceItems(input.evidence, checkpointId);
+		assertCheckpointEvidenceCoversPlan(state.goal, target, evidence);
 		const packet: GoalCheckpointPacket = {
-			id: `${state.goal.id}-checkpoint-${sequence}`,
+			id: checkpointId,
 			sequence,
 			goalId: state.goal.id,
 			targetId: target.id,
@@ -3607,11 +4705,7 @@ export class GoalRuntime {
 			status: input.status,
 			summary: trimmed(input.summary, "summary"),
 			localClaims: input.localClaims.map(claim => trimmed(claim, "local_claims[]")),
-			evidence: input.evidence.map(item => ({
-				claim: trimmed(item.claim, "evidence[].claim"),
-				evidence: trimmed(item.evidence, "evidence[].evidence"),
-				current: item.current,
-			})),
+			evidence,
 			checksRun: cloneStringArray(input.checksRun),
 			artifactsTouched: cloneStringArray(input.artifactsTouched),
 			notClaimed: withDefaultNotClaimed(input.notClaimed.map(claim => trimmed(claim, "not_claimed[]"))),
@@ -3693,6 +4787,8 @@ export class GoalRuntime {
 				throw new Error("cannot resolve checkpoint because no checkpoint is pending");
 			if (state.goal.pendingCheckpointId !== input.checkpointId)
 				throw new Error("checkpoint_id does not match the pending checkpoint");
+			const pendingCheckpoint = state.goal.checkpoints?.find(checkpoint => checkpoint.id === input.checkpointId);
+			if (!pendingCheckpoint) throw new Error("checkpoint_id does not match a committed checkpoint");
 			if (input.decision === "next_target" && !input.nextTarget) {
 				throw new Error("next_target is required when decision is next_target");
 			}
@@ -3706,15 +4802,18 @@ export class GoalRuntime {
 			const sequence = nextResolutionSequence(state.goal);
 			const resolutionId = `${state.goal.id}-checkpoint-resolution-${sequence}`;
 			let parentFrameChanged = false;
-			if (input.parentDelta) {
-				parentFrameChanged = parentDeltaHasFrameChanges(input.parentDelta);
+			const parentDelta = input.parentDelta
+				? normalizeParentDeltaCheckpointEvidenceRefs(input.parentDelta, pendingCheckpoint)
+				: undefined;
+			if (parentDelta) {
+				parentFrameChanged = parentDeltaHasFrameChanges(parentDelta);
 				if (parentFrameChanged) {
-					state.goal.parentFrame = this.#applyParentStateDeltaToFrame(state.goal, input.parentDelta, resolutionId);
+					state.goal.parentFrame = this.#applyParentStateDeltaToFrame(state.goal, parentDelta, resolutionId);
 				}
-				if (parentDeltaHasDeliverableChanges(input.parentDelta)) {
+				if (parentDeltaHasDeliverableChanges(parentDelta)) {
 					state.goal.deliverableMap = applyDeliverableDeltas(
 						state.goal.deliverableMap,
-						input.parentDelta.deliverableDeltas,
+						parentDelta.deliverableDeltas,
 					);
 				}
 			}
@@ -3722,17 +4821,25 @@ export class GoalRuntime {
 			let runMode: GoalRunMode = "awaiting-user-input";
 			if (input.decision === "next_target") {
 				const nextTargetInput = input.nextTarget as GoalStartTargetInput;
+				const normalizedNextTargetInput = {
+					...nextTargetInput,
+					baselineRefs: replaceLegacyCheckpointRef(nextTargetInput.baselineRefs, pendingCheckpoint),
+				};
 				if (repair?.blockers.length) {
-					validateVerifierRepairLinks(nextTargetInput.linkedVerifierBlockerIds, repair.blockers, "next_target");
+					validateVerifierRepairLinks(
+						normalizedNextTargetInput.linkedVerifierBlockerIds,
+						repair.blockers,
+						"next_target",
+					);
 				}
 				nextTarget = targetFromInput(
 					state.goal,
 					{
-						...nextTargetInput,
+						...normalizedNextTargetInput,
 						createdBy: "checkpoint-resolution",
 						createdFromCheckpointId: input.checkpointId,
 						createdFromVerificationAttemptId:
-							nextTargetInput.createdFromVerificationAttemptId ?? repair?.verificationAttemptId,
+							normalizedNextTargetInput.createdFromVerificationAttemptId ?? repair?.verificationAttemptId,
 					},
 					nextTargetSequence(state.goal),
 					parentFrameChanged ? state.parentFrameVersion + 1 : state.parentFrameVersion,
@@ -3752,7 +4859,7 @@ export class GoalRuntime {
 				checkpointId: input.checkpointId,
 				decision: input.decision,
 				parentReading: trimmed(input.parentReading, "parent_reading"),
-				parentDelta: input.parentDelta,
+				parentDelta,
 				notPropagated: input.notPropagated.map(item => trimmed(item, "not_propagated[]")),
 				remainingParentWork: input.remainingParentWork.map(item => trimmed(item, "remaining_parent_work[]")),
 				broaderChecksOrInputs: cloneStringArray(input.broaderChecksOrInputs),
@@ -4061,6 +5168,11 @@ export class GoalRuntime {
 			const now = this.#now();
 			const approvedPlan = cloneTargetPlan({
 				...submittedPlan,
+				planHash: input.planHash,
+				planBytes: input.planBytes,
+				payloadFilePath: input.payloadFilePath,
+				payloadHash: input.payloadHash,
+				payloadBytes: input.payloadBytes,
 				status: "approved",
 				updatedAt: now,
 				approvedAt: now,

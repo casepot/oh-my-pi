@@ -20,7 +20,7 @@ Use this tool for goal control state only: parent framing, target lifecycle, che
 - `target_plan_schema`: during `planning-target`, return the payload schema/reference text without mutating goal state. Call before drafting the payload, or after schema diagnostics mention unknown keys or invalid object shapes; do not guess aliases, nesting, enum values, or array/object shapes.
 - `submit_target_plan` / `lint_target_plan` / `fail_target_plan`: during `planning-target`, use file-backed `payload_file_path` calls, never inline payload objects. Payload JSON sidecar is canonical for lint/submit; Markdown is executor-facing narrative.
 - `recover_blocked_state`: after user/broader-check/external input resolves an open `blocked_state`, recover using exactly one listed `blocked_state.allowedActions` item and the source identity from `blocked_state`. Target-plan blocks restart planning for the same active target with a fresh target-plan id/revision. Checkpoint-external-pause blocks either start the next target or enter parent-completion verification.
-- `checkpoint`: submit target-closure evidence for review. Requires `status:"closed_with_evidence"`, `summary`, non-empty `local_claims`, non-empty `evidence`, non-empty `not_claimed`, and non-empty `remaining_questions`. Optional: `checks_run`, `artifacts_touched`, `risks_or_caveats`, `stale_if`, `suggested_controller_questions`, `retrospective_target` for legacy sessions only.
+- `checkpoint`: submit target-closure evidence for review. Requires `status:"closed_with_evidence"`, `summary`, non-empty `local_claims`, non-empty `evidence`, non-empty `not_claimed`, and non-empty `remaining_questions`. Each `evidence[]` item may include stable `id`, `signal_ids`, `scenario_row_ids`, `workstream_ids`, `verification_command_ids`, `evidence_refs`, and `stale_if`. Approved target plans require checkpoint evidence to cover every required signal, in-scope scenario row, and required workstream when there is more than one or when explicit coverage ids are already present. Optional: `checks_run`, `artifacts_touched`, `risks_or_caveats`, `stale_if`, `suggested_controller_questions`, `retrospective_target` for legacy sessions only.
 - `resolve_checkpoint`: record the controller decision for the pending accepted checkpoint. Requires `checkpoint_id`, `decision`, `parent_reading`, `not_propagated`, and `remaining_parent_work`. Optional: `parent_delta`, `broader_checks_or_inputs`, `lessons_for_future`, and `next_target` for `decision:"next_target"`.
 - `complete`: attempt verified parent completion. Use only when there is no pending checkpoint and no unrepaired verifier blocker.
 - `drop`: drop the parent goal without completing it.
@@ -66,6 +66,23 @@ File-backed submit:
 ```
 </target-planning>
 
+<checkpoint-evidence>
+For plan-backed targets, annotate checkpoint evidence with the target-plan coverage ids it satisfies:
+```json
+{
+  "claim": "Focused behavior works",
+  "evidence": "bun test packages/coding-agent/test/goals/goal-tool.test.ts",
+  "current": true,
+  "signal_ids": ["signal-primary"],
+  "scenario_row_ids": ["row-happy"],
+  "workstream_ids": ["backend-api"],
+  "verification_command_ids": ["verify-1"],
+  "stale_if": ["changed files invalidate this focused check"]
+}
+```
+Use `goal({op:"get", view:"active_plan"})` or the active execution contract to recover required signal, row, and workstream ids before checkpointing.
+</checkpoint-evidence>
+
 <checkpoint-resolution>
 Before `resolve_checkpoint` or `recover_blocked_state`, call `goal({op:"get"})`; copy `state_version` and `parent_frame_version` from that fresh response into the mutation call. Stale versions are rejected before parent_delta, blocked-state recovery, checkpoint resolution records, or next-target creation.
 `resolve_checkpoint.decision` must be one of:
@@ -82,7 +99,7 @@ Before `resolve_checkpoint` or `recover_blocked_state`, call `goal({op:"get"})`;
 </checkpoint-resolution>
 
 <output>
-Returns a compact status summary and structured details containing the goal, state, remaining budget, checkpoint/review, checkpoint resolution, and completion-verification data when applicable. A rejected checkpoint means the target remains active. A rejected completion records verifier repair state; it is not a soft success.
+Returns compact status text + structured details. `goal({op:"get"})` defaults to the full status summary; explicit views return a structured `details.view` envelope with `name`, versions, and compact payload. Supported views: `routing`, `active_plan`, `proof_path`, `unresolved`, `diff`, `state_size`, `parent_burndown`, `evidence_status`; legacy aliases `state` and `proof` remain accepted. Details include goal, state, remaining budget, checkpoint/review, checkpoint resolution, target-plan, and completion-verification data when applicable. A rejected checkpoint means the target remains active. A rejected completion records verifier repair state; it is not a soft success.
 </output>
 
 <critical>
