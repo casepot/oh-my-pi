@@ -89,7 +89,7 @@ describe("task agent capability descriptions", () => {
 		const agents = loadBundledAgents();
 
 		expect(isReadOnlyAgent(agentByName(agents, "explore"))).toBe(true);
-		for (const name of ["task", "quick_task", "plan", "reviewer", "oracle", "designer"]) {
+		for (const name of ["task", "sonic", "plan", "reviewer", "designer"]) {
 			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
 		}
 	});
@@ -99,7 +99,7 @@ describe("task agent capability descriptions", () => {
 
 		expect(agentByName(agents, "explore").readSummarize).toBe(false);
 		expect(agentByName(agents, "librarian").readSummarize).toBe(false);
-		for (const name of ["task", "quick_task", "plan", "reviewer", "oracle", "designer"]) {
+		for (const name of ["task", "sonic", "plan", "reviewer", "designer"]) {
 			expect(agentByName(agents, name).readSummarize).toBeUndefined();
 		}
 	});
@@ -127,9 +127,10 @@ describe("task agent capability descriptions", () => {
 		const tool = await TaskTool.create(createSession());
 		const description = tool.description;
 
-		expect(description).toContain("# read_scout — READ-ONLY (no edit/write/exec tools)\nRead-only scout");
-		expect(description).toContain("# full_agent\nFull agent");
-		expect(description).not.toContain("# full_agent — READ-ONLY");
+		expect(description).toMatch(/read_scout[^\n]*READ-ONLY[^\n]*no edit\/write\/(?:exec|command) tools/i);
+		expect(description).toContain("Read-only scout");
+		expect(description).toMatch(/full_agent[\s\S]*Full agent/);
+		expect(description).not.toMatch(/full_agent[^\n]*READ-ONLY/i);
 	});
 
 	it("forces subagents into read-only planning mode during goal target planning", async () => {
@@ -243,7 +244,8 @@ describe("task agent capability descriptions", () => {
 
 			const options = runSpy.mock.calls[0]?.[0];
 			expect(options?.targetPlanReference?.path).toBe(planFilePath);
-			expect(options?.targetPlanReference?.content).toContain("FULL_PLAN_CONTENT_SHOULD_INLINE");
+			expect(options?.targetPlanReference?.content).toContain("Approved goal target execution contract");
+			expect(options?.targetPlanReference?.content).not.toContain("FULL_PLAN_CONTENT_SHOULD_INLINE");
 			expect(options?.targetPlanReference?.content).toContain("Target behavior is verified.");
 			expect(options?.targetPlanReference?.content).toContain("Focused evidence is observed.");
 			expect(options?.targetPlanReference?.content).toContain('"confidenceIfSatisfied": "high"');

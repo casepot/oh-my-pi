@@ -1,85 +1,84 @@
-import { z } from "zod/v4";
+import { scope } from "arktype";
 
-const OpenRouterRoutingSchema = z.object({
-	only: z.array(z.string()).optional(),
-	order: z.array(z.string()).optional(),
+// Config schemas validate at most a handful of times per process (on config
+// load), so the eager JIT codegen ArkType runs at definition time is pure
+// startup tax. A local jitless scope skips that codegen and falls back to
+// interpreted traversal — ~65% cheaper to construct, validation correctness
+// unchanged. (No `name`: duplicate module instances would collide.)
+const { type } = scope({}, { jitless: true });
+
+const OpenRouterRoutingSchema = type({
+	"only?": "string[]",
+	"order?": "string[]",
 });
 
-const VercelGatewayRoutingSchema = z.object({
-	only: z.array(z.string()).optional(),
-	order: z.array(z.string()).optional(),
+const VercelGatewayRoutingSchema = type({
+	"only?": "string[]",
+	"order?": "string[]",
 });
 
-const ReasoningEffortMapSchema = z.object({
-	minimal: z.string().optional(),
-	low: z.string().optional(),
-	medium: z.string().optional(),
-	high: z.string().optional(),
-	xhigh: z.string().optional(),
+const ReasoningEffortMapSchema = type({
+	"minimal?": "string",
+	"low?": "string",
+	"medium?": "string",
+	"high?": "string",
+	"xhigh?": "string",
 });
 
-const OpenAICompatFieldsSchema = z.object({
-	supportsStore: z.boolean().optional(),
-	supportsDeveloperRole: z.boolean().optional(),
-	supportsMultipleSystemMessages: z.boolean().optional(),
-	supportsReasoningEffort: z.boolean().optional(),
-	reasoningEffortMap: ReasoningEffortMapSchema.optional(),
-	maxTokensField: z.enum(["max_completion_tokens", "max_tokens"]).optional(),
-	supportsUsageInStreaming: z.boolean().optional(),
-	requiresToolResultName: z.boolean().optional(),
-	requiresMistralToolIds: z.boolean().optional(),
-	requiresAssistantAfterToolResult: z.boolean().optional(),
-	requiresThinkingAsText: z.boolean().optional(),
-	reasoningContentField: z.enum(["reasoning_content", "reasoning", "reasoning_text"]).optional(),
-	requiresReasoningContentForToolCalls: z.boolean().optional(),
-	allowsSyntheticReasoningContentForToolCalls: z.boolean().optional(),
-	requiresAssistantContentForToolCalls: z.boolean().optional(),
-	supportsToolChoice: z.boolean().optional(),
-	supportsForcedToolChoice: z.boolean().optional(),
-	disableReasoningOnForcedToolChoice: z.boolean().optional(),
-	disableReasoningOnToolChoice: z.boolean().optional(),
-	thinkingFormat: z.enum(["openai", "openrouter", "zai", "qwen", "qwen-chat-template"]).optional(),
-	openRouterRouting: OpenRouterRoutingSchema.optional(),
-	vercelGatewayRouting: VercelGatewayRoutingSchema.optional(),
-	extraBody: z.record(z.string(), z.unknown()).optional(),
-	cacheControlFormat: z.enum(["anthropic"]).optional(),
-	supportsStrictMode: z.boolean().optional(),
-	toolStrictMode: z.enum(["all_strict", "none"]).optional(),
-	streamIdleTimeoutMs: z.number().nonnegative().optional(),
-	supportsLongPromptCacheRetention: z.boolean().optional(),
-	supportsReasoningParams: z.boolean().optional(),
-	alwaysSendMaxTokens: z.boolean().optional(),
-	strictResponsesPairing: z.boolean().optional(),
-	supportsImageDetailOriginal: z.boolean().optional(),
+const OpenAICompatFields = {
+	"supportsStore?": "boolean",
+	"supportsDeveloperRole?": "boolean",
+	"supportsMultipleSystemMessages?": "boolean",
+	"supportsReasoningEffort?": "boolean",
+	"reasoningEffortMap?": ReasoningEffortMapSchema,
+	"maxTokensField?": '"max_completion_tokens" | "max_tokens"',
+	"supportsUsageInStreaming?": "boolean",
+	"requiresToolResultName?": "boolean",
+	"requiresMistralToolIds?": "boolean",
+	"requiresAssistantAfterToolResult?": "boolean",
+	"requiresThinkingAsText?": "boolean",
+	"reasoningContentField?": '"reasoning_content" | "reasoning" | "reasoning_text"',
+	"requiresReasoningContentForToolCalls?": "boolean",
+	"allowsSyntheticReasoningContentForToolCalls?": "boolean",
+	"requiresAssistantContentForToolCalls?": "boolean",
+	"supportsToolChoice?": "boolean",
+	"supportsForcedToolChoice?": "boolean",
+	"disableReasoningOnForcedToolChoice?": "boolean",
+	"disableReasoningOnToolChoice?": "boolean",
+	"thinkingFormat?": '"openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template"',
+	"openRouterRouting?": OpenRouterRoutingSchema,
+	"vercelGatewayRouting?": VercelGatewayRoutingSchema,
+	"extraBody?": { "[string]": "unknown" },
+	"cacheControlFormat?": '"anthropic"',
+	"supportsStrictMode?": "boolean",
+	"toolStrictMode?": '"all_strict" | "none"',
+	"streamIdleTimeoutMs?": "number >= 0",
+	"supportsLongPromptCacheRetention?": "boolean",
+	"supportsReasoningParams?": "boolean",
+	"alwaysSendMaxTokens?": "boolean",
+	"strictResponsesPairing?": "boolean",
+	"supportsImageDetailOriginal?": "boolean",
 	// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
-	requiresToolResultId: z.boolean().optional(),
-	replayUnsignedThinking: z.boolean().optional(),
+	"requiresToolResultId?": "boolean",
+	"replayUnsignedThinking?": "boolean",
+} as const;
+
+const OpenAICompatFieldsSchema = type(OpenAICompatFields);
+
+export const OpenAICompatSchema = type({
+	...OpenAICompatFields,
+	"whenThinking?": OpenAICompatFieldsSchema,
 });
 
-export const OpenAICompatSchema = OpenAICompatFieldsSchema.extend({
-	whenThinking: OpenAICompatFieldsSchema.optional(),
-});
+const ApiSchema = type(
+	'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
+);
 
-const ApiSchema = z.enum([
-	"openai-completions",
-	"openai-responses",
-	"openai-codex-responses",
-	"azure-openai-responses",
-	"anthropic-messages",
-	"google-generative-ai",
-	"google-gemini-cli",
-	"google-vertex",
-]);
+const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh"');
 
-const EffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
-
-const ThinkingControlModeSchema = z.enum([
-	"effort",
-	"budget",
-	"google-level",
-	"anthropic-adaptive",
-	"anthropic-budget-effort",
-]);
+const ThinkingControlModeSchema = type(
+	'"effort" | "budget" | "google-level" | "anthropic-adaptive" | "anthropic-budget-effort"',
+);
 
 const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"] as const;
 
@@ -87,130 +86,172 @@ const EFFORT_ORDER = ["minimal", "low", "medium", "high", "xhigh"] as const;
  * Accepts the canonical `efforts` vocabulary plus the legacy
  * `minLevel`/`maxLevel`/`levels` range shape, normalizing both to
  * `ThinkingConfig` (ordered `efforts`, never empty). Precedence mirrors the
- * old runtime: explicit `levels` beat the min..max range; `efforts` beat both.
+ * old runtime: explicit `levels` beat the min..max range; `efforts` beats both.
  */
-const ModelThinkingSchema = z
-	.object({
-		mode: ThinkingControlModeSchema,
-		efforts: z.array(EffortSchema).min(1).optional(),
-		defaultLevel: EffortSchema.optional(),
-		effortMap: ReasoningEffortMapSchema.optional(),
-		supportsDisplay: z.boolean().optional(),
-		// Legacy range vocabulary (pre-efforts configs).
-		minLevel: EffortSchema.optional(),
-		maxLevel: EffortSchema.optional(),
-		levels: z.array(EffortSchema).min(1).optional(),
-	})
-	.refine(
-		value =>
+const ModelThinkingSchema = type({
+	mode: ThinkingControlModeSchema,
+	"efforts?": EffortSchema.array(),
+	"defaultLevel?": EffortSchema,
+	"effortMap?": ReasoningEffortMapSchema,
+	"supportsDisplay?": "boolean",
+	// Legacy range vocabulary (pre-efforts configs).
+	"minLevel?": EffortSchema,
+	"maxLevel?": EffortSchema,
+	"levels?": EffortSchema.array(),
+})
+	.narrow(
+		(value, ctx) =>
 			value.efforts !== undefined ||
 			value.levels !== undefined ||
-			(value.minLevel !== undefined && value.maxLevel !== undefined),
-		{
-			message: "thinking requires `efforts` (or legacy `levels`/`minLevel`+`maxLevel`)",
-		},
+			(value.minLevel !== undefined && value.maxLevel !== undefined) ||
+			ctx.mustBe("thinking with `efforts` (or legacy `levels`/`minLevel`+`maxLevel`)"),
 	)
-	.transform(({ efforts, levels, minLevel, maxLevel, mode, defaultLevel, effortMap, supportsDisplay }) => {
-		let resolved = efforts ?? levels;
+	.pipe((value: any) => {
+		let resolved = value.efforts ?? value.levels;
 		if (!resolved) {
-			const minIndex = EFFORT_ORDER.indexOf(minLevel!);
-			const maxIndex = EFFORT_ORDER.indexOf(maxLevel!);
+			const minIndex = EFFORT_ORDER.indexOf(value.minLevel!);
+			const maxIndex = EFFORT_ORDER.indexOf(value.maxLevel!);
 			resolved = EFFORT_ORDER.slice(minIndex, Math.max(minIndex, maxIndex) + 1);
 		}
 		return {
-			mode,
+			mode: value.mode,
 			efforts: resolved,
-			...(defaultLevel !== undefined && { defaultLevel }),
-			...(effortMap !== undefined && { effortMap }),
-			...(supportsDisplay !== undefined && { supportsDisplay }),
+			...(value.defaultLevel !== undefined && { defaultLevel: value.defaultLevel }),
+			...(value.effortMap !== undefined && { effortMap: value.effortMap }),
+			...(value.supportsDisplay !== undefined && { supportsDisplay: value.supportsDisplay }),
 		};
 	});
 
-const RemoteCompactionSchema = z.object({
-	enabled: z.boolean().optional(),
-	api: ApiSchema.optional(),
-	endpoint: z.string().min(1).optional(),
-	v2StreamingEnabled: z.boolean().optional(),
-	v2Endpoint: z.string().min(1).optional(),
-	streamingEndpoint: z.string().min(1).optional(),
-	model: z.string().min(1).optional(),
+const RemoteCompactionSchema = type({
+	"enabled?": "boolean",
+	"api?": ApiSchema,
+	"endpoint?": "string",
+	"model?": "string",
+	"v2StreamingEnabled?": "boolean",
+	"v2Endpoint?": "string",
+	"streamingEndpoint?": "string",
+}).narrow((value, ctx) => {
+	if (value.endpoint !== undefined && typeof value.endpoint === "string" && value.endpoint.length === 0) {
+		return ctx.mustBe("remoteCompaction.endpoint a non-empty string");
+	}
+	if (value.model !== undefined && typeof value.model === "string" && value.model.length === 0) {
+		return ctx.mustBe("remoteCompaction.model a non-empty string");
+	}
+	if (value.v2Endpoint !== undefined && typeof value.v2Endpoint === "string" && value.v2Endpoint.length === 0) {
+		return ctx.mustBe("remoteCompaction.v2Endpoint a non-empty string");
+	}
+	if (
+		value.streamingEndpoint !== undefined &&
+		typeof value.streamingEndpoint === "string" &&
+		value.streamingEndpoint.length === 0
+	) {
+		return ctx.mustBe("remoteCompaction.streamingEndpoint a non-empty string");
+	}
+	return true;
 });
 
-const ModelDefinitionSchema = z.object({
-	id: z.string().min(1),
-	name: z.string().min(1).optional(),
-	api: ApiSchema.optional(),
-	baseUrl: z.string().min(1).optional(),
-	reasoning: z.boolean().optional(),
-	thinking: ModelThinkingSchema.optional(),
-	input: z.array(z.enum(["text", "image"])).optional(),
-	supportsTools: z.boolean().optional(),
-	cost: z
-		.object({
-			input: z.number(),
-			output: z.number(),
-			cacheRead: z.number(),
-			cacheWrite: z.number(),
-		})
-		.optional(),
-	premiumMultiplier: z.number().optional(),
-	contextWindow: z.number().optional(),
-	maxTokens: z.number().optional(),
-	omitMaxOutputTokens: z.boolean().optional(),
-	headers: z.record(z.string(), z.string()).optional(),
-	compat: OpenAICompatSchema.optional(),
-	compactionModel: z.string().min(1).optional(),
-	remoteCompaction: RemoteCompactionSchema.optional(),
+const ModelDefinitionSchema = type({
+	id: "string",
+	"name?": "string",
+	"api?": ApiSchema,
+	"baseUrl?": "string",
+	"reasoning?": "boolean",
+	"thinking?": ModelThinkingSchema,
+	"input?": '("text" | "image")[]',
+	"supportsTools?": "boolean",
+	"cost?": {
+		input: "number",
+		output: "number",
+		cacheRead: "number",
+		cacheWrite: "number",
+	},
+	"premiumMultiplier?": "number",
+	"contextWindow?": "number",
+	"maxTokens?": "number",
+	"omitMaxOutputTokens?": "boolean",
+	"headers?": { "[string]": "string" },
+	"compat?": OpenAICompatSchema,
+	"compactionModel?": "string",
+	"remoteCompaction?": RemoteCompactionSchema,
+}).narrow((value, ctx) => {
+	// Enforce id non-empty
+	if (typeof value.id === "string" && value.id.length === 0) {
+		return ctx.mustBe("id a non-empty string");
+	}
+	if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
+		return ctx.mustBe("name a non-empty string");
+	}
+	if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
+		return ctx.mustBe("baseUrl a non-empty string");
+	}
+	if (
+		value.compactionModel !== undefined &&
+		typeof value.compactionModel === "string" &&
+		value.compactionModel.length === 0
+	) {
+		return ctx.mustBe("compactionModel a non-empty string");
+	}
+	return true;
 });
 
-export const ModelOverrideSchema = z.object({
-	name: z.string().min(1).optional(),
-	reasoning: z.boolean().optional(),
-	thinking: ModelThinkingSchema.optional(),
-	input: z.array(z.enum(["text", "image"])).optional(),
-	supportsTools: z.boolean().optional(),
-	cost: z
-		.object({
-			input: z.number().optional(),
-			output: z.number().optional(),
-			cacheRead: z.number().optional(),
-			cacheWrite: z.number().optional(),
-		})
-		.optional(),
-	premiumMultiplier: z.number().optional(),
-	contextWindow: z.number().optional(),
-	maxTokens: z.number().optional(),
-	omitMaxOutputTokens: z.boolean().optional(),
-	headers: z.record(z.string(), z.string()).optional(),
-	compat: OpenAICompatSchema.optional(),
-	compactionModel: z.string().min(1).optional(),
-	remoteCompaction: RemoteCompactionSchema.optional(),
+export const ModelOverrideSchema = type({
+	"name?": "string",
+	"reasoning?": "boolean",
+	"thinking?": ModelThinkingSchema,
+	"input?": '("text" | "image")[]',
+	"supportsTools?": "boolean",
+	"cost?": {
+		"input?": "number",
+		"output?": "number",
+		"cacheRead?": "number",
+		"cacheWrite?": "number",
+	},
+	"premiumMultiplier?": "number",
+	"contextWindow?": "number",
+	"maxTokens?": "number",
+	"omitMaxOutputTokens?": "boolean",
+	"headers?": { "[string]": "string" },
+	"compat?": OpenAICompatSchema,
+	"compactionModel?": "string",
+	"remoteCompaction?": RemoteCompactionSchema,
+}).narrow((value, ctx) => {
+	if (value.name !== undefined && typeof value.name === "string" && value.name.length === 0) {
+		return ctx.mustBe("name a non-empty string");
+	}
+	if (
+		value.compactionModel !== undefined &&
+		typeof value.compactionModel === "string" &&
+		value.compactionModel.length === 0
+	) {
+		return ctx.mustBe("compactionModel a non-empty string");
+	}
+	return true;
 });
 
-export type ModelOverride = z.infer<typeof ModelOverrideSchema>;
+export type ModelOverride = typeof ModelOverrideSchema.infer;
 
-export const ProviderDiscoverySchema = z.object({
-	type: z.enum(["ollama", "llama.cpp", "lm-studio", "openai-models-list", "proxy", "litellm"]),
+export const ProviderDiscoverySchema = type({
+	type: '"ollama" | "llama.cpp" | "lm-studio" | "openai-models-list" | "proxy" | "litellm"',
 });
 
-export const ProviderAuthSchema = z.enum(["apiKey", "none", "oauth"]);
+export const ProviderAuthSchema = type('"apiKey" | "none" | "oauth"');
 
-export type ProviderAuthMode = z.infer<typeof ProviderAuthSchema>;
-export type ProviderDiscovery = z.infer<typeof ProviderDiscoverySchema>;
+export type ProviderAuthMode = typeof ProviderAuthSchema.infer;
+export type ProviderDiscovery = typeof ProviderDiscoverySchema.infer;
 
-const ProviderConfigSchema = z.object({
-	baseUrl: z.string().min(1).optional(),
-	apiKey: z.string().min(1).optional(),
-	api: ApiSchema.optional(),
-	headers: z.record(z.string(), z.string()).optional(),
-	compat: OpenAICompatSchema.optional(),
-	remoteCompaction: RemoteCompactionSchema.optional(),
-	authHeader: z.boolean().optional(),
-	auth: ProviderAuthSchema.optional(),
-	discovery: ProviderDiscoverySchema.optional(),
-	models: z.array(ModelDefinitionSchema).optional(),
-	modelOverrides: z.record(z.string(), ModelOverrideSchema).optional(),
-	disableStrictTools: z.boolean().optional(),
+const ProviderConfigSchema = type({
+	"baseUrl?": "string",
+	"apiKey?": "string",
+	"api?": ApiSchema,
+	"headers?": { "[string]": "string" },
+	"compat?": OpenAICompatSchema,
+	"remoteCompaction?": RemoteCompactionSchema,
+	"authHeader?": "boolean",
+	"auth?": ProviderAuthSchema,
+	"discovery?": ProviderDiscoverySchema,
+	"models?": ModelDefinitionSchema.array(),
+	"modelOverrides?": { "[string]": ModelOverrideSchema },
+	"disableStrictTools?": "boolean",
 	/**
 	 * Streaming transport override. When set to `"pi-native"`, omp dispatches
 	 * every model under this provider via the auth-gateway's
@@ -218,17 +259,19 @@ const ProviderConfigSchema = z.object({
 	 * provider's `baseUrl` must point at a compatible `omp auth-gateway`
 	 * and `apiKey` must carry the gateway bearer.
 	 */
-	transport: z.literal("pi-native").optional(),
+	"transport?": '"pi-native"',
+}).narrow((value, ctx) => {
+	if (value.baseUrl !== undefined && typeof value.baseUrl === "string" && value.baseUrl.length === 0) {
+		return ctx.mustBe("baseUrl a non-empty string");
+	}
+	if (value.apiKey !== undefined && typeof value.apiKey === "string" && value.apiKey.length === 0) {
+		return ctx.mustBe("apiKey a non-empty string");
+	}
+	return true;
 });
 
-const EquivalenceConfigSchema = z.object({
-	overrides: z.record(z.string(), z.string().min(1)).optional(),
-	exclude: z.array(z.string().min(1)).optional(),
+export const ModelsConfigSchema = type({
+	"providers?": { "[string]": ProviderConfigSchema },
 });
 
-export const ModelsConfigSchema = z.object({
-	providers: z.record(z.string(), ProviderConfigSchema).optional(),
-	equivalence: EquivalenceConfigSchema.optional(),
-});
-
-export type ModelsConfig = z.infer<typeof ModelsConfigSchema>;
+export type ModelsConfig = typeof ModelsConfigSchema.infer;

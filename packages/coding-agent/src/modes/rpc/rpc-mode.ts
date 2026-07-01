@@ -12,7 +12,7 @@ import {
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
-import { buildSkillPromptMessage } from "../../extensibility/skills";
+import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { SessionObserverRegistry } from "../../modes/session-observer-registry";
 import { type Theme, theme } from "../../modes/theme/theme";
@@ -134,15 +134,12 @@ export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	text: string,
 ): Promise<RpcSkillCommandResult | false> {
-	if (!text.startsWith("/skill:")) return false;
 	if (!session.skillsSettings?.enableSkillCommands) return false;
-	const spaceIndex = text.indexOf(" ");
-	const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-	const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
-	const skillName = commandName.slice("skill:".length);
-	const skill = session.skills.find(candidate => candidate.name === skillName);
+	const parsed = parseSkillInvocation(text);
+	if (!parsed) return false;
+	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return false;
-	const built = await buildSkillPromptMessage(skill, args);
+	const built = await buildSkillPromptMessage(skill, parsed.args);
 	await session.promptCustomMessage({
 		customType: SKILL_PROMPT_MESSAGE_TYPE,
 		content: built.message,

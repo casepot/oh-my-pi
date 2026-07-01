@@ -7,6 +7,14 @@
  * `builtin-defaults` provider; project-gated packs are attached by built-in
  * skillsets and enter the same rule bucketing funnel.
  */
+import goAddCleanup from "./go-add-cleanup.md" with { type: "text" };
+import goBenchLoop from "./go-bench-loop.md" with { type: "text" };
+import goExpPromoted from "./go-exp-promoted.md" with { type: "text" };
+import goIoutil from "./go-ioutil.md" with { type: "text" };
+import goJoinHostport from "./go-join-hostport.md" with { type: "text" };
+import goNewExpr from "./go-new-expr.md" with { type: "text" };
+import goRandV2 from "./go-rand-v2.md" with { type: "text" };
+import goRangeInt from "./go-range-int.md" with { type: "text" };
 import rsAsyncStdFs from "./rs-async-std-fs.md" with { type: "text" };
 import rsAsyncStdMpsc from "./rs-async-std-mpsc.md" with { type: "text" };
 import rsBoxLeak from "./rs-box-leak.md" with { type: "text" };
@@ -52,6 +60,14 @@ export interface BuiltinRuleSource {
 
 /** All embedded rule sources, ordered by pack then name. */
 export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
+	{ name: "go-add-cleanup", content: goAddCleanup, pack: "global" },
+	{ name: "go-bench-loop", content: goBenchLoop, pack: "global" },
+	{ name: "go-exp-promoted", content: goExpPromoted, pack: "global" },
+	{ name: "go-ioutil", content: goIoutil, pack: "global" },
+	{ name: "go-join-hostport", content: goJoinHostport, pack: "global" },
+	{ name: "go-new-expr", content: goNewExpr, pack: "global" },
+	{ name: "go-rand-v2", content: goRandV2, pack: "global" },
+	{ name: "go-range-int", content: goRangeInt, pack: "global" },
 	{ name: "ts-bare-catch", content: tsBareCatch, pack: "global" },
 	{ name: "ts-import-type", content: tsImportType, pack: "global" },
 	{ name: "ts-no-any", content: tsNoAny, pack: "global" },

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * Rewrite the natural-language prose of a prompt file into the terse
  * implementation-scratchpad voice (see `rewrite-system-prompt.style.md`),
@@ -37,8 +38,8 @@
  *       --dry-run          classify + chunk, print a plan, make no network calls
  */
 
-import { parseArgs } from "node:util";
 import * as path from "node:path";
+import { parseArgs } from "node:util";
 import STYLE_GUIDE from "./rewrite-system-prompt.style.md" with { type: "text" };
 
 const DEFAULT_INPUT = "packages/coding-agent/src/prompts/system/system-prompt.md";
@@ -218,7 +219,7 @@ export function planRewrite(content: string): RewritePlan {
 		if (isVerbatimLine(line)) continue;
 		const { prefix, core, suffix } = peel(line);
 		if (core.trim() === "") continue; // nothing rewritable after peeling
-		const tokens = Array.from(core.matchAll(FRAGILE_RE), (m) => m[0]);
+		const tokens = Array.from(core.matchAll(FRAGILE_RE), m => m[0]);
 		prose.push({ lineIndex: i, prefix, suffix, core, tokens });
 	}
 	return { lines, prose };
@@ -285,8 +286,8 @@ export async function rewriteAll(
 	const groups = chunk(toRewrite, opts.chunkSize);
 
 	let done = 0;
-	const resolved = await mapPool(groups, opts.concurrency, async (group) => {
-		const items: RewriteItem[] = group.map((e) => ({
+	const resolved = await mapPool(groups, opts.concurrency, async group => {
+		const items: RewriteItem[] = group.map(e => ({
 			id: e.lineIndex,
 			text: e.core,
 			tokens: e.tokens,
@@ -297,7 +298,7 @@ export async function rewriteAll(
 		} catch {
 			map = new Map();
 		}
-		const out = group.map((entry) => {
+		const out = group.map(entry => {
 			const candidate = map.get(entry.lineIndex);
 			return { entry, text: candidate ?? entry.core, ok: candidate != null };
 		});
@@ -393,7 +394,7 @@ const REWRITE_RESPONSE_FORMAT = {
 
 /** Build a {@link RewriteChunk} backed by an OpenRouter chat-completions endpoint. */
 export function makeOpenRouterRewriter(opts: OpenRouterOptions): RewriteChunk {
-	return async (items) => {
+	return async items => {
 		const result = new Map<number, string>();
 		let pending = items;
 		let lastErr: unknown;
@@ -407,7 +408,7 @@ export function makeOpenRouterRewriter(opts: OpenRouterOptions): RewriteChunk {
 						{ role: "system", content: opts.system },
 						{
 							role: "user",
-							content: JSON.stringify({ items: pending.map((p) => ({ id: p.id, text: p.text })) }),
+							content: JSON.stringify({ items: pending.map(p => ({ id: p.id, text: p.text })) }),
 						},
 					],
 				});
@@ -446,7 +447,7 @@ export function makeOpenRouterRewriter(opts: OpenRouterOptions): RewriteChunk {
 		}
 		if (pending.length > 0) {
 			console.error(
-				`  ${pending.length} line(s) [${pending.map((p) => p.id).join(",")}] kept original: ${String(lastErr ?? "rewrite dropped a token")}`,
+				`  ${pending.length} line(s) [${pending.map(p => p.id).join(",")}] kept original: ${String(lastErr ?? "rewrite dropped a token")}`,
 			);
 		}
 		return result;
