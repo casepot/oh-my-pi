@@ -26,6 +26,7 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed the advisor prompt to use phase-aware product judgment without turning phases into workflow gates: planning shortens implementation, implementation keeps behavior ahead of proof scaffolds, verification seeks claim/risk-matched real signal, final handoff blocks only false completion, and both speed without correctness and correctness theater are failures.
 - Changed goal-mode context persistence to write goal-state sidecar refs, routing capsules, narrow `goal({op:"get"})` views, and approved-plan execution contracts instead of replaying full proof/planning bodies in active context.
 - Changed goal checkpoint evidence to carry stable signal, scenario-row, workstream, verification-command, and evidence refs so proof projections can dedupe checkpoint support without replaying full evidence bodies.
 - Allowed goal target planning turns to use temporary todos, restoring the pre-planning todo list when an approved target plan enters execution.

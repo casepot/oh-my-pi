@@ -64,6 +64,19 @@ describe("advisor", () => {
 			expect(advisorSystemPrompt).toContain("NEVER assert concrete values, array indexes");
 			expect(advisorSystemPrompt).toContain("NEVER claim `paths[0]`, array flattening, or malformed `paths`");
 		});
+
+		it("prioritizes phase-aware product judgment over process compliance", () => {
+			expect(advisorSystemPrompt).toContain("Bring product judgment, not process compliance");
+			expect(advisorSystemPrompt).toContain("Treat phases as local context, not workflow gates");
+			expect(advisorSystemPrompt).toContain("multiple phases may be active");
+			expect(advisorSystemPrompt).toContain("changes the next useful action");
+			expect(advisorSystemPrompt).toContain("plans should shorten implementation, not prove diligence");
+			expect(advisorSystemPrompt).toContain("substitute for behavior rather than deliver or unlock it");
+			expect(advisorSystemPrompt).toContain("match signal to claim and risk");
+			expect(advisorSystemPrompt).toContain("NEVER demand more proof, broader suites, or clerical evidence");
+			expect(advisorSystemPrompt).toContain("Optional cleanup is not a blocker");
+			expect(advisorSystemPrompt).toContain("Speed without correctness and correctness theater are both failures");
+		});
 	});
 
 	describe("formatAdvisorContextPrompt", () => {
