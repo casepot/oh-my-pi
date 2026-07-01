@@ -3771,6 +3771,14 @@ export class AgentSession {
 					: {};
 			this.#toolExecutionArgsById.set(event.toolCallId, { toolName: event.toolName, args });
 		}
+		// Mark successful yield before any awaited listener/accounting work. A
+		// trailing empty assistant stop can arrive immediately after the yield tool
+		// result; agent_end must still route through yield-terminal maintenance
+		// instead of the empty-stop retry path.
+		if (event.type === "tool_execution_end" && event.toolName === "yield" && !event.isError) {
+			this.#lastSuccessfulYieldToolCallId = event.toolCallId;
+			this.#yieldTerminationPending = true;
+		}
 
 		try {
 			await this.#emitSessionEvent(displayEvent);
@@ -3825,10 +3833,6 @@ export class AgentSession {
 			} else {
 				await this.#goalRuntime.onToolCompleted(event.toolName);
 			}
-		}
-		if (event.type === "tool_execution_end" && event.toolName === "yield" && !event.isError) {
-			this.#lastSuccessfulYieldToolCallId = event.toolCallId;
-			this.#yieldTerminationPending = true;
 		}
 
 		// TTSR: Check for pattern matches on assistant text/thinking and tool argument deltas

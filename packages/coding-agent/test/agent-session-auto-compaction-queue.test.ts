@@ -1563,7 +1563,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 			summary: "Installer smoke target closed.",
 			localClaims: ["Installer smoke has bounded current evidence"],
 			evidence: [
-				{ claim: "Installer smoke has bounded current evidence", evidence: "Observed smoke output", current: true },
+				{
+					claim: "Installer smoke has bounded current evidence",
+					evidence: "Observed smoke output",
+					current: true,
+					signalIds: ["signal-primary"],
+				},
 			],
 			notClaimed: ["Parent goal is complete"],
 			remainingQuestions: ["Which target follows?"],
@@ -1628,7 +1633,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 			summary: "Installer smoke target closed.",
 			localClaims: ["Installer smoke has bounded current evidence"],
 			evidence: [
-				{ claim: "Installer smoke has bounded current evidence", evidence: "Observed smoke output", current: true },
+				{
+					claim: "Installer smoke has bounded current evidence",
+					evidence: "Observed smoke output",
+					current: true,
+					signalIds: ["signal-primary"],
+				},
 			],
 			notClaimed: ["Parent goal is complete"],
 			remainingQuestions: ["Operator must choose a release gate."],

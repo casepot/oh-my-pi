@@ -11,6 +11,14 @@ import { TtsrManager, type TtsrMatchContext } from "@oh-my-pi/pi-coding-agent/ex
 import "@oh-my-pi/pi-coding-agent/discovery";
 
 const EXPECTED_RULE_NAMES = [
+	"go-add-cleanup",
+	"go-bench-loop",
+	"go-exp-promoted",
+	"go-ioutil",
+	"go-join-hostport",
+	"go-new-expr",
+	"go-rand-v2",
+	"go-range-int",
 	"ts-bare-catch",
 	"ts-import-type",
 	"ts-no-any",

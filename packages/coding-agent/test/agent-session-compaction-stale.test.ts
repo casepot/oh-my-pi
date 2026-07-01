@@ -432,11 +432,11 @@ describe("AgentSession stale-safe compaction commits", () => {
 
 		await session!.compact();
 
-		const duplicateEntries = sessionManager
-			.getEntries()
-			.filter(entry => entry.type === "compaction" && entry.summary === "duplicate summary");
-		expect(duplicateEntries).toHaveLength(2);
-		expect(emittedCompactionId).toBe(duplicateEntries[1].id);
+		const compactionEntries = sessionManager.getEntries().filter(entry => entry.type === "compaction");
+		const latestCompaction = getLatestCompactionEntry(sessionManager.getBranch());
+		expect(compactionEntries).toHaveLength(2);
+		expect(latestCompaction?.summary).toBe("duplicate summary");
+		expect(emittedCompactionId).toBe(latestCompaction?.id);
 		expect(emittedCompactionId).not.toBe(previousCompactionId);
 	});
 

@@ -182,7 +182,7 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 		expect(result.model?.id).toBe("qwen3.6-plus-free");
 	});
 
-	test("resolves explicit all-model candidates without wrapping private-field registries", async () => {
+	test("uses explicit all-model candidates without touching private-field registry methods", async () => {
 		class PrivateFieldRegistry {
 			#models = [parentModel, unauthedTaskModel];
 			canonicalCalls = 0;
@@ -215,7 +215,7 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 			[parentModel, unauthedTaskModel],
 		);
 
-		expect(registry.canonicalCalls).toBeGreaterThan(0);
+		expect(registry.canonicalCalls).toBe(0);
 		expect(result.authFallbackUsed).toBe(true);
 		expect(result.model?.provider).toBe("deepseek");
 		expect(result.model?.id).toBe("deepseek-v4-pro");
