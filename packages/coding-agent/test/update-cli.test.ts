@@ -23,6 +23,8 @@ import {
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
+import { FORK_REPO_URL, UPSTREAM_REPO_URL } from "../src/update/source-status";
+import { updateViaSource } from "../src/update/source-updater";
 
 const tempDirs: string[] = [];
 
@@ -49,6 +51,24 @@ async function runGit(cwd: string, args: string[]): Promise<void> {
 	if (exitCode !== 0) {
 		throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
 	}
+}
+
+async function readGit(cwd: string, args: string[]): Promise<string> {
+	const proc = Bun.spawn(["git", ...args], {
+		cwd,
+		stdin: "ignore",
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) {
+		throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+	}
+	return stdout.trim();
 }
 
 afterEach(async () => {
@@ -257,6 +277,59 @@ describe("update-cli source checkout safety", () => {
 
 		await expect(ensureSourceCheckoutCleanForUpdate(dir)).rejects.toThrow("uncommitted changes");
 	});
+
+	it("rejects source migration before resetting a clean checkout with local-only commits", async () => {
+		const seed = await makeGitRepo();
+		await runGit(seed, ["config", "user.email", "test@example.com"]);
+		await runGit(seed, ["config", "user.name", "OMP Test"]);
+		await runGit(seed, ["checkout", "-B", "main"]);
+		await Bun.write(path.join(seed, "package.json"), "{");
+		await runGit(seed, ["add", "package.json"]);
+		await runGit(seed, ["commit", "-m", "origin main"]);
+
+		const remoteParent = await makeTempDir();
+		const origin = path.join(remoteParent, "origin.git");
+		await runGit(remoteParent, ["clone", "--bare", seed, origin]);
+		await runGit(origin, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+		const checkoutParent = await makeTempDir();
+		const checkout = path.join(checkoutParent, "source");
+		await runGit(checkoutParent, ["clone", origin, checkout]);
+		await runGit(checkout, ["config", "user.email", "test@example.com"]);
+		await runGit(checkout, ["config", "user.name", "OMP Test"]);
+		await runGit(checkout, ["remote", "set-url", "origin", FORK_REPO_URL]);
+		await runGit(checkout, ["remote", "add", "upstream", UPSTREAM_REPO_URL]);
+		const localOnlyFile = path.join(checkout, "local-only.txt");
+		await Bun.write(localOnlyFile, "local-only work\n");
+		await runGit(checkout, ["add", "local-only.txt"]);
+		await runGit(checkout, ["commit", "-m", "local only"]);
+		const localHead = await readGit(checkout, ["rev-parse", "HEAD"]);
+		const originalSpawn = Bun.spawn.bind(Bun);
+		vi.spyOn(Bun, "spawn").mockImplementation(((command: unknown, options?: unknown) => {
+			if (Array.isArray(command) && command[0] === "git" && command[1] === "fetch") {
+				const rewritten = command.map((arg, index) =>
+					index > 1 && (arg === "origin" || arg === "upstream") ? origin : arg,
+				);
+				return originalSpawn(rewritten, options as never);
+			}
+			return originalSpawn(command as never, options as never);
+		}) as typeof Bun.spawn);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+
+		let migrationError: unknown;
+		try {
+			await updateViaSource({ method: "source", mode: "migrate", root: checkout }, { force: false, check: false });
+		} catch (err) {
+			migrationError = err;
+		}
+
+		expect(await readGit(checkout, ["rev-parse", "HEAD"])).toBe(localHead);
+		expect(await Bun.file(localOnlyFile).text()).toBe("local-only work\n");
+		if (!(migrationError instanceof Error)) {
+			throw new Error("Expected source migration to reject local-only commits");
+		}
+		expect(migrationError.message).toContain("Source checkout HEAD is ahead of fork main with 1 local commit");
+	}, 15_000);
 });
 
 describe("update-cli fork release URLs", () => {

@@ -9,6 +9,7 @@ import {
 	FORK_REPO_URL,
 	readSourceCheckoutStatus,
 	remoteMatchesRepo,
+	runGit,
 	type SourceCheckoutStatus,
 	UPSTREAM_REPO_URL,
 } from "./source-status";
@@ -95,8 +96,99 @@ async function ensureRemoteUrl(
 	await runProcess("git", ["remote", "add", name, expectedUrl], root);
 }
 
+interface ForkDefaultBranchDivergence {
+	ahead: number;
+	behind: number;
+}
+
+async function fetchForkDefaultBranch(root: string): Promise<void> {
+	await runProcess(
+		"git",
+		["fetch", "origin", `+refs/heads/${DEFAULT_SOURCE_BRANCH}:refs/remotes/origin/${DEFAULT_SOURCE_BRANCH}`],
+		root,
+	);
+}
+
+async function hasGitCommit(root: string, ref: string): Promise<boolean> {
+	const result = await runGit(root, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+	return result.exitCode === 0;
+}
+
+async function hasLocalBranch(root: string, branch: string): Promise<boolean> {
+	const result = await runGit(root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+	return result.exitCode === 0;
+}
+
+async function readForkDefaultBranchDivergence(root: string, left: string): Promise<ForkDefaultBranchDivergence> {
+	const right = `origin/${DEFAULT_SOURCE_BRANCH}`;
+	const result = await runGit(root, ["rev-list", "--left-right", "--count", `${left}...${right}`]);
+	if (result.exitCode !== 0) {
+		const details = (result.stderr || result.stdout).trim();
+		throw new Error(
+			`Could not compare source checkout with fork ${DEFAULT_SOURCE_BRANCH}${details ? `: ${details}` : ""}`,
+		);
+	}
+	const [aheadText, behindText] = result.stdout.trim().split(/\s+/u);
+	const ahead = Number(aheadText);
+	const behind = Number(behindText);
+	if (!Number.isFinite(ahead) || !Number.isFinite(behind)) {
+		throw new Error(`Could not parse source checkout divergence from fork ${DEFAULT_SOURCE_BRANCH}`);
+	}
+	return { ahead, behind };
+}
+
+async function assertNoLocalCommitsAgainstForkDefaultBranch(
+	root: string,
+	ref: string,
+	description: string,
+): Promise<ForkDefaultBranchDivergence | undefined> {
+	if (!(await hasGitCommit(root, ref))) return undefined;
+
+	const divergence = await readForkDefaultBranchDivergence(root, ref);
+	if (divergence.ahead > 0) {
+		const relation = divergence.behind > 0 ? "has diverged from" : "is ahead of";
+		const commits = `${divergence.ahead} local commit${divergence.ahead === 1 ? "" : "s"}`;
+		throw new Error(
+			`Source checkout ${description} ${relation} fork ${DEFAULT_SOURCE_BRANCH} with ${commits} not on origin/${DEFAULT_SOURCE_BRANCH} at ${root}; push them, create a branch, back up the checkout, or choose another source directory before running ${APP_NAME} update.`,
+		);
+	}
+
+	return divergence;
+}
+
+async function updateExistingForkSourceCheckout(root: string, status: SourceCheckoutStatus): Promise<void> {
+	const currentDivergence = await assertNoLocalCommitsAgainstForkDefaultBranch(root, "HEAD", "HEAD");
+	if (!currentDivergence) {
+		await runProcess("git", ["checkout", "-B", DEFAULT_SOURCE_BRANCH, `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+		return;
+	}
+
+	if (status.branch === DEFAULT_SOURCE_BRANCH) {
+		if (currentDivergence.behind > 0) {
+			await runProcess("git", ["merge", "--ff-only", `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+		}
+		return;
+	}
+
+	if (await hasLocalBranch(root, DEFAULT_SOURCE_BRANCH)) {
+		const defaultBranchDivergence = await assertNoLocalCommitsAgainstForkDefaultBranch(
+			root,
+			`refs/heads/${DEFAULT_SOURCE_BRANCH}`,
+			`${DEFAULT_SOURCE_BRANCH} branch`,
+		);
+		await runProcess("git", ["checkout", DEFAULT_SOURCE_BRANCH], root);
+		if ((defaultBranchDivergence?.behind ?? 0) > 0) {
+			await runProcess("git", ["merge", "--ff-only", `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+		}
+		return;
+	}
+
+	await runProcess("git", ["checkout", "-b", DEFAULT_SOURCE_BRANCH, `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+}
+
 async function prepareForkSourceCheckout(root: string): Promise<SourceCheckoutStatus> {
 	const gitPath = path.join(root, ".git");
+	let existingStatus: SourceCheckoutStatus | undefined;
 	if (!(await pathExistsForUpdate(gitPath))) {
 		const entryCount = await readDirectoryEntryCount(root);
 		if (entryCount !== undefined && entryCount > 0) {
@@ -107,13 +199,17 @@ async function prepareForkSourceCheckout(root: string): Promise<SourceCheckoutSt
 		await runProcess("git", ["clone", FORK_REPO_URL, root]);
 		await runProcess("git", ["remote", "add", "upstream", UPSTREAM_REPO_URL], root);
 	} else {
-		const status = await ensureSourceCheckoutCleanForUpdate(root);
-		await ensureRemoteUrl(root, "origin", status.originUrl, FORK_REPO_URL);
-		await ensureRemoteUrl(root, "upstream", status.upstreamUrl, UPSTREAM_REPO_URL);
+		existingStatus = await ensureSourceCheckoutCleanForUpdate(root);
+		await ensureRemoteUrl(root, "origin", existingStatus.originUrl, FORK_REPO_URL);
+		await ensureRemoteUrl(root, "upstream", existingStatus.upstreamUrl, UPSTREAM_REPO_URL);
 	}
 
-	await runProcess("git", ["fetch", "origin", DEFAULT_SOURCE_BRANCH], root);
-	await runProcess("git", ["checkout", "-B", DEFAULT_SOURCE_BRANCH, `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+	await fetchForkDefaultBranch(root);
+	if (existingStatus) {
+		await updateExistingForkSourceCheckout(root, existingStatus);
+	} else {
+		await runProcess("git", ["checkout", "-B", DEFAULT_SOURCE_BRANCH, `origin/${DEFAULT_SOURCE_BRANCH}`], root);
+	}
 	return readSourceCheckoutStatus(root, { fetchRemotes: true });
 }
 
