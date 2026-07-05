@@ -38,10 +38,19 @@ export const V2_COMPACTION_TIMEOUT_MS = 180_000;
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
+const CODEX_BETA_FEATURES_HEADER = "x-codex-beta-features";
+const CODEX_REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
 const COMPACTION_TRIGGER_ITEM = { type: "compaction_trigger" } as const;
 // OpenAI image metering depends on detail and dimensions; charge the common
 // high-detail 1024px-path budget so retained image history cannot be unbounded.
 const IMAGE_TOKEN_ESTIMATE = 765;
+
+function appendCommaHeaderToken(current: string | undefined, token: string): string {
+	if (!current) return token;
+	const tokens = current.split(",").map(value => value.trim());
+	return tokens.includes(token) ? current : `${current},${token}`;
+}
+
 const CONTEXTUAL_USER_PREFIXES = [
 	"<environment_context>",
 	"<user_instructions>",
@@ -202,11 +211,24 @@ export function buildCompactionV2Request(
 // Streaming Request Handler
 // ============================================================================
 
+interface RequestTimeoutScope {
+	signal: AbortSignal | undefined;
+	timeoutReason(): Error | undefined;
+}
+
 /** Race the caller's signal against the V2 request timeout. */
-function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
-	if (timeoutMs <= 0) return signal;
+function createRequestTimeoutScope(signal: AbortSignal | undefined, timeoutMs: number): RequestTimeoutScope {
+	if (timeoutMs <= 0) {
+		return {
+			signal,
+			timeoutReason: () => undefined,
+		};
+	}
 	const timeout = AbortSignal.timeout(timeoutMs);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
+	return {
+		signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+		timeoutReason: () => (timeout.reason instanceof Error ? timeout.reason : undefined),
+	};
 }
 
 /** Request V2 compaction over the normal OpenAI Responses streaming endpoint. */
@@ -231,11 +253,11 @@ export async function requestCompactionV2Streaming(
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
-		const timeoutSignal = withRequestTimeout(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
+		const timeoutScope = createRequestTimeoutScope(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
 		try {
-			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutSignal);
+			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutScope.signal);
 		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err));
+			const error = timeoutScope.timeoutReason() ?? (err instanceof Error ? err : new Error(String(err)));
 			if (signal?.aborted) throw error;
 
 			if (isRetryableCompactionError(error) && attempt < V2_COMPACTION_MAX_RETRIES) {
@@ -338,6 +360,10 @@ function buildCompactionV2Headers(model: Model, apiKey: string, request: Compact
 		}
 		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
+		headers[CODEX_BETA_FEATURES_HEADER] = appendCommaHeaderToken(
+			headers[CODEX_BETA_FEATURES_HEADER],
+			CODEX_REMOTE_COMPACTION_V2_FEATURE,
+		);
 	}
 
 	return headers;
@@ -508,9 +534,9 @@ function isRetryableCompactionError(error: Error): boolean {
 	if (
 		error.name === "AbortError" ||
 		error.name === "TimeoutError" ||
-		error.message.toLowerCase().includes("timeout")
+		error.message.toLowerCase().includes("timed out")
 	) {
-		return true;
+		return false;
 	}
 	if (error instanceof ProviderHttpError) {
 		return isTransientStatus(error.status);

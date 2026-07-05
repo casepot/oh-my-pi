@@ -427,6 +427,101 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
 	});
 
+	test("aborts V2 stream at an explicit timeoutMs without retrying TimeoutError", async () => {
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] }],
+			"instructions",
+		);
+		let attempts = 0;
+		let retryWaitCalls = 0;
+		let abortReasonName: string | undefined;
+		const timeoutBudgets: number[] = [];
+		const timeoutControllers: AbortController[] = [];
+		vi.spyOn(AbortSignal, "timeout").mockImplementation((timeoutMs: number) => {
+			timeoutBudgets.push(timeoutMs);
+			const controller = new AbortController();
+			timeoutControllers.push(controller);
+			return controller.signal;
+		});
+		const fetchMock: FetchImpl = (_input, init) => {
+			attempts++;
+			if (attempts > 1) return Promise.reject(new Error("TimeoutError was retried"));
+			const signal = init?.signal as AbortSignal | undefined;
+			if (!signal) throw new Error("Expected V2 compaction to pass an AbortSignal to fetch");
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const rejectWithAbort = () => {
+				const reason = signal.reason;
+				abortReasonName = reason instanceof Error ? reason.name : String(reason);
+				reject(reason instanceof Error ? reason : new DOMException("Aborted", "AbortError"));
+			};
+			if (signal.aborted) rejectWithAbort();
+			else signal.addEventListener("abort", rejectWithAbort, { once: true });
+			return promise;
+		};
+
+		const resultPromise = requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: fetchMock,
+			timeoutMs: 10,
+			retryWait: async () => {
+				retryWaitCalls++;
+			},
+		});
+		expect(timeoutBudgets).toEqual([10]);
+		timeoutControllers[0]?.abort(new DOMException("V2 deadline", "TimeoutError"));
+		const error = await resultPromise.catch(err => err);
+		expect(error).toMatchObject({ name: "TimeoutError" });
+
+		expect(abortReasonName).toBe("TimeoutError");
+		expect(attempts).toBe(1);
+		expect(retryWaitCalls).toBe(0);
+	});
+
+	test("sends Codex remote-compaction beta features on V2 requests", async () => {
+		const model = makeOpenAiModel({
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://chatgpt.com/backend-api/codex/responses",
+				model: "gpt-5-codex",
+			},
+		});
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] }],
+			"instructions",
+		);
+		let codexBetaFeatures: string | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			if (!init?.headers || init.headers instanceof Headers || Array.isArray(init.headers)) {
+				throw new Error("Expected V2 compaction to send headers as a plain object");
+			}
+			const rawBetaFeatures = init.headers["x-codex-beta-features"];
+			codexBetaFeatures = typeof rawBetaFeatures === "string" ? rawBetaFeatures : undefined;
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+			]);
+		};
+
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, { fetch: fetchMock });
+
+		expect(codexBetaFeatures?.split(",").map(feature => feature.trim())).toContain("remote_compaction_v2");
+	});
+
 	test("retries transient V2 stream failures with a fresh request attempt", async () => {
 		const model = makeOpenAiModel({
 			remoteCompaction: {
@@ -823,6 +918,70 @@ describe("compact() remote compaction failure handling", () => {
 			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: true, remoteStreamingV2Enabled: false },
 		};
 	}
+
+	test("passes remoteTimeoutMs into V2 and skips V1 fetch after V2 timeout", async () => {
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		preparation.settings = {
+			...preparation.settings,
+			remoteStreamingV2Enabled: true,
+			remoteTimeoutMs: 5,
+		};
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		let v1Fetches = 0;
+		let v2AbortReasonName: string | undefined;
+		const timeoutBudgets: number[] = [];
+		const timeoutControllers: AbortController[] = [];
+		vi.spyOn(AbortSignal, "timeout").mockImplementation((timeoutMs: number) => {
+			timeoutBudgets.push(timeoutMs);
+			const controller = new AbortController();
+			timeoutControllers.push(controller);
+			return controller.signal;
+		});
+		vi.spyOn(Bun, "sleep").mockResolvedValue(undefined);
+		const fetchMock: FetchImpl = (input, init) => {
+			const url = String(input);
+			if (url.endsWith("/responses/compact")) {
+				v1Fetches++;
+				return Promise.resolve(
+					Response.json({
+						output: [{ type: "compaction_summary", summary: "v1 remote fallback" }],
+					}),
+				);
+			}
+			if (url !== "https://compact.example/v1/responses") {
+				throw new Error(`Unexpected remote compaction URL: ${url}`);
+			}
+			const signal = init?.signal as AbortSignal | undefined;
+			if (!signal) throw new Error("Expected V2 compaction to pass an AbortSignal to fetch");
+			const { promise, reject } = Promise.withResolvers<Response>();
+			const rejectWithAbort = () => {
+				const reason = signal.reason;
+				v2AbortReasonName = reason instanceof Error ? reason.name : String(reason);
+				reject(reason instanceof Error ? reason : new DOMException("Aborted", "AbortError"));
+			};
+			if (signal.aborted) rejectWithAbort();
+			else signal.addEventListener("abort", rejectWithAbort, { once: true });
+			queueMicrotask(() => timeoutControllers.at(-1)?.abort(new DOMException("V2 deadline", "TimeoutError")));
+			return promise;
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+		});
+
+		expect(timeoutBudgets).toEqual([5]);
+		expect(v2AbortReasonName).toBe("TimeoutError");
+		expect(v1Fetches).toBe(0);
+		expect(result.summary).toContain("local summary");
+		expect(completeSpy).toHaveBeenCalled();
+	});
 
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));

@@ -248,6 +248,17 @@ function getRemoteCompactionDiagnosticFields(err: unknown): Record<string, unkno
 	return fields;
 }
 
+function isRemoteCompactionTimeout(err: unknown): boolean {
+	if (err instanceof RemoteCompactionError) {
+		return err.details.timedOut === true || err.details.kind === "timeout";
+	}
+	if (err instanceof Error) {
+		const message = err.message.toLowerCase();
+		return err.name === "TimeoutError" || message.includes("timed out");
+	}
+	return false;
+}
+
 // ============================================================================
 // Token calculation
 // ============================================================================
@@ -1437,6 +1448,7 @@ export async function compact(
 			...recentMessages,
 		];
 		let usedRemoteCompaction = false;
+		let skipOpenAiRemoteFallback = false;
 		if (
 			settings.remoteEnabled !== false &&
 			settings.remoteStreamingV2Enabled !== false &&
@@ -1472,7 +1484,10 @@ export async function compact(
 						apiKey,
 						key => {
 							openAiRemoteAttempted = true;
-							return requestCompactionV2Streaming(model, key, request, signal, { fetch: summaryOptions.fetch });
+							return requestCompactionV2Streaming(model, key, request, signal, {
+								fetch: summaryOptions.fetch,
+								timeoutMs: summaryOptions.remoteTimeoutMs,
+							});
 						},
 						{ signal },
 					);
@@ -1486,16 +1501,29 @@ export async function compact(
 					if (isCompactionCancelled(err, signal)) {
 						throw toCompactionCancelledError(err);
 					}
-					logger.warn("OpenAI V2 remote compaction failed, falling back to V1/local summarization", {
-						...getRemoteCompactionDiagnosticFields(err),
-						model: model.id,
-						provider: model.provider,
-					});
+					const timedOut = isRemoteCompactionTimeout(err);
+					skipOpenAiRemoteFallback = timedOut;
+					logger.warn(
+						timedOut
+							? "OpenAI V2 remote compaction timed out, falling back to local summarization"
+							: "OpenAI V2 remote compaction failed, falling back to V1/local summarization",
+						{
+							...getRemoteCompactionDiagnosticFields(err),
+							model: model.id,
+							provider: model.provider,
+							skippingV1Fallback: timedOut,
+						},
+					);
 				}
 			}
 		}
 
-		if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(model)) {
+		if (
+			!usedRemoteCompaction &&
+			!skipOpenAiRemoteFallback &&
+			settings.remoteEnabled !== false &&
+			shouldUseOpenAiRemoteCompaction(model)
+		) {
 			const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
 			const previousV2Compaction = getCompactionV2PreserveData(previousPreserveData);
 			const previousReplacementHistory =
