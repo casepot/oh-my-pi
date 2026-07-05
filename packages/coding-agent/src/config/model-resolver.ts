@@ -1238,7 +1238,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 	const fallbackKey = await modelRegistry.getApiKey(fallback.model);
-	if (!isAuthenticated(fallbackKey)) {
+	if (!(fallbackKey === kNoAuth || isAuthenticated(fallbackKey))) {
 		return { ...primary, authFallbackUsed: false };
 	}
 

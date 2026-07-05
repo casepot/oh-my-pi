@@ -39,6 +39,19 @@ const parentModel: Model<Api> = buildModel({
 	maxTokens: 8192,
 });
 
+const keylessParentLocalModel: Model<Api> = buildModel({
+	id: "llama3.2",
+	name: "Llama 3.2",
+	api: "openai-completions",
+	provider: "ollama",
+	baseUrl: "http://localhost:11434/v1",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 128000,
+	maxTokens: 8192,
+});
+
 const unauthedTaskModel: Model<Api> = buildModel({
 	id: "qwen3.6-plus-free",
 	name: "Qwen3.6 Plus Free",
@@ -96,6 +109,19 @@ describe("issue #985: subagent dispatch auth fallback", () => {
 		expect(result.authFallbackUsed).toBe(true);
 		expect(result.model?.provider).toBe("deepseek");
 		expect(result.model?.id).toBe("deepseek-v4-pro");
+	});
+
+	test("falls back to keyless parent local model when primary remote model has no auth", async () => {
+		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
+			getAvailable: () => [keylessParentLocalModel, unauthedTaskModel],
+			getApiKey: async (model: Model<Api>) => (model.provider === "ollama" ? kNoAuth : undefined),
+		};
+
+		const result = await resolveModelOverrideWithAuthFallback(["qwen3.6-plus-free"], "ollama/llama3.2", registry);
+
+		expect(result.authFallbackUsed).toBe(true);
+		expect(result.model?.provider).toBe("ollama");
+		expect(result.model?.id).toBe("llama3.2");
 	});
 
 	test("does not fall back when resolved subagent model has working auth", async () => {
