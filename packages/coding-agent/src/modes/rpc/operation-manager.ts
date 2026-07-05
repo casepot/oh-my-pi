@@ -33,6 +33,7 @@ type StateNotifier = (changed: string[]) => void;
 
 export class RpcOperationManager {
 	#operations = new Map<string, OperationRecord>();
+	#terminalWaiters = new Map<string, Array<() => void>>();
 	#write: OperationWriter;
 	#notifyStateChanged: StateNotifier;
 
@@ -145,6 +146,22 @@ export class RpcOperationManager {
 		}));
 	}
 
+	waitForTerminal(operationId: string): Promise<void> {
+		if (!this.#operations.has(operationId)) return Promise.resolve();
+		const pending = Promise.withResolvers<void>();
+		const waiters = this.#terminalWaiters.get(operationId) ?? [];
+		waiters.push(pending.resolve);
+		this.#terminalWaiters.set(operationId, waiters);
+		return pending.promise;
+	}
+
+	#resolveTerminalWaiters(operationId: string): void {
+		const waiters = this.#terminalWaiters.get(operationId);
+		if (!waiters) return;
+		this.#terminalWaiters.delete(operationId);
+		for (const resolve of waiters) resolve();
+	}
+
 	#complete(operationId: string, data: unknown): void {
 		const record = this.#operations.get(operationId);
 		if (!record || record.settled) return;
@@ -164,6 +181,7 @@ export class RpcOperationManager {
 			data,
 		});
 		this.#operations.delete(operationId);
+		this.#resolveTerminalWaiters(operationId);
 		this.#notifyStateChanged(["activeOperations"]);
 	}
 
@@ -192,6 +210,7 @@ export class RpcOperationManager {
 			errorInfo,
 		});
 		this.#operations.delete(operationId);
+		this.#resolveTerminalWaiters(operationId);
 		this.#notifyStateChanged(["activeOperations"]);
 	}
 

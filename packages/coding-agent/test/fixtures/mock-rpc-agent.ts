@@ -7,25 +7,42 @@
  * Used by rpc-client lifecycle tests that need to exercise start/stop/start
  * without booting the full agent runtime (which requires provider credentials).
  */
-process.stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
+const send = (frame: Record<string, unknown>) => {
+	process.stdout.write(`${JSON.stringify(frame)}\n`);
+};
+
+send({ type: "ready" });
+
+let operationSeq = 0;
 
 // Bun's `console` is an AsyncIterable over stdin lines.
 for await (const raw of console) {
 	if (!raw) continue;
 	try {
 		const frame = JSON.parse(raw) as Record<string, unknown>;
-		if (frame && typeof frame === "object" && typeof frame.type === "string") {
-			const id = typeof frame.id === "string" ? frame.id : undefined;
-			process.stdout.write(
-				`${JSON.stringify({
-					id,
-					type: "response",
-					command: frame.type,
-					success: true,
-					data: {},
-				})}\n`,
-			);
+		if (!frame || typeof frame !== "object" || typeof frame.type !== "string") continue;
+		const id = typeof frame.id === "string" ? frame.id : undefined;
+
+		if (frame.type === "bash" || frame.type === "prompt") {
+			const operationId = `op_mock_${++operationSeq}`;
+			send({
+				id,
+				type: "response",
+				command: frame.type,
+				success: true,
+				data: { ack: "accepted", operationId },
+			});
+			send({ type: "operation_start", operationId, command: frame.type });
+			continue;
 		}
+
+		send({
+			id,
+			type: "response",
+			command: frame.type,
+			success: true,
+			data: {},
+		});
 	} catch {
 		// ignore parse errors — the test harness sends well-formed frames.
 	}

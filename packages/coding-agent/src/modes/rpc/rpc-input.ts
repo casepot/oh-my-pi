@@ -10,6 +10,7 @@ import type {
 	RpcHostUriCancelAck,
 	RpcHostUriResult,
 } from "./rpc-types";
+import { RPC_COMMAND_TYPES, RPC_SUBAGENT_SUBSCRIPTION_LEVELS } from "./rpc-types";
 
 type RpcInboundFrame =
 	| RpcCommand
@@ -24,55 +25,12 @@ export type RpcParsedInput =
 	| { ok: true; frame: RpcInboundFrame; requestId?: string }
 	| { ok: false; requestId?: string; command?: string; errorInfo: RpcErrorInfo };
 
-const KNOWN_COMMANDS: Record<string, true> = {
-	get_protocol_info: true,
-	get_state: true,
-	ping: true,
-	cancel_operation: true,
-	shutdown: true,
-	shutdown_after: true,
-	prompt: true,
-	steer: true,
-	follow_up: true,
-	abort: true,
-	abort_and_prompt: true,
-	new_session: true,
-	set_todos: true,
-	set_host_tools: true,
-	add_host_tools: true,
-	remove_host_tools: true,
-	set_host_uri_schemes: true,
-	add_host_uri_schemes: true,
-	remove_host_uri_schemes: true,
-	set_model: true,
-	cycle_model: true,
-	get_available_models: true,
-	set_thinking_level: true,
-	cycle_thinking_level: true,
-	set_steering_mode: true,
-	set_follow_up_mode: true,
-	set_interrupt_mode: true,
-	compact: true,
-	set_auto_compaction: true,
-	set_auto_retry: true,
-	abort_retry: true,
-	bash: true,
-	abort_bash: true,
-	get_session_stats: true,
-	export_html: true,
-	switch_session: true,
-	branch: true,
-	get_branch_messages: true,
-	get_last_assistant_text: true,
-	set_session_name: true,
-	handoff: true,
-	get_messages: true,
-	get_session_entries: true,
-	get_session_tree: true,
-	get_observable_sessions: true,
-	get_login_providers: true,
-	login: true,
-};
+const KNOWN_COMMANDS = Object.fromEntries(RPC_COMMAND_TYPES.map(command => [command, true])) as Readonly<
+	Record<string, true>
+>;
+const SUBAGENT_SUBSCRIPTION_LEVELS = Object.fromEntries(
+	RPC_SUBAGENT_SUBSCRIPTION_LEVELS.map(level => [level, true]),
+) as Readonly<Record<string, true>>;
 
 const HOST_OR_UI_FRAMES: Record<string, true> = {
 	extension_ui_response: true,
@@ -83,36 +41,41 @@ const HOST_OR_UI_FRAMES: Record<string, true> = {
 	host_uri_cancel_ack: true,
 };
 
-const STREAMING_BEHAVIORS = new Set(["steer", "followUp"]);
-const THINKING_LEVELS = new Set<string>([
-	ThinkingLevel.Inherit,
-	ThinkingLevel.Off,
-	ThinkingLevel.Minimal,
-	ThinkingLevel.Low,
-	ThinkingLevel.Medium,
-	ThinkingLevel.High,
-	ThinkingLevel.XHigh,
-]);
-const SERIAL_QUEUE_MODES = new Set(["all", "one-at-a-time"]);
-const INTERRUPT_MODES = new Set(["immediate", "wait"]);
+const STREAMING_BEHAVIORS: Readonly<Record<string, true>> = { steer: true, followUp: true };
+const THINKING_LEVELS: Readonly<Record<string, true>> = {
+	[ThinkingLevel.Inherit]: true,
+	[ThinkingLevel.Off]: true,
+	[ThinkingLevel.Minimal]: true,
+	[ThinkingLevel.Low]: true,
+	[ThinkingLevel.Medium]: true,
+	[ThinkingLevel.High]: true,
+	[ThinkingLevel.XHigh]: true,
+};
+const SERIAL_QUEUE_MODES: Readonly<Record<string, true>> = { all: true, "one-at-a-time": true };
+const INTERRUPT_MODES: Readonly<Record<string, true>> = { immediate: true, wait: true };
 
-function enumProp(frame: Record<string, unknown>, key: string, type: string, allowed: Set<string>): string | undefined {
+function enumProp(
+	frame: Record<string, unknown>,
+	key: string,
+	type: string,
+	allowed: Readonly<Record<string, true>>,
+): string | undefined {
 	const value = frame[key];
 	if (value === undefined) return `${type}.${key} is required`;
 	if (typeof value !== "string") return `${type}.${key} must be a string`;
-	return allowed.has(value) ? undefined : `${type}.${key} has unsupported value: ${value}`;
+	return allowed[value] ? undefined : `${type}.${key} has unsupported value: ${value}`;
 }
 
 function optionalEnumProp(
 	frame: Record<string, unknown>,
 	key: string,
 	type: string,
-	allowed: Set<string>,
+	allowed: Readonly<Record<string, true>>,
 ): string | undefined {
 	const value = frame[key];
 	if (value === undefined) return undefined;
 	if (typeof value !== "string") return `${type}.${key} must be a string`;
-	return allowed.has(value) ? undefined : `${type}.${key} has unsupported value: ${value}`;
+	return allowed[value] ? undefined : `${type}.${key} has unsupported value: ${value}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -142,6 +105,13 @@ function optionalStringProp(frame: Record<string, unknown>, key: string, type: s
 function optionalBooleanProp(frame: Record<string, unknown>, key: string, type: string): string | undefined {
 	const value = frame[key];
 	return value === undefined || typeof value === "boolean" ? undefined : `${type}.${key} must be a boolean`;
+}
+
+function optionalFiniteNumberProp(frame: Record<string, unknown>, key: string, type: string): string | undefined {
+	const value = frame[key];
+	return value === undefined || (typeof value === "number" && Number.isFinite(value))
+		? undefined
+		: `${type}.${key} must be a finite number`;
 }
 
 function objectProp(frame: Record<string, unknown>, key: string, type: string): string | undefined {
@@ -260,6 +230,18 @@ function validateCommandShape(frame: Record<string, unknown>): RpcErrorInfo | un
 			return arrayProp(frame, "schemes", type)
 				? rpcErrorInfo("invalid_arguments", arrayProp(frame, "schemes", type)!)
 				: undefined;
+		case "set_subagent_subscription": {
+			const enumError = enumProp(frame, "level", type, SUBAGENT_SUBSCRIPTION_LEVELS);
+			return enumError ? rpcErrorInfo("invalid_arguments", enumError) : undefined;
+		}
+		case "get_subagent_messages": {
+			const subagentIdError = optionalStringProp(frame, "subagentId", type);
+			if (subagentIdError) return rpcErrorInfo("invalid_arguments", subagentIdError);
+			const sessionFileError = optionalStringProp(frame, "sessionFile", type);
+			if (sessionFileError) return rpcErrorInfo("invalid_arguments", sessionFileError);
+			const fromByteError = optionalFiniteNumberProp(frame, "fromByte", type);
+			return fromByteError ? rpcErrorInfo("invalid_arguments", fromByteError) : undefined;
+		}
 		case "set_model": {
 			const providerError = stringProp(frame, "provider", type);
 			if (providerError) return rpcErrorInfo("invalid_arguments", providerError);

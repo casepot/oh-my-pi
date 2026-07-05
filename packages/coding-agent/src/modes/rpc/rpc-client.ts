@@ -1395,6 +1395,7 @@ export class RpcClient {
 			for (const waiter of waiters) waiter.reject(error);
 		}
 		this.#operationWaiters.clear();
+		this.#operations.clear();
 		for (const waiter of this.#idleWaiters.splice(0)) {
 			clearTimeout(waiter.timeoutId);
 			waiter.reject(error);

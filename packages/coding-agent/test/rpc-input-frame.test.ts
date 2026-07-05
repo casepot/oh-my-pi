@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { validateRpcInputFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-input";
 import {
 	dispatchRpcInputFrame,
 	type PendingExtensionRequest,
@@ -51,6 +52,41 @@ const cancelledBashResponse = (id: string): RpcResponse => ({
 		outputLines: 0,
 		outputBytes: 0,
 	},
+});
+
+describe("validateRpcInputFrame", () => {
+	test("accepts SDK-exposed command frames and keeps unsupported commands typed unknown", () => {
+		const acceptedFrames = [
+			{ id: "available", type: "get_available_commands" },
+			{ id: "subscribe", type: "set_subagent_subscription", level: "events" },
+			{ id: "subagents", type: "get_subagents" },
+			{ id: "messages-minimal", type: "get_subagent_messages" },
+			{
+				id: "messages-selector",
+				type: "get_subagent_messages",
+				subagentId: "agent_1",
+				sessionFile: "/tmp/subagent.jsonl",
+				fromByte: 12,
+			},
+		] as const;
+
+		for (const frame of acceptedFrames) {
+			const parsed = validateRpcInputFrame(frame);
+			expect(parsed.ok).toBe(true);
+			if (parsed.ok) {
+				expect(parsed.requestId).toBe(frame.id);
+				expect(parsed.frame.type).toBe(frame.type);
+			}
+		}
+
+		const unsupported = validateRpcInputFrame({ id: "future", type: "future_sdk_command" });
+		expect(unsupported.ok).toBe(false);
+		if (!unsupported.ok) {
+			expect(unsupported.requestId).toBe("future");
+			expect(unsupported.command).toBe("future_sdk_command");
+			expect(unsupported.errorInfo.code).toBe("unknown_command");
+		}
+	});
 });
 
 describe("dispatchRpcInputFrame", () => {

@@ -5,6 +5,7 @@ import type { RpcHostToolBridge } from "./host-tools";
 import type { RpcHostUriBridge } from "./host-uris";
 import {
 	type JsonObject,
+	RPC_COMMAND_TYPES,
 	RPC_PROTOCOL_NAME,
 	RPC_PROTOCOL_VERSION,
 	RPC_SCHEMA_VERSION,
@@ -51,56 +52,6 @@ export const RPC_LIMITS: RpcLimits = Object.freeze({
 	defaultExtensionUiTimeoutMs: 30_000,
 });
 
-const RPC_COMMANDS = Object.freeze([
-	"get_protocol_info",
-	"get_state",
-	"ping",
-	"cancel_operation",
-	"shutdown",
-	"shutdown_after",
-	"prompt",
-	"steer",
-	"follow_up",
-	"abort",
-	"abort_and_prompt",
-	"new_session",
-	"set_todos",
-	"set_host_tools",
-	"add_host_tools",
-	"remove_host_tools",
-	"set_host_uri_schemes",
-	"add_host_uri_schemes",
-	"remove_host_uri_schemes",
-	"set_model",
-	"cycle_model",
-	"get_available_models",
-	"set_thinking_level",
-	"cycle_thinking_level",
-	"set_steering_mode",
-	"set_follow_up_mode",
-	"set_interrupt_mode",
-	"compact",
-	"set_auto_compaction",
-	"set_auto_retry",
-	"abort_retry",
-	"bash",
-	"abort_bash",
-	"get_session_stats",
-	"export_html",
-	"switch_session",
-	"branch",
-	"get_branch_messages",
-	"get_last_assistant_text",
-	"set_session_name",
-	"handoff",
-	"get_messages",
-	"get_session_entries",
-	"get_session_tree",
-	"get_observable_sessions",
-	"get_login_providers",
-	"login",
-] as const);
-
 const RPC_EVENTS = Object.freeze([
 	"protocol_error",
 	"transport_warning",
@@ -146,7 +97,7 @@ const RPC_EVENTS = Object.freeze([
 ] as const);
 
 export const RPC_CAPABILITIES: RpcCapabilities = Object.freeze({
-	commands: [...RPC_COMMANDS],
+	commands: [...RPC_COMMAND_TYPES],
 	events: [...RPC_EVENTS],
 	frameMetadata: true,
 	operationEvents: true,

@@ -224,6 +224,21 @@ describe("RPC schema artifact", () => {
 		expect(validate({ type: "prompt" }, inbound, schema)).not.toEqual([]);
 		expect(validate({ type: "cancel_operation", operationId: "op_1" }, inbound, schema)).toEqual([]);
 		expect(validate({ type: "cancel_operation" }, inbound, schema)).not.toEqual([]);
+
+		const sdkCommands: JsonObject[] = [
+			{ type: "get_available_commands" },
+			{ type: "set_subagent_subscription", level: "events" },
+			{ type: "get_subagents" },
+			{ type: "get_subagent_messages" },
+			{ type: "get_subagent_messages", subagentId: "agent_1", sessionFile: "/tmp/subagent.jsonl", fromByte: 12 },
+		];
+		for (const command of sdkCommands) {
+			expect(validate(command, inbound, schema)).toEqual([]);
+		}
+		expect(validate({ type: "set_subagent_subscription" }, inbound, schema)).not.toEqual([]);
+		expect(validate({ type: "set_subagent_subscription", level: "verbose" }, inbound, schema)).not.toEqual([]);
+		expect(validate({ type: "get_subagent_messages", fromByte: -1 }, inbound, schema)).not.toEqual([]);
+		expect(validate({ type: "get_subagent_messages", fromByte: 1.5 }, inbound, schema)).not.toEqual([]);
 		expect(validate({ type: "host_tool_result", id: "host_1", result: {} }, hostOrUi, schema)).toEqual([]);
 		expect(validate({ type: "host_tool_result", id: "host_1" }, hostOrUi, schema)).not.toEqual([]);
 	});

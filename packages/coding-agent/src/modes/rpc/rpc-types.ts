@@ -259,6 +259,59 @@ export type RpcCommand =
 	| { id?: string; type: "login"; providerId: string };
 
 export type RpcCommandType = RpcCommand["type"];
+export const RPC_COMMAND_TYPES = Object.freeze([
+	"get_protocol_info",
+	"get_state",
+	"ping",
+	"cancel_operation",
+	"shutdown",
+	"shutdown_after",
+	"prompt",
+	"steer",
+	"follow_up",
+	"abort",
+	"abort_and_prompt",
+	"new_session",
+	"get_available_commands",
+	"set_todos",
+	"set_host_tools",
+	"add_host_tools",
+	"remove_host_tools",
+	"set_host_uri_schemes",
+	"add_host_uri_schemes",
+	"remove_host_uri_schemes",
+	"set_subagent_subscription",
+	"get_subagents",
+	"get_subagent_messages",
+	"set_model",
+	"cycle_model",
+	"get_available_models",
+	"set_thinking_level",
+	"cycle_thinking_level",
+	"set_steering_mode",
+	"set_follow_up_mode",
+	"set_interrupt_mode",
+	"compact",
+	"set_auto_compaction",
+	"set_auto_retry",
+	"abort_retry",
+	"bash",
+	"abort_bash",
+	"get_session_stats",
+	"export_html",
+	"switch_session",
+	"branch",
+	"get_branch_messages",
+	"get_last_assistant_text",
+	"set_session_name",
+	"handoff",
+	"get_messages",
+	"get_session_entries",
+	"get_session_tree",
+	"get_observable_sessions",
+	"get_login_providers",
+	"login",
+] as const satisfies readonly RpcCommandType[]);
 
 // ============================================================================
 // RPC State / sessions / operations
@@ -381,7 +434,8 @@ export interface RpcObservableSessionView {
 	updatedAt?: string;
 }
 
-export type RpcSubagentSubscriptionLevel = "off" | "progress" | "events";
+export const RPC_SUBAGENT_SUBSCRIPTION_LEVELS = Object.freeze(["off", "progress", "events"] as const);
+export type RpcSubagentSubscriptionLevel = (typeof RPC_SUBAGENT_SUBSCRIPTION_LEVELS)[number];
 
 export interface RpcSubagentSnapshot {
 	id: string;

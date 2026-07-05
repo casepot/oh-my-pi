@@ -24,6 +24,7 @@ interface RpcFrameRecord {
 	requestId?: unknown;
 	operationId?: unknown;
 	status?: unknown;
+	reason?: unknown;
 	changed?: unknown;
 	state?: unknown;
 	stateSeq?: unknown;
@@ -258,6 +259,54 @@ describe("RPC orchestration contract", () => {
 		expect(frames[1]?.success).toBe(true);
 		expect(responseData(frames[1] ?? {}).protocol).toEqual(frames[0]?.protocol);
 		expect(frames[2]?.status).toBe("one_shot_complete");
+		expectFrameMetadata(frames);
+	});
+
+	test("one-shot operation emits ACK before terminal and shutdown after terminal", async () => {
+		const proc = Bun.spawn({
+			cmd: [
+				"bun",
+				path.join(import.meta.dir, "..", "src", "cli.ts"),
+				"--mode",
+				"rpc",
+				"--no-session",
+				"--no-skills",
+				"--no-rules",
+				"--no-title",
+				"--rpc-one-shot",
+				JSON.stringify({ type: "bash", command: 'bun -e ""' }),
+			],
+			cwd: path.join(import.meta.dir, ".."),
+			env: { ...Bun.env, PI_NO_TITLE: "1" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const stdout = await new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+		expect(exitCode).toBe(0);
+		const frames = stdout
+			.trim()
+			.split("\n")
+			.filter(Boolean)
+			.map(line => JSON.parse(line) as RpcFrameRecord);
+		const response = frames.find(frame => frame.type === "response" && frame.id === "req");
+		if (!response) throw new Error("Expected one-shot operation ACK response");
+		const operationId = responseData(response).operationId;
+		expect(typeof operationId).toBe("string");
+		const terminal = frames.find(
+			frame =>
+				(frame.type === "operation_end" || frame.type === "operation_error") && frame.operationId === operationId,
+		);
+		if (!terminal) throw new Error("Expected one-shot operation terminal frame");
+		const shutdown = frames.find(frame => frame.type === "shutdown");
+		if (!shutdown) throw new Error("Expected one-shot shutdown frame");
+		expect(response.command).toBe("bash");
+		expect(response.success).toBe(true);
+		expect(terminal.type).toBe("operation_end");
+		expect(terminal.status).toBe("completed");
+		expect(shutdown.status).toBe("one_shot_complete");
+		expect(frames.indexOf(response)).toBeLessThan(frames.indexOf(terminal));
+		expect(frames.indexOf(terminal)).toBeLessThan(frames.indexOf(shutdown));
 		expectFrameMetadata(frames);
 	});
 
@@ -559,6 +608,35 @@ describe("RPC orchestration contract", () => {
 		expect(frames.indexOf(response)).toBeLessThan(frames.indexOf(terminal));
 		await child.write({ id: "shutdown", type: "shutdown" });
 		await child.next(frame => frame.type === "shutdown");
+	});
+
+	test("shutdown_after operation ACK precedes terminal frame and shutdown waits for terminal", async () => {
+		const child = launchRpc();
+		await child.next(frame => frame.type === "ready");
+		await child.write({
+			id: "after-bash",
+			type: "shutdown_after",
+			command: { type: "bash", command: 'bun -e ""' },
+		});
+		const response = await child.next(frame => frame.type === "response" && frame.id === "after-bash");
+		const operationId = responseData(response).operationId;
+		expect(response.command).toBe("bash");
+		expect(response.success).toBe(true);
+		expect(typeof operationId).toBe("string");
+
+		const terminal = await child.next(
+			frame =>
+				(frame.type === "operation_end" || frame.type === "operation_error") && frame.operationId === operationId,
+			10_000,
+		);
+		const shutdown = await child.next(frame => frame.type === "shutdown", 10_000);
+		const frames = child.frames();
+		expect(terminal.type).toBe("operation_end");
+		expect(terminal.status).toBe("completed");
+		expect(shutdown.reason).toBe("one_shot_complete");
+		expect(shutdown.status).toBe("graceful");
+		expect(frames.indexOf(response)).toBeLessThan(frames.indexOf(terminal));
+		expect(frames.indexOf(terminal)).toBeLessThan(frames.indexOf(shutdown));
 	});
 
 	test("operation cancellation before the run timer fires suppresses the body and emits one terminal frame", async () => {

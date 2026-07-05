@@ -1458,6 +1458,84 @@
               "type": "string"
             },
             "type": {
+              "const": "get_available_commands"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "level"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "set_subagent_subscription"
+            },
+            "level": {
+              "enum": [
+                "off",
+                "progress",
+                "events"
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_subagents"
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "get_subagent_messages"
+            },
+            "subagentId": {
+              "type": "string"
+            },
+            "sessionFile": {
+              "type": "string"
+            },
+            "fromByte": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": true
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "type": {
               "const": "shutdown"
             }
           },

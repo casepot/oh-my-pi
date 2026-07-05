@@ -733,6 +733,7 @@ export async function runRpcMode(
 	let operationManager: RpcOperationManager;
 	let shutdownRequested = false;
 	let shutdownReason = "shutdown_requested";
+	let trackStartedOperationForShutdown = false;
 	const subagentRegistry = options.eventBus ? new RpcSubagentRegistry(options.eventBus, output) : undefined;
 
 	const protocolInfo = () => buildRpcProtocolInfo(mode, session, hostToolBridge, hostUriBridge);
@@ -1250,18 +1251,34 @@ export async function runRpcMode(
 			})),
 		);
 
+	const operationIdFromResponse = (response: RpcResponse): string | undefined => {
+		if (!response.success || !isRecord(response.data)) return undefined;
+		const operationId = response.data.operationId;
+		return typeof operationId === "string" ? operationId : undefined;
+	};
+
+	const waitForOperationResponse = async (response: RpcResponse): Promise<void> => {
+		const operationId = operationIdFromResponse(response);
+		if (operationId) await operationManager.waitForTerminal(operationId);
+	};
+
 	const startOperation = <T>(
 		command: string,
 		requestId: string | undefined,
 		run: (context: RpcOperationContext) => Promise<T> | T,
 		cancel?: () => void | Promise<void>,
-	): RpcOperationAck =>
-		operationManager.start({
+	): RpcOperationAck => {
+		const ack = operationManager.start({
 			command,
 			requestId,
 			cancel,
 			run,
 		});
+		if (trackStartedOperationForShutdown) {
+			shutdownCoordinator.track(operationManager.waitForTerminal(ack.operationId));
+		}
+		return ack;
+	};
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
 	const reloadPluginState = async () => {
@@ -1315,10 +1332,16 @@ export async function runRpcMode(
 							: nested.errorInfo,
 					);
 				}
-				const response = await handleCommand({ ...nested.frame, id: command.command.id ?? id } as RpcCommand);
-				shutdownRequested = true;
-				shutdownReason = "one_shot_complete";
-				return response;
+				const previousTrackSetting = trackStartedOperationForShutdown;
+				trackStartedOperationForShutdown = true;
+				try {
+					const response = await handleCommand({ ...nested.frame, id: command.command.id ?? id } as RpcCommand);
+					shutdownRequested = true;
+					shutdownReason = "one_shot_complete";
+					return response;
+				} finally {
+					trackStartedOperationForShutdown = previousTrackSetting;
+				}
 			}
 			case "prompt":
 				return success(
@@ -1850,9 +1873,9 @@ export async function runRpcMode(
 		const parsed = parseOneShotCommand(options.oneShotCommand);
 		const validation = validateRpcInputFrame(parsed);
 		if (validation.ok) {
-			const awaited = dispatchRpcInputFrame({ ...validation.frame, id: parsed.id ?? "req" }, dispatchFrameDeps);
-			if (awaited) await awaited;
-			await shutdownCoordinator.drain();
+			const response = await handleCommand({ ...validation.frame, id: parsed.id ?? "req" } as RpcCommand);
+			output(response);
+			await waitForOperationResponse(response);
 		} else {
 			emitProtocolError(validation.requestId ?? "req", validation.command, validation.errorInfo);
 		}

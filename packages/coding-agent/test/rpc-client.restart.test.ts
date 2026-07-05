@@ -22,6 +22,38 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		client.stop();
 	}, 20000);
 
+	test("stop() rejects pending operation waiters and restart starts idle", async () => {
+		const operationStarted = Promise.withResolvers<void>();
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			onFrame: frame => {
+				if (typeof frame === "object" && frame !== null && "type" in frame && frame.type === "operation_start") {
+					operationStarted.resolve();
+				}
+			},
+		});
+
+		await client.start();
+		const ack = await client.prompt("hang");
+		await operationStarted.promise;
+		const operation = client.waitForOperation(ack.operationId);
+
+		const stopped = operation.then(
+			() => {
+				throw new Error("operation unexpectedly completed");
+			},
+			error => error,
+		);
+		client.stop();
+		const error = await stopped;
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toBe("RPC client stopped");
+
+		await client.start();
+		await expect(client.waitForIdle(1_000)).resolves.toBeUndefined();
+		client.stop();
+	}, 20000);
+
 	test("start() may be retried after a failed start (child is cleaned up on failure)", async () => {
 		using client = new RpcClient({
 			cliPath: path.join(import.meta.dir, "..", "src", "cli.ts"),
