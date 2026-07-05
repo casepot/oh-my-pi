@@ -13,6 +13,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 
 const LONG_TOOL_RESULT = "inline maintenance tool result ".repeat(20);
 const OLD_CONTEXT = "old seed context ".repeat(3_000);
@@ -85,7 +86,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 
 	function createHarness(options?: {
 		model?: Model;
-		strategy?: "context-full" | "handoff";
+		strategy?: "context-full" | "handoff" | "snapcompact";
 		seedContext?: boolean;
 		firstUsageTokens?: number;
 		mockMatchesSessionModel?: boolean;
@@ -217,6 +218,41 @@ describe("AgentSession inline provider-call maintenance", () => {
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "context-full" });
 		expect(events.some(event => event.type === "auto_compaction_end" && event.action === "context-full")).toBe(true);
+	});
+
+	it("uses snapcompact instead of the local LLM summarizer for inline provider-call maintenance", async () => {
+		const { mock, sessionManager, events } = createHarness({ strategy: "snapcompact" });
+		const localCompactSpy = vi
+			.spyOn(compactionModule, "compact")
+			.mockRejectedValue(new Error("local compaction should not run"));
+		let callsAtSnapcompact = -1;
+		const snapcompactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async preparation => {
+			callsAtSnapcompact = mock.calls.length;
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
+			return {
+				summary: "inline snapcompact archive",
+				shortSummary: "snapcompact",
+				firstKeptEntryId: findCurrentPromptEntryId(sessionManager),
+				tokensBefore: preparation.tokensBefore,
+				details: { readFiles: [], modifiedFiles: [] },
+				preserveData: {
+					snapcompact: { frames: [], totalChars: 0, truncatedChars: 0 },
+				},
+			};
+		});
+
+		await session!.prompt("use the echo tool");
+
+		expect(snapcompactSpy).toHaveBeenCalledTimes(1);
+		expect(localCompactSpy).not.toHaveBeenCalled();
+		expect(callsAtSnapcompact).toBe(1);
+		expect(mock.calls).toHaveLength(2);
+		expect(JSON.stringify(mock.calls[0]?.context.messages)).not.toContain("inline snapcompact archive");
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).toContain("inline snapcompact archive");
+		expect(JSON.stringify(mock.calls[1]?.context.messages)).not.toContain(OLD_CONTEXT);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "snapcompact" });
+		expect(events.some(event => event.type === "auto_compaction_end" && event.action === "snapcompact")).toBe(true);
 	});
 
 	it("does not warn when stale pending usage exceeds the band but compacted context fits", async () => {

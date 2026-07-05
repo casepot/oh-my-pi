@@ -67,6 +67,7 @@ import {
 	generateHandoffFromContext,
 	prepareCompaction,
 	renderHandoffPrompt,
+	resolveBudgetReserveTokens,
 	resolveThresholdTokens,
 	type SessionEntry,
 	type SessionMessageEntry,
@@ -1816,7 +1817,6 @@ type AutoCompactionReason = "overflow" | "threshold" | "idle" | "incomplete";
 
 interface AutoCompactionOptions {
 	autoContinue?: boolean;
-	forceAction?: "context-full";
 	scheduleContinuation?: boolean;
 	suppressContinuation?: boolean;
 	suppressHandoff?: boolean;
@@ -7029,11 +7029,12 @@ export class AgentSession {
 		const runInlineCompaction = async (): Promise<void> => {
 			await this.#runAutoCompaction("threshold", false, false, false, {
 				autoContinue: false,
-				forceAction: "context-full",
-				scheduleContinuation: false,
+				suppressContinuation: true,
+				suppressHandoff: true,
 				armGoalContinuation: false,
 				sourceSignal: signal,
 				throwOnError: true,
+				triggerContextTokens: decision.contextTokens,
 			});
 		};
 
@@ -14805,10 +14806,7 @@ export class AgentSession {
 			this.getContextUsage({ contextWindow, ignorePendingSnapshot: true })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
 		);
-		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
-		const defaultReserveTokens = Math.floor(contextWindow * 0.15);
-		const fitReserveTokens = Math.min(reserveTokens, defaultReserveTokens);
-		const fitBudget = Math.max(0, contextWindow - fitReserveTokens);
+		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
 	}
 
@@ -14882,17 +14880,16 @@ export class AgentSession {
 		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#promptGeneration;
-		const forceContextFull = options.forceAction === "context-full";
 		const suppressContinuation = options.suppressContinuation === true || options.scheduleContinuation === false;
 		const shouldAutoContinue =
 			!suppressContinuation && options.autoContinue !== false && compactionSettings.autoContinue !== false;
 		const shouldScheduleContinuation = !suppressContinuation;
-		const suppressHandoff = forceContextFull || options.suppressHandoff === true;
+		const suppressHandoff = options.suppressHandoff === true;
 		let fallbackFromShake = false;
 		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
 		// reclaims nothing we fall through to the summary-compaction body below so
 		// the oversized input still gets resolved.
-		if (!forceContextFull && compactionSettings.strategy === "shake") {
+		if (compactionSettings.strategy === "shake") {
 			const outcome = await this.#runAutoShake(
 				reason,
 				willRetry,
@@ -14970,11 +14967,11 @@ export class AgentSession {
 			sourceSignal.addEventListener("abort", onSourceAbort, { once: true });
 		}
 
-		// "overflow" forces context-full because the input itself is broken — a handoff
-		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
-		// so a handoff request on the existing context is still viable.
+		// Overflow cannot use handoff because a handoff LLM call would hit the
+		// same oversized context. A configured snapcompact still runs inline first;
+		// context-full is the fallback when snapcompact cannot make the prompt fit.
 		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact" && !forceContextFull
+			compactionSettings.strategy === "snapcompact"
 				? "snapcompact"
 				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
 					? "handoff"

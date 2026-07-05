@@ -7,7 +7,9 @@ import {
 	compact,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
+	DEFAULT_RESERVE_TOKENS,
 	prepareCompaction,
+	resolveBudgetReserveTokens,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -740,11 +742,26 @@ describe("compact remote fallback classification", () => {
 	});
 });
 
-describe("remote compaction settings", () => {
-	test("disables remote compaction by default and caps opt-in remote waits", () => {
-		expect(DEFAULT_COMPACTION_SETTINGS.remoteEnabled).toBe(false);
+describe("compaction default settings", () => {
+	test("enables remote compaction by default with the upstream request ceiling", () => {
+		expect(DEFAULT_COMPACTION_SETTINGS.remoteEnabled).toBe(true);
 		expect(DEFAULT_COMPACTION_SETTINGS.remoteTimeoutMs).toBe(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS);
-		expect(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS).toBe(30_000);
+		expect(DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS).toBe(180_000);
+	});
+
+	test("distinguishes unset default reserve from an explicit 16384-token reserve for tiny windows", () => {
+		expect(DEFAULT_RESERVE_TOKENS).toBe(16_384);
+		expect(DEFAULT_COMPACTION_SETTINGS.reserveTokens).toBeUndefined();
+
+		const tinyWindow = 4_096;
+		const proportionalReserve = Math.floor(tinyWindow * 0.15);
+		expect(resolveBudgetReserveTokens(tinyWindow, DEFAULT_COMPACTION_SETTINGS)).toBe(proportionalReserve);
+		expect(
+			resolveBudgetReserveTokens(tinyWindow, {
+				...DEFAULT_COMPACTION_SETTINGS,
+				reserveTokens: DEFAULT_RESERVE_TOKENS,
+			}),
+		).toBe(DEFAULT_RESERVE_TOKENS);
 	});
 });
 

@@ -1885,7 +1885,7 @@ export const SETTINGS_SCHEMA = {
 	"compaction.strategy": {
 		type: "enum",
 		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
-		default: "snapcompact",
+		default: "context-full",
 		ui: {
 			tab: "context",
 			group: "Compaction",
@@ -2011,13 +2011,13 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteEnabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Remote Compaction",
 			description:
-				"Preserve OpenAI native history with provider remote compaction before local summarization; opt in only when the extra network wait is acceptable",
+				"Preserve OpenAI native history with provider remote compaction before local summarization when the model/provider supports it",
 		},
 	},
 
@@ -2032,7 +2032,7 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"compaction.reserveTokens": { type: "number", default: 16384 },
+	"compaction.reserveTokens": { type: "number", default: undefined },
 
 	"compaction.keepRecentTokens": { type: "number", default: 20000 },
 
@@ -2042,12 +2042,12 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteTimeoutMs": {
 		type: "number",
-		default: 30_000,
+		default: 180_000,
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Remote Compaction Timeout",
-			description: "Maximum time to wait for opt-in remote compaction before falling back to local summarization",
+			description: "Maximum time to wait for remote compaction before falling back to local summarization",
 		},
 	},
 
@@ -5123,7 +5123,7 @@ export interface CompactionSettings {
 	allowModelFallbacks: boolean;
 	thresholdPercent: number;
 	thresholdTokens: number;
-	reserveTokens: number;
+	reserveTokens: number | undefined;
 	keepRecentTokens: number;
 	midTurnEnabled: boolean;
 	handoffSaveToDisk: boolean;

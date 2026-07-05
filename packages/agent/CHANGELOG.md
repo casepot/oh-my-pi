@@ -12,6 +12,7 @@
 - Changed stale tool-output pruning to cover exact repeated search/find calls, skip error results, and use the same supersede key during overflow pruning while preserving the newest anchors.
 - Changed custom session/compaction messages to support `includeInContext: false` for UI artifacts that should not enter LLM context.
 
+- Changed remote compaction defaults to enable provider-native compaction with a 180s request ceiling and unset default reserve provenance for small-window budget recovery.
 
 - Changed branch summaries to accept the same explicit thinking-level override used by compaction and handoff summarizers.
 
@@ -21,7 +22,6 @@
 - Fixed compaction cut-point selection when a post-compaction continuation crosses the keep-recent budget on a trailing tool result; compaction now keeps the latest assistant/tool-result pair and summarizes earlier continuation history instead of treating the pass as a no-op.
 - Added provider-call maintenance hooks, materialized-context preflight/rematerialization, abort guards, event-consumption acknowledgements, and a visible `ContextMaintenanceError` lifecycle so embedders can fail closed before sending an unsafe continuation request.
 - Fixed remote compaction to classify caller cancellation separately from timeout, HTTP, malformed-response, and transport failures, preserving cancellation while allowing live remote failures to fall back locally with structured diagnostics.
-- Fixed remote compaction defaults to be opt-in with a 30s request ceiling, avoiding repeated 180s waits before local summarization on slow or unavailable provider-native compact endpoints.
 ## [16.2.4] - 2026-06-28
 
 ### Changed

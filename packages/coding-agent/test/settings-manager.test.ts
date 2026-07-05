@@ -71,11 +71,17 @@ describe("Settings", () => {
 		await tempDir?.remove();
 	});
 	describe("defaults", () => {
-		it("keeps fast compaction defaults", async () => {
+		it("keeps upstream compaction maintenance defaults", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
-			expect(settings.get("compaction.remoteEnabled")).toBe(false);
-			expect(settings.get("compaction.remoteTimeoutMs")).toBe(30_000);
+			expect(settings.get("compaction.remoteEnabled")).toBe(true);
+			expect(settings.get("compaction.remoteTimeoutMs")).toBe(180_000);
+		});
+
+		it("uses context-full as the default automatic compaction strategy", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("compaction.strategy")).toBe("context-full");
+			expect(getDefault("compaction.strategy")).toBe("context-full");
 		});
 
 		it("keeps native terminal progress disabled by default", async () => {

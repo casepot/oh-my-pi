@@ -187,7 +187,15 @@ export interface CompactionSettings {
 	thresholdPercent?: number;
 	thresholdTokens?: number;
 	midTurnEnabled?: boolean;
-	reserveTokens: number;
+	/**
+	 * Tokens reserved below the context window for the next prompt + response.
+	 *
+	 * Leave unset to use {@link DEFAULT_RESERVE_TOKENS}; the unset state is the
+	 * provenance signal that lets small-window recovery replace the default with
+	 * a proportional reserve (see {@link resolveBudgetReserveTokens}). An
+	 * explicit value — even one equal to the default — is always honored.
+	 */
+	reserveTokens?: number;
 	keepRecentTokens: number;
 	autoContinue?: boolean;
 	remoteEnabled?: boolean;
@@ -197,16 +205,21 @@ export interface CompactionSettings {
 	v2RetainedMessageBudget?: number;
 }
 
+/** Reserve applied when {@link CompactionSettings.reserveTokens} is unset. */
+export const DEFAULT_RESERVE_TOKENS = 16384;
+
+// reserveTokens is deliberately absent: an unset reserve is what marks it as
+// defaulted, which resolveBudgetReserveTokens needs to distinguish "user never
+// chose a reserve" from "user explicitly configured the default value".
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	strategy: "context-full",
 	thresholdPercent: -1,
 	thresholdTokens: -1,
 	midTurnEnabled: true,
-	reserveTokens: 16384,
 	keepRecentTokens: 20000,
 	autoContinue: true,
-	remoteEnabled: false,
+	remoteEnabled: true,
 	remoteTimeoutMs: DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS,
 	remoteStreamingV2Enabled: true,
 	v2RetainedMessageBudget: V2_RETAINED_MESSAGE_TOKEN_BUDGET,
@@ -284,10 +297,29 @@ export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefine
 }
 
 /**
- * Effective reserve: at least 15% of context window or the configured floor, whichever is larger.
+ * Effective reserve: at least 15% of context window or the configured floor
+ * (defaulting to {@link DEFAULT_RESERVE_TOKENS} when unset), whichever is larger.
  */
 export function effectiveReserveTokens(contextWindow: number, settings: CompactionSettings): number {
-	return Math.max(Math.floor(contextWindow * 0.15), settings.reserveTokens);
+	return Math.max(Math.floor(contextWindow * 0.15), settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS);
+}
+
+/**
+ * Reserve used when deciding whether a prompt still fits inside the model window.
+ *
+ * The default absolute reserve predates small bundled windows and can leave no
+ * practical budget there; recover only a DEFAULTED reserve that is impossible
+ * for the window with the 15% proportional reserve. Explicit reserves —
+ * including values above the context window — still win, because they
+ * intentionally shrink the usable prompt budget.
+ */
+export function resolveBudgetReserveTokens(contextWindow: number, settings: CompactionSettings): number {
+	const reserveTokens = effectiveReserveTokens(contextWindow, settings);
+	const proportionalReserveTokens = Math.max(1, Math.floor(contextWindow * 0.15));
+	const reserveWasDefaulted = settings.reserveTokens === undefined;
+	const defaultReserveIsEffectivelyImpossible =
+		reserveWasDefaulted && reserveTokens >= contextWindow - proportionalReserveTokens;
+	return defaultReserveIsEffectivelyImpossible ? proportionalReserveTokens : reserveTokens;
 }
 
 /**
@@ -326,10 +358,17 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
 	}
 
-	// Percentage-based threshold
+	// Percentage-based threshold. The default absolute reserve can exceed bundled
+	// small-context windows, or nearly consume a 16k-class window; in those
+	// known-impossible default configurations, fall back to the proportional
+	// reserve so threshold/recovery-band checks stay usable. Explicit valid
+	// configured reserves still define the usable prompt budget.
 	const thresholdPercent = settings.thresholdPercent;
 	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
-		return contextWindow - effectiveReserveTokens(contextWindow, settings);
+		return Math.max(
+			0,
+			Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)),
+		);
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
 	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
@@ -1313,11 +1352,12 @@ export async function compact(
 		fileOps,
 		settings,
 	} = preparation;
+	const reserveTokens = settings.reserveTokens ?? DEFAULT_RESERVE_TOKENS;
 
 	const summaryOptions: SummaryOptions = {
 		promptOverride: options?.promptOverride,
 		extraContext: options?.extraContext,
-		remoteEndpoint: settings.remoteEnabled === true ? settings.remoteEndpoint : undefined,
+		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
 		remoteTimeoutMs: settings.remoteTimeoutMs,
 		remoteInstructions: options?.remoteInstructions,
 		initiatorOverride: options?.initiatorOverride,
@@ -1345,7 +1385,7 @@ export async function compact(
 		estimateMessageListTokens(messagesToSummarize) + estimateMessageListTokens(turnPrefixMessages);
 	const estimatedKeptTokens = estimateMessageListTokens(recentMessages);
 	const openAiRemoteEnabled =
-		settings.remoteEnabled === true &&
+		settings.remoteEnabled !== false &&
 		((settings.remoteStreamingV2Enabled !== false && shouldUseCompactionV2Streaming(model)) ||
 			shouldUseOpenAiRemoteCompaction(model));
 	let openAiRemoteAttempted = false;
@@ -1389,7 +1429,7 @@ export async function compact(
 		];
 		let usedRemoteCompaction = false;
 		if (
-			settings.remoteEnabled === true &&
+			settings.remoteEnabled !== false &&
 			settings.remoteStreamingV2Enabled !== false &&
 			shouldUseCompactionV2Streaming(model)
 		) {
@@ -1446,7 +1486,7 @@ export async function compact(
 			}
 		}
 
-		if (!usedRemoteCompaction && settings.remoteEnabled === true && shouldUseOpenAiRemoteCompaction(model)) {
+		if (!usedRemoteCompaction && settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(model)) {
 			const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
 			const previousV2Compaction = getCompactionV2PreserveData(previousPreserveData);
 			const previousReplacementHistory =
@@ -1517,7 +1557,7 @@ export async function compact(
 					? generateSummary(
 							messagesToSummarize,
 							model,
-							settings.reserveTokens,
+							reserveTokens,
 							apiKey,
 							signal,
 							customInstructions,
@@ -1525,14 +1565,7 @@ export async function compact(
 							summaryOptions,
 						)
 					: Promise.resolve("No prior history."),
-				generateTurnPrefixSummary(
-					turnPrefixMessages,
-					model,
-					settings.reserveTokens,
-					apiKey,
-					signal,
-					summaryOptions,
-				),
+				generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
 			]);
 			// Merge into single summary
 			summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
@@ -1541,7 +1574,7 @@ export async function compact(
 			summary = await generateSummary(
 				messagesToSummarize,
 				model,
-				settings.reserveTokens,
+				reserveTokens,
 				apiKey,
 				signal,
 				customInstructions,
@@ -1558,7 +1591,7 @@ export async function compact(
 
 		const shortSummary = usedRemoteCompaction
 			? "Remote compaction"
-			: await generateShortSummary(recentMessages, summary, model, settings.reserveTokens, apiKey, signal, {
+			: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, {
 					extraContext: options?.extraContext,
 					remoteEndpoint: summaryOptions.remoteEndpoint,
 					remoteTimeoutMs: summaryOptions.remoteTimeoutMs,
