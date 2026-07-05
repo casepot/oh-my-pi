@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
+	compactSingleLineText,
 	dedupeParseErrors,
 	expandKeyHint,
 	formatCodeFrameLine,
@@ -15,6 +16,7 @@ import {
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { renderCodeCell } from "@oh-my-pi/pi-coding-agent/tui";
 import { getKeybindings, setKeybindings, type KeybindingsManager as TuiKeybindingsManager } from "@oh-my-pi/pi-tui";
 
 describe("parse error formatting", () => {
@@ -297,6 +299,23 @@ describe("formatErrorMessage (F4 sanitization)", () => {
 		expect(out).not.toContain("\t");
 	});
 
+	it("collapses raw CR/LF and strips non-SGR terminal controls from compact error text", () => {
+		const out = formatErrorMessage("first\r\nsecond\x1b[2Jthird\nfourth\rfifth", theme);
+
+		expect(out).not.toContain("\r");
+		expect(out).not.toContain("\n");
+		expect(out).not.toContain("\x1b[2J");
+		expect(Bun.stripANSI(out)).toContain("Error: first secondthird fourth fifth");
+	});
+
+	it("compacts single-line preview text without embedding raw CR/LF", () => {
+		const out = compactSingleLineText("alpha\r\nbeta\n\rgamma");
+
+		expect(out).toBe("alpha beta gamma");
+		expect(out).not.toContain("\r");
+		expect(out).not.toContain("\n");
+	});
+
 	it("truncates very long error messages to keep TUI from overflowing", () => {
 		const longTail = "x".repeat(500);
 		const out = formatErrorMessage(`crash: ${longTail}`, theme);
@@ -314,6 +333,32 @@ describe("formatErrorMessage (F4 sanitization)", () => {
 	it("falls back to 'Unknown error' for empty/missing input", () => {
 		const out = formatErrorMessage(undefined, theme);
 		expect(out).toContain("Unknown error");
+	});
+});
+
+describe("renderCodeCell terminal sanitization", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	it("strips non-SGR terminal controls from rendered code and output while preserving SGR styling", () => {
+		const rendered = renderCodeCell(
+			{
+				code: "before\x1b[2Jafter",
+				output: "plain \x1b[31mred\x1b[0m\x1b[H done",
+				status: "complete",
+				width: 120,
+				expanded: true,
+			},
+			theme,
+		).join("\n");
+
+		expect(rendered).not.toContain("\x1b[2J");
+		expect(rendered).not.toContain("\x1b[H");
+		expect(rendered).toContain("\x1b[31m");
+		expect(rendered).toContain("\x1b[0m");
+		expect(Bun.stripANSI(rendered)).toContain("beforeafter");
+		expect(Bun.stripANSI(rendered)).toContain("plain red done");
 	});
 });
 

@@ -101,15 +101,110 @@ export function getPreviewLines(text: string, maxLines: number, maxLineLen: numb
 	return lines.slice(0, maxLines).map(l => truncateToWidth(l.trim(), maxLineLen, ellipsis));
 }
 
+const ESC_CODE = 0x1b;
+const BEL_CODE = 0x07;
+const CSI_INTRO_CODE = 0x5b;
+const OSC_INTRO_CODE = 0x5d;
+const DCS_INTRO_CODE = 0x50;
+const PM_INTRO_CODE = 0x5e;
+const APC_INTRO_CODE = 0x5f;
+const STRING_TERMINATOR_CODE = 0x5c;
+const SGR_FINAL_CODE = 0x6d;
+const REPLACEMENT_CHAR = "\ufffd";
+const TERMINAL_CONTROL_RE = /[\x00-\x08\x0B-\x1F\x7F-\x9F]/;
+
+interface EscapeScan {
+	end: number;
+	preserve: boolean;
+}
+
+function scanCsiSequence(text: string, start: number): EscapeScan {
+	for (let i = start + 2; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code >= 0x40 && code <= 0x7e) {
+			return { end: i + 1, preserve: code === SGR_FINAL_CODE };
+		}
+		if (code <= 0x08 || (code >= 0x0b && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) break;
+	}
+	return { end: start + 1, preserve: false };
+}
+
+function scanStringControlSequence(text: string, start: number): EscapeScan {
+	for (let i = start + 2; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code === BEL_CODE) return { end: i + 1, preserve: false };
+		if (code === ESC_CODE && text.charCodeAt(i + 1) === STRING_TERMINATOR_CODE) {
+			return { end: i + 2, preserve: false };
+		}
+	}
+	return { end: Math.min(start + 2, text.length), preserve: false };
+}
+
+function scanEscapeSequence(text: string, start: number): EscapeScan {
+	const intro = text.charCodeAt(start + 1);
+	if (Number.isNaN(intro)) return { end: start + 1, preserve: false };
+	if (intro === CSI_INTRO_CODE) return scanCsiSequence(text, start);
+	if (intro === OSC_INTRO_CODE || intro === DCS_INTRO_CODE || intro === PM_INTRO_CODE || intro === APC_INTRO_CODE) {
+		return scanStringControlSequence(text, start);
+	}
+	return { end: Math.min(start + 2, text.length), preserve: false };
+}
+
+/**
+ * Strip terminal controls that can move the cursor, erase the screen, ring the
+ * bell, or otherwise corrupt a low-level render row while preserving SGR color
+ * spans (`ESC[…m`) that the renderer intentionally emits.
+ */
+export function sanitizeTerminalControls(text: string): string {
+	const wellFormed = text.toWellFormed();
+	const input = wellFormed === text ? text : wellFormed.replaceAll(REPLACEMENT_CHAR, "");
+	if (!TERMINAL_CONTROL_RE.test(input)) return input;
+
+	let output = "";
+	let chunkStart = 0;
+	for (let i = 0; i < input.length; i++) {
+		const code = input.charCodeAt(i);
+		if (code === ESC_CODE) {
+			output += input.slice(chunkStart, i);
+			const scan = scanEscapeSequence(input, i);
+			if (scan.preserve) output += input.slice(i, scan.end);
+			i = scan.end - 1;
+			chunkStart = scan.end;
+		} else if (code <= 0x08 || (code >= 0x0b && code <= 0x1f) || (code >= 0x7f && code <= 0x9f)) {
+			output += input.slice(chunkStart, i);
+			chunkStart = i + 1;
+		}
+	}
+	return output + input.slice(chunkStart);
+}
+
+function collapseCarriageReturns(line: string): string {
+	const idx = line.lastIndexOf("\r");
+	return idx < 0 ? line : line.slice(idx + 1);
+}
+
+/** Split renderable text into lines after normalizing CR overwrites and controls. */
+export function sanitizeTerminalLines(text: string): string[] {
+	return text.split(/\r?\n/).map(line => sanitizeTerminalControls(collapseCarriageReturns(line)));
+}
+
+/** Collapse text destined for a one-line/compact preview without raw CR/LF controls. */
+export function compactSingleLineText(text: string): string {
+	return sanitizeTerminalControls(text.replace(/[\r\n]+/g, " "))
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
 /**
  * Collapse a possibly multi-line string into a single line, then truncate it to
  * `maxWidth` display cells. {@link truncateToWidth} alone caps width but
  * newlines are zero-width, so multi-line content (markdown briefs, tool args,
  * provider errors) would otherwise spill a single status row across several
  * visual lines. Whitespace runs collapse to one space, so tabs are handled too.
+ * Non-SGR terminal controls are stripped before width calculation.
  */
 export function previewLine(text: string, maxWidth: number, ellipsis?: Ellipsis): string {
-	return truncateToWidth(text.replace(/\s+/g, " ").trim(), maxWidth, ellipsis);
+	return truncateToWidth(compactSingleLineText(text), maxWidth, ellipsis);
 }
 
 // =============================================================================
@@ -246,8 +341,8 @@ export function formatMeta(meta: string[], theme: Theme): string {
 }
 
 function sanitizeErrorText(message: string | undefined): string {
-	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
-	return clean ? replaceTabs(truncateToWidth(clean, TRUNCATE_LENGTHS.LINE)) : "Unknown error";
+	const clean = previewLine((message ?? "").replace(/^Error:\s*/, ""), TRUNCATE_LENGTHS.LINE);
+	return clean || "Unknown error";
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {

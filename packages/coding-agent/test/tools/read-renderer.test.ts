@@ -112,6 +112,32 @@ describe("readToolRenderer hyperlinks", () => {
 	});
 });
 
+describe("readToolRenderer terminal sanitization", () => {
+	it("strips non-SGR terminal controls from rendered file content", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+
+		const component = readToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "safe\x1b[2Jstill\nnext\x1b[Hline" }],
+				details: {
+					displayContent: { text: "safe\x1b[2Jstill\nnext\x1b[Hline", startLine: 1 },
+					contentType: "text/plain",
+				},
+			},
+			{ expanded: true, isPartial: false },
+			theme!,
+			{ path: "src/example.txt" },
+		);
+
+		const rendered = component.render(200).join("\n");
+		expect(rendered).not.toContain("\x1b[2J");
+		expect(rendered).not.toContain("\x1b[H");
+		expect(Bun.stripANSI(rendered)).toContain("safestill");
+		expect(Bun.stripANSI(rendered)).toContain("nextline");
+	});
+});
+
 describe("read ToolExecutionComponent framing", () => {
 	it("renders framed read results inside the standard tool container padding", () => {
 		const uiStub = { requestRender() {} } as unknown as TUI;

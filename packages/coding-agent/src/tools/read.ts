@@ -104,7 +104,7 @@ import {
 	splitInternalUrlSel,
 	splitPathAndSel,
 } from "./path-utils";
-import { formatBytes, replaceTabs, shortenPath, wrapBrackets } from "./render-utils";
+import { formatBytes, replaceTabs, sanitizeTerminalLines, shortenPath, wrapBrackets } from "./render-utils";
 import {
 	executeReadQuery,
 	getRowByKey,
@@ -3392,7 +3392,7 @@ export const readToolRenderer = {
 				title += `:${startLine}${endLine ? `-${endLine}` : ""}`;
 			}
 			const header = renderStatusLine({ icon: "error", title }, uiTheme);
-			const errorLines = errorText.split("\n").map(line => uiTheme.fg("error", replaceTabs(line)));
+			const errorLines = sanitizeTerminalLines(errorText).map(line => uiTheme.fg("error", replaceTabs(line)));
 			const outputBlock = new CachedOutputBlock();
 			return markFramedBlockComponent({
 				render: (width: number) =>

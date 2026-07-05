@@ -9,6 +9,7 @@ import {
 	formatMoreItems,
 	formatStatusIcon,
 	replaceTabs,
+	sanitizeTerminalLines,
 } from "../tools/render-utils";
 import { renderOutputBlock } from "./output-block";
 import type { State } from "./types";
@@ -96,21 +97,6 @@ function formatHeader(options: CodeCellOptions, theme: Theme): { title: string; 
 	return { title: headerTitle, meta: metaParts.join(theme.fg("dim", theme.sep.dot)) };
 }
 
-/**
- * Normalize terminal control characters that would otherwise corrupt TUI rendering:
- * - Collapse `\r\n` to `\n`.
- * - Within a line, treat `\r` as a cursor-return overwrite by keeping only the
- *   final segment (mirrors how rsync/curl/pip progress bars render to a terminal).
- * Splits on `\n` and returns the cleaned lines.
- */
-function sanitizeTerminalLines(text: string): string[] {
-	return text.split(/\r?\n/).map(collapseCarriageReturns);
-}
-
-function collapseCarriageReturns(line: string): string {
-	const idx = line.lastIndexOf("\r");
-	return idx < 0 ? line : line.slice(idx + 1);
-}
 export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[] {
 	const {
 		code,
