@@ -77,6 +77,12 @@
 - Changed the default automatic compaction strategy from snapcompact to context-full so default maintenance uses provider-native remote compaction when available instead of image archives.
 
 ### Fixed
+- Fixed source checkout migration to refuse local commits before relinking to the fork-backed `origin/main` update channel.
+- Fixed branched sessions to copy referenced artifact logs into the new session artifact directory.
+- Fixed RPC one-shot and `shutdown_after` operation commands to wait for terminal operation frames before exiting.
+- Fixed RPC client stop/restart cleanup and command validation/schema coverage for subagent subscription and message commands.
+- Fixed subagent parent-model auth fallback so keyless local fallback models can be selected when the primary model is unauthenticated.
+- Fixed tool/code renderers to strip non-SGR terminal controls and compact carriage-return error text before display.
 - Fixed goal-mode compaction append races where persisted `goal_state_snapshot` and `mode_change` bookkeeping could make a finished provider-call compaction look stale and get discarded.
 - Fixed inline compaction progress checks so stale pre-compaction provider usage no longer emits a false no-headroom warning after the compacted prompt already fits.
 - Fixed provider-call context maintenance to honor `compaction.strategy: "snapcompact"` inline before falling back to context-full summarization.
