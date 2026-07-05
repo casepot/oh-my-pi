@@ -30,6 +30,7 @@ import {
 	MemorySessionStorage,
 	type SessionStorage,
 	type SessionStorageWriter,
+	type WriteTextAtomicOptions,
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
@@ -107,11 +108,8 @@ class CloseHoldingStorage implements SessionStorage {
 	writeText(p: string, content: string): Promise<void> {
 		return this.#inner.writeText(p, content);
 	}
-	writeTextAtomic(p: string, content: string): Promise<void> {
-		return this.#inner.writeTextAtomic(p, content);
-	}
-	writeChunksAtomic(p: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void> {
-		return this.#inner.writeChunksAtomic(p, chunks);
+	writeTextAtomic(p: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		return this.#inner.writeTextAtomic(p, content, options);
 	}
 	rename(p: string, nextPath: string): Promise<void> {
 		return this.#inner.rename(p, nextPath);
@@ -121,6 +119,9 @@ class CloseHoldingStorage implements SessionStorage {
 	}
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
 		return this.#inner.deleteSessionWithArtifacts(sessionPath);
+	}
+	drain(): Promise<void> {
+		return this.#inner.drain();
 	}
 }
 

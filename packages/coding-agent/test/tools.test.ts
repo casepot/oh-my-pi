@@ -1625,7 +1625,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-11", {
 				pattern: "match",
-				paths: [testFile],
+				paths: testFile,
 			});
 
 			const output = getTextOutput(result);
@@ -1639,7 +1639,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-useless-search", {
 				pattern: "ZZZ_NO_SUCH_TOKEN_999",
-				paths: [testDir],
+				paths: testDir,
 			});
 
 			expect(getTextOutput(result)).toContain("No matches found");
@@ -1651,7 +1651,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-useless-search-warn", {
 				pattern: "ZZZ_NO_SUCH_TOKEN_999",
-				paths: [testDir, path.join(testDir, "missing-file.txt")],
+				paths: `${testDir}; ${path.join(testDir, "missing-file.txt")}`,
 			});
 
 			expect(getTextOutput(result)).toContain("Skipped missing paths");
@@ -1665,7 +1665,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-11-path-glob", {
 				pattern: "review target",
-				paths: [`${testDir}/schema-review-*.test.ts`],
+				paths: `${testDir}/schema-review-*.test.ts`,
 			});
 
 			const output = getTextOutput(result);
@@ -1686,7 +1686,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-11-path-and-glob", {
 				pattern: "providerOptions",
-				paths: [`${packageDir}/ai@6.0.119+*/node_modules/ai/**/*.{d.ts,ts}`],
+				paths: `${packageDir}/ai@6.0.119+*/node_modules/ai/**/*.{d.ts,ts}`,
 				gitignore: false,
 			});
 
@@ -1709,7 +1709,7 @@ function b() {
 			);
 			const result = await contextSearchTool.execute("test-call-12", {
 				pattern: "match",
-				paths: [testFile],
+				paths: testFile,
 			});
 
 			const output = getTextOutput(result);
@@ -1731,7 +1731,7 @@ function b() {
 			);
 			const result = await noContextSearchTool.execute("test-call-12-gap", {
 				pattern: "match",
-				paths: [testFile],
+				paths: testFile,
 			});
 
 			const output = getTextOutput(result);
@@ -1747,13 +1747,13 @@ function b() {
 
 			const first = await searchTool.execute("test-call-12-skip-first", {
 				pattern: "needle",
-				paths: [skipDir],
+				paths: skipDir,
 			});
 			expect(first.details?.fileCount).toBe(4);
 
 			const second = await searchTool.execute("test-call-12-skip-page", {
 				pattern: "needle",
-				paths: [skipDir],
+				paths: skipDir,
 				skip: 2,
 			});
 			const secondOutput = getTextOutput(second);
@@ -1771,14 +1771,14 @@ function b() {
 			// 1. By default, search is case-sensitive (only matches the lowercase pattern "hello")
 			const defaultResult = await searchTool.execute("test-case-default", {
 				pattern: "hello",
-				paths: [caseFile],
+				paths: caseFile,
 			});
 			expect(defaultResult.details?.matchCount).toBe(1);
 
 			// 2. With case: true, search is case-sensitive (only matches "hello")
 			const sensitiveResult = await searchTool.execute("test-case-sensitive", {
 				pattern: "hello",
-				paths: [caseFile],
+				paths: caseFile,
 				case: true,
 			});
 			expect(sensitiveResult.details?.matchCount).toBe(1);
@@ -1786,7 +1786,7 @@ function b() {
 			// 3. With case: false, search is case-insensitive (matches both "Hello World" and "hello world")
 			const insensitiveResult = await searchTool.execute("test-case-insensitive", {
 				pattern: "hello",
-				paths: [caseFile],
+				paths: caseFile,
 				case: false,
 			});
 			expect(insensitiveResult.details?.matchCount).toBe(2);
@@ -1800,7 +1800,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-13-round-robin", {
 				pattern: "needle",
-				paths: [testDir],
+				paths: testDir,
 			});
 
 			const output = getTextOutput(result);
@@ -1820,7 +1820,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-14-grouped-headings", {
 				pattern: "needle",
-				paths: [testDir],
+				paths: testDir,
 			});
 
 			const output = getTextOutput(result);
@@ -1844,7 +1844,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-15-directory-headings", {
 				pattern: "Claude Opus",
-				paths: [testDir],
+				paths: testDir,
 			});
 
 			const output = getTextOutput(result);
@@ -1863,7 +1863,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-15-gitignore-default", {
 				pattern: "needle",
-				paths: [scenarioDir],
+				paths: scenarioDir,
 			});
 
 			const output = getTextOutput(result);
@@ -1881,7 +1881,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-16-gitignore-off", {
 				pattern: "needle",
-				paths: [scenarioDir],
+				paths: scenarioDir,
 				gitignore: false,
 			});
 
@@ -1903,7 +1903,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-16-fifo-dir", {
 				pattern: "needle",
-				paths: [scenarioDir],
+				paths: scenarioDir,
 				gitignore: false,
 			});
 
@@ -1925,7 +1925,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-14-file-limit", {
 				pattern: "needle",
-				paths: [limitDir],
+				paths: limitDir,
 			});
 
 			const output = getTextOutput(result);
@@ -1948,7 +1948,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-14-per-file-cap", {
 				pattern: "needle",
-				paths: [concDir],
+				paths: concDir,
 			});
 
 			const hotCount = result.details?.fileMatches?.find(entry => entry.path.endsWith("hot.txt"))?.count ?? 0;
@@ -1963,7 +1963,7 @@ function b() {
 
 			const result = await searchTool.execute("test-call-14-single-file-cap", {
 				pattern: "needle",
-				paths: [single],
+				paths: single,
 			});
 
 			expect(result.details?.matchCount).toBe(count);

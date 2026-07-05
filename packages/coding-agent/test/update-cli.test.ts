@@ -1,11 +1,18 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as pluginCli from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
+import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import {
+	buildBunInstallArgs,
+	buildHomebrewUpdateArgs,
+	buildMiseForceInstallArgs,
+	buildMiseUpgradeArgs,
 	ensureSourceCheckoutCleanForUpdate,
 	getReleaseAssetUrlForTest,
+	parseUpdateArgs,
 	pruneBunInstallCache,
 	replaceBinaryForUpdate,
 	resolveBunGlobalNodeModulesDirFromLocations,
@@ -13,7 +20,9 @@ import {
 	resolveUpdateTargetForTest,
 	sweepStaleBackups,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
+import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 
 const tempDirs: string[] = [];
 
@@ -43,9 +52,45 @@ async function runGit(cwd: string, args: string[]): Promise<void> {
 }
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
+const TEST_CONFIG: CliConfig = {
+	bin: "omp",
+	version: "0.0.0-test",
+	commands: new Map(),
+};
+
+describe("update command plugin dispatch", () => {
+	it("routes -l to plugin upgrade instead of the app updater", async () => {
+		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+
+		const command = new Update(["-l"], TEST_CONFIG);
+		await command.run();
+
+		expect(pluginSpy).toHaveBeenCalledWith({ action: "upgrade", args: [], flags: {} });
+		expect(updateSpy).not.toHaveBeenCalled();
+	});
+
+	it("keeps normal update flags on the app updater path", async () => {
+		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+
+		const command = new Update(["--check", "--force"], TEST_CONFIG);
+		await command.run();
+
+		expect(updateSpy).toHaveBeenCalledWith({ force: true, check: true });
+		expect(pluginSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("parseUpdateArgs", () => {
+	it("preserves the legacy plugin update shorthand", () => {
+		expect(parseUpdateArgs(["update", "-l"])).toEqual({ force: false, check: false, plugins: true });
+	});
+});
 describe("update-cli install target detection", () => {
 	it("detects when the prioritized omp is inside bun global bin", () => {
 		const method = resolveUpdateMethodForTest("/Users/test/.bun/bin/omp", "/Users/test/.bun/bin");
@@ -128,10 +173,10 @@ describe("update-cli install target detection", () => {
 
 	it("detects when the prioritized omp is in an active mise bin path", () => {
 		const method = resolveUpdateMethodForTest(
-			"/Users/test/.local/share/mise/installs/github-can1357-oh-my-pi/latest/bin/omp",
+			"/Users/test/.local/share/mise/installs/github-casepot-oh-my-pi/latest/bin/omp",
 			undefined,
 			{
-				miseBinDirs: ["/Users/test/.local/share/mise/installs/github-can1357-oh-my-pi/latest/bin"],
+				miseBinDirs: ["/Users/test/.local/share/mise/installs/github-casepot-oh-my-pi/latest/bin"],
 			},
 		);
 
@@ -144,6 +189,64 @@ describe("update-cli install target detection", () => {
 		});
 
 		expect(method).toBe("mise");
+	});
+});
+
+describe("update-cli package manager commands", () => {
+	it("targets the Homebrew tap formula and switches to reinstall for forced updates", () => {
+		expect(buildHomebrewUpdateArgs(false)).toEqual(["upgrade", "can1357/tap/omp"]);
+		expect(buildHomebrewUpdateArgs(true)).toEqual(["reinstall", "can1357/tap/omp"]);
+	});
+
+	it("targets the fork mise GitHub backend tool and force-reinstalls the checked version when requested", () => {
+		expect(buildMiseUpgradeArgs()).toEqual(["upgrade", "github:casepot/oh-my-pi", "--bump"]);
+		expect(buildMiseForceInstallArgs("15.10.5")).toEqual(["install", "--force", "github:casepot/oh-my-pi@15.10.5"]);
+	});
+});
+
+describe("update-cli bun install command", () => {
+	it("pins the official npm registry and bypasses the manifest cache so a stale mirror or snapshot cannot mask a freshly published version", () => {
+		// Regression: omp queries https://registry.npmjs.org/<pkg>/latest directly.
+		// The install MUST hit the same registry, otherwise:
+		//   - a lagging mirror (corp proxy, Taobao, …) rejects the version with
+		//     `No version matching "X" (but package exists)`,
+		//   - or bun's local manifest snapshot does the same when the user's bun
+		//     is already pointed at the official registry but its cache predates
+		//     the release.
+		// See https://github.com/can1357/oh-my-pi/issues/1686.
+		const args = buildBunInstallArgs("15.7.6", "linux-x64");
+		expect(args.slice(0, 5)).toEqual([
+			"install",
+			"-g",
+			"--no-cache",
+			"--registry=https://registry.npmjs.org/",
+			"@oh-my-pi/pi-coding-agent@15.7.6",
+		]);
+	});
+
+	it("pins the native addon core and the platform-specific leaf to the same version so the loader sentinel cannot drift on supported tags", () => {
+		// Regression: bun install -g <pkg>@<v> would update only the top-level
+		// package, leaving @oh-my-pi/pi-natives and @oh-my-pi/pi-natives-<tag>
+		// at their previous version. The next launch then loaded a stale .node
+		// file and aborted at validateLoadedBindings with `The .node file on
+		// disk is from a different release than this loader`. See
+		// https://github.com/can1357/oh-my-pi/issues/1824.
+		for (const tag of ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"]) {
+			const args = buildBunInstallArgs("15.9.0", tag);
+			expect(args).toContain("@oh-my-pi/pi-natives@15.9.0");
+			expect(args).toContain(`@oh-my-pi/pi-natives-${tag}@15.9.0`);
+		}
+	});
+
+	it("omits the leaf on unsupported platform tags so an EBADPLATFORM swap does not mask the underlying `no matching version` error", () => {
+		// Defensive: an unsupported tag (e.g. linux-arm32) still installs the
+		// core natives package — which will fail at module load if the platform
+		// truly is unsupported — but we never request a leaf the release
+		// pipeline doesn't publish, otherwise bun aborts with EBADPLATFORM
+		// and hides the real diagnostic from `loadNative`'s aggregated error.
+		const args = buildBunInstallArgs("15.9.0", "linux-arm");
+		expect(args).toContain("@oh-my-pi/pi-natives@15.9.0");
+		expect(args.some(arg => arg.startsWith("@oh-my-pi/pi-natives-"))).toBe(false);
 	});
 });
 

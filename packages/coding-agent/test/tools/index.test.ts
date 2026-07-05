@@ -373,7 +373,7 @@ describe("createTools", () => {
 		if (!astGrepTool) throw new Error("expected ast_grep tool");
 		const astGrepResult = await astGrepTool.execute("ast-grep-plan", {
 			pat: "createTools",
-			paths: [import.meta.path],
+			path: import.meta.path,
 		});
 		expect(JSON.stringify(astGrepResult.content)).not.toContain("Goal target planning is active");
 		const astEditTool = tools.find(tool => tool.name === "ast_edit");

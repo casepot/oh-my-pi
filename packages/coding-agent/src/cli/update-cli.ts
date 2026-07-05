@@ -15,12 +15,22 @@ import { FORK_REPO } from "../fork-policy";
 import { theme } from "../modes/theme/theme";
 import { getBunGlobalBinDir, getDefaultSourceCheckoutDir, resolveSourceRootFromOmpPath } from "../update/source-status";
 import { updateViaSource } from "../update/source-updater";
+import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 
 export { ensureSourceCheckoutCleanForUpdate } from "../update/source-updater";
 
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const NPM_REGISTRY = "https://registry.npmjs.org/";
+const RELEASE_METADATA_TIMEOUT_MS = 30_000;
+const BINARY_DOWNLOAD_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
+ * version sentinel the loader looks up at runtime matches the `.node` on
+ * disk; see {@link buildBunInstallArgs} for why this must be installed
+ * explicitly rather than inherited as a transitive dependency.
+ */
 const NATIVES_PACKAGE = "@oh-my-pi/pi-natives";
 const SUPPORTED_NATIVE_TAGS: ReadonlySet<string> = new Set([
 	"linux-x64",
@@ -58,7 +68,7 @@ export interface BinaryReplacementOptions {
  * Parse update subcommand arguments.
  * Returns undefined if not an update command.
  */
-export function parseUpdateArgs(args: string[]): { force: boolean; check: boolean } | undefined {
+export function parseUpdateArgs(args: string[]): { force: boolean; check: boolean; plugins: boolean } | undefined {
 	if (args.length === 0 || args[0] !== "update") {
 		return undefined;
 	}
@@ -66,6 +76,7 @@ export function parseUpdateArgs(args: string[]): { force: boolean; check: boolea
 	return {
 		force: args.includes("--force") || args.includes("-f"),
 		check: args.includes("--check") || args.includes("-c"),
+		plugins: args.includes("--plugins") || args.includes("-l"),
 	};
 }
 
@@ -229,7 +240,17 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
  * Get the latest release info from the fork's GitHub releases.
  */
 async function getLatestRelease(): Promise<ReleaseInfo> {
-	const response = await fetch(`https://api.github.com/repos/${FORK_REPO}/releases/latest`);
+	let response: Response;
+	try {
+		response = await fetch(`https://api.github.com/repos/${FORK_REPO}/releases/latest`, {
+			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
+		});
+	} catch (err) {
+		if (isTimeoutError(err)) {
+			throw new Error("Timed out fetching release info after 30s", { cause: err });
+		}
+		throw err;
+	}
 	if (!response.ok) {
 		throw new Error(`Failed to fetch release info: ${response.statusText}`);
 	}
@@ -507,7 +528,8 @@ function getBinaryName(): string {
  * Resolve the path that `omp` maps to in the user's PATH.
  */
 function resolveOmpPath(): string | undefined {
-	return $which(APP_NAME) ?? undefined;
+	const pathEnv = process.env.PATH;
+	return $which(APP_NAME, pathEnv ? { PATH: pathEnv } : undefined) ?? undefined;
 }
 
 /**
@@ -687,7 +709,18 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 	const backupPath = `${targetPath}.${Date.now()}.${process.pid}.bak`;
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 
-	const response = await fetch(url, { redirect: "follow" });
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			redirect: "follow",
+			signal: withTimeoutSignal(BINARY_DOWNLOAD_TIMEOUT_MS),
+		});
+	} catch (err) {
+		if (isTimeoutError(err)) {
+			throw new Error("Timed out downloading release binary after 15 minutes", { cause: err });
+		}
+		throw err;
+	}
 	if (!response.ok || !response.body) {
 		throw new Error(`Download failed: ${response.statusText}`);
 	}
@@ -776,12 +809,14 @@ ${chalk.bold("Usage:")}
   ${APP_NAME} update [options]
 
 ${chalk.bold("Options:")}
-  -c, --check   Check for updates without installing
-  -f, --force   Force reinstall even if up to date
+  -c, --check     Check for updates without installing
+  -f, --force     Force reinstall even if up to date
+  -l, --plugins   Update installed plugins
 
 ${chalk.bold("Examples:")}
-  ${APP_NAME} update           Update to latest version
-  ${APP_NAME} update --check   Check if updates are available
-  ${APP_NAME} update --force   Force reinstall
+  ${APP_NAME} update              Update to latest version
+  ${APP_NAME} update --check      Check if updates are available
+  ${APP_NAME} update --force      Force reinstall
+  ${APP_NAME} update -l           Update installed plugins
 `);
 }

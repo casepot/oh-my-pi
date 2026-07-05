@@ -73,7 +73,7 @@ describe.skipIf(isWindows)("search with omitted paths", () => {
 		expect(details?.fileCount).toBe(1);
 	});
 
-	it("defaults to the workspace root when paths is an empty array", async () => {
+	it("defaults to the workspace root when path is an empty JSON array", async () => {
 		const tools = await createTools(createTestSession(cwd));
 		const tool = tools.find(entry => entry.name === "grep");
 		if (!tool) throw new Error("Missing grep tool");

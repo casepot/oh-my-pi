@@ -183,8 +183,8 @@ export interface WhichOptions extends Bun.WhichOptions {
 
 // Darwin-specific "which" shim: consult Xcode/CLT toolchain directories after $PATH.
 // Uses cached directory listings instead of per-command existsSync or xcrun subprocesses.
-function darwinWhich(command: string, _options?: Bun.WhichOptions): string | null {
-	const regular = Bun.which(command);
+function darwinWhich(command: string, options?: Bun.WhichOptions): string | null {
+	const regular = Bun.which(command, options);
 	if (regular) return regular;
 	if (isXcodeBin(command)) {
 		return getMacosToolPaths().get(command) ?? null;

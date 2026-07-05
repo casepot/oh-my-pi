@@ -14,14 +14,14 @@ import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/sessi
 class ChunkRecordingStorage implements SessionStorage {
 	readonly #inner = new MemorySessionStorage();
 	syncRewriteCalls = 0;
-	atomicRewriteCalls = 0;
+	textAtomicRewriteCalls = 0;
 	titleUpdateCalls = 0;
 	lastChunkCount = 0;
 	lastTotalBytes = 0;
 
 	resetRecords(): void {
 		this.syncRewriteCalls = 0;
-		this.atomicRewriteCalls = 0;
+		this.textAtomicRewriteCalls = 0;
 		this.titleUpdateCalls = 0;
 		this.lastChunkCount = 0;
 		this.lastTotalBytes = 0;
@@ -80,16 +80,14 @@ class ChunkRecordingStorage implements SessionStorage {
 		return this.#inner.writeText(p, content);
 	}
 
-	writeTextAtomic(): Promise<void> {
-		return Promise.reject(new Error("writeTextAtomic should not be used for session rewrites"));
-	}
-
-	async writeChunksAtomic(p: string, chunks: Iterable<string> | AsyncIterable<string>): Promise<void> {
-		const materialized: string[] = [];
-		for await (const chunk of chunks) materialized.push(chunk);
-		this.atomicRewriteCalls++;
-		this.#record(materialized);
-		await this.#inner.writeChunksAtomic(p, materialized);
+	async writeTextAtomic(
+		p: string,
+		content: string,
+		options?: Parameters<SessionStorage["writeTextAtomic"]>[2],
+	): Promise<void> {
+		this.textAtomicRewriteCalls++;
+		this.#record([content]);
+		await this.#inner.writeTextAtomic(p, content, options);
 	}
 
 	rename(p: string, nextPath: string): Promise<void> {
@@ -106,6 +104,10 @@ class ChunkRecordingStorage implements SessionStorage {
 
 	openWriter(p: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter {
 		return this.#inner.openWriter(p, options);
+	}
+
+	drain(): Promise<void> {
+		return this.#inner.drain();
 	}
 }
 
@@ -136,8 +138,8 @@ function createManager(storage: ChunkRecordingStorage): SessionManager {
 	return SessionManager.create(root, path.join(root, "sessions"), storage);
 }
 
-describe("SessionManager chunked rewrites", () => {
-	it("uses chunked rewrite APIs for rewrites and title slot updates for renames", async () => {
+describe("SessionManager full-text rewrites", () => {
+	it("uses atomic full-text rewrites and title slot updates for renames", async () => {
 		let storage = new ChunkRecordingStorage();
 		let manager = createManager(storage);
 		manager.appendMessage({ role: "user", content: "before assistant", timestamp: Date.now() });
@@ -146,7 +148,7 @@ describe("SessionManager chunked rewrites", () => {
 		const renamed = await manager.setSessionName("renamed", "user");
 		expect(renamed).toBe(true);
 		expect(storage.titleUpdateCalls).toBe(1);
-		expect(storage.atomicRewriteCalls).toBe(0);
+		expect(storage.textAtomicRewriteCalls).toBe(0);
 		expect(storage.lastChunkCount).toBe(0);
 
 		storage = new ChunkRecordingStorage();
@@ -154,8 +156,8 @@ describe("SessionManager chunked rewrites", () => {
 		manager.appendMessage({ role: "user", content: "force disk", timestamp: Date.now() });
 		storage.resetRecords();
 		await manager.ensureOnDisk();
-		expect(storage.atomicRewriteCalls).toBe(1);
-		expect(storage.lastChunkCount).toBeGreaterThan(1);
+		expect(storage.textAtomicRewriteCalls).toBe(1);
+		expect(storage.lastChunkCount).toBe(1);
 		expect(storage.lastTotalBytes).toBeGreaterThan(0);
 
 		storage = new ChunkRecordingStorage();
@@ -176,7 +178,7 @@ describe("SessionManager chunked rewrites", () => {
 		manager.appendMessage({ role: "user", content: "hot append", timestamp: Date.now() });
 		manager.flushSync();
 		expect(storage.syncRewriteCalls).toBe(0);
-		expect(storage.atomicRewriteCalls).toBe(0);
+		expect(storage.textAtomicRewriteCalls).toBe(0);
 		expect(storage.lastChunkCount).toBe(0);
 	});
 });

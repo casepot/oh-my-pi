@@ -26,6 +26,7 @@ import {
 	partitionExistingPaths,
 	resolveExplicitFindPatterns,
 	resolveToCwd,
+	toPathList,
 } from "./path-utils";
 import {
 	createCachedComponent,
@@ -490,11 +491,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 interface GlobRenderArgs {
 	paths?: string | string[];
+	/** Legacy pre-`paths` argument name; kept so historical transcripts still render a scope. */
+	path?: string | string[];
 	limit?: number;
 }
 
-function formatGlobRenderPaths(paths: GlobRenderArgs["paths"]): string | undefined {
-	return Array.isArray(paths) ? paths.join(", ") : paths;
+function formatGlobRenderPaths(args: GlobRenderArgs | undefined): string | undefined {
+	const list = toPathList(args?.paths ?? args?.path);
+	return list.length > 0 ? list.join(", ") : undefined;
 }
 
 const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
@@ -514,7 +518,7 @@ export const globToolRenderer = {
 				icon: "pending",
 				title: "Glob",
 				titleColor: "toolTitle",
-				description: formatGlobRenderPaths(args.paths) || "*",
+				description: formatGlobRenderPaths(args) || "*",
 				meta,
 			},
 			uiTheme,
@@ -554,7 +558,7 @@ export const globToolRenderer = {
 					iconOverride: globStatusIcon(uiTheme),
 					title: "Glob",
 					titleColor: "toolTitle",
-					description: formatGlobRenderPaths(args?.paths),
+					description: formatGlobRenderPaths(args),
 					meta: [formatCount("file", lines.length)],
 				},
 				uiTheme,
@@ -594,7 +598,7 @@ export const globToolRenderer = {
 					icon: "warning",
 					title: "Glob",
 					titleColor: "toolTitle",
-					description: formatGlobRenderPaths(args?.paths),
+					description: formatGlobRenderPaths(args),
 					meta: ["0 files"],
 				},
 				uiTheme,
@@ -611,7 +615,7 @@ export const globToolRenderer = {
 				...(truncated ? { icon: "warning" as const } : { iconOverride: globStatusIcon(uiTheme) }),
 				title: "Glob",
 				titleColor: "toolTitle",
-				description: formatGlobRenderPaths(args?.paths),
+				description: formatGlobRenderPaths(args),
 				meta,
 			},
 			uiTheme,

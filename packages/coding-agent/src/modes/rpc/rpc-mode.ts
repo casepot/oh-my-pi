@@ -2,7 +2,8 @@
  * RPC mode: orchestration-grade local stdio NDJSON protocol.
  */
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { $env, Snowflake } from "@oh-my-pi/pi-utils";
+import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -55,9 +56,12 @@ import type {
 	RpcHostToolCancelAck,
 	RpcHostToolCancelRequest,
 	RpcHostToolDefinition,
+	RpcHostToolResult,
+	RpcHostToolUpdate,
 	RpcHostUriCancelAck,
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
+	RpcHostUriResult,
 	RpcMode,
 	RpcObservableSessionView,
 	RpcOperationAck,
@@ -139,7 +143,7 @@ export async function tryRunRpcSkillCommand(
 	if (!parsed) return false;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return false;
-	const built = await buildSkillPromptMessage(skill, parsed.args);
+	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
 	await session.promptCustomMessage({
 		customType: SKILL_PROMPT_MESSAGE_TYPE,
 		content: built.message,
@@ -261,6 +265,170 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 	});
 }
 
+/**
+ * Dependencies for {@link dispatchRpcInputFrame}. Provided by the RPC mode
+ * entrypoint; broken out so tests can drive the input loop with stubs.
+ */
+export interface RpcInputFrameDeps {
+	handleCommand: (command: RpcCommand) => Promise<RpcResponse>;
+	output: RpcOutput;
+	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
+	trackBackgroundTask?: (task: Promise<void>) => void;
+	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
+	onHostToolResult: (frame: RpcHostToolResult) => void;
+	onHostToolUpdate: (frame: RpcHostToolUpdate) => void;
+	onHostToolCancelAck: (frame: RpcHostToolCancelAck) => void;
+	onHostUriResult: (frame: RpcHostUriResult) => void;
+	onHostUriCancelAck: (frame: RpcHostUriCancelAck) => void;
+}
+
+/**
+ * Structural guard for a well-formed extension UI response frame. Mirrors the
+ * shape declared in {@link RpcExtensionUIResponse} — a truthy record with
+ * `type === "extension_ui_response"` and a string `id`. Payload variants (value,
+ * confirmed, cancelled) are validated at the read site.
+ */
+function isRpcExtensionUIResponse(value: unknown): value is RpcExtensionUIResponse {
+	if (!isRecord(value)) return false;
+	return value.type === "extension_ui_response" && typeof value.id === "string";
+}
+
+/**
+ * Dispatch a single parsed frame from the RPC input stream.
+ *
+ * Bash commands are dispatched in the background so the caller (the stdin loop
+ * in {@link runRpcMode}) can keep reading subsequent frames while a shell
+ * command is still running. This lets a client send `abort_bash` (or any other
+ * command) while a long-running `bash` is in flight. Response correlation is
+ * preserved via each command's `id`; ordering across concurrent commands is
+ * not guaranteed and clients MUST match on `id`.
+ *
+ * @returns `undefined` when the frame was routed to a side-channel handler
+ *   (extension UI response, host tool/URI frames) or dispatched in the
+ *   background (`bash`). Otherwise a promise that resolves once the response
+ *   for the command has been emitted via `output`. Errors from `handleCommand`
+ *   on non-`bash` commands propagate; the caller is expected to wrap them.
+ */
+export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
+	// Side-channel: extension UI responses resolve a pending dialog promise.
+	if (isRpcExtensionUIResponse(parsed)) {
+		const pending = deps.pendingExtensionRequests.get(parsed.id);
+		if (pending) pending.resolve(parsed);
+		return undefined;
+	}
+
+	if (isRpcHostToolResult(parsed)) {
+		deps.onHostToolResult(parsed);
+		return undefined;
+	}
+
+	if (isRpcHostToolUpdate(parsed)) {
+		deps.onHostToolUpdate(parsed);
+		return undefined;
+	}
+
+	if (isRecord(parsed) && parsed.type === "host_tool_cancel_ack") {
+		deps.onHostToolCancelAck(parsed as unknown as RpcHostToolCancelAck);
+		return undefined;
+	}
+
+	if (isRpcHostUriResult(parsed)) {
+		deps.onHostUriResult(parsed);
+		return undefined;
+	}
+
+	if (isRecord(parsed) && parsed.type === "host_uri_cancel_ack") {
+		deps.onHostUriCancelAck(parsed as unknown as RpcHostUriCancelAck);
+		return undefined;
+	}
+
+	// Regular RPC command. The transport contract states each remaining frame
+	// is an {@link RpcCommand}; `handleCommand`'s `default` arm surfaces
+	// unknown discriminants as an error response, so we do not shape-check
+	// the union here.
+	const command = parsed as RpcCommand;
+
+	// `bash` can run for a long time. Dispatch it in the background so a
+	// subsequent `abort_bash` frame can be read and handled without waiting
+	// for the shell command to finish on its own. The response is emitted
+	// when `handleCommand` resolves; clients correlate via `command.id`.
+	if (command.type === "bash") {
+		const task = (async () => {
+			try {
+				deps.output(await deps.handleCommand(command));
+			} catch (err: unknown) {
+				const message = err instanceof Error ? err.message : String(err);
+				deps.output(deps.errorResponse(command.id, "bash", message));
+			}
+		})();
+		deps.trackBackgroundTask?.(task);
+		return undefined;
+	}
+
+	return (async () => {
+		deps.output(await deps.handleCommand(command));
+	})();
+}
+
+/**
+ * Coordinates deferred shutdown with in-flight background input tasks.
+ *
+ * `pi.shutdown()` from an extension only *requests* shutdown; the process must
+ * not exit while a background-dispatched command (`bash`, see
+ * {@link dispatchRpcInputFrame}) still owes the client a response frame. The
+ * coordinator tracks those tasks, re-checks the shutdown request whenever one
+ * settles (covering a shutdown requested mid-bash with no follow-up client
+ * frame), and drains every tracked task before invoking `performShutdown`.
+ * The shutdown sequence is latched so concurrent triggers (input loop and
+ * settling tasks) run it exactly once.
+ */
+export class RpcShutdownCoordinator {
+	#tasks = new Set<Promise<void>>();
+	#shutdown: Promise<void> | undefined;
+	readonly #isShutdownRequested: () => boolean;
+	readonly #performShutdown: () => Promise<void>;
+
+	constructor(options: { isShutdownRequested: () => boolean; performShutdown: () => Promise<void> }) {
+		this.#isShutdownRequested = options.isShutdownRequested;
+		this.#performShutdown = options.performShutdown;
+	}
+
+	/**
+	 * Track a background input task. When it settles it is untracked and the
+	 * shutdown request is re-checked, so a deferred shutdown fires even when
+	 * no further client frames arrive.
+	 */
+	track(task: Promise<void>): void {
+		this.#tasks.add(task);
+		void task.finally(() => {
+			this.#tasks.delete(task);
+			// Fire-and-forget: performShutdown ends the process. Rejections are
+			// not expected — hook errors are caught inside extensionRunner.emit,
+			// and background tasks catch their own dispatch errors.
+			void this.checkShutdownRequested();
+		});
+	}
+
+	/** Await every tracked task, including tasks tracked while draining. */
+	async drain(): Promise<void> {
+		while (this.#tasks.size > 0) {
+			await Promise.allSettled(Array.from(this.#tasks));
+		}
+	}
+
+	/**
+	 * If shutdown was requested, drain background tasks (so every owed
+	 * response frame is written) before running the shutdown sequence.
+	 */
+	checkShutdownRequested(): Promise<void> {
+		if (!this.#shutdown) {
+			if (!this.#isShutdownRequested()) return Promise.resolve();
+			this.#shutdown = this.drain().then(() => this.#performShutdown());
+		}
+		return this.#shutdown;
+	}
+}
+
 export type RpcSubagentResetRegistry = Pick<RpcSubagentRegistry, "clear">;
 
 export async function handleRpcSessionChange(
@@ -310,7 +478,7 @@ function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostTo
 			name,
 			label,
 			description,
-			parameters: tool.parameters,
+			parameters: isZodSchema(tool.parameters) ? zodToWireSchema(tool.parameters) : tool.parameters,
 			hidden: tool.hidden === true,
 			sideEffectClass: tool.sideEffectClass ?? "unknown",
 			trustClass: tool.trustClass ?? "host",
@@ -1562,6 +1730,7 @@ export async function runRpcMode(
 									method: "open_url",
 									expectsResponse: false,
 									url: info.url,
+									launchUrl: info.launchUrl,
 									instructions: info.instructions,
 								} satisfies RpcExtensionUIRequest);
 							},
@@ -1612,78 +1781,6 @@ export async function runRpcMode(
 		});
 	};
 
-	const dispatchFrame = async (frame: RpcCommand | RpcExtensionUIResponse | object): Promise<void> => {
-		const frameType = (frame as { type?: unknown }).type;
-		if (frameType === "extension_ui_response") {
-			const response = frame as RpcExtensionUIResponse;
-			const pending = pendingExtensionRequests.get(response.id);
-			if (pending) {
-				pending.resolve(response);
-			} else {
-				emitUnmatchedInboundFrame(response, "Unmatched extension UI response");
-			}
-			return;
-		}
-		if (frameType === "host_tool_result") {
-			if (isRpcHostToolResult(frame)) {
-				if (!hostToolBridge.handleResult(frame)) emitUnmatchedInboundFrame(frame, "Unmatched host tool result");
-			} else {
-				emitUnmatchedInboundFrame(frame as { id?: unknown; type?: unknown }, "Invalid host tool result frame");
-			}
-			return;
-		}
-		if (frameType === "host_tool_update") {
-			if (isRpcHostToolUpdate(frame)) {
-				if (!hostToolBridge.handleUpdate(frame)) emitUnmatchedInboundFrame(frame, "Unmatched host tool update");
-			} else {
-				emitUnmatchedInboundFrame(frame as { id?: unknown; type?: unknown }, "Invalid host tool update frame");
-			}
-			return;
-		}
-		if (frameType === "host_uri_result") {
-			if (isRpcHostUriResult(frame)) {
-				if (!hostUriBridge.handleResult(frame)) emitUnmatchedInboundFrame(frame, "Unmatched host URI result");
-			} else {
-				emitUnmatchedInboundFrame(frame as { id?: unknown; type?: unknown }, "Invalid host URI result frame");
-			}
-			return;
-		}
-		if (frameType === "host_tool_cancel_ack") {
-			const handled = hostToolBridge.handleCancelAck(frame as RpcHostToolCancelAck);
-			if (!handled) {
-				emitUnmatchedInboundFrame(
-					frame as { id?: unknown; type?: unknown },
-					"Unmatched host tool cancel acknowledgement",
-				);
-			}
-			return;
-		}
-		if (frameType === "host_uri_cancel_ack") {
-			const handled = hostUriBridge.handleCancelAck(frame as RpcHostUriCancelAck);
-			if (!handled) {
-				emitUnmatchedInboundFrame(
-					frame as { id?: unknown; type?: unknown },
-					"Unmatched host URI cancel acknowledgement",
-				);
-			}
-			return;
-		}
-
-		const command = frame as RpcCommand;
-		try {
-			const response = await handleCommand(command);
-			if (response) {
-				output(response);
-			} else {
-				output(
-					error(command.id, command.type, rpcErrorInfo("unknown_command", `Unknown command: ${command.type}`)),
-				);
-			}
-		} catch (err) {
-			output(error(command.id, command.type, errorInfoFromUnknown(err)));
-		}
-	};
-
 	const performShutdown = async (
 		reason: string,
 		status: "graceful" | "peer_closed" | "one_shot_complete",
@@ -1712,27 +1809,85 @@ export async function runRpcMode(
 		process.exit(0);
 	};
 
+	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
+	// process while a background-dispatched bash still owes the client its
+	// response frame. The coordinator drains tracked tasks before exiting and
+	// re-checks the request as each task settles.
+	const shutdownCoordinator = new RpcShutdownCoordinator({
+		isShutdownRequested: () => shutdownRequested,
+		performShutdown: () => performShutdown(shutdownReason, "graceful"),
+	});
+
+	const dispatchFrameDeps: RpcInputFrameDeps = {
+		handleCommand,
+		output,
+		errorResponse: (requestId, command, message) =>
+			error(requestId, command, rpcErrorInfo("internal_error", message)),
+		trackBackgroundTask: task => shutdownCoordinator.track(task),
+		pendingExtensionRequests,
+		onHostToolResult: frame => {
+			if (!hostToolBridge.handleResult(frame)) emitUnmatchedInboundFrame(frame, "Unmatched host tool result");
+		},
+		onHostToolUpdate: frame => {
+			if (!hostToolBridge.handleUpdate(frame)) emitUnmatchedInboundFrame(frame, "Unmatched host tool update");
+		},
+		onHostToolCancelAck: frame => {
+			if (!hostToolBridge.handleCancelAck(frame)) {
+				emitUnmatchedInboundFrame(frame, "Unmatched host tool cancel acknowledgement");
+			}
+		},
+		onHostUriResult: frame => {
+			if (!hostUriBridge.handleResult(frame)) emitUnmatchedInboundFrame(frame, "Unmatched host URI result");
+		},
+		onHostUriCancelAck: frame => {
+			if (!hostUriBridge.handleCancelAck(frame)) {
+				emitUnmatchedInboundFrame(frame, "Unmatched host URI cancel acknowledgement");
+			}
+		},
+	};
+
 	if (options.oneShotCommand) {
 		const parsed = parseOneShotCommand(options.oneShotCommand);
 		const validation = validateRpcInputFrame(parsed);
 		if (validation.ok) {
-			await dispatchFrame({ ...validation.frame, id: parsed.id ?? "req" });
+			const awaited = dispatchRpcInputFrame({ ...validation.frame, id: parsed.id ?? "req" }, dispatchFrameDeps);
+			if (awaited) await awaited;
+			await shutdownCoordinator.drain();
 		} else {
 			emitProtocolError(validation.requestId ?? "req", validation.command, validation.errorInfo);
 		}
 		await performShutdown("one_shot_complete", "one_shot_complete");
 	}
 
+	// Listen for bounded JSON input using Bun's stdin. Frame dispatch lives in
+	// dispatchRpcInputFrame so it can be exercised directly by tests; see the
+	// helper's docstring for the concurrency contract.
 	for await (const parsed of readBoundedRpcInput(Bun.stdin.stream())) {
 		if (!parsed.ok) {
 			emitProtocolError(parsed.requestId, parsed.command, parsed.errorInfo);
 			continue;
 		}
-		void dispatchFrame(parsed.frame).then(async () => {
-			if (shutdownRequested) await performShutdown(shutdownReason, "graceful");
-		});
+		try {
+			const awaited = dispatchRpcInputFrame(parsed.frame, dispatchFrameDeps);
+			if (awaited) {
+				await awaited;
+				// Check for deferred shutdown request (idle between commands).
+				// Background-dispatched bash frames skip this check so a later
+				// abort_bash can still be read; the coordinator re-checks when
+				// each tracked task settles, so a shutdown requested mid-bash
+				// fires once the response frame is written even if no further
+				// client frames arrive.
+				await shutdownCoordinator.checkShutdownRequested();
+			}
+		} catch (err: unknown) {
+			const command = parsed.frame as { id?: string; type?: string };
+			output(error(command.id, command.type ?? "parse", errorInfoFromUnknown(err)));
+		}
 	}
 
+	// Background bash tasks may still owe response frames; drain them before
+	// tearing down (stdin EOF ends the frame stream, not in-flight work).
+	await shutdownCoordinator.drain();
 	await performShutdown("stdin_closed", "peer_closed");
 }
 

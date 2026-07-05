@@ -176,6 +176,7 @@ export async function repairLegacyGoalSessionFileBeforeLoad(
 	const version = typeof header.version === "number" ? header.version : 1;
 	if (version >= CURRENT_SESSION_VERSION || version !== 3) return false;
 	if (!(storage instanceof FileSessionStorage)) return false;
-	await storage.writeChunksAtomic(filePath, repairLegacyGoalSessionLines(filePath));
+	const chunks = await Array.fromAsync(repairLegacyGoalSessionLines(filePath));
+	await storage.writeTextAtomic(filePath, chunks.join(""));
 	return true;
 }

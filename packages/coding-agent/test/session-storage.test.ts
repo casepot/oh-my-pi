@@ -202,7 +202,7 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	});
 });
 
-describe("IndexedSessionStorage.writeChunksAtomic", () => {
+describe("IndexedSessionStorage.writeTextAtomic", () => {
 	it("rewrites through one backend full write instead of truncate plus append", async () => {
 		const backend = new IndexedMemoryBackend();
 		const storage = new IndexedSessionStorage(backend);
@@ -211,7 +211,7 @@ describe("IndexedSessionStorage.writeChunksAtomic", () => {
 		backend.appendCalls = 0;
 		backend.truncateCalls = 0;
 
-		await storage.writeChunksAtomic("/sessions/p/session.jsonl", ["new", "\n"]);
+		await storage.writeTextAtomic("/sessions/p/session.jsonl", "new\n");
 
 		expect(await storage.readText("/sessions/p/session.jsonl")).toBe("new\n");
 		expect(backend.truncateCalls).toBe(0);
@@ -225,9 +225,7 @@ describe("IndexedSessionStorage.writeChunksAtomic", () => {
 		await storage.writeText("/sessions/p/session.jsonl", "old\n");
 		backend.failNextWriteFull = new Error("backend exploded");
 
-		await expect(storage.writeChunksAtomic("/sessions/p/session.jsonl", ["new\n"])).rejects.toThrow(
-			"backend exploded",
-		);
+		await expect(storage.writeTextAtomic("/sessions/p/session.jsonl", "new\n")).rejects.toThrow("backend exploded");
 
 		expect(await storage.readText("/sessions/p/session.jsonl")).toBe("old\n");
 		expect(storage.statSync("/sessions/p/session.jsonl").size).toBe(Buffer.byteLength("old\n", "utf-8"));
@@ -323,5 +321,85 @@ describe("IndexedSessionStorage.updateSessionTitle", () => {
 
 		const [slotLine] = (await storage.readText(sessionPath)).split("\n");
 		expect(JSON.parse(slotLine)).toMatchObject({ type: "title", title: "Second", source: "user", updatedAt: "t2" });
+	});
+});
+
+class PausableWriteFullBackend implements SessionStorageBackend {
+	readonly writeFullCalls: Array<{ content: string; mtimeMs: number }> = [];
+	readonly firstWriteStarted = Promise.withResolvers<void>();
+	readonly firstWriteRelease = Promise.withResolvers<void>();
+	#firstReleased = false;
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		return Promise.resolve([]);
+	}
+	readFull(): Promise<string | null> {
+		return Promise.resolve(null);
+	}
+	readSlices(): Promise<[string, string]> {
+		return Promise.resolve(["", ""]);
+	}
+	async writeFull(_path: string, content: string, mtimeMs: number): Promise<void> {
+		if (!this.#firstReleased) {
+			this.#firstReleased = true;
+			this.firstWriteStarted.resolve();
+			await this.firstWriteRelease.promise;
+		}
+		this.writeFullCalls.push({ content, mtimeMs });
+	}
+	append(): Promise<void> {
+		return Promise.resolve();
+	}
+	updateSessionTitle(): Promise<void> {
+		return Promise.resolve();
+	}
+	truncate(): Promise<void> {
+		return Promise.resolve();
+	}
+	remove(): Promise<void> {
+		return Promise.resolve();
+	}
+	move(): Promise<void> {
+		return Promise.resolve();
+	}
+}
+
+describe("IndexedSessionStorage.writeTextAtomic commitGuard", () => {
+	it("aborts before touching the backend when the guard rejects up front", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		await storage.writeTextAtomic("/sessions/s.jsonl", "stale", { commitGuard: () => false });
+		expect(backend.writeFullCalls).toEqual([]);
+		expect(storage.existsSync("/sessions/s.jsonl")).toBe(false);
+	});
+
+	it("re-checks the guard inside the enqueued task so a concurrent write cannot be overwritten", async () => {
+		const backend = new PausableWriteFullBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+
+		// First write parks the backend inside writeFull, holding the per-path
+		// tail. The second write awaits behind it. When the first releases,
+		// the second's awaitPath resumes — but by then the guard has flipped
+		// (simulated flushSync epoch bump), and the backend MUST NOT see the
+		// stale second body.
+		const first = storage.writeTextAtomic("/sessions/s.jsonl", "seed", {});
+		let epochBumped = false;
+		const second = storage.writeTextAtomic("/sessions/s.jsonl", "stale", {
+			commitGuard: () => !epochBumped,
+		});
+
+		await backend.firstWriteStarted.promise;
+		epochBumped = true;
+		backend.firstWriteRelease.resolve();
+		await first;
+		await second;
+
+		expect(backend.writeFullCalls.map(call => call.content)).toEqual(["seed"]);
 	});
 });

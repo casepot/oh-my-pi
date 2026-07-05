@@ -308,18 +308,25 @@ export function effectiveReserveTokens(contextWindow: number, settings: Compacti
  * Reserve used when deciding whether a prompt still fits inside the model window.
  *
  * The default absolute reserve predates small bundled windows and can leave no
- * practical budget there; recover only a DEFAULTED reserve that is impossible
- * for the window with the 15% proportional reserve. Explicit reserves —
- * including values above the context window — still win, because they
- * intentionally shrink the usable prompt budget.
+ * practical budget there; recover a DEFAULTED reserve that is impossible for
+ * the window with the 15% proportional reserve (clamped to >= 1 so the derived
+ * threshold stays strictly below the window even for tiny test windows).
+ * Explicit valid reserves — including one that happens to equal the default —
+ * still win, because they intentionally shrink the usable prompt budget.
+ * Non-default explicit reserves that exceed the whole window are nonsensical
+ * and recover to the proportional reserve instead.
  */
 export function resolveBudgetReserveTokens(contextWindow: number, settings: CompactionSettings): number {
 	const reserveTokens = effectiveReserveTokens(contextWindow, settings);
 	const proportionalReserveTokens = Math.max(1, Math.floor(contextWindow * 0.15));
 	const reserveWasDefaulted = settings.reserveTokens === undefined;
+	const reserveExceedsWindow =
+		settings.reserveTokens !== undefined &&
+		settings.reserveTokens !== DEFAULT_RESERVE_TOKENS &&
+		reserveTokens >= contextWindow;
 	const defaultReserveIsEffectivelyImpossible =
 		reserveWasDefaulted && reserveTokens >= contextWindow - proportionalReserveTokens;
-	return defaultReserveIsEffectivelyImpossible ? proportionalReserveTokens : reserveTokens;
+	return reserveExceedsWindow || defaultReserveIsEffectivelyImpossible ? proportionalReserveTokens : reserveTokens;
 }
 
 /**
@@ -362,7 +369,9 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 	// small-context windows, or nearly consume a 16k-class window; in those
 	// known-impossible default configurations, fall back to the proportional
 	// reserve so threshold/recovery-band checks stay usable. Explicit valid
-	// configured reserves still define the usable prompt budget.
+	// configured reserves still define the usable prompt budget. Cap at
+	// contextWindow - 1 (matching the fixed-token clamp above) so the threshold
+	// never reaches the whole window even when the reserve resolves to 0.
 	const thresholdPercent = settings.thresholdPercent;
 	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
 		return Math.max(

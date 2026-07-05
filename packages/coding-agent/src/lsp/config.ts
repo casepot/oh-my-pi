@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { $which, isRecord, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
@@ -202,6 +201,21 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 	return false;
 }
 
+/**
+ * Check whether any ancestor directory of a file is an LSP project root.
+ */
+export function hasRootMarkerAncestor(filePath: string, markers: string[]): boolean {
+	if (markers.length === 0) return false;
+
+	let dir = path.dirname(path.resolve(filePath));
+	while (true) {
+		if (hasRootMarkers(dir, markers)) return true;
+		const parent = path.dirname(dir);
+		if (parent === dir) return false;
+		dir = parent;
+	}
+}
+
 // =============================================================================
 // Local Binary Resolution
 // =============================================================================
@@ -345,14 +359,6 @@ function getConfigSources(cwd: string): ConfigSource[] {
 		}
 	}
 
-	// User config directories (~/.omp/agent/, ~/.pi/agent/, ~/.claude/)
-	const userDirs = getConfigDirPaths("", { user: true, project: false });
-	for (const dir of userDirs) {
-		for (const filename of filenames) {
-			sources.push(fileConfigSource(path.join(dir, filename)));
-		}
-	}
-
 	// Plugin LSP configs (from marketplace/--plugin-dir roots)
 	if (isProviderEnabled("claude-plugins")) {
 		const pluginRoots = getPreloadedPluginRoots();
@@ -364,23 +370,18 @@ function getConfigSources(cwd: string): ConfigSource[] {
 		}
 	}
 
-	// User home root files (lowest priority fallback)
-	for (const filename of filenames) {
-		sources.push(fileConfigSource(path.join(os.homedir(), filename)));
-	}
-
 	return sources;
 }
 
 /**
  * Load LSP configuration.
  *
- * Priority (highest to lowest):
  * 1. Project root: lsp.json/.lsp.json/lsp.yml/.lsp.yml/lsp.yaml/.lsp.yaml
  * 2. Project config dirs: .omp/lsp.*, .pi/lsp.*, .claude/lsp.* (+ hidden variants)
- * 3. User config dirs: ~/.omp/agent/lsp.*, ~/.pi/agent/lsp.*, ~/.claude/lsp.* (+ hidden variants)
- * 4. User home root: ~/lsp.*, ~/.lsp.*
- * 5. Auto-detect from project markers + available binaries
+ * 3. Plugin LSP configs from explicitly loaded plugin roots
+ * 4. Auto-detect from project markers + available binaries
+ *
+ * User/home LSP configs are intentionally not loaded by default; they are user-sourced tool behavior.
  *
  * Config files are merged from lowest to highest priority; later files override earlier settings.
  *

@@ -7,7 +7,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getDefault, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRunner, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -1239,7 +1239,7 @@ describe("AgentSession handoff", () => {
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.strategy")).toBe("snapcompact");
+		expect(session.settings.get("compaction.strategy")).toBe(getDefault("compaction.strategy"));
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 

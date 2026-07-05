@@ -675,6 +675,12 @@ export type RpcExtensionUIRequest =
 			method: "open_url";
 			expectsResponse: false;
 			url: string;
+			/**
+			 * Short loopback URL that 302-redirects to {@link url}. When present,
+			 * hosts SHOULD surface it as the copy target so terminal viewport
+			 * truncation cannot corrupt OAuth query parameters on the full URL.
+			 */
+			launchUrl?: string;
 			instructions?: string;
 	  };
 

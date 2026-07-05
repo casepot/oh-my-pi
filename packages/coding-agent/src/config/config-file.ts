@@ -1,62 +1,13 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { ArkErrors, type Type } from "arktype";
 import { JSONC, YAML } from "bun";
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {
 	instancePath: string;
 	message: string | undefined;
-}
-
-type StandardSchemaPathSegment = PropertyKey | { readonly key: PropertyKey };
-
-interface StandardSchemaIssue {
-	readonly message: string;
-	readonly path?: readonly StandardSchemaPathSegment[];
-}
-
-type StandardSchemaResult<T> =
-	| { readonly value: T; readonly issues?: undefined }
-	| { readonly issues: readonly StandardSchemaIssue[] };
-
-export interface ConfigFileSchema<T> {
-	readonly "~standard": {
-		readonly validate: (value: unknown) => StandardSchemaResult<T> | Promise<StandardSchemaResult<T>>;
-	};
-}
-
-type SchemaCheckResult<T> =
-	| { value: T; schemaErrors?: undefined }
-	| { value?: undefined; schemaErrors: ConfigSchemaError[] };
-
-function isPromiseResult<T>(
-	result: StandardSchemaResult<T> | Promise<StandardSchemaResult<T>>,
-): result is Promise<StandardSchemaResult<T>> {
-	return typeof result === "object" && result !== null && "then" in result;
-}
-
-function standardInstancePath(path: readonly StandardSchemaPathSegment[] | undefined): string {
-	if (!path || path.length === 0) return "root";
-	let rendered = "";
-	for (const segment of path) {
-		const key = typeof segment === "object" && segment !== null ? segment.key : segment;
-		rendered += `/${String(key)}`;
-	}
-	return rendered;
-}
-
-function checkSchema<T>(schema: ConfigFileSchema<T>, value: unknown): SchemaCheckResult<T> {
-	const result = schema["~standard"].validate(value);
-	if (isPromiseResult(result)) {
-		throw new Error("Config schemas must validate synchronously");
-	}
-	if (!result.issues) return { value: result.value };
-	const schemaErrors: ConfigSchemaError[] = [];
-	for (const issue of result.issues) {
-		schemaErrors.push({ instancePath: standardInstancePath(issue.path), message: issue.message });
-	}
-	return { schemaErrors };
 }
 
 /**
@@ -104,7 +55,7 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 
 export interface IConfigFile<T> {
 	readonly id: string;
-	readonly schema: ConfigFileSchema<T>;
+	readonly schema: Type;
 	path?(): string;
 	load(): T | null;
 	invalidate?(): void;
@@ -178,7 +129,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 	constructor(
 		readonly id: string,
-		readonly schema: ConfigFileSchema<T>,
+		readonly schema: Type,
 		configPath: string = path.join(getAgentDir(), `${id}.yml`),
 	) {
 		this.#basePath = configPath;
@@ -242,10 +193,10 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	}
 
 	createDefault(): T {
-		const parsed = checkSchema(this.schema, {});
-		if (!parsed.schemaErrors) return parsed.value;
-		const fallback = checkSchema(this.schema, undefined);
-		if (!fallback.schemaErrors) return fallback.value;
+		const parsed = this.schema({});
+		if (!(parsed instanceof ArkErrors)) return parsed as T;
+		const fallback = this.schema(undefined);
+		if (!(fallback instanceof ArkErrors)) return fallback as T;
 		throw new ConfigError(this.id, undefined, {
 			err: new Error("Schema produced no default value"),
 			stage: "createDefault",
@@ -268,13 +219,17 @@ export class ConfigFile<T> implements IConfigFile<T> {
 				throw new Error(`Invalid config file path: ${this.#basePath}`);
 			}
 
-			const checked = checkSchema(this.schema, parsed);
-			if (checked.schemaErrors) {
-				const error = new ConfigError(this.id, checked.schemaErrors);
+			const checked = this.schema(parsed);
+			if (checked instanceof ArkErrors) {
+				const schemaErrors: ConfigSchemaError[] = checked.map(error => ({
+					instancePath: error.path.length === 0 ? "root" : error.path.join("."),
+					message: error.problem,
+				}));
+				const error = new ConfigError(this.id, schemaErrors);
 				logger.warn("Failed to parse config file", { path: this.path(), error });
 				return this.#storeCache({ error, status: "error" });
 			}
-			const value = checked.value;
+			const value = checked as T;
 			try {
 				this.#auxValidate?.(value);
 			} catch (error) {

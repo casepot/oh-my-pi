@@ -330,10 +330,24 @@ export class RpcClient {
 		if (options.onExtensionError) this.#extensionErrorListeners.push(options.onExtensionError);
 	}
 
+	/**
+	 * Start the RPC agent process.
+	 *
+	 * Safe to call again after {@link stop} on the same instance: a fresh
+	 * {@link AbortController} is minted for each start, and any failure after
+	 * the child spawn kills the child and clears internal state so callers may
+	 * retry without leaking processes.
+	 */
 	async start(): Promise<void> {
-		if (this.#process) throw new Error("Client already started");
+		if (this.#process) {
+			throw new Error("Client already started");
+		}
 		this.#closed = false;
+
+		// Mint a fresh controller so a previous stop()'s abort does not
+		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
+
 		const baseCommand = this.#options.command
 			? [this.#options.command.cmd, ...(this.#options.command.args ?? [])]
 			: ["bun", this.#options.cliPath ?? "dist/cli.js"];
@@ -342,11 +356,13 @@ export class RpcClient {
 		if (this.#options.model) args.push("--model", this.#options.model);
 		if (this.#options.sessionDir) args.push("--session-dir", this.#options.sessionDir);
 		if (this.#options.args) args.push(...this.#options.args);
-		this.#process = ptree.spawn([...baseCommand, ...args], {
+
+		const child = ptree.spawn([...baseCommand, ...args], {
 			cwd: this.#options.cwd,
 			env: { ...Bun.env, ...this.#options.env },
 			stdin: "pipe",
 		});
+		this.#process = child;
 
 		const { promise: readyPromise, resolve: readyResolve, reject: readyReject } = Promise.withResolvers<void>();
 		let readySettled = false;
@@ -357,37 +373,63 @@ export class RpcClient {
 			else readyResolve();
 		};
 
-		const lines = readJsonl(this.#process.stdout, this.#abortController.signal);
+		// Process lines in background, intercepting the ready signal.
+		const lines = readJsonl(child.stdout, this.#abortController.signal);
 		void (async () => {
 			for await (const line of lines) {
 				if (!readySettled && isRecord(line) && line.type === "ready") settleReady();
 				this.#handleLine(line);
 			}
-			const error = new Error(`Agent process stdout closed. Stderr: ${this.#process?.peekStderr() ?? ""}`);
-			if (!readySettled) settleReady(error);
-			this.#close(error, false);
+			// Stream ended without the ready signal — the child exited or is
+			// exiting. Defer until ptree has drained stderr so startup errors are
+			// reported with the full stderr tail.
+			if (readySettled) return;
+			await child.exited.catch(() => {});
+			settleReady(new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`));
 		})().catch((err: Error) => {
 			if (!readySettled) settleReady(err);
-			this.#close(err, false);
+			if (this.#process === child) this.#close(err, false);
 		});
 
-		void this.#process.exited.then((exitCode: number) => {
-			const err = new Error(
-				`Agent process exited with code ${exitCode}. Stderr: ${this.#process?.peekStderr() ?? ""}`,
-			);
-			if (!readySettled) settleReady(err);
-			this.#close(err, false);
-		});
+		// Also race against process exit (in case stdout closes before we read it).
+		void child.exited.then(
+			(exitCode: number) => {
+				const err = new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`);
+				if (!readySettled) settleReady(err);
+				if (this.#process === child) this.#close(err, false);
+			},
+			(err: Error) => {
+				const error = new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`, { cause: err });
+				if (!readySettled) settleReady(error);
+				if (this.#process === child) this.#close(error, false);
+			},
+		);
 
 		const readyTimeout = this.#startTimeout(30000, () => {
-			settleReady(
-				new Error(`Timeout waiting for agent to become ready. Stderr: ${this.#process?.peekStderr() ?? ""}`),
-			);
+			settleReady(new Error(`Timeout waiting for agent to become ready. Stderr: ${child.peekStderr()}`));
 		});
 		try {
 			await readyPromise;
-			if (this.#customTools.length > 0) await this.setCustomTools(this.#customTools);
-			if (this.#hostUris.length > 0) await this.setHostUris(this.#hostUris);
+			if (this.#customTools.length > 0) {
+				await this.setCustomTools(this.#customTools);
+			}
+			if (this.#hostUris.length > 0) {
+				await this.setHostUris(this.#hostUris);
+			}
+		} catch (err) {
+			// Startup failed after we spawned the child. Kill it and clear
+			// state so the caller (or a retry via start() again) does not
+			// leak the abandoned process (issue #4079).
+			try {
+				child.kill();
+			} catch {
+				// best-effort cleanup
+			}
+			this.#abortController.abort();
+			if (this.#process === child) {
+				this.#process = null;
+			}
+			throw err;
 		} finally {
 			clearTimeout(readyTimeout);
 		}
@@ -734,13 +776,26 @@ export class RpcClient {
 		}>(response).providers;
 	}
 
+	/**
+	 * Trigger OAuth login for the given provider.
+	 * The server will emit an `open_url` extension_ui_request for the auth URL.
+	 * Resolves when login completes or rejects on failure.
+	 *
+	 * @param onOpenUrl Called when the server emits the auth URL. The host must
+	 *   open `url` in a browser for the callback-server OAuth flow to complete.
+	 *   When the flow's callback server hosts a `/launch` redirect, `launchUrl`
+	 *   is a short loopback URL that 302s to `url` — hosts SHOULD surface it as
+	 *   the truncation-safe copy target so terminal viewport clipping cannot
+	 *   corrupt trailing OAuth query parameters (e.g. `code_challenge_method=S256`).
+	 */
 	async login(
 		providerId: string,
-		options?: { onOpenUrl?: (url: string, instructions?: string) => void },
+		options?: { onOpenUrl?: (url: string, instructions?: string, launchUrl?: string) => void },
 	): Promise<{ providerId: string }> {
-		const listener = options?.onOpenUrl
+		const { onOpenUrl } = options ?? {};
+		const listener = onOpenUrl
 			? (req: RpcExtensionUIRequest) => {
-					if (req.method === "open_url") options.onOpenUrl?.(req.url, req.instructions);
+					if (req.method === "open_url") onOpenUrl(req.url, req.instructions, req.launchUrl);
 				}
 			: undefined;
 		if (listener) this.#extensionUiListeners.add(listener);

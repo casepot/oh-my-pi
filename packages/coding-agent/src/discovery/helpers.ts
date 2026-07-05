@@ -909,6 +909,13 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 
 const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
 
+const pluginCacheInvalidators = new Set<() => void>();
+
+/** Register a process-global plugin cache invalidator called whenever plugin roots are cleared. */
+export function registerPluginCacheInvalidator(invalidator: () => void): void {
+	pluginCacheInvalidators.add(invalidator);
+}
+
 /**
  * List all OMP marketplace plugin roots.
  *
@@ -1050,6 +1057,7 @@ export async function listClaudePluginRoots(
  */
 export function clearClaudePluginRootsCache(): void {
 	pluginRootsCache.clear();
+	for (const invalidate of pluginCacheInvalidators) invalidate();
 	preloadedPluginRoots = [...injectedPluginDirRoots];
 	// Re-warm preloaded roots asynchronously so sync LSP config reads stay valid
 	if (lastPreloadHome) {
