@@ -4,7 +4,7 @@
  * Artifacts are stored in a directory alongside the session file,
  * accessible via artifact:// URLs.
  */
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 /**
@@ -23,6 +23,16 @@ function sanitizeToolType(toolType: string): string {
 		.slice(0, 64)
 		.replace(/^_+|_+$/g, "");
 	return sanitized.length > 0 ? sanitized : "tool";
+}
+
+const ARTIFACT_REF_PATTERN = /artifact:\/\/(\d+)(?=$|[^A-Za-z0-9_-])/g;
+const ARTIFACT_LOG_FILE_PATTERN = /^(\d+)\..*\.log$/;
+const JSONL_SUFFIX_LENGTH = ".jsonl".length;
+
+export interface ArtifactCopyReport {
+	copiedIds: string[];
+	missingIds: string[];
+	failedIds: Array<{ id: string; error: string }>;
 }
 
 /**
@@ -56,13 +66,33 @@ export class ArtifactManager {
 		return this.#dir;
 	}
 
+	static directoryForSessionFile(sessionFile: string | undefined): string | null {
+		return sessionFile ? sessionFile.slice(0, -JSONL_SUFFIX_LENGTH) : null;
+	}
+
+	static forSessionFile(sessionFile: string | undefined): ArtifactManager | null {
+		const dir = ArtifactManager.directoryForSessionFile(sessionFile);
+		return dir ? new ArtifactManager(dir) : null;
+	}
+
 	async #ensureDir(): Promise<void> {
 		if (!this.#dirCreated) {
-			await fs.mkdir(this.#dir, { recursive: true });
+			await fs.promises.mkdir(this.#dir, { recursive: true });
 			this.#dirCreated = true;
 		}
 		if (!this.#initialized) {
 			await this.#scanExistingIds();
+			this.#initialized = true;
+		}
+	}
+
+	#ensureDirSync(): void {
+		if (!this.#dirCreated) {
+			fs.mkdirSync(this.#dir, { recursive: true });
+			this.#dirCreated = true;
+		}
+		if (!this.#initialized) {
+			this.#scanExistingIdsSync();
 			this.#initialized = true;
 		}
 	}
@@ -72,11 +102,18 @@ export class ArtifactManager {
 	 * This ensures we don't overwrite artifacts when resuming a session.
 	 */
 	async #scanExistingIds(): Promise<void> {
-		const files = await this.listFiles();
+		this.#scanExistingFiles(await this.listFiles());
+	}
+
+	#scanExistingIdsSync(): void {
+		this.#scanExistingFiles(this.listFilesSync());
+	}
+
+	#scanExistingFiles(files: string[]): void {
 		let maxId = -1;
 		for (const file of files) {
 			// Files are named: {id}.{toolType}.log
-			const match = file.match(/^(\d+)\..*\.log$/);
+			const match = file.match(ARTIFACT_LOG_FILE_PATTERN);
 			if (match) {
 				const id = parseInt(match[1], 10);
 				if (id > maxId) maxId = id;
@@ -133,10 +170,77 @@ export class ArtifactManager {
 	 */
 	async listFiles(): Promise<string[]> {
 		try {
-			return await fs.readdir(this.#dir);
+			return await fs.promises.readdir(this.#dir);
 		} catch {
 			return [];
 		}
+	}
+
+	/**
+	 * Synchronous variant for branch creation, which is intentionally a synchronous
+	 * SessionManager API for existing callers.
+	 */
+	listFilesSync(): string[] {
+		try {
+			return fs.readdirSync(this.#dir);
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Collect numeric artifact IDs referenced in persisted session payloads.
+	 */
+	static referencedIdsIn(value: unknown): string[] {
+		const text = typeof value === "string" ? value : JSON.stringify(value);
+		if (!text) return [];
+
+		const ids = new Set<string>();
+		ARTIFACT_REF_PATTERN.lastIndex = 0;
+		let match = ARTIFACT_REF_PATTERN.exec(text);
+		while (match !== null) {
+			ids.add(match[1]);
+			match = ARTIFACT_REF_PATTERN.exec(text);
+		}
+		return [...ids];
+	}
+
+	/**
+	 * Copy all files backing the given artifact IDs from another session's artifact
+	 * directory into this manager's directory, preserving the original filenames
+	 * (and therefore tool-type extensions/metadata suffixes).
+	 *
+	 * Missing source artifacts are reported rather than thrown so unrelated branch
+	 * creation can still succeed.
+	 */
+	copyReferencedArtifactsFromSync(source: ArtifactManager, ids: Iterable<string>): ArtifactCopyReport {
+		const report: ArtifactCopyReport = { copiedIds: [], missingIds: [], failedIds: [] };
+		const sourceFiles = source.listFilesSync();
+		let targetReady = false;
+
+		for (const id of new Set(ids)) {
+			const files = sourceFiles.filter(file => file.startsWith(`${id}.`));
+			if (files.length === 0) {
+				report.missingIds.push(id);
+				continue;
+			}
+
+			try {
+				if (!targetReady) {
+					this.#ensureDirSync();
+					targetReady = true;
+				}
+				for (const file of files) {
+					fs.copyFileSync(path.join(source.dir, file), path.join(this.#dir, file));
+				}
+				report.copiedIds.push(id);
+			} catch (error) {
+				report.failedIds.push({ id, error: error instanceof Error ? error.message : String(error) });
+			}
+		}
+
+		if (targetReady) this.#scanExistingIdsSync();
+		return report;
 	}
 
 	/**

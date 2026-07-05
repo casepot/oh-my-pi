@@ -86,7 +86,6 @@ import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slo
 export type { ModeChangeEntry } from "./session-entries";
 export { getLatestCompactionEntry };
 
-const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
 const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
 
@@ -100,10 +99,6 @@ function nowIso(): string {
 
 function fileSafeTimestamp(iso: string): string {
 	return iso.replace(/[:.]/g, "-");
-}
-
-function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
-	return sessionFile ? sessionFile.slice(0, -JSONL_SUFFIX_LENGTH) : null;
 }
 
 /**
@@ -849,9 +844,35 @@ export class SessionManager {
 
 		if (this.#artifactManager && this.#artifactManagerSessionFile === sessionFile) return this.#artifactManager;
 
-		this.#artifactManager = new ArtifactManager(sessionFile.slice(0, -JSONL_SUFFIX_LENGTH));
+		const manager = ArtifactManager.forSessionFile(sessionFile);
+		if (!manager) return null;
+
+		this.#artifactManager = manager;
 		this.#artifactManagerSessionFile = sessionFile;
 		return this.#artifactManager;
+	}
+
+	#preserveBranchArtifacts(
+		sourceSessionFile: string | undefined,
+		targetSessionFile: string,
+		entries: readonly SessionEntry[],
+	): void {
+		const artifactIds = ArtifactManager.referencedIdsIn(entries);
+		if (artifactIds.length === 0) return;
+
+		const source = ArtifactManager.forSessionFile(sourceSessionFile);
+		const target = ArtifactManager.forSessionFile(targetSessionFile);
+		if (!source || !target) return;
+
+		const report = target.copyReferencedArtifactsFromSync(source, artifactIds);
+		if (report.missingIds.length === 0 && report.failedIds.length === 0) return;
+
+		logger.warn("Session branch artifact preservation incomplete", {
+			sourceSessionFile,
+			targetSessionFile,
+			missingArtifactIds: report.missingIds,
+			failedArtifactIds: report.failedIds,
+		});
 	}
 
 	#notifySessionNameListeners(): void {
@@ -1070,8 +1091,8 @@ export class SessionManager {
 
 			const oldSessionFile = this.#sessionFile;
 			const newSessionFile = path.join(nextSessionDir, path.basename(oldSessionFile));
-			const oldArtifactsDir = artifactsDirectoryFor(oldSessionFile)!;
-			const newArtifactsDir = artifactsDirectoryFor(newSessionFile)!;
+			const oldArtifactsDir = ArtifactManager.directoryForSessionFile(oldSessionFile)!;
+			const newArtifactsDir = ArtifactManager.directoryForSessionFile(newSessionFile)!;
 			const sessionPathChanged = path.resolve(oldSessionFile) !== path.resolve(newSessionFile);
 			const artifactPathChanged = path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
 			sessionFileExisted = this.#storage.existsSync(oldSessionFile);
@@ -1239,7 +1260,7 @@ export class SessionManager {
 
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
-		return artifactsDirectoryFor(this.#sessionFile);
+		return ArtifactManager.directoryForSessionFile(this.#sessionFile);
 	}
 
 	adoptArtifactManager(manager: ArtifactManager): void {
@@ -1811,6 +1832,7 @@ export class SessionManager {
 
 		this.#sessionFile = newSessionFile;
 		this.#rewriteSynchronously();
+		this.#preserveBranchArtifacts(sourceSessionFile, newSessionFile, entriesToKeep);
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
 		return newSessionFile;
 	}
