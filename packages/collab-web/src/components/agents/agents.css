@@ -114,6 +114,18 @@
 	animation: ag-pulse 1.6s ease-out infinite;
 }
 
+.ag-dot--waiting {
+	background: var(--ring);
+}
+
+.ag-dot--paused {
+	background: var(--accent);
+}
+
+.ag-dot--idle {
+	background: var(--fg-muted);
+}
+
 .ag-dot--parked {
 	background: var(--warn);
 }
@@ -149,6 +161,21 @@
 .ag-chip--running {
 	border-color: color-mix(in srgb, var(--ok) 35%, transparent);
 	color: var(--ok);
+}
+
+.ag-chip--waiting {
+	border-color: var(--ring);
+	color: var(--ring);
+}
+
+.ag-chip--paused {
+	border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+	color: var(--accent);
+}
+
+.ag-chip--idle {
+	border-color: var(--border-strong);
+	color: var(--fg-muted);
 }
 
 .ag-chip--parked {
@@ -242,6 +269,32 @@
 	flex: none;
 	align-items: center;
 	gap: 6px;
+}
+
+.ag-status-detail {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	align-items: baseline;
+	gap: 8px;
+	padding: 7px 14px;
+	border-bottom: 1px solid var(--border);
+	background: var(--bg-inset);
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+
+.ag-status-detail-code {
+	color: var(--accent);
+	white-space: nowrap;
+}
+
+.ag-status-detail-reason {
+	overflow-wrap: anywhere;
+}
+
+.ag-status-detail-meta {
+	color: var(--fg-faint);
+	white-space: nowrap;
 }
 
 /* ── Buttons ──────────────────────────────────────────────────────── */

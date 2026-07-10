@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Rendered waiting, paused, idle, and parked subagent lifecycle states and reasons distinctly, with lifecycle-safe messaging and revival controls.
+
 ## [16.3.7] - 2026-07-05
 
 ### Fixed

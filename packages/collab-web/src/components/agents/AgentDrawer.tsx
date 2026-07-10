@@ -3,7 +3,7 @@ import { OctagonX, RotateCcw, SendHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { GuestClient } from "../../lib/client";
-import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
+import { fmtCost, fmtDuration, fmtTokens, relTime } from "../../lib/format";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
 import type { TranscriptProps } from "../transcript/Transcript";
 import { Transcript } from "../transcript/Transcript";
@@ -125,7 +125,7 @@ export function AgentDrawer(props: {
 							kill
 						</button>
 					) : null}
-					{(agent.status === "parked" || agent.status === "aborted") && !readOnly ? (
+					{agent.status === "parked" && !readOnly ? (
 						<button type="button" className="ag-btn" onClick={() => client.sendAgentCmd("revive", agent.id)}>
 							<RotateCcw size={13} aria-hidden />
 							revive
@@ -136,6 +136,18 @@ export function AgentDrawer(props: {
 					</button>
 				</div>
 			</header>
+			{agent.statusDetail ? (
+				<div className="ag-status-detail">
+					<span className="ag-status-detail-code">{agent.statusDetail.code.replaceAll("_", " ")}</span>
+					<span className="ag-status-detail-reason">{agent.statusDetail.reason}</span>
+					<span className="ag-status-detail-meta">
+						{agent.statusDetail.consecutive !== undefined
+							? `attempt ${agent.statusDetail.consecutive}${agent.statusDetail.limit !== undefined ? `/${agent.statusDetail.limit}` : ""} · `
+							: ""}
+						{relTime(agent.statusDetail.since)}
+					</span>
+				</div>
+			) : null}
 			{p ? (
 				<div className="ag-stats">
 					<span className="ag-stat">
@@ -188,7 +200,7 @@ export function AgentDrawer(props: {
 					<div className="ag-empty">no transcript available</div>
 				)}
 			</div>
-			{!readOnly && (
+			{!readOnly && agent.status !== "aborted" && (
 				<form
 					className="ag-chat"
 					onSubmit={e => {

@@ -37,6 +37,9 @@ function activityLine(
 	lc: SubagentLifecyclePayload | undefined,
 	now: number,
 ): string {
+	if (agent.status !== "running") {
+		return agent.statusDetail?.reason ? `${agent.status} · ${agent.statusDetail.reason}` : agent.status;
+	}
 	if (p?.currentTool) {
 		const start = toolStartMs(p);
 		if (start !== null) return `${p.currentTool} · ${fmtDuration(Math.max(0, now - start))}`;

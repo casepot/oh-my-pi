@@ -17,10 +17,20 @@ interface IrcMsg {
 	replyTo?: string;
 }
 
+type AgentStatus = "running" | "waiting" | "paused" | "idle" | "parked" | "aborted";
+interface AgentStatusDetail {
+	code: "no_progress" | "provider_retry" | "external_wait";
+	reason: string;
+	since: number;
+	consecutive?: number;
+	limit?: number;
+}
+
 interface IrcPeer {
 	id: string;
 	kind: string;
-	status: string;
+	status: AgentStatus;
+	statusDetail?: AgentStatusDetail;
 	parentId?: string;
 	unread: number;
 }
@@ -56,7 +66,52 @@ function parseInbox(value: unknown): IrcMsg[] {
 	return out;
 }
 
-const PEER_STATUS_ORDER: Record<string, number> = { running: 0, idle: 1, parked: 2 };
+const PEER_STATUS_ORDER: Record<AgentStatus, number> = {
+	running: 0,
+	waiting: 1,
+	paused: 2,
+	idle: 3,
+	parked: 4,
+	aborted: 5,
+};
+
+function parseAgentStatus(value: unknown): AgentStatus | null {
+	switch (str(value)) {
+		case "running":
+			return "running";
+		case "waiting":
+			return "waiting";
+		case "paused":
+			return "paused";
+		case "idle":
+			return "idle";
+		case "parked":
+			return "parked";
+		case "aborted":
+			return "aborted";
+		default:
+			return null;
+	}
+}
+
+function parseStatusDetail(value: unknown): AgentStatusDetail | undefined {
+	if (!isRecord(value)) return undefined;
+	const code = str(value.code);
+	const reason = str(value.reason);
+	const since = value.since;
+	if (
+		(code !== "no_progress" && code !== "provider_retry" && code !== "external_wait") ||
+		reason === null ||
+		typeof since !== "number" ||
+		!Number.isFinite(since)
+	) {
+		return undefined;
+	}
+	const consecutive =
+		typeof value.consecutive === "number" && Number.isFinite(value.consecutive) ? value.consecutive : undefined;
+	const limit = typeof value.limit === "number" && Number.isFinite(value.limit) ? value.limit : undefined;
+	return { code, reason, since, consecutive, limit };
+}
 
 function parsePeers(value: unknown): IrcPeer[] {
 	if (!Array.isArray(value)) return [];
@@ -65,10 +120,13 @@ function parsePeers(value: unknown): IrcPeer[] {
 		if (!isRecord(item)) continue;
 		const id = str(item.id);
 		if (id === null) continue;
+		const status = parseAgentStatus(item.status);
+		if (status === null) continue;
 		out.push({
 			id,
 			kind: str(item.kind) ?? "?",
-			status: str(item.status) ?? "?",
+			status,
+			statusDetail: parseStatusDetail(item.statusDetail),
 			parentId: str(item.parentId) ?? undefined,
 			unread: typeof item.unread === "number" && Number.isFinite(item.unread) ? item.unread : 0,
 		});
@@ -92,15 +150,19 @@ function outcomeTone(outcome: string): Tone | undefined {
 	}
 }
 
-function statusTone(status: string): Tone | undefined {
+function statusTone(status: AgentStatus): Tone | undefined {
 	switch (status) {
 		case "running":
 			return "accent";
+		case "waiting":
+			return "accent";
+		case "paused":
+			return "warn";
 		case "idle":
 			return "ok";
 		case "parked":
 			return undefined;
-		default:
+		case "aborted":
 			return "err";
 	}
 }
@@ -246,6 +308,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 							<Badge tone={statusTone(peer.status)}>{peer.status}</Badge>{" "}
 							<span className="tv-faint">
 								{peer.parentId ? `${peer.kind} · of ${peer.parentId}` : peer.kind}
+								{peer.statusDetail && ` · ${normalizeWs(peer.statusDetail.reason)}`}
 							</span>
 							{peer.unread > 0 && (
 								<>

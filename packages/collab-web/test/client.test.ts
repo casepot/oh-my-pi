@@ -52,7 +52,7 @@ function messageEntry(id: string, message: WireMessage): SessionEntry {
 	return { type: "message", id, parentId: null, timestamp: "2026-06-12T00:00:01Z", message };
 }
 
-function welcomeFrame(entryCount = 0, readOnly?: boolean): HostFrame {
+function welcomeFrame(entryCount = 0, readOnly?: boolean): Extract<HostFrame, { t: "welcome" }> {
 	return { t: "welcome", proto: COLLAB_PROTO, header: HEADER, state: STATE, agents: AGENTS, entryCount, readOnly };
 }
 
@@ -91,6 +91,43 @@ describe("GuestClient frame apply", () => {
 		expect(client.getSnapshot().readOnly).toBe(false);
 		client.applyFrameForTest(welcomeFrame(0, true));
 		expect(client.getSnapshot().readOnly).toBe(true);
+	});
+
+	it("retains waiting and paused status detail from welcome and agents frames", () => {
+		const waiting: AgentSnapshot = {
+			id: "sub-1",
+			displayName: "Waiting Agent",
+			kind: "sub",
+			parentId: "main",
+			status: "waiting",
+			statusDetail: {
+				code: "provider_retry",
+				reason: "provider retry backoff",
+				since: 1_000,
+				consecutive: 2,
+				limit: 4,
+			},
+			hasSessionFile: true,
+			createdAt: 500,
+			lastActivity: 1_000,
+		};
+		const client = new GuestClient(LINK, "tester");
+		client.applyFrameForTest({ ...welcomeFrame(), agents: [waiting] });
+		expect(client.getSnapshot().agents[0]).toEqual(waiting);
+
+		const paused: AgentSnapshot = {
+			...waiting,
+			status: "paused",
+			statusDetail: {
+				code: "no_progress",
+				reason: "paused after repeated tool loops",
+				since: 2_000,
+				consecutive: 3,
+				limit: 3,
+			},
+		};
+		client.applyFrameForTest({ t: "agents", agents: [paused] });
+		expect(client.getSnapshot().agents[0]).toEqual(paused);
 	});
 
 	it("times out stalled snapshot chunks and resets the clock on progress", () => {
