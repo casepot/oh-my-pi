@@ -66,6 +66,7 @@ import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillComman
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
+	assistantUsageIsBilled,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
@@ -522,7 +523,10 @@ export class UiHelpers {
 						this.ctx.pendingTools.set(content.id, component);
 					}
 				}
-				pendingUsage = this.ctx.settings.get("display.showTokenUsage") ? message.usage : undefined;
+				pendingUsage =
+					this.ctx.settings.get("display.showTokenUsage") && assistantUsageIsBilled(message.usage)
+						? message.usage
+						: undefined;
 				pendingUsageDuration = message.duration;
 				pendingUsageTtft = message.ttft;
 			} else if (message.role === "toolResult") {
@@ -636,7 +640,7 @@ export class UiHelpers {
 		} else {
 			this.ctx.resetTranscript();
 		}
-		this.ctx.pendingMessagesContainer.clear();
+		this.ctx.pendingMessagesContainer.disposeChildren();
 		this.ctx.pendingBashComponents = [];
 		this.ctx.pendingPythonComponents = [];
 
@@ -704,7 +708,7 @@ export class UiHelpers {
 	}
 
 	updatePendingMessagesDisplay(): void {
-		this.ctx.pendingMessagesContainer.clear();
+		this.ctx.pendingMessagesContainer.disposeChildren();
 		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
 		const steeringMessages: Array<{ message: string; label: string }> = [];

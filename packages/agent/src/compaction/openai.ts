@@ -85,9 +85,53 @@ export interface RemoteCompactionResponse {
 export interface RemoteCompactionRequestOptions {
 	fetch?: FetchImpl;
 	timeoutMs?: number;
+	model?: Model;
+	apiKey?: string;
 }
 
 export const DEFAULT_REMOTE_COMPACTION_TIMEOUT_MS = REMOTE_COMPACTION_TIMEOUT_MS;
+
+function parseRemoteCompactionResponse(data: unknown): RemoteCompactionResponse | undefined {
+	if (!data || typeof data !== "object" || !("summary" in data) || typeof data.summary !== "string") {
+		return undefined;
+	}
+
+	const response: RemoteCompactionResponse = { summary: data.summary };
+	if ("shortSummary" in data && typeof data.shortSummary === "string") {
+		response.shortSummary = data.shortSummary;
+	}
+	return response;
+}
+
+function parseRemoteChatCompletionSummary(data: unknown): string | undefined {
+	if (!data || typeof data !== "object" || !("choices" in data) || !Array.isArray(data.choices)) {
+		return undefined;
+	}
+	const firstChoice = data.choices[0];
+	if (!firstChoice || typeof firstChoice !== "object" || !("message" in firstChoice)) {
+		return undefined;
+	}
+	const message = firstChoice.message;
+	if (!message || typeof message !== "object" || !("content" in message)) {
+		return undefined;
+	}
+	const content = message.content;
+	if (typeof content === "string") {
+		return content.length > 0 ? content : undefined;
+	}
+	if (!Array.isArray(content)) {
+		return undefined;
+	}
+
+	const chunks: string[] = [];
+	for (const part of content) {
+		if (part && typeof part === "object" && "text" in part && typeof part.text === "string") {
+			chunks.push(part.text);
+		}
+	}
+	const summary = chunks.join("");
+	return summary.length > 0 ? summary : undefined;
+}
 
 export type RemoteCompactionFailureKind = "timeout" | "http" | "malformed" | "network";
 
@@ -729,18 +773,57 @@ export async function requestOpenAiRemoteCompaction(
 	}
 }
 
+/**
+ * Generic remote-compaction POST. Two wire shapes are auto-selected by
+ * endpoint suffix so a single `compaction.remoteEndpoint` setting can point at
+ * either a purpose-built omp summarizer (`{systemPrompt, prompt}` → `{summary}`)
+ * or any OpenAI-compatible chat-completions server (`/chat/completions`,
+ * `/v1/chat/completions`, …) as reported for llama.cpp / vLLM / etc. in
+ * issue #4630: without this, the omp payload was rejected with
+ * HTTP 400 `"'messages' is required"`, compaction silently fell back to
+ * local summarization, and context grew unbounded.
+ *
+ * When `context.model` is provided the chat-completions body is tagged with
+ * that model's wire id (llama.cpp requires the field) and `context.apiKey` is
+ * forwarded as `Authorization: Bearer`. Callers wrap this in `withAuth` so
+ * 401s force-refresh through the standard credential rotation policy.
+ */
 export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
 	opts?: RemoteCompactionRequestOptions,
 ): Promise<RemoteCompactionResponse> {
+	let endpointPath = endpoint;
+	try {
+		endpointPath = new URL(endpoint).pathname;
+	} catch {
+		// Keep the raw endpoint for relative/custom fetch implementations.
+	}
+	const isChatCompletions = /\/chat\/completions\/?$/.test(endpointPath);
+	const headers: Record<string, string> = { "content-type": "application/json" };
+	if (isChatCompletions) {
+		if (opts?.apiKey) headers.Authorization = `Bearer ${opts.apiKey}`;
+		if (opts?.model?.headers) Object.assign(headers, opts.model.headers);
+	}
+
+	const body: Record<string, unknown> = isChatCompletions
+		? {
+				model: opts?.model ? resolveOpenAiCompactModel(opts.model) : undefined,
+				messages: [
+					{ role: "system", content: request.systemPrompt },
+					{ role: "user", content: request.prompt },
+				],
+				stream: false,
+			}
+		: { systemPrompt: request.systemPrompt, prompt: request.prompt };
+
 	const signalScope = createRemoteSignalScope(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS);
 	try {
 		const response = await (opts?.fetch ?? fetch)(endpoint, {
 			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(request),
+			headers,
+			body: JSON.stringify(body),
 			signal: signalScope.signal,
 		});
 
@@ -751,6 +834,8 @@ export async function requestRemoteCompaction(
 				{
 					kind: "http",
 					endpoint,
+					model: opts?.model?.id,
+					provider: opts?.model?.provider,
 					callerSignal: signal,
 					timeoutMs: signalScope.timeoutMs,
 					timedOut: signalScope.timedOut(),
@@ -763,26 +848,50 @@ export async function requestRemoteCompaction(
 			throw error;
 		}
 
-		let data: RemoteCompactionResponse | undefined;
+		let rawData: unknown;
 		try {
-			data = (await response.json()) as RemoteCompactionResponse | undefined;
+			rawData = await response.json();
 		} catch (err) {
 			if (signal?.aborted || signalScope.timedOut()) {
-				throw classifyRemoteRequestError(err, endpoint, signal, signalScope);
+				throw classifyRemoteRequestError(err, endpoint, signal, signalScope, opts?.model);
 			}
 			throw makeRemoteCompactionError("Remote compaction response invalid JSON", {
 				kind: "malformed",
 				endpoint,
+				model: opts?.model?.id,
+				provider: opts?.model?.provider,
 				callerSignal: signal,
 				timeoutMs: signalScope.timeoutMs,
 				timedOut: false,
 				error: err,
 			});
 		}
-		if (!data || typeof data.summary !== "string") {
+
+		if (isChatCompletions) {
+			const summary = parseRemoteChatCompletionSummary(rawData);
+			if (summary === undefined) {
+				const error = makeRemoteCompactionError("Remote compaction response missing choices[0].message.content", {
+					kind: "malformed",
+					endpoint,
+					model: opts?.model?.id,
+					provider: opts?.model?.provider,
+					callerSignal: signal,
+					timeoutMs: signalScope.timeoutMs,
+					timedOut: signalScope.timedOut(),
+				});
+				logger.warn("Remote chat-completions compaction response missing summary", { ...error.details });
+				throw error;
+			}
+			return { summary };
+		}
+
+		const data = parseRemoteCompactionResponse(rawData);
+		if (!data) {
 			const error = makeRemoteCompactionError("Remote compaction response missing summary", {
 				kind: "malformed",
 				endpoint,
+				model: opts?.model?.id,
+				provider: opts?.model?.provider,
 				callerSignal: signal,
 				timeoutMs: signalScope.timeoutMs,
 				timedOut: signalScope.timedOut(),
@@ -796,7 +905,7 @@ export async function requestRemoteCompaction(
 		if (err instanceof RemoteCompactionError || err instanceof CompactionCancelledError) {
 			throw err;
 		}
-		throw classifyRemoteRequestError(err, endpoint, signal, signalScope);
+		throw classifyRemoteRequestError(err, endpoint, signal, signalScope, opts?.model);
 	} finally {
 		signalScope.cleanup();
 	}

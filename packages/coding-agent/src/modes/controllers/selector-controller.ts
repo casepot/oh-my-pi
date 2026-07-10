@@ -593,13 +593,27 @@ export class SelectorController {
 				this.ctx.settings,
 				this.ctx.session.modelRegistry,
 				this.ctx.session.scopedModels,
-				async (model, role, thinkingLevel, selector) => {
+				async (model, role, thinkingLevel, selector, action) => {
 					// `auto` is session-global: never baked into a per-role model value
 					// (it can't round-trip through `model:<level>`). Apply it to the session
 					// separately and persist via `defaultThinkingLevel`.
 					const isAuto = thinkingLevel === AUTO_THINKING;
 					const concreteThinking = isAuto ? undefined : thinkingLevel;
+					const selectorValue = selector ?? `${model.provider}/${model.id}`;
 					try {
+						if (action === "retryFallback" && role !== null) {
+							const fallbackSelector = formatModelSelectorValue(selectorValue, concreteThinking);
+							const fallbackChains = this.ctx.settings.get("retry.fallbackChains");
+							const chain = Array.isArray(fallbackChains[role]) ? fallbackChains[role] : [];
+							this.ctx.settings.set("retry.fallbackChains", {
+								...fallbackChains,
+								[role]: [fallbackSelector, ...chain.filter(existing => existing !== fallbackSelector)],
+							});
+							const roleInfo = getRoleInfo(role, settings);
+							const roleLabel = roleInfo?.name ?? role;
+							this.ctx.showStatus(`${roleLabel} fallback model: ${fallbackSelector}`);
+							return;
+						}
 						if (role === null) {
 							// Temporary: update agent state but don't persist the model to settings
 							await this.ctx.session.setModelTemporary(model);
@@ -771,7 +785,6 @@ export class SelectorController {
 						return;
 					}
 
-					this.ctx.chatContainer.clear();
 					this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 					this.ctx.editor.setText(result.selectedText);
 					done();
@@ -915,7 +928,6 @@ export class SelectorController {
 
 						// Update UI — rebuild the display transcript for the new leaf (the
 						// context from navigateTree is the LLM context, not the transcript).
-						this.ctx.chatContainer.clear();
 						this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 						await this.ctx.reloadTodos();
 						if (result.editorText && !this.ctx.editor.getText().trim()) {
@@ -927,7 +939,7 @@ export class SelectorController {
 					} finally {
 						if (summaryLoader) {
 							summaryLoader.stop();
-							this.ctx.statusContainer.clear();
+							this.ctx.statusContainer.disposeChildren();
 						}
 						this.ctx.editor.onEscape = originalOnEscape;
 					}
@@ -1067,7 +1079,6 @@ export class SelectorController {
 		this.ctx.updateEditorBorderColor();
 
 		// Clear and re-render the chat
-		this.ctx.chatContainer.clear();
 		this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.ctx.reloadTodos();
 		this.ctx.showStatus(movedProject ? `Resumed session in ${shortenPath(newCwd)}` : "Resumed session");
@@ -1426,18 +1437,27 @@ export class SelectorController {
 			sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
 		});
 
-		// The double-← gesture passes requireContent so it stays inert when there
-		// are no subagents to show; the explicit hub/observe keys still open the
-		// empty roster. The freshly built hub already ran the persisted-subagent
-		// scan, so its row count is the authoritative "is there anything to show".
+		const showReadyHub = () => {
+			// The double-← gesture passes requireContent so it stays inert when
+			// neither live nor persisted subagents are available. Persisted rows now
+			// load asynchronously, so defer the gate until that scan has refreshed the
+			// hub instead of treating the initial empty table as authoritative.
+			if (options?.requireContent && hub.isEmpty) {
+				hub.dispose();
+				return;
+			}
+
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(hub);
+			this.ctx.ui.setFocus(hub);
+			this.ctx.ui.requestRender();
+		};
+
 		if (options?.requireContent && hub.isEmpty) {
-			hub.dispose();
+			void hub.persistedSubagentsReady.then(showReadyHub);
 			return;
 		}
 
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(hub);
-		this.ctx.ui.setFocus(hub);
-		this.ctx.ui.requestRender();
+		showReadyHub();
 	}
 }

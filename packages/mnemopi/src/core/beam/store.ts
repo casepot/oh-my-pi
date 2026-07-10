@@ -5,9 +5,9 @@ import { toUtcIso } from "../../util/datetime";
 import { generateId } from "../../util/ids";
 import { currentEmbeddingModel, embeddingsDisabled } from "../embeddings";
 import { EpisodicGraph } from "../episodic-graph";
-import { extractFactsSafe } from "../extraction";
+import { countExtractedFactCategories, extractFactCategoriesSafe } from "../extraction";
 import { getMnemopiRuntimeOptions, withMnemopiRuntimeOptions } from "../runtime-options";
-import { storeFactStrings } from "./consolidate";
+import { storeExtractedFactCategories } from "./consolidate";
 import { type EmbedItem, scheduleEmbedding, vecAvailable, vecInsert } from "./helpers";
 import type {
 	BeamEvent,
@@ -232,9 +232,9 @@ function proactiveLinkIfEnabled(
  */
 async function runFactExtraction(beam: BeamMemoryState, memoryId: string, content: string): Promise<void> {
 	try {
-		const facts = await extractFactsSafe(content);
-		if (facts.length === 0) return;
-		storeFactStrings(beam, facts, 0, memoryId);
+		const extracted = await extractFactCategoriesSafe(content);
+		if (countExtractedFactCategories(extracted) === 0) return;
+		storeExtractedFactCategories(beam, extracted, 0, memoryId);
 		invalidateCaches(beam);
 	} catch {
 		// Background fact extraction is best-effort and never surfaces to the caller.
@@ -665,7 +665,46 @@ export function get(beam: BeamMemoryState, memoryId: string): Row | null {
 			WHERE id = ? AND (session_id = ? OR scope = 'global')
 		`)
 		.get(memoryId, beam.sessionId) as Row | null | undefined;
-	return episodic == null ? null : { ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" };
+	if (episodic != null) return { ...episodic, metadata: episodic.metadata_json, memory_store: "episodic" };
+
+	return getFact(beam, memoryId);
+}
+
+/**
+ * Read-only resolution for ids minted from the `facts` table. `recall`
+ * surfaces `facts.fact_id` as a result id (`factRecall`), so `get` must
+ * resolve those ids too — otherwise every surfaced fact id is a dead end
+ * for the read path (issue #4725). Visibility mirrors `factRecall`:
+ * same-session facts plus explicitly global ones (`scope` is an optional
+ * column on `facts`; `SELECT *` tolerates banks without it, in which case
+ * only same-session facts resolve). The row is shaped like the
+ * working/episodic hits with the full triple as content;
+ * `memory_store: "fact"` marks it read-only — no update/forget/invalidate
+ * path mutates `facts`.
+ */
+function getFact(beam: BeamMemoryState, memoryId: string): Row | null {
+	const fact = beam.db.prepare("SELECT * FROM facts WHERE fact_id = ?").get(memoryId) as Row | null | undefined;
+	if (fact == null) return null;
+	if (fact.session_id !== beam.sessionId && fact.scope !== "global") return null;
+	const subject = typeof fact.subject === "string" ? fact.subject : "";
+	const predicate = typeof fact.predicate === "string" ? fact.predicate : "";
+	const object = typeof fact.object === "string" ? fact.object : "";
+	return {
+		id: fact.fact_id,
+		content: [subject, predicate, object].filter(part => part.length > 0).join(" "),
+		source: "facts",
+		timestamp: fact.timestamp ?? null,
+		session_id: fact.session_id ?? null,
+		importance: fact.confidence ?? null,
+		metadata: JSON.stringify({
+			subject,
+			predicate,
+			object,
+			source_msg_id: fact.source_msg_id ?? null,
+		}),
+		created_at: fact.created_at ?? null,
+		memory_store: "fact",
+	};
 }
 
 export function forgetWorking(beam: BeamMemoryState, memoryId: string): boolean {

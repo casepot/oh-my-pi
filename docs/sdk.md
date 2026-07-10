@@ -257,7 +257,7 @@ If restore falls back, `modelFallbackMessage` describes the fallback.
 
 `AuthStorage.getApiKey(...)` resolves runtime overrides, config overrides, stored API keys, stored OAuth credentials, provider environment variables, and custom-provider fallback resolvers.
 
-## Event subscription and prompt lifecycle
+## Event subscription
 
 `session.subscribe(listener)` appends a listener and returns an unsubscribe function for that listener.
 
@@ -280,7 +280,7 @@ It also includes session-level events:
 - `thinking_level_changed`
 - `goal_updated`
 
-`session.prompt(text, options?)` is the primary prompt API. It expands command/template syntax by default, validates model/API-key availability, appends the user message, and starts the turn.
+A host can subscribe before calling `session.prompt(...)` to stream events:
 
 ```ts
 const unsubscribe = session.subscribe((event) => {
@@ -302,6 +302,22 @@ try {
   unsubscribe();
 }
 ```
+
+## Prompt lifecycle
+
+`session.prompt(text, options?)` is the primary entry point.
+
+Behavior:
+
+1. optional command/template expansion (`/` commands, custom commands, file slash commands, prompt templates)
+2. if currently streaming:
+   - `streamingBehavior: "steer" | "followUp"` chooses how `prompt()` queues
+   - extension `sendUserMessage(content)` defaults to steer when `deliverAs` is omitted
+   - queued messages are preserved instead of throwing work away
+3. if idle:
+   - validates model + API key
+   - appends user message
+   - starts agent turn
 
 Prompt options from source:
 

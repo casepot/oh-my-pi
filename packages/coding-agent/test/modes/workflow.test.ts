@@ -53,83 +53,18 @@ describe("workflow keyword highlighting", () => {
 });
 
 describe("workflow notice", () => {
-	const base = {
-		evalAvailable: true,
-		taskToolAvailable: true,
-		planMode: false,
-		sessionSpawns: "*",
-		taskDepth: 0,
-		taskMaxRecursionDepth: 2,
-		disabledAgents: [],
-		availableAgentTypes: ["task", "explore"],
-	} as const;
-
-	it("is a non-empty system notice carrying the eval-fan-out contract when task spawning is allowed", () => {
+	it("is a non-empty system notice carrying the task fan-out contract", () => {
 		expect(WORKFLOW_NOTICE.length).toBeGreaterThan(0);
 		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
-		expect(WORKFLOW_NOTICE).toContain("parallel_settled(");
-		expect(WORKFLOW_NOTICE).toContain('agent(prompt, *, agent="task"');
+		expect(WORKFLOW_NOTICE).toContain("Use the `task` tool for batched fan-out");
+		expect(WORKFLOW_NOTICE).toContain("tasks[]");
 	});
 
-	it("renders an inline-only notice when spawns are disabled", () => {
-		const notice = renderWorkflowNotice({ ...base, sessionSpawns: "" });
-		expect(notice).toContain("Allowed subagent spawns now: none");
-		expect(notice).toContain("Do not call eval `agent()`");
-		expect(notice).not.toContain("agent(prompt");
-		expect(notice).not.toContain("parallel_settled([lambda");
-	});
-
-	it("renders restricted spawn examples without defaulting to task", () => {
-		const notice = renderWorkflowNotice({ ...base, sessionSpawns: "explore" });
-		expect(notice).toContain("Allowed subagent spawns now: explore");
-		expect(notice).toContain('agent="explore"');
-		expect(notice).not.toContain("agent_type");
-	});
-
-	it("keeps recursive spawning available below depth limits and disables it at max depth", () => {
-		const recursiveNotice = renderWorkflowNotice({ ...base, taskDepth: 1 });
-		expect(recursiveNotice).toContain("agent(prompt");
-		expect(recursiveNotice).toContain("parallel_settled(");
-
-		const exhaustedNotice = renderWorkflowNotice({ ...base, taskDepth: 3 });
-		expect(exhaustedNotice).toContain("eval agent() recursion depth is exhausted");
-		expect(exhaustedNotice).toContain("task.maxRecursionDepth is exhausted");
-		expect(exhaustedNotice).not.toContain("agent(prompt");
-	});
-
-	it("uses a concrete enabled agent when wildcard spawns disable task", () => {
-		const notice = renderWorkflowNotice({ ...base, disabledAgents: ["task"] });
-		expect(notice).toContain("Allowed subagent spawns now: explore");
-		expect(notice).toContain('agent="explore"');
-		expect(notice).not.toContain('agent=""');
-		expect(notice).not.toContain("agent_type");
-	});
-
-	it("falls back to inline workflow when every discovered wildcard agent is disabled", () => {
-		const notice = renderWorkflowNotice({
-			...base,
-			disabledAgents: ["task"],
-			availableAgentTypes: ["task"],
-		});
-		expect(notice).toContain("Allowed subagent spawns now: none");
-		expect(notice).toContain("Do not call eval `agent()`");
-		expect(notice).not.toContain('agent=""');
-		expect(notice).not.toContain("agent(prompt");
-	});
-
-	it("allows eval-agent and task fan-out in plan mode", () => {
-		const notice = renderWorkflowNotice({ ...base, planMode: true });
-		expect(notice).toContain("Plan mode is active");
-		expect(notice).toContain("eval agent() and task are available for read-only planning subagents");
-		expect(notice).toContain("Planning mode: agents are for planning/review");
-		expect(notice).not.toContain("Eval file edits are allowed");
-		expect(notice).toContain("parallel_settled([lambda");
-	});
-
-	it("uses planning execution guidance during goal target planning", () => {
-		const notice = renderWorkflowNotice({ ...base, targetPlanningMode: true });
-		expect(notice).toContain("Goal target planning is active");
-		expect(notice).toContain("Planning mode: agents are for planning/review");
-		expect(notice).not.toContain("Eval file edits are allowed");
+	it("renders flat task-call guidance when task.batch is disabled", () => {
+		const notice = renderWorkflowNotice({ taskBatch: false });
+		expect(notice).toContain("once per independent subagent");
+		expect(notice).toContain("Do not pass `context` or `tasks[]`");
+		expect(notice).toContain("one independent task call per leaf");
+		expect(notice).not.toContain("Call `task` once per independent fan-out batch");
 	});
 });

@@ -137,6 +137,7 @@ export type RpcSkillCommandResult = { agentInvoked: true };
 export async function tryRunRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	text: string,
+	streamingBehavior: "steer" | "followUp" = "steer",
 ): Promise<RpcSkillCommandResult | false> {
 	if (!session.skillsSettings?.enableSkillCommands) return false;
 	const parsed = parseSkillInvocation(text);
@@ -144,13 +145,16 @@ export async function tryRunRpcSkillCommand(
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
 	if (!skill) return false;
 	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
-	await session.promptCustomMessage({
-		customType: SKILL_PROMPT_MESSAGE_TYPE,
-		content: built.message,
-		display: true,
-		details: built.details,
-		attribution: "user",
-	});
+	await session.promptCustomMessage(
+		{
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: built.message,
+			display: true,
+			details: built.details,
+			attribution: "user",
+		},
+		{ streamingBehavior },
+	);
 	return { agentInvoked: true };
 }
 
@@ -726,6 +730,7 @@ export async function runRpcMode(
 	const emitRpcTitles = shouldEmitRpcTitles();
 
 	const pendingExtensionRequests = new Map<string, PendingExtensionRequest>();
+	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const observerRegistry = new SessionObserverRegistry();
@@ -1005,6 +1010,10 @@ export async function runRpcMode(
 			editorOptions?: { promptStyle?: boolean },
 		): Promise<string | undefined> {
 			return requestRpcEditor(this.#pendingRequests, this.#output, title, prefill, dialogOptions, editorOptions);
+		}
+
+		addAutocompleteProvider(): void {
+			// Autocomplete provider composition is not supported in RPC mode
 		}
 
 		get theme(): Theme {
@@ -1317,6 +1326,61 @@ export async function runRpcMode(
 					? error(id, "cancel_operation", info)
 					: success(id, "cancel_operation", { operationId: command.operationId });
 			}
+
+			// =================================================================
+			// Prompting
+			// =================================================================
+
+			case "prompt": {
+				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
+				if (skillResult) {
+					return success(id, "prompt", skillResult);
+				}
+				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+					session,
+					sessionManager: session.sessionManager,
+					settings: session.settings,
+					cwd: session.sessionManager.getCwd(),
+					output: text => output({ type: "command_output", text }),
+					refreshCommands: emitAvailableCommandsUpdate,
+					reloadPlugins: reloadPluginState,
+					notifyTitleChanged: async () => {
+						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+					},
+					notifyConfigChanged: async () => {
+						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+					},
+				});
+				if (builtinResult !== false) {
+					if ("prompt" in builtinResult) {
+						watchAndReportLocalOnlyPromptResult({
+							id,
+							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							output,
+							onError: promptError => output(error(id, "prompt", errorInfoFromUnknown(promptError))),
+							extensionUserMessageTracker,
+						});
+						return success(id, "prompt");
+					}
+					return success(id, "prompt", { agentInvoked: false });
+				}
+
+				// Don't await - events will stream
+				// Extension commands are executed immediately, file prompt templates are expanded
+				// If streaming and streamingBehavior specified, queues via steer/followUp
+				watchAndReportLocalOnlyPromptResult({
+					id,
+					startPrompt: () =>
+						session.prompt(command.message, {
+							images: command.images,
+							streamingBehavior: command.streamingBehavior,
+						}),
+					output,
+					onError: promptError => output(error(id, "prompt", errorInfoFromUnknown(promptError))),
+					extensionUserMessageTracker,
+				});
+				return success(id, "prompt");
+			}
 			case "shutdown":
 				shutdownRequested = true;
 				shutdownReason = command.reason ?? "client_requested";
@@ -1343,52 +1407,6 @@ export async function runRpcMode(
 					trackStartedOperationForShutdown = previousTrackSetting;
 				}
 			}
-			case "prompt":
-				return success(
-					id,
-					"prompt",
-					startOperation(
-						"prompt",
-						id,
-						async () => {
-							if (await tryRunRpcSkillCommand(session, command.message)) return;
-							const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
-								session,
-								sessionManager: session.sessionManager,
-								settings: session.settings,
-								cwd: session.sessionManager.getCwd(),
-								output: text => output({ type: "command_output", text }),
-								refreshCommands: emitAvailableCommandsUpdate,
-								reloadPlugins: reloadPluginState,
-								notifyTitleChanged: async () => {
-									output({
-										type: "session_info_update",
-										title: session.sessionName,
-										sessionId: session.sessionId,
-									});
-								},
-								notifyConfigChanged: async () => {
-									output({
-										type: "config_update",
-										model: session.model,
-										thinkingLevel: session.thinkingLevel,
-									});
-								},
-							});
-							if (builtinResult !== false) {
-								if ("prompt" in builtinResult) {
-									await session.prompt(builtinResult.prompt, { images: command.images });
-								}
-								return;
-							}
-							await session.prompt(command.message, {
-								images: command.images,
-								streamingBehavior: command.streamingBehavior,
-							});
-						},
-						() => session.abort(),
-					),
-				);
 			case "steer":
 				await session.steer(command.message, command.images);
 				return success(id, "steer");
@@ -1723,16 +1741,6 @@ export async function runRpcMode(
 							"operation_cancelled",
 							`Operation cancelled: ${context.operationId}`,
 						);
-						const waitForCancellation = (): Promise<string> => {
-							const pending = Promise.withResolvers<string>();
-							const rejectCancelled = () => pending.reject(cancellationError);
-							if (context.signal.aborted) {
-								rejectCancelled();
-								return pending.promise;
-							}
-							context.signal.addEventListener("abort", rejectCancelled, { once: true });
-							return pending.promise.finally(() => context.signal.removeEventListener("abort", rejectCancelled));
-						};
 						if (context.signal.aborted) throw cancellationError;
 						const knownProvider = getOAuthProviders().find(provider => provider.id === command.providerId);
 						if (!knownProvider) {
@@ -1741,6 +1749,9 @@ export async function runRpcMode(
 							});
 						}
 						const uiCtx = new RpcExtensionUIContext(pendingExtensionRequests, output);
+						// Track whether onAuth has fired. Providers that require interactive
+						// input before a browser URL cannot be satisfied headlessly; after
+						// onAuth, prompt input is the pasted OAuth code/redirect URL path.
 						let authEmitted = false;
 						await session.modelRegistry.authStorage.login(command.providerId, {
 							signal: context.signal,
@@ -1760,17 +1771,20 @@ export async function runRpcMode(
 							onProgress: message => {
 								if (!context.signal.aborted) uiCtx.notify(message, "info");
 							},
-							onPrompt: () => {
+							onPrompt: async prompt => {
 								if (context.signal.aborted) throw cancellationError;
 								if (!authEmitted) {
-									return Promise.reject(
-										new RpcProtocolError(
-											"unsupported_capability",
-											`Provider '${command.providerId}' requires interactive prompts which are not supported in RPC mode. Use the terminal UI to log in.`,
-										),
+									throw new RpcProtocolError(
+										"unsupported_capability",
+										`Provider '${command.providerId}' requires interactive prompts which are not supported in RPC mode. Use the terminal UI to log in.`,
 									);
 								}
-								return waitForCancellation();
+								const value = await uiCtx.input(prompt.message, prompt.placeholder, {
+									timeout: 600_000,
+									signal: context.signal,
+								});
+								if (context.signal.aborted) throw cancellationError;
+								return value ?? "";
 							},
 						});
 						if (context.signal.aborted) throw cancellationError;

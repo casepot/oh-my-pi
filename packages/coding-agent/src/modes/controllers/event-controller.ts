@@ -33,6 +33,7 @@ import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { interruptHint } from "../shared";
 import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
+import { assistantUsageIsBilled } from "../utils/transcript-render-helpers";
 import { StreamingRevealController } from "./streaming-reveal";
 import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
 
@@ -141,11 +142,11 @@ export class EventController {
 			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			getProseOnlyThinking: () => this.ctx.proseOnlyThinking,
-			requestRender: () => this.ctx.ui.requestRender(),
+			requestRender: component => this.ctx.ui.requestComponentRender(component),
 		});
 		this.#toolArgsReveal = new ToolArgsRevealController({
 			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
-			requestRender: () => this.ctx.ui.requestRender(),
+			requestRender: component => this.ctx.ui.requestComponentRender(component),
 		});
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
@@ -392,7 +393,7 @@ export class EventController {
 		if (this.ctx.retryLoader) {
 			this.ctx.retryLoader.stop();
 			this.ctx.retryLoader = undefined;
-			this.ctx.statusContainer.clear();
+			this.ctx.statusContainer.disposeChildren();
 		}
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
@@ -865,7 +866,7 @@ export class EventController {
 			}
 			this.#lastAssistantComponent = this.ctx.streamingComponent;
 			this.#lastAssistantComponent.markTranscriptBlockFinalized();
-			if (settings.get("display.showTokenUsage")) {
+			if (settings.get("display.showTokenUsage") && assistantUsageIsBilled(event.message.usage)) {
 				this.ctx.chatContainer.addChild(
 					createUsageRowBlock(event.message.usage, event.message.duration, event.message.ttft),
 				);
@@ -1105,7 +1106,7 @@ export class EventController {
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
-			this.ctx.statusContainer.clear();
+			this.ctx.statusContainer.disposeChildren();
 		}
 		if (this.ctx.streamingComponent) {
 			this.ctx.chatContainer.removeChild(this.ctx.streamingComponent);
@@ -1149,9 +1150,9 @@ export class EventController {
 
 	/**
 	 * Tear down the live "Working…" loader: stop its animation timer AND clear the
-	 * reference. A transient overlay (auto-compaction / auto-retry) that only ran
-	 * `statusContainer.clear()` detached the loader from the container but left
-	 * `ctx.loadingAnimation` set, so the resumed turn's `agent_start` →
+	 * reference. A transient overlay (auto-compaction / auto-retry) can remove the
+	 * loader from the container while leaving `ctx.loadingAnimation` set, so the
+	 * resumed turn's `agent_start` →
 	 * `ensureLoadingAnimation()` (guarded by `if (!this.loadingAnimation)`) skipped
 	 * re-adding it and the spinner vanished while the agent kept streaming. Nulling
 	 * the reference here lets the next `agent_start` recreate and re-attach it.
@@ -1192,7 +1193,7 @@ export class EventController {
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(true);
 		this.#stopWorkingLoader();
-		this.ctx.statusContainer.clear();
+		this.ctx.statusContainer.disposeChildren();
 		const reasonText =
 			event.reason === "overflow"
 				? "Context overflow detected, "
@@ -1227,7 +1228,7 @@ export class EventController {
 		if (this.ctx.autoCompactionLoader) {
 			this.ctx.autoCompactionLoader.stop();
 			this.ctx.autoCompactionLoader = undefined;
-			this.ctx.statusContainer.clear();
+			this.ctx.statusContainer.disposeChildren();
 		}
 		const isHandoffAction = event.action === "handoff";
 		const isShakeAction = event.action === "shake";
@@ -1269,12 +1270,12 @@ export class EventController {
 		} else if (event.errorMessage) {
 			this.ctx.showWarning(event.errorMessage);
 		} else if (isHandoffAction) {
-			this.ctx.chatContainer.clear();
+			this.ctx.clearTransientSessionUi();
 			this.ctx.lastAssistantUsage = undefined;
-			this.ctx.rebuildChatFromMessages();
+			this.ctx.renderInitialMessages();
 			this.ctx.statusLine.invalidate();
-			this.ctx.ui.requestRender();
 			await this.ctx.reloadTodos();
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
 			this.ctx.showStatus("Auto-handoff completed");
 		} else if (event.skipped) {
 			// Benign skip: no model selected, no candidate models available, or nothing
@@ -1292,7 +1293,7 @@ export class EventController {
 	async #handleAutoRetryStart(event: Extract<AgentSessionEvent, { type: "auto_retry_start" }>): Promise<void> {
 		this.#trackRetrySupersededAssistantComponent(this.#lastAssistantComponent);
 		this.#stopWorkingLoader();
-		this.ctx.statusContainer.clear();
+		this.ctx.statusContainer.disposeChildren();
 		if (AIError.is(event.errorId, AIError.Flag.ThinkingLoop)) {
 			// The retry path drops the failed assistant from runtime context. Do not
 			// restore its inline Error row; just unpin the fixed-region banner so the
@@ -1316,7 +1317,7 @@ export class EventController {
 		if (this.ctx.retryLoader) {
 			this.ctx.retryLoader.stop();
 			this.ctx.retryLoader = undefined;
-			this.ctx.statusContainer.clear();
+			this.ctx.statusContainer.disposeChildren();
 		}
 		if (event.success) {
 			let appliedRecovered = false;

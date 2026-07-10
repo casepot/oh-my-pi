@@ -1,4 +1,4 @@
-Read files, directories, archives, SQLite, images, documents, internal resources, and web URLs via one `path`.
+Read files, directories, archives, SQLite, images, documents, internal resources, and web URLs via `path` plus optional `selector`.
 
 <instruction>
 - SHOULD parallelize independent reads.
@@ -7,7 +7,8 @@ Read files, directories, archives, SQLite, images, documents, internal resources
 
 ## Parameters
 
-- `path` — required. Local path, internal URI (`skill://`, `agent://`, `artifact://`, `memory://`, `rule://`, `local://`, `vault://`, `mcp://`, `omp://`, `issue://`, `pr://`, `ssh://`), or URL. Append `:<sel>` for ranges/modes (e.g. `src/foo.ts:50-200`, `src/foo.ts:raw`, `db.sqlite:users:42`).
+- `path` — required. Local path, internal URI (`skill://`, `agent://`, `artifact://`, `memory://`, `rule://`, `local://`, `vault://`, `mcp://`, `omp://`, `issue://`, `pr://`, `ssh://`), or URL. Inline `:<sel>` still works for ranges/modes (e.g. `src/foo.ts:50-200`, `src/foo.ts:raw`, `db.sqlite:users:42`).
+- `selector` — optional selector without leading `:` (e.g. `"50-200"`, `"raw"`, `"raw:50-100"`, `"conflicts"`). Use when `path` contains literal colons: `{"path":"test:1-2","selector":"1-2"}`.
 
 ## Selectors
 
@@ -75,5 +76,6 @@ All `path` URI schemes resolve transparently and take the same line selectors. `
 <critical>
 - You MUST use `read`, not shell equivalents (`cat`, `head`, `tail`, `less`, `more`, `ls`, `tar`, `unzip`, `curl`, `wget`), for file/dir/archive/URL/internal-resource inspection.
 - Line ranges go in the selector: `path="src/foo.ts:50-200"`; NEVER `sed -n`, `awk NR`, or `head`/`tail`.
+- Literal colon filename + selector? Use `selector`, not recursive `path:"file:sel:sel"`.
 - Summary footer names elided ranges? Re-issue ONLY those ranges. NEVER guess `..`/`…` content.
 </critical>

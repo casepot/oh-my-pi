@@ -20,7 +20,7 @@ import {
 	createOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
 	resolveCacheRetention,
-	sanitizeOpenAIResponsesHistoryItemsForReplay,
+	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
 import { withEmptyCompletionRetry } from "../utils/empty-completion-retry";
@@ -76,7 +76,7 @@ import {
 	createInitialResponsesAssistantMessage,
 	createOpenAIStrictToolsState,
 	disableStrictToolsForScope,
-	getOpenAIResponsesPromptCacheKey,
+	getOpenAIPromptCacheKey,
 	getOpenAIResponsesRoutingSessionId,
 	getOpenAIStrictToolsScope,
 	getOpenRouterResponsesSessionId,
@@ -390,7 +390,7 @@ const streamOpenAIResponsesOnce = (
 			// stable prompt-cache key independently. Side-channel calls use this to
 			// avoid perturbing provider conversation state without cold-starting the cache.
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
-			const promptCacheSessionId = getOpenAIResponsesPromptCacheKey(options);
+			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const { headers, copilotPremiumRequests, baseUrl } = resolveOpenAIRequestSetup(model, {
 				apiKey,
@@ -487,9 +487,9 @@ const streamOpenAIResponsesOnce = (
 								body: requestParams,
 								signal: requestSignal,
 								fetch: options?.fetch,
-								// With a first-event watchdog armed, transport retries must
-								// not silently extend the caller's deadline.
-								maxAttempts: requestTimeoutMs !== undefined ? 1 : undefined,
+								// Transient 408/429/5xx get Retry-After-aware transport
+								// retries; the first-event watchdog aborts `requestSignal`,
+								// so retries cannot extend the caller's deadline.
 								onSseEvent: rawSseObserver,
 							});
 							// Disarm the first-event watchdog as soon as headers arrive — a slow
@@ -668,7 +668,7 @@ const streamOpenAIResponsesOnce = (
 			}
 
 			// Detect premature stream closure: the HTTP stream ended without the
-			// provider sending `response.completed` or `response.incomplete`.
+			// provider sending a recognized terminal response event.
 			// Custom/proxy providers may drop the connection mid-stream; without
 			// this guard the incomplete output is silently surfaced as a successful
 			// "stop".
@@ -687,31 +687,38 @@ const streamOpenAIResponsesOnce = (
 			}
 
 			const responseIncomplete = output.stopDetails?.category === "response.incomplete";
-			if (!responseIncomplete) {
-				output.providerPayload = createOpenAIResponsesHistoryPayload(
-					model.provider,
-					filterOpenAIResponsesHistoryItemsForPersistence(nativeOutputItems),
+			if (responseIncomplete) {
+				if (chainState) resetOpenAIResponsesChainState(chainState);
+			} else {
+				const persistedOutputItems = filterOpenAIResponsesHistoryItemsForPersistence(nativeOutputItems);
+				output.providerPayload = createOpenAIResponsesHistoryPayload(model.provider, persistedOutputItems);
+				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
+					structuredCloneJSON(persistedOutputItems),
 				);
-			}
-			if (providerSessionState) providerSessionState.nativeHistoryReplayWarmed = true;
-			if (chainState) {
-				if (responseIncomplete) {
-					resetOpenAIResponsesChainState(chainState);
-				} else {
-					chainState.lastParams = structuredCloneJSON(activeParams);
-					if (output.responseId) {
-						chainState.lastResponseId = output.responseId;
-						chainState.lastResponseItems = sanitizeOpenAIResponsesHistoryItemsForReplayPayload(
-							structuredCloneJSON(nativeOutputItems),
-						);
-						chainState.canAppend = true;
-						// Only a successful CHAINED completion clears the stale counter — a
-						// full-context success must not mask categorical rejection.
-						if (sentPreviousResponseId) chainState.staleFailures = 0;
-					} else {
-						// Without a response id the append baseline cannot be trusted.
-						chainState.canAppend = false;
+				if (replayableResponseItems) {
+					if (providerSessionState) providerSessionState.nativeHistoryReplayWarmed = true;
+					if (chainState) {
+						chainState.lastParams = structuredCloneJSON(activeParams);
+						if (output.responseId) {
+							chainState.lastResponseId = output.responseId;
+							chainState.lastResponseItems = replayableResponseItems;
+							chainState.canAppend = true;
+							// Only a successful CHAINED completion clears the stale counter — a
+							// full-context success must not mask categorical rejection.
+							if (sentPreviousResponseId) chainState.staleFailures = 0;
+						} else {
+							// Without a response id the append baseline cannot be trusted.
+							chainState.canAppend = false;
+						}
 					}
+				} else if (chainState) {
+					// Hidden-empty / fully sanitized successes cannot be used as an append
+					// baseline, but `lastParams` still records the successful wire controls
+					// without re-enabling `previous_response_id` chaining.
+					chainState.canAppend = false;
+					chainState.lastParams = structuredCloneJSON(activeParams);
+					chainState.lastResponseId = undefined;
+					chainState.lastResponseItems = undefined;
 				}
 			}
 
@@ -817,7 +824,7 @@ export function buildParams(
 	}
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
-	const promptCacheKey = getOpenAIResponsesPromptCacheKey(options);
+	const promptCacheKey = getOpenAIPromptCacheKey(options);
 	const modelId = applyWireModelIdTransform(
 		model.requestModelId ?? model.id,
 		model.compat.wireModelIdMode,
@@ -864,7 +871,7 @@ export function buildParams(
 	if (context.tools) {
 		const disableStrictTools =
 			disableStrictToolsOverride || isStrictToolsDisabledForScope(providerSessionState, strictToolsScope);
-		const strictMode = !disableStrictTools && model.compat.supportsStrictMode;
+		const strictMode = !disableStrictTools && model.compat.supportsStrictMode !== false;
 		params.tools = convertTools(context.tools, strictMode, model);
 		strictToolsApplied = params.tools.some(t => (t as { strict?: boolean }).strict === true);
 		if (options?.toolChoice) {
@@ -903,6 +910,13 @@ export function buildParams(
 			model.thinking?.effortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
 			effort,
 	});
+	// Catalog pro aliases (`gpt-5.6-*-pro`): merge AFTER the compat policy so the
+	// mode survives every policy branch (disabled/omitted effort included) while
+	// keeping whatever effort/summary the policy produced — mode and effort are
+	// independent wire fields.
+	if (model.reasoningMode) {
+		params.reasoning = { ...params.reasoning, mode: model.reasoningMode };
+	}
 
 	applyOpenAIGatewayRouting(params, model.compat);
 
@@ -919,10 +933,6 @@ function filterOpenAIResponsesHistoryItemsForPersistence(
 	items: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
 	return items.filter(item => !isIncompleteOpenAIResponsesHistoryItem(item));
-}
-
-function sanitizeOpenAIResponsesHistoryItemsForReplayPayload(items: Array<Record<string, unknown>>): ResponseInput {
-	return sanitizeOpenAIResponsesHistoryItemsForReplay(filterOpenAIResponsesHistoryItemsForPersistence(items));
 }
 
 /**
@@ -1013,9 +1023,12 @@ export function convertTools(
 			parameters,
 			// `strict: false` and an omitted `strict` are NOT equivalent for every
 			// OpenAI-compat backend — some over-fill optional args when the flag is
-			// absent (#4336). Preserve the author's explicit `false` only while the
-			// Responses strict field is enabled; compatibility disables and
-			// strict-schema fallback retries rely on uniformly absent flags.
+			// absent (#4336). Preserve the author's explicit `false` unless the
+			// provider is explicitly known not to understand the field
+			// (`supportsStrictMode: false`) or the strict-schema fallback is
+			// active — both paths rely on a uniformly absent wire flag. Mirrors the
+			// `supportsStrictMode !== false` gate used by openai-completions
+			// (#4527).
 			...(effectiveStrict
 				? { strict: true }
 				: !NO_STRICT && strictMode && tool.strict === false

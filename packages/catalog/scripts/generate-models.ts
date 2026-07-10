@@ -39,6 +39,7 @@ import {
 	isKimiK27CodeModelId,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
+	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
 } from "../src/provider-models/openai-compat";
@@ -585,6 +586,10 @@ async function generateModels() {
 		const name = cleanModelName(model.name);
 		return name === model.name ? model : { ...model, name };
 	});
+	// Re-derive the first-party gpt-5.6 pro-reasoning aliases from the current
+	// base rows (stale previous-snapshot aliases are dropped inside), before the
+	// policy re-bake so the aliases get the same baked thinking metadata.
+	allModels = projectOpenAIProReasoningAliases(allModels);
 	applyGeneratedModelPolicies(allModels);
 	// Collapse effort-tier variants AFTER the policy re-bake: live-discovery
 	// entries are already collapsed (rebake skips them); this pass folds
@@ -596,6 +601,7 @@ async function generateModels() {
 
 	for (const model of allModels) {
 		canonicalizeModelCompat(model);
+		stripLegacyContextPromotionMetadata(model);
 	}
 
 	// Group by provider and sort each provider's models
@@ -659,6 +665,15 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
 	if (!hasKeys) {
 		delete model.compat;
 	}
+}
+
+function stripLegacyContextPromotionMetadata(model: ModelSpec<Api>): void {
+	const legacyModel = model as ModelSpec<Api> & {
+		contextPromotion?: unknown;
+		contextPromotionTarget?: unknown;
+	};
+	delete legacyModel.contextPromotion;
+	delete legacyModel.contextPromotionTarget;
 }
 
 // Run the generator

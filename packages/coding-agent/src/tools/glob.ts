@@ -96,6 +96,8 @@ export interface GlobOperations {
 export interface GlobToolOptions {
 	/** Custom operations for find. Default: local filesystem + rg */
 	operations?: GlobOperations;
+	/** Remap slash-only paths to the session cwd before root-search validation. */
+	rootPathAlias?: boolean;
 }
 
 interface GlobTarget {
@@ -133,12 +135,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly strict = true;
 
 	readonly #customOps?: GlobOperations;
+	readonly #rootPathAlias: boolean;
 
 	constructor(
 		private readonly session: ToolSession,
 		options?: GlobToolOptions,
 	) {
 		this.#customOps = options?.operations;
+		this.#rootPathAlias = options?.rootPathAlias === true;
 		this.description = prompt.render(globDescription);
 	}
 
@@ -153,13 +157,21 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 		return untilAborted(signal, async () => {
 			const formatScopePath = (targetPath: string): string => formatPathRelativeToCwd(targetPath, this.session.cwd);
-			const rawPatternInputs: string[] = this.#customOps
-				? paths
-				: await expandDelimitedPathEntries(paths, this.session.cwd, { splitter: parseFindPattern });
-			const rawPatterns = rawPatternInputs.map((input: string) => normalizePathLikeInput(input).replace(/\\/g, "/"));
+			const scopedPaths = toPathList(paths);
+			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
+			const rawPatternInputs = this.#customOps
+				? effectivePaths
+				: await expandDelimitedPathEntries(effectivePaths, this.session.cwd, { splitter: parseFindPattern });
+			const rawPatterns = rawPatternInputs.map(input => normalizePathLikeInput(input).replace(/\\/g, "/"));
+			const aliasResolvedPatterns = this.#rootPathAlias
+				? rawPatterns.map(pattern => (/^\/+$/.test(pattern) ? "." : pattern))
+				: rawPatterns;
+			if (aliasResolvedPatterns.some(pattern => /^\/+$/.test(pattern))) {
+				throw new ToolError("Searching from root directory '/' is not allowed");
+			}
 			const internalRouter = InternalUrlRouter.instance();
 			const normalizedPatterns: string[] = [];
-			for (const rawPattern of rawPatterns) {
+			for (const rawPattern of aliasResolvedPatterns) {
 				if (!internalRouter.canHandle(rawPattern)) {
 					normalizedPatterns.push(rawPattern);
 					continue;

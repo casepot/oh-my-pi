@@ -1106,7 +1106,13 @@ export function streamSimple<TApi extends Api>(
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
-				const nextKey = await resolveRetryKey(apiKeyResolver, AUTH_RETRY_STEPS[step]!, failure.error, signal);
+				const nextKey = await resolveRetryKey(
+					apiKeyResolver,
+					AUTH_RETRY_STEPS[step]!,
+					failure.error,
+					signal,
+					lastKey,
+				);
 				if (nextKey === undefined || nextKey === lastKey) continue;
 				lastKey = nextKey;
 				const isLastStep = step === AUTH_RETRY_STEPS.length - 1;
@@ -1656,6 +1662,7 @@ function mapOptionsForApi<TApi extends Api>(
 						enabled: true,
 						level: mapEffortToGoogleThinkingLevel(effort),
 					},
+					hideThinkingSummary: options?.hideThinkingSummary,
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 				});
 			}
@@ -1666,6 +1673,7 @@ function mapOptionsForApi<TApi extends Api>(
 					enabled: true,
 					budgetTokens: getGoogleBudget(googleModel, effort, options?.thinkingBudgets),
 				},
+				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
 			});
 		}
@@ -1685,6 +1693,7 @@ function mapOptionsForApi<TApi extends Api>(
 							enabled: true,
 							level: mapEffortToGoogleThinkingLevel(effort),
 						},
+						hideThinkingSummary: options?.hideThinkingSummary,
 						toolChoice,
 						antigravityEndpointMode: options?.antigravityEndpointMode,
 					});
@@ -1707,6 +1716,7 @@ function mapOptionsForApi<TApi extends Api>(
 						maxTokens,
 						requestModelId: resolveWireModelId(model, effort),
 						thinking: { enabled: true, budgetTokens: thinkingBudget },
+						hideThinkingSummary: options?.hideThinkingSummary,
 						toolChoice,
 						antigravityEndpointMode: options?.antigravityEndpointMode,
 					});
@@ -1753,6 +1763,7 @@ function mapOptionsForApi<TApi extends Api>(
 						enabled: true,
 						level: mapEffortToGoogleThinkingLevel(effort),
 					},
+					hideThinkingSummary: options?.hideThinkingSummary,
 					toolChoice: mapGoogleToolChoice(options?.toolChoice),
 				});
 			}
@@ -1764,6 +1775,7 @@ function mapOptionsForApi<TApi extends Api>(
 					enabled: true,
 					budgetTokens: getGoogleBudget(geminiModel, effort, options?.thinkingBudgets),
 				},
+				hideThinkingSummary: options?.hideThinkingSummary,
 				toolChoice: mapGoogleToolChoice(options?.toolChoice),
 			});
 		}

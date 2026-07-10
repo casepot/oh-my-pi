@@ -10,7 +10,7 @@
 *.gif -text
 *.webp -text
 *.ico -text
-*.pdf -text
+*.pdf binary
 *.zip -text
 *.gz -text
 *.tar -text

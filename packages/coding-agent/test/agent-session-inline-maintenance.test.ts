@@ -317,7 +317,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 		expect(noProgressNotices).toHaveLength(0);
 	});
 
-	it("fails closed and persists a maintenance assistant error when inline compaction fails", async () => {
+	it("fails closed and keeps an empty maintenance assistant error out of persisted history", async () => {
 		const { mock, sessionManager } = createHarness();
 		vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("summary backend down"));
 
@@ -332,11 +332,12 @@ describe("AgentSession inline provider-call maintenance", () => {
 				entry.message.errorMessage?.includes("Context maintenance failed before provider call")
 			);
 		});
-		expect(persistedAssistantErrors).toHaveLength(1);
+		expect(persistedAssistantErrors).toHaveLength(0);
 		expect(session!.agent.state.messages.at(-1)?.role).toBe("assistant");
 		expect(session!.agent.state.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "error",
+			errorMessage: expect.stringContaining("Context maintenance failed before provider call"),
 		});
 	});
 

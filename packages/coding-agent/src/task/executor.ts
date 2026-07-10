@@ -219,7 +219,12 @@ function renderIrcPeerRoster(selfId: string): string {
 	return lines.join("\n");
 }
 
-function withAbortTimeout<T>(promise: Promise<T>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+function withAbortTimeout<T>(
+	promise: Promise<T>,
+	timeoutMs: number,
+	signal?: AbortSignal,
+	timeoutController?: AbortController,
+): Promise<T> {
 	if (signal?.aborted) {
 		return Promise.reject(new ToolAbortError());
 	}
@@ -229,6 +234,7 @@ function withAbortTimeout<T>(promise: Promise<T>, timeoutMs: number, signal?: Ab
 	const timeoutId = setTimeout(() => {
 		if (settled) return;
 		settled = true;
+		timeoutController?.abort(new DOMException(`MCP tool call timed out after ${timeoutMs}ms`, "TimeoutError"));
 		reject(new Error(`MCP tool call timed out after ${timeoutMs}ms`));
 	}, timeoutMs);
 
@@ -236,6 +242,7 @@ function withAbortTimeout<T>(promise: Promise<T>, timeoutMs: number, signal?: Ab
 		if (settled) return;
 		settled = true;
 		clearTimeout(timeoutId);
+		timeoutController?.abort();
 		reject(new ToolAbortError());
 	};
 
@@ -727,13 +734,21 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 				const serverName = mcpTool.mcpServerName ?? "";
 				const mcpToolName = mcpTool.mcpToolName ?? "";
 				try {
+					const timeoutController = new AbortController();
+					const timeoutSignal = timeoutController.signal;
+					const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 					const result = await withAbortTimeout(
 						(async () => {
-							const connection = await mcpManager.waitForConnection(serverName);
-							return callTool(connection, mcpToolName, params as Record<string, unknown>, { signal });
+							const connection = await untilAborted(combinedSignal, () =>
+								mcpManager.waitForConnection(serverName),
+							);
+							return callTool(connection, mcpToolName, params as Record<string, unknown>, {
+								signal: combinedSignal,
+							});
 						})(),
 						MCP_CALL_TIMEOUT_MS,
 						signal,
+						timeoutController,
 					);
 					return {
 						content: (result.content ?? []).map(item =>
@@ -2139,14 +2154,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				authFallbackUsed,
 			} = resolvedModelOverride;
 			if (!model && modelPatterns.length > 0) {
-				throw new Error(
-					formatProviderFailure(
-						"Subagent model preflight failed",
-						classifyProviderFailure(
-							`Model not found for configured subagent model selector(s): ${modelPatterns.join(", ")}`,
+				if (!options.parentActiveModelPattern) {
+					throw new Error(
+						formatProviderFailure(
+							"Subagent model preflight failed",
+							classifyProviderFailure(
+								`Model not found for configured subagent model selector(s): ${modelPatterns.join(", ")}`,
+							),
 						),
-					),
-				);
+					);
+				}
+				logger.debug("Deferring unresolved subagent model selector(s) to child runtime", {
+					requested: modelPatterns,
+					parentModel: options.parentActiveModelPattern,
+				});
 			}
 			if (model && !authFallbackUsed) {
 				const apiKey = await awaitAbortable(modelRegistry.getApiKey(model));
@@ -2258,6 +2279,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry,
 				settings: subagentSettings,
 				model,
+				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+				modelPatternAuthFallback:
+					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+				modelPatternFallbackRole:
+					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
 				thinkingLevel: effectiveThinkingLevel,
 				toolNames,
 				outputSchema,
