@@ -125,9 +125,13 @@ function sentinelsFromFile(file: string, size: number): LocalTranscriptSentinel[
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
 		case "running":
-			return theme.fg("success", "running");
+			return theme.fg("accent", "running");
+		case "waiting":
+			return theme.fg("accent", "waiting");
+		case "paused":
+			return theme.fg("warning", "paused");
 		case "idle":
-			return theme.fg("accent", "idle");
+			return theme.fg("success", "idle");
 		case "parked":
 			return theme.fg("muted", "parked");
 		case "aborted":
@@ -559,7 +563,13 @@ export class AgentTranscriptViewer implements Component {
 		const contentWidth = Math.max(1, width - 1);
 		const ref = this.deps.registry.get(this.deps.agentId);
 
-		const headerLines = this.#headerLines(ref?.status, ref?.kind, ref?.parentId);
+		const headerLines = this.#headerLines(
+			ref?.status,
+			ref?.statusDetail?.reason,
+			ref?.kind,
+			ref?.parentId,
+			innerWidth,
+		);
 		const footerLines = this.#footerLines();
 		const noticeLine = this.#notice
 			? ` ${theme.fg("error", sanitizeErrorLine(this.#notice, innerWidth))}`
@@ -591,12 +601,32 @@ export class AgentTranscriptViewer implements Component {
 		return lines;
 	}
 
-	#headerLines(status: AgentStatus | undefined, kind: string | undefined, parentId: string | undefined): string[] {
+	#headerLines(
+		status: AgentStatus | undefined,
+		statusDetail: string | undefined,
+		kind: string | undefined,
+		parentId: string | undefined,
+		maxWidth: number,
+	): string[] {
 		const lines = [theme.fg("accent", `Agent Hub ${theme.sep.dot} ${this.deps.agentId}`)];
 		if (status && kind) {
 			const kindTag = theme.fg("dim", ` ${parentId ? `${kind} ${theme.sep.dot} of ${parentId}` : kind}`);
+			const detailLabel = statusDetail
+				? theme.fg(
+						"muted",
+						`${theme.sep.dot}${truncateToWidth(
+							replaceTabs(statusDetail).replace(/[\r\n]+/g, " "),
+							Math.max(10, Math.floor(maxWidth / 2)),
+						)}`,
+					)
+				: "";
 			const modelLabel = this.#model ? theme.fg("muted", `${theme.sep.dot}${this.#model}`) : "";
-			lines.push(`${theme.bold(this.deps.agentId)} ${statusBadge(status)}${kindTag}${modelLabel}`);
+			lines.push(
+				truncateToWidth(
+					`${theme.bold(this.deps.agentId)} ${statusBadge(status)}${kindTag}${detailLabel}${modelLabel}`,
+					maxWidth,
+				),
+			);
 		}
 		return lines;
 	}

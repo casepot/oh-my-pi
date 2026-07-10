@@ -3411,9 +3411,8 @@ function workstreamTaskIdMatches(run: GoalWorkstreamBatch["workstreams"][number]
 function terminalWorkstreamStatusFromResult(
 	result: TaskToolDetails["results"][number] | undefined,
 ): GoalWorkstreamBatch["workstreams"][number]["status"] | undefined {
-	if (!result) return undefined;
-	if (result.aborted) return "aborted";
-	return result.exitCode === 0 && !result.error ? "completed" : "failed";
+	if (!result || result.termination.status === "paused") return undefined;
+	return result.termination.status;
 }
 
 function terminalWorkstreamStatusFromProgress(
@@ -3443,15 +3442,21 @@ function compactWorkstreamTaskText(value: string | undefined): string | undefine
 
 function workstreamResultSummary(result: TaskToolDetails["results"][number] | undefined): string | undefined {
 	if (!result) return undefined;
-	if (result.aborted) return compactWorkstreamTaskText(`Task aborted: ${result.abortReason ?? "no reason reported"}`);
-	const failure = result.error ?? result.retryFailure?.errorMessage;
-	if (failure) return compactWorkstreamTaskText(`Task failed: ${failure}`);
-	return (
-		compactWorkstreamTaskText(result.output) ??
-		compactWorkstreamTaskText(result.description) ??
-		compactWorkstreamTaskText(result.assignment) ??
-		compactWorkstreamTaskText(result.task)
-	);
+	switch (result.termination.status) {
+		case "aborted":
+			return compactWorkstreamTaskText(`Task aborted: ${result.termination.reason}`);
+		case "failed":
+			return compactWorkstreamTaskText(`Task failed: ${result.termination.reason}`);
+		case "paused":
+			return compactWorkstreamTaskText(`Task paused: ${result.termination.reason}`);
+		case "completed":
+			return (
+				compactWorkstreamTaskText(result.output) ??
+				compactWorkstreamTaskText(result.description) ??
+				compactWorkstreamTaskText(result.assignment) ??
+				compactWorkstreamTaskText(result.task)
+			);
+	}
 }
 
 function workstreamLatestActivity(

@@ -8,11 +8,13 @@ import {
 	type RpcSessionChangeCommand,
 	type RpcSessionChangeResult,
 	type RpcSessionChangeSession,
+	taskResultToRpcResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import {
 	type AgentProgress,
+	type SingleResult,
 	type SubagentEventPayload,
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -22,6 +24,22 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+
+const NO_PROGRESS_TERMINATION = {
+	status: "paused",
+	code: "no_progress",
+	reason: "Paused after 3 no-progress cycles",
+	resumable: true,
+	historyUri: "history://SubagentA",
+	outputUri: "agent://SubagentA",
+	policy: {
+		request: { termination: "disabled", advisory: { mode: "advisory", afterAssistantTurns: 20 } },
+		wallClock: { maxRuntimeMs: null },
+		stall: { action: "pause", afterAssistantTurns: 3 },
+		spawn: { remainingDepth: null },
+		idle: { resumable: true, parkingTtlMs: null },
+	},
+} satisfies NonNullable<SubagentLifecyclePayload["termination"]>;
 
 const tempPaths: string[] = [];
 
@@ -80,6 +98,39 @@ function createSessionChangeSession(options: SessionChangeStubOptions): RpcSessi
 		branch: async (_entryId: string) => options.branch ?? { selectedText: "branched text", cancelled: false },
 	};
 }
+
+describe("RPC task result transport", () => {
+	test("derives status and artifact URI exclusively from the required termination", () => {
+		const termination = {
+			...NO_PROGRESS_TERMINATION,
+			outputUri: "agent://ActualAgent",
+		} satisfies NonNullable<SubagentLifecyclePayload["termination"]>;
+		const source = {
+			index: 0,
+			id: "SubagentA",
+			agent: "task",
+			agentSource: "bundled",
+			task: "Do work",
+			exitCode: 0,
+			output: "Paused work",
+			stderr: "",
+			truncated: false,
+			durationMs: 10,
+			tokens: 20,
+			requests: 3,
+			termination,
+		} satisfies SingleResult;
+
+		const [result] = taskResultToRpcResult(source);
+
+		expect(result).toMatchObject({
+			id: "SubagentA",
+			status: "paused",
+			outputRef: { uri: "agent://ActualAgent" },
+		});
+		expect(result?.termination).toBe(termination);
+	});
+});
 
 describe("RPC subagent registry", () => {
 	test("defaults subagent frame emission to off while tracking snapshots", () => {
@@ -266,9 +317,11 @@ describe("RPC subagent registry", () => {
 		}
 	});
 
-	test("prunes terminal lifecycle snapshots while retaining transcript selectors", () => {
+	test("retains and emits exact terminal lifecycle snapshots while ignoring late progress", () => {
 		const eventBus = new EventBus();
-		const registry = new RpcSubagentRegistry(eventBus, () => {});
+		const frames: RpcSubagentFrame[] = [];
+		const registry = new RpcSubagentRegistry(eventBus, frame => frames.push(frame));
+		registry.setSubscriptionLevel("progress");
 		const sessionFile = "/tmp/subagent.jsonl";
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 			id: "SubagentA",
@@ -279,17 +332,34 @@ describe("RPC subagent registry", () => {
 			sessionFile,
 		} satisfies SubagentLifecyclePayload);
 
-		expect(registry.getSubagents()).toHaveLength(1);
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+		const terminalLifecycle = {
 			id: "SubagentA",
 			index: 0,
 			agent: "task",
 			agentSource: "bundled",
-			status: "completed",
+			status: "paused",
 			sessionFile,
-		} satisfies SubagentLifecyclePayload);
+			termination: NO_PROGRESS_TERMINATION,
+		} satisfies SubagentLifecyclePayload;
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, terminalLifecycle);
+		eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			task: "Do work",
+			sessionFile,
+			progress: createProgress({ status: "running" }),
+		} satisfies SubagentProgressPayload);
 
-		expect(registry.getSubagents()).toHaveLength(0);
+		expect(registry.getSubagents()).toMatchObject([
+			{
+				id: "SubagentA",
+				status: "paused",
+				sessionFile,
+				termination: NO_PROGRESS_TERMINATION,
+			},
+		]);
+		expect(frames.at(-1)).toEqual({ type: "subagent_lifecycle", payload: terminalLifecycle });
 		expect(registry.resolveSessionFile({ subagentId: "SubagentA" })).toBe(sessionFile);
 		expect(registry.resolveSessionFile({ sessionFile })).toBe(sessionFile);
 		registry.dispose();

@@ -567,6 +567,7 @@ export class CollabHost {
 					kind: ref.kind,
 					parentId: ref.parentId,
 					status: ref.status,
+					statusDetail: ref.statusDetail,
 					hasSessionFile: !!ref.sessionFile,
 					createdAt: ref.createdAt,
 					lastActivity: ref.lastActivity,
@@ -622,9 +623,18 @@ export class CollabHost {
 				kill().catch(fail);
 				break;
 			}
-			case "revive":
+			case "revive": {
+				const ref = AgentRegistry.global().get(agentId);
+				if (ref?.status !== "parked") {
+					this.#socket?.send(
+						{ t: "error", message: `agent ${agentId}: only parked agents can be revived` },
+						fromPeer,
+					);
+					return;
+				}
 				AgentLifecycleManager.global().ensureLive(agentId).catch(fail);
 				break;
+			}
 		}
 	}
 

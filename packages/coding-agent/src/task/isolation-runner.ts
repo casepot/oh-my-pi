@@ -18,8 +18,11 @@
  * Step 1 happens once per top-level call (the baseline is cloned per spawn
  * before mutation); steps 2 and 3 are per-spawn.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
+import { registerArtifactsDir } from "../internal-urls/registry-helpers";
+import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
@@ -115,6 +118,47 @@ export interface IsolatedRunOptions {
 	buildFailureResult: (err: unknown) => SingleResult;
 }
 
+async function persistIsolationFailureRecovery(opts: IsolatedRunOptions, result: SingleResult): Promise<SingleResult> {
+	await fs.mkdir(opts.artifactsDir, { recursive: true });
+	registerArtifactsDir(opts.artifactsDir);
+	const recoveryText = result.output || result.stderr || result.termination.reason;
+	const outputPath = result.outputPath ?? path.join(opts.artifactsDir, `${opts.agentId}.md`);
+	try {
+		await fs.stat(outputPath);
+	} catch {
+		await fs.writeFile(outputPath, recoveryText);
+	}
+
+	const registry = AgentRegistry.global();
+	const existing = registry.get(opts.agentId);
+	if (!existing || (!existing.session && !existing.sessionFile)) {
+		const sessionFile = path.join(opts.artifactsDir, `${opts.agentId}.jsonl`);
+		try {
+			await fs.stat(sessionFile);
+		} catch {
+			await fs.writeFile(sessionFile, "");
+		}
+		registry.register({
+			id: opts.agentId,
+			displayName: opts.baseOptions.role?.trim() || result.agent,
+			kind: "sub",
+			parentId: opts.baseOptions.parentAgentId,
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+	}
+	return {
+		...result,
+		outputPath,
+		outputMeta:
+			result.outputMeta ??
+			({ lineCount: recoveryText.split("\n").length, charCount: recoveryText.length } satisfies NonNullable<
+				SingleResult["outputMeta"]
+			>),
+	};
+}
+
 async function writeIsolationPatch(
 	isolationDir: string,
 	baseline: WorktreeBaseline,
@@ -156,7 +200,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			preloadedExtensionPaths: undefined,
 			preloadedCustomToolPaths: undefined,
 		});
-		if (opts.mergeMode === "branch" && result.exitCode === 0) {
+		if (opts.mergeMode === "branch" && result.termination.status === "completed") {
 			try {
 				const commitResult = await commitToBranch(
 					isolationDir,
@@ -183,19 +227,36 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 						opts.artifactsDir,
 						opts.agentId,
 					);
+					const reason = `Merge failed: ${msg}`;
 					return {
 						...result,
 						patchPath: patchResult.patchPath,
 						nestedPatches: patchResult.nestedPatches,
-						error: `Merge failed: ${msg}`,
+						error: reason,
+						termination: {
+							...result.termination,
+							status: "failed",
+							code: "merge_failed",
+							reason,
+						},
 					};
 				} catch (patchErr) {
 					const patchMsg = patchErr instanceof Error ? patchErr.message : String(patchErr);
-					return { ...result, error: `Merge failed: ${msg}; patch capture failed: ${patchMsg}` };
+					const reason = `Merge failed: ${msg}; patch capture failed: ${patchMsg}`;
+					return {
+						...result,
+						error: reason,
+						termination: {
+							...result.termination,
+							status: "failed",
+							code: "merge_failed",
+							reason,
+						},
+					};
 				}
 			}
 		}
-		if (result.exitCode === 0) {
+		if (result.termination.status === "completed") {
 			try {
 				const patchResult = await writeIsolationPatch(isolationDir, taskBaseline, opts.artifactsDir, opts.agentId);
 				return {
@@ -205,12 +266,23 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				};
 			} catch (patchErr) {
 				const msg = patchErr instanceof Error ? patchErr.message : String(patchErr);
-				return { ...result, error: `Patch capture failed: ${msg}` };
+				const reason = `Patch capture failed: ${msg}`;
+				return {
+					...result,
+					error: reason,
+					termination: {
+						...result.termination,
+						status: "failed",
+						code: "merge_failed",
+						reason,
+					},
+				};
 			}
 		}
 		return result;
 	} catch (err) {
-		return opts.buildFailureResult(err);
+		const result = opts.buildFailureResult(err);
+		return persistIsolationFailureRecovery(opts, result);
 	} finally {
 		if (handle) {
 			await cleanupIsolation(handle);
@@ -251,7 +323,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 	const { result, repoRoot, mergeMode } = opts;
 	try {
 		if (mergeMode === "branch") {
-			if (!result.branchName && result.exitCode === 0 && !result.aborted && result.error) {
+			if (!result.branchName && result.termination.code === "merge_failed" && result.error) {
 				const patchList = result.patchPath ? `\nPatch artifact:\n- ${result.patchPath}` : "";
 				return {
 					summary: `\n\n<system-notification>Branch merge failed before a task branch could be created: ${result.error}\nTask outputs are preserved but changes were not applied.${patchList}</system-notification>`,
@@ -261,8 +333,8 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 				};
 			}
 			const canApplyNestedOnly =
-				!result.branchName && result.exitCode === 0 && !result.aborted && (result.nestedPatches?.length ?? 0) > 0;
-			if (!result.branchName || result.exitCode !== 0 || result.aborted) {
+				!result.branchName && result.termination.status === "completed" && (result.nestedPatches?.length ?? 0) > 0;
+			if (!result.branchName || result.termination.status !== "completed") {
 				return {
 					summary: canApplyNestedOnly
 						? "\n\nNo root changes to apply; nested repository patches captured."
@@ -302,11 +374,11 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			return { summary, changesApplied, hadAnyChanges, mergedBranchForNestedPatches };
 		}
 
-		// Patch mode: apply the patch from a successful run. A failed or
-		// aborted run has nothing to apply and must not block the result.
+		// Patch mode: only a completed run may apply its captured patch.
+		// Other terminal states preserve output without changing the parent repo.
 		let changesApplied: boolean;
 		let hadAnyChanges: boolean;
-		const succeeded = result.exitCode === 0 && !result.error && !result.aborted;
+		const succeeded = result.termination.status === "completed" && !result.error;
 		if (!succeeded) {
 			changesApplied = true;
 			hadAnyChanges = false;
@@ -371,7 +443,7 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 }
 
 export interface NestedPatchApplyOptions {
-	/** Subagent result carrying `nestedPatches`/`exitCode`/`aborted`. */
+	/** Subagent result carrying nested patches and mandatory termination state. */
 	result: SingleResult;
 	repoRoot: string;
 	mergeMode: "patch" | "branch";
@@ -385,9 +457,9 @@ export interface NestedPatchApplyOptions {
 
 /**
  * Apply nested-repo patches after the parent merge phase. Centralizes the
- * three-way gate (exitCode/aborted, patch-mode failed parent, branch-mode
- * branch-merged) and the non-fatal failure handling so `TaskTool` and the
- * eval `agent()` bridge use one implementation.
+ * three-way gate (completed termination, patch-mode parent success, branch-mode
+ * branch merge) and the non-fatal failure handling so `TaskTool` and the eval
+ * `agent()` bridge use one implementation.
  *
  * Returns a system-notification suffix to append to the parent merge summary,
  * or an empty string when nothing was applied or the nested apply succeeded.
@@ -398,8 +470,7 @@ export async function applyEligibleNestedPatches(opts: NestedPatchApplyOptions):
 	const nestedPatches = result.nestedPatches ?? [];
 	const eligible =
 		nestedPatches.length > 0 &&
-		result.exitCode === 0 &&
-		!result.aborted &&
+		result.termination.status === "completed" &&
 		(mergeMode !== "branch" || mergedBranchForNestedPatches);
 	if (!eligible) return "";
 	try {

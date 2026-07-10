@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
+import { type AsyncJob, type AsyncJobDeliveryPayload, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
+import type { SingleResult, SubagentTermination } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { JobTool } from "@oh-my-pi/pi-coding-agent/tools/job";
 
 type AsyncEntry = {
 	jobId: string;
 	result: string;
+	termination?: SubagentTermination;
 	job: AsyncJob | undefined;
 	durationMs: number | undefined;
 };
@@ -18,6 +20,7 @@ type AsyncDetails = {
 		jobId: string;
 		type?: "bash" | "task";
 		label?: string;
+		termination?: SubagentTermination;
 		durationMs?: number;
 	}>;
 };
@@ -35,6 +38,7 @@ function buildAsyncMessage(entries: AsyncEntry[]): CustomMessage<AsyncDetails> |
 				jobId: entry.jobId,
 				type: entry.job?.type,
 				label: entry.job?.label,
+				termination: entry.termination,
 				durationMs: entry.durationMs,
 			})),
 		},
@@ -61,6 +65,42 @@ function createToolSession(asyncJobManager?: AsyncJobManager): ToolSession {
 	} as unknown as ToolSession;
 }
 
+function termination(id: string, status: SubagentTermination["status"]): SubagentTermination {
+	return {
+		status,
+		code: status === "paused" ? "no_progress" : "yielded",
+		reason: status === "paused" ? "Paused after three no-progress cycles" : "Yielded structured result",
+		resumable: status === "paused",
+		historyUri: `history://${id}`,
+		outputUri: `agent://${id}`,
+		policy: {
+			request: { termination: "disabled", advisory: { mode: "advisory", afterAssistantTurns: 24 } },
+			wallClock: { maxRuntimeMs: null },
+			stall: { action: "pause", afterAssistantTurns: 3 },
+			spawn: { remainingDepth: null },
+			idle: { resumable: true, parkingTtlMs: null },
+		},
+	};
+}
+
+function taskResult(id: string, settled: SubagentTermination): SingleResult {
+	return {
+		index: 0,
+		id,
+		agent: "task",
+		agentSource: "bundled",
+		task: "Do the thing.",
+		exitCode: settled.status === "completed" ? 0 : 1,
+		output: "structured task result",
+		stderr: "",
+		truncated: false,
+		durationMs: 10,
+		tokens: 1,
+		requests: 1,
+		termination: settled,
+	};
+}
+
 function createHarness(initialStreaming: boolean) {
 	let streaming = initialStreaming;
 	const followUps: AgentMessage[] = [];
@@ -84,11 +124,12 @@ function createHarness(initialStreaming: boolean) {
 		build: buildAsyncMessage,
 	});
 	manager = new AsyncJobManager({
-		onJobComplete: (jobId, result, job) => {
+		onJobComplete: (jobId, payload: AsyncJobDeliveryPayload, job) => {
 			if (manager.isDeliverySuppressed(jobId)) return;
 			queue.enqueue<AsyncEntry>("async-result", {
 				jobId,
-				result,
+				result: payload.text,
+				termination: payload.kind === "task" ? payload.result.termination : undefined,
 				job,
 				durationMs: job ? Math.max(0, Date.now() - job.startTime) : undefined,
 			});
@@ -154,6 +195,26 @@ describe("async result yield queue delivery", () => {
 			.jobs.map(job => job.jobId)
 			.sort();
 		expect(deliveredIds).toEqual([firstJobId, secondJobId].sort());
+	});
+
+	test("paused task completion preserves the exact termination through staged delivery", async () => {
+		const harness = createHarness(true);
+		const settled = termination("PausedWorker", "paused");
+		const jobId = harness.manager.register("task", "paused worker", async () => ({
+			kind: "task",
+			text: '<task-result status="paused">structured task result</task-result>',
+			result: taskResult("PausedWorker", settled),
+		}));
+
+		await harness.manager.waitForAll();
+		expect(await harness.manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+		await harness.queue.flush("streaming");
+
+		expect(harness.followUps).toHaveLength(1);
+		const delivered = asyncDetails(harness.followUps[0]!).jobs.find(job => job.jobId === jobId);
+		expect(delivered?.termination).toBe(settled);
+		expect(delivered?.termination).toEqual(settled);
+		expect(harness.followUps[0]?.role === "custom" ? harness.followUps[0].content : "").toContain('status="paused"');
 	});
 
 	test("idle completion prompts once after scheduled idle flush", async () => {

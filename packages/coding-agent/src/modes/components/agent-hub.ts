@@ -53,13 +53,24 @@ function clampHubLine(line: string, width: number): string {
 	return truncateToWidth(line.replace(/[\r\n]+/g, " "), Math.max(1, width - 2), Ellipsis.Omit);
 }
 
-const STATUS_ORDER: Record<AgentStatus, number> = { running: 0, idle: 1, parked: 2, aborted: 3 };
+const STATUS_ORDER: Record<AgentStatus, number> = {
+	running: 0,
+	waiting: 1,
+	paused: 2,
+	idle: 3,
+	parked: 4,
+	aborted: 5,
+};
 
 /** Glyph + status word, colored per theme status conventions. */
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
 		case "running":
 			return theme.fg("accent", `${theme.status.running} running`);
+		case "waiting":
+			return theme.fg("accent", `${theme.status.pending} waiting`);
+		case "paused":
+			return theme.fg("warning", `${theme.icon.pause || theme.status.pending} paused`);
 		case "idle":
 			return theme.fg("success", `${theme.status.enabled} idle`);
 		case "parked":
@@ -454,12 +465,19 @@ export class AgentHubOverlayComponent extends Container {
 	}
 
 	#statusSummary(): string {
-		const counts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
+		const counts: Record<AgentStatus, number> = {
+			running: 0,
+			waiting: 0,
+			paused: 0,
+			idle: 0,
+			parked: 0,
+			aborted: 0,
+		};
 		for (const ref of this.#rows) {
 			counts[ref.status]++;
 		}
 		const parts: string[] = [];
-		for (const status of ["running", "idle", "parked", "aborted"] as const) {
+		for (const status of ["running", "waiting", "paused", "idle", "parked", "aborted"] as const) {
 			const count = counts[status];
 			if (count > 0) parts.push(`${count} ${status}`);
 		}
@@ -471,6 +489,9 @@ export class AgentHubOverlayComponent extends Container {
 		const parts: string[] = [statusBadge(ref.status), theme.bold(replaceTabs(ref.id))];
 		parts.push(theme.fg("dim", replaceTabs(ref.displayName)));
 		parts.push(theme.fg("dim", ref.parentId ? `${ref.kind} · of ${ref.parentId}` : ref.kind));
+		if (ref.statusDetail?.reason) {
+			parts.push(theme.fg("muted", sanitizeLine(ref.statusDetail.reason, TRUNCATE_LENGTHS.TITLE)));
+		}
 		if (ref.kind === "advisor") {
 			parts.push(theme.fg("warning", "read-only"));
 		}

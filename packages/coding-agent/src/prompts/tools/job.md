@@ -9,5 +9,6 @@ Jobs are process-local scheduling records. They are not restored after a restart
 - **Block and wait:** Pass `poll` with specific job IDs when you are completely blocked and cannot do any other work. The call returns as soon as one watched job finishes, the wait window elapses, or an IRC / steering message interrupts the wait — NOT when all jobs finish; re-issue to keep waiting.
   - To watch EVERY running job, issue a call with NO fields at all (no `poll`, no `cancel`, no `list`). NEVER pass an array of every running ID.
   - A finished job's output, or the interrupting message and reason, is included in the next turn.
-- **Stop execution:** Pass `cancel` with job IDs to kill jobs that have hung, stalled, or are no longer needed. A cancel-only call returns immediately.
-- **Snapshot:** Pass `list: true` to get the current status of all jobs without waiting.
+- **Stop execution:** Pass `cancel` with job IDs to stop running jobs you no longer need. A cancel-only call returns immediately.
+- **Snapshot:** Pass `list: true` to get the current status of all jobs. Task snapshots also show available agent session status, last-activity age, and activity gist.
+  - Job status is authoritative. `idle`/`parked` describe retained agent session state. You NEVER infer failure or cancel from activity age alone.

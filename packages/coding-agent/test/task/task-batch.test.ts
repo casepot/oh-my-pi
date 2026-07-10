@@ -72,6 +72,21 @@ function makeResult(id: string, overrides: Partial<SingleResult> = {}): SingleRe
 		durationMs: 5,
 		tokens: 0,
 		requests: 1,
+		termination: {
+			status: "completed",
+			code: "yielded",
+			reason: "Yielded structured result",
+			resumable: true,
+			historyUri: `history://${id}`,
+			outputUri: `agent://${id}`,
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "pause", afterAssistantTurns: 10 },
+				spawn: { remainingDepth: null },
+				idle: { resumable: true, parkingTtlMs: null },
+			},
+		},
 		...overrides,
 	};
 }
@@ -259,7 +274,7 @@ describe("task.batch spawning", () => {
 		expect(text).toContain("- `Alpha`");
 		expect(text).toContain("- `Beta`");
 		expect(result.details?.progress?.map(progress => progress.id)).toEqual(["Alpha", "Beta"]);
-		expect(result.details?.async?.state).toBe("running");
+		expect(result.details?.async?.state).toBe("waiting");
 
 		const alphaJob = manager.getJob("Alpha");
 		const betaJob = manager.getJob("Beta");
@@ -270,8 +285,13 @@ describe("task.batch spawning", () => {
 
 		expect(alphaJob!.status).toBe("completed");
 		expect(betaJob!.status).toBe("completed");
-		expect(alphaJob!.resultText).toContain("Alpha is now idle");
-		expect(betaJob!.resultText).toContain("history://Beta");
+		expect(alphaJob!.result?.kind).toBe("task");
+		expect(betaJob!.result?.kind).toBe("task");
+		if (alphaJob!.result?.kind !== "task" || betaJob!.result?.kind !== "task") {
+			throw new Error("Expected structured task results");
+		}
+		expect(alphaJob!.result.result.termination.historyUri).toBe("history://Alpha");
+		expect(betaJob!.result.result.termination.outputUri).toBe("agent://Beta");
 
 		expect(seen).toHaveLength(2);
 		for (const spawn of seen) {
@@ -408,7 +428,7 @@ describe("task.batch spawning", () => {
 			},
 		);
 
-		expect(result.details?.async?.state).toBe("running");
+		expect(result.details?.async?.state).toBe("waiting");
 
 		const firstJob = manager.getJob("First")!;
 		const secondJob = manager.getJob("Second")!;
@@ -428,10 +448,9 @@ describe("task.batch spawning", () => {
 
 		expect(secondJob.status).toBe("cancelled");
 		const last = updates.at(-1);
-		// The acquire-time abort path has to flow through the same `onSettled`
-		// the post-acquire abort path uses, otherwise the batch aggregate sticks
-		// at "running" forever after the surviving spawn completes.
-		expect(last?.async?.state).toBe("failed");
+		// The acquire-time cancellation settles the queued spawn as aborted;
+		// the aggregate preserves that outcome after the surviving spawn completes.
+		expect(last?.async?.state).toBe("aborted");
 		expect(last?.progress?.find(p => p.id === "Second")?.status).toBe("aborted");
 		expect(last?.progress?.find(p => p.id === "First")?.status).toBe("completed");
 	});

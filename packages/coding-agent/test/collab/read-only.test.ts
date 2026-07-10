@@ -14,6 +14,7 @@ import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
@@ -193,6 +194,72 @@ describe("collab read-only links", () => {
 		expect(cmdReply.t).toBe("error");
 
 		expect(host.participants.find(p => p.name === "viewer")?.readOnly).toBe(true);
+	});
+
+	it("serializes waiting and paused status detail in welcome snapshots", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "wire-waiting",
+			displayName: "Wire Waiting",
+			kind: "sub",
+			parentId: "Main",
+			session: {} as never,
+			status: "waiting",
+			statusDetail: {
+				code: "provider_retry",
+				reason: "provider retry backoff",
+				since: 1_000,
+				consecutive: 2,
+				limit: 5,
+			},
+		});
+		registry.register({
+			id: "wire-paused",
+			displayName: "Wire Paused",
+			kind: "sub",
+			parentId: "Main",
+			session: {} as never,
+			status: "paused",
+			statusDetail: {
+				code: "no_progress",
+				reason: "paused after repeated tool loops",
+				since: 2_000,
+			},
+		});
+
+		try {
+			const guest = await joinAsGuest(host.link, "lifecycle-reader");
+			guestCleanups.push(() => guest.socket.close());
+			const welcome = await guest.nextFrame();
+			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+			expect(welcome.agents).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						id: "wire-waiting",
+						status: "waiting",
+						statusDetail: {
+							code: "provider_retry",
+							reason: "provider retry backoff",
+							since: 1_000,
+							consecutive: 2,
+							limit: 5,
+						},
+					}),
+					expect.objectContaining({
+						id: "wire-paused",
+						status: "paused",
+						statusDetail: {
+							code: "no_progress",
+							reason: "paused after repeated tool loops",
+							since: 2_000,
+						},
+					}),
+				]),
+			);
+		} finally {
+			registry.unregister("wire-waiting");
+			registry.unregister("wire-paused");
+		}
 	});
 
 	it("keeps full write capability for guests holding the write token", async () => {

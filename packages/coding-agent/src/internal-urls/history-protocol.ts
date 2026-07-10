@@ -2,8 +2,9 @@
  * Protocol handler for history:// URLs.
  *
  * Exposes agent transcripts as concise markdown. Live refs render from the
- * in-memory message array; parked refs (session disposed, sessionFile
- * retained) load read-only from the JSONL session file — no writer, no lock.
+ * in-memory message array; refs with retained session files load read-only
+ * from JSONL — no writer, no lock. This includes parked refs and terminal
+ * aborted refs preserved for recovery.
  *
  * URL forms:
  * - history:// - Index of all registry agents (id, status, kind, last activity)
@@ -31,7 +32,7 @@ function formatAgo(timestamp: number): string {
  * Handler for history:// URLs.
  *
  * Resolves agent ids against the global AgentRegistry, serving transcripts
- * for both live and parked agents.
+ * from either live sessions or retained session files.
  */
 export class HistoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "history";

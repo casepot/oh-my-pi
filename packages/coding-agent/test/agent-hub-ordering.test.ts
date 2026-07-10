@@ -14,6 +14,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
+const AGENT_STATUSES = ["running", "waiting", "paused", "idle", "parked", "aborted"] as const;
+
 interface GeometryStub {
 	setRows(n: number): void;
 	restore(): void;
@@ -57,10 +59,7 @@ function renderedAgentIds(hub: AgentHubOverlayComponent): string[] {
 		.render(120)
 		.map(line => Bun.stripANSI(line))
 		.map(line => line.split(" · "))
-		.filter(
-			parts =>
-				parts.length >= 4 && ["running", "idle", "parked", "aborted"].some(status => parts[0].endsWith(status)),
-		)
+		.filter(parts => parts.length >= 4 && AGENT_STATUSES.some(status => parts[0].endsWith(status)))
 		.map(parts => parts[1]!);
 }
 
@@ -78,6 +77,35 @@ describe("Agent hub row ordering", () => {
 		geometry?.restore();
 		geometry = undefined;
 		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("orders, summarizes, and labels all six lifecycle states", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		for (const status of AGENT_STATUSES.toReversed()) {
+			const statusDetail =
+				status === "waiting"
+					? { code: "provider_retry" as const, reason: "provider retry", since: Date.now() }
+					: status === "paused"
+						? { code: "no_progress" as const, reason: "progress cap", since: Date.now() }
+						: undefined;
+			agents.register({
+				id: `${status}-agent`,
+				displayName: status,
+				kind: "sub",
+				session: status === "parked" || status === "aborted" ? null : ({} as AgentSession),
+				status,
+				statusDetail,
+			});
+		}
+
+		const hub = makeHub(agents);
+		const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+		expect(renderedAgentIds(hub)).toEqual(AGENT_STATUSES.map(status => `${status}-agent`));
+		expect(rendered).toContain("1 running · 1 waiting · 1 paused · 1 idle · 1 parked · 1 aborted");
+		expect(rendered).toContain("provider retry");
+		expect(rendered).toContain("progress cap");
+		hub.dispose();
 	});
 
 	it("freezes the initial lastActivity order while the hub is open", () => {

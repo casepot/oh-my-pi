@@ -1,7 +1,7 @@
 import type { AgentSession } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
 import type { AgentLifecycleManager, AgentReviver } from "./agent-lifecycle";
-import { type AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-registry";
+import { type AgentRegistry, type AgentStatus, type AgentStatusDetail, MAIN_AGENT_ID } from "./agent-registry";
 
 export const AGENT_REF_CUSTOM_TYPE = "agent-ref";
 export const AGENT_REF_SCHEMA_VERSION = 1;
@@ -13,6 +13,7 @@ export interface PersistedAgentRefRecord {
 	kind: "sub";
 	parentId?: string;
 	status: AgentStatus;
+	statusDetail?: AgentStatusDetail;
 	sessionFile: string | null;
 	agentName?: string;
 	role?: string;
@@ -33,6 +34,17 @@ export interface RestorePersistedAgentRefsInput {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object";
+}
+function parseStatusDetail(value: unknown): AgentStatusDetail | undefined {
+	if (!isRecord(value)) return undefined;
+	const { code, reason, since, consecutive, limit } = value;
+	if (code !== "no_progress" && code !== "provider_retry" && code !== "external_wait") return undefined;
+	if (typeof reason !== "string" || reason.length === 0) return undefined;
+	if (typeof since !== "number" || !Number.isFinite(since)) return undefined;
+	if (consecutive !== undefined && (typeof consecutive !== "number" || !Number.isFinite(consecutive)))
+		return undefined;
+	if (limit !== undefined && (typeof limit !== "number" || !Number.isFinite(limit))) return undefined;
+	return { code, reason, since, consecutive, limit };
 }
 
 function parsePersistedAgentRef(entry: SessionEntry): PersistedAgentRefRecord | undefined {
@@ -55,7 +67,12 @@ function parsePersistedAgentRef(entry: SessionEntry): PersistedAgentRefRecord | 
 	const rawSpawns = data.spawns;
 	const rawStatus = data.status;
 	const status =
-		rawStatus === "running" || rawStatus === "idle" || rawStatus === "parked" || rawStatus === "aborted"
+		rawStatus === "running" ||
+		rawStatus === "waiting" ||
+		rawStatus === "paused" ||
+		rawStatus === "idle" ||
+		rawStatus === "parked" ||
+		rawStatus === "aborted"
 			? rawStatus
 			: "parked";
 	const rawUpdatedAt = data.updatedAt;
@@ -72,6 +89,7 @@ function parsePersistedAgentRef(entry: SessionEntry): PersistedAgentRefRecord | 
 		kind: "sub",
 		parentId: typeof data.parentId === "string" && data.parentId.length > 0 ? data.parentId : undefined,
 		status,
+		statusDetail: parseStatusDetail(data.statusDetail),
 		sessionFile: typeof rawSessionFile === "string" && rawSessionFile.length > 0 ? rawSessionFile : null,
 		agentName: typeof rawAgentName === "string" && rawAgentName.length > 0 ? rawAgentName : undefined,
 		role: typeof data.role === "string" && data.role.length > 0 ? data.role : undefined,
@@ -106,6 +124,7 @@ export function restorePersistedAgentRefs(input: RestorePersistedAgentRefsInput)
 			session: null,
 			sessionFile: record.sessionFile,
 			status,
+			statusDetail: status === record.status ? record.statusDetail : undefined,
 		});
 		if (status !== "aborted") {
 			input.lifecycle.adopt(record.id, {
@@ -123,7 +142,8 @@ export function installRegistryStatusSync(agentId: string, session: AgentSession
 		if (event.type === "agent_start") {
 			registry.setStatus(agentId, "running");
 		} else if (event.type === "agent_end") {
-			registry.setStatus(agentId, "idle");
+			const status = registry.get(agentId)?.status;
+			if (status === "running" || status === "waiting") registry.setStatus(agentId, "idle");
 		}
 	});
 }

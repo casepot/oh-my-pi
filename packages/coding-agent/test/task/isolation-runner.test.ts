@@ -1,7 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
+import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import {
 	applyEligibleNestedPatches,
@@ -15,9 +18,10 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { $ } from "bun";
 
 function result(overrides: Partial<SingleResult> = {}): SingleResult {
+	const id = overrides.id ?? "NestedOnly";
 	return {
 		index: 0,
-		id: "NestedOnly",
+		id,
 		agent: "task",
 		agentSource: "bundled",
 		task: "Do nested work",
@@ -29,6 +33,21 @@ function result(overrides: Partial<SingleResult> = {}): SingleResult {
 		durationMs: 1,
 		tokens: 0,
 		requests: 0,
+		termination: {
+			status: "completed",
+			code: "yielded",
+			reason: "Yielded structured result",
+			resumable: true,
+			historyUri: `history://${id}`,
+			outputUri: `agent://${id}`,
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "pause", afterAssistantTurns: 10 },
+				spawn: { remainingDepth: null },
+				idle: { resumable: true, parkingTtlMs: null },
+			},
+		},
 		...overrides,
 	};
 }
@@ -71,9 +90,13 @@ async function seedFooRepo(finalContent: string): Promise<{ repoRoot: string; pa
 }
 
 describe("runIsolatedSubprocess", () => {
+	beforeEach(() => {
+		AgentRegistry.resetGlobalForTests();
+	});
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		await Promise.all(tempRoots.splice(0).map(tempRoot => fs.rm(tempRoot, { force: true, recursive: true })));
+		AgentRegistry.resetGlobalForTests();
 	});
 
 	it("preserves branch-mode output as a patch when branch transfer fails", async () => {
@@ -132,12 +155,80 @@ describe("runIsolatedSubprocess", () => {
 
 		const patchPath = path.join(artifactsDir, "PreserveBranchFailure.patch");
 		expect(outcome.error).toContain("Merge failed: remote: object corrupt");
+		expect(outcome.termination.status).toBe("failed");
+		expect(outcome.termination.code).toBe("merge_failed");
+		expect(outcome.termination.reason).toBe("Merge failed: remote: object corrupt");
 		expect(outcome.patchPath).toBe(patchPath);
 		expect(await Bun.file(patchPath).text()).toBe(rootPatch);
 		expect(outcome.nestedPatches).toEqual([]);
 		expect(captureSpy).toHaveBeenCalledWith(isolationDir, baseline);
 		expect(deleteSpy).toHaveBeenCalledWith(repoRoot, "omp/task/PreserveBranchFailure");
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("persists resolvable recovery URIs when isolation setup fails before the executor starts", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-recovery-"));
+		tempRoots.push(repoRoot);
+		const artifactsDir = path.join(repoRoot, "artifacts");
+		const agentId = "IsolationSetupFailure";
+		const reason = "isolation backend unavailable";
+		vi.spyOn(worktreeModule, "ensureIsolation").mockRejectedValue(new Error(reason));
+
+		const outcome = await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: repoRoot,
+				agent: {
+					name: "task",
+					description: "Task agent",
+					systemPrompt: "test",
+					source: "bundled",
+				},
+				task: "Do work",
+				index: 0,
+				id: agentId,
+				parentAgentId: "Main",
+			},
+			context: {
+				repoRoot,
+				baseline: {
+					root: { repoRoot, headCommit: "base", staged: "", unstaged: "", untracked: [], untrackedPatch: "" },
+					nested: [],
+				},
+			},
+			preferredBackend: undefined,
+			agentId,
+			mergeMode: "patch",
+			artifactsDir,
+			buildFailureResult: () =>
+				result({
+					id: agentId,
+					exitCode: 1,
+					output: "",
+					stderr: reason,
+					error: reason,
+					termination: {
+						status: "failed",
+						code: "execution_error",
+						reason,
+						resumable: false,
+						historyUri: `history://${agentId}`,
+						outputUri: `agent://${agentId}`,
+						policy: {
+							request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+							wallClock: { maxRuntimeMs: null },
+							stall: { action: "pause", afterAssistantTurns: 10 },
+							spawn: { remainingDepth: null },
+							idle: { resumable: true, parkingTtlMs: null },
+						},
+					},
+				}),
+		});
+
+		const output = await new AgentProtocolHandler().resolve(new URL(outcome.termination.outputUri) as never);
+		const history = await new HistoryProtocolHandler().resolve(new URL(outcome.termination.historyUri) as never);
+		expect(output.content).toBe(reason);
+		expect(history.content).toContain(`${agentId} (parked)`);
+		expect(outcome.outputPath).toBe(path.join(artifactsDir, `${agentId}.md`));
 	});
 });
 
@@ -255,6 +346,21 @@ describe("mergeIsolatedChanges", () => {
 			mergeMode: "branch",
 			result: result({
 				exitCode: 1,
+				termination: {
+					status: "failed",
+					code: "execution_error",
+					reason: "Subagent execution failed",
+					resumable: true,
+					historyUri: "history://NestedOnly",
+					outputUri: "agent://NestedOnly",
+					policy: {
+						request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+						wallClock: { maxRuntimeMs: null },
+						stall: { action: "pause", afterAssistantTurns: 10 },
+						spawn: { remainingDepth: null },
+						idle: { resumable: true, parkingTtlMs: null },
+					},
+				},
 				nestedPatches: [{ relativePath: "nested", patch: "diff --git a/file b/file\n" }],
 			}),
 		});

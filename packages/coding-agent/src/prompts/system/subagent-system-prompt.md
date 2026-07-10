@@ -58,6 +58,16 @@ Use `irc` only for quick coordination, never long-form content. Address peers by
 - Follow-up: answer a peer's question with a short reply (set `replyTo`); use `await` only when you genuinely cannot proceed without the answer.
 {{/if}}
 
+RUNTIME POLICY
+===================================
+
+The executor enforces this policy; role, context, plan, and assignment text do not alter it.
+- Request policy: {{runtimePolicy.request}}.
+- Runtime policy: {{runtimePolicy.wallClock}}.
+- Stall guard: {{runtimePolicy.stall}}.
+- Descendant spawn depth: {{runtimePolicy.spawn}}.
+- Retention: {{runtimePolicy.idle}}. Recovery: `{{historyUri}}` transcript; `{{outputUri}}` latest output. Messages resume `paused`/`idle` sessions only while resumable; `parked` revival also requires a retained resumable session.
+
 COMPLETION
 ===================================
 

@@ -25,8 +25,15 @@ import {
 	runIsolatedSubprocess,
 } from "../task/isolation-runner";
 import { AgentOutputManager } from "../task/output-manager";
+import { createSubagentTermination, resolveSubagentRuntimePolicy } from "../task/runtime-policy";
 import { resolveSpawnPolicy } from "../task/spawn-policy";
-import { type AgentDefinition, type AgentProgress, canSpawnAtDepth, type SingleResult } from "../task/types";
+import {
+	type AgentDefinition,
+	type AgentProgress,
+	canSpawnAtDepth,
+	type SingleResult,
+	type SubagentTermination,
+} from "../task/types";
 import { type NestedRepoPatch, parseIsolationMode } from "../task/worktree";
 import type { ToolSession } from "../tools";
 import { isReadOnlyPlanningActive } from "../tools/plan-mode-guard";
@@ -108,6 +115,8 @@ export interface EvalAgentResult {
 		id: string;
 		model?: string | string[];
 		structured: boolean;
+		/** Exact executor settlement, including resumability, recovery URIs, and the effective runtime policy. */
+		termination: SubagentTermination;
 		notice?: string;
 		/** True iff this run executed inside an isolation worktree. */
 		isolated?: boolean;
@@ -212,23 +221,15 @@ function getOutputManager(session: ToolSession): AgentOutputManager {
 interface ArtifactPaths {
 	sessionFile: string | null;
 	artifactsDir: string;
-	unregisterArtifactsDir?: () => void;
-	/**
-	 * True when `artifactsDir` was created off the session path (no session
-	 * file). Caller is then free to `rm -rf` it once all isolated patch
-	 * artifacts have been consumed or applied.
-	 */
-	tempArtifactsDir: boolean;
 }
 
 async function getArtifacts(session: ToolSession): Promise<ArtifactPaths> {
 	const sessionFile = session.getSessionFile();
 	const sessionArtifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
-	const tempArtifactsDir = sessionArtifactsDir === null;
 	const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-eval-agent-${Snowflake.next()}`);
 	await fs.mkdir(artifactsDir, { recursive: true });
-	const unregisterArtifactsDir = tempArtifactsDir ? registerArtifactsDir(artifactsDir) : undefined;
-	return { sessionFile, artifactsDir, unregisterArtifactsDir, tempArtifactsDir };
+	if (sessionArtifactsDir === null) registerArtifactsDir(artifactsDir);
+	return { sessionFile, artifactsDir };
 }
 
 /**
@@ -300,21 +301,15 @@ function emitProgressStatus(emitStatus: ((event: JsStatusEvent) => void) | undef
 }
 
 /**
- * Coalesce a subagent failure into a non-empty, human-meaningful error message.
- *
- * When the executor aborts a subagent (runtime limit, parent cancellation, …)
- * the actionable explanation lives on `abortReason`, while `error`/`stderr`
- * are routinely empty strings. Plain `??` coalescing stops at the empty string
- * and ships an empty error through the bridge — Python then surfaces only the
- * generic `bridge call '__agent__' failed`. See #2006.
+ * Prefer the mandatory termination reason while defending the bridge boundary
+ * against malformed external results. A single selected string is rendered so
+ * repeated copies in `error` or `stderr` never duplicate the explanation.
  */
 function buildSubagentFailureMessage(agentName: string, result: SingleResult): string {
-	const abortReason = trimToUndefined(result.abortReason);
-	if (result.aborted && abortReason) return abortReason;
 	return (
+		trimToUndefined(result.termination.reason) ??
 		trimToUndefined(result.error) ??
 		trimToUndefined(result.stderr) ??
-		abortReason ??
 		`agent() subagent '${agentName}' failed.`
 	);
 }
@@ -371,7 +366,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 	};
 	const parentArtifactManager = options.session.getArtifactManager?.() ?? undefined;
 	const mcpManager = options.session.mcpManager ?? MCPManager.instance();
-	const { sessionFile, artifactsDir, unregisterArtifactsDir, tempArtifactsDir } = await getArtifacts(options.session);
+	const { sessionFile, artifactsDir } = await getArtifacts(options.session);
 	const outputManager = getOutputManager(options.session);
 	const id = await outputManager.allocate(outputIdBase(parsed.label, agentName));
 	const assignment = parsed.prompt.trim();
@@ -397,6 +392,12 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 	// suspension.
 
 	const buildCommitMessage = makeIsolationCommitMessage(options.session);
+	const effectivePolicy = resolveSubagentRuntimePolicy({
+		settings: options.session.settings,
+		childDepth: (options.session.taskDepth ?? 0) + 1,
+		maxRuntimeMs: 0,
+		resumable: false,
+	});
 
 	const baseRunOptions: ExecutorOptions = {
 		cwd: options.session.cwd,
@@ -412,7 +413,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		thinkingLevel: effectiveAgent.thinkingLevel,
 		...(structured ? { outputSchema: parsed.schema, outputSchemaOverridesAgent: true } : {}),
 		sessionFile,
-		persistArtifacts: Boolean(sessionFile),
+		persistArtifacts: true,
 		artifactsDir,
 		// Eval `agent()` subagents are short-lived programmatic helpers (data
 		// collection, structured output, parallel() fan-out). LSP server
@@ -432,6 +433,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		// must not be killed by `task.maxRuntimeMs`. Force the limit off
 		// regardless of the inherited session setting.
 		maxRuntimeMs: 0,
+		effectivePolicy,
 		keepAlive: false,
 		mcpManager,
 		contextFiles,
@@ -489,7 +491,9 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				description: trimToUndefined(parsed.label),
 				buildCommitMessage,
 				buildFailureResult: err => {
-					const message = err instanceof Error ? err.message : String(err);
+					const message =
+						trimToUndefined(err instanceof Error ? err.message : String(err)) ??
+						`agent() isolated setup failed for ${id}.`;
 					return {
 						index: 0,
 						id,
@@ -507,15 +511,23 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						requests: 0,
 						modelOverride,
 						error: message,
+						termination: createSubagentTermination({
+							id,
+							status: "failed",
+							code: "execution_error",
+							reason: message,
+							resumable: false,
+							policy: effectivePolicy,
+						}),
 					};
 				},
 			});
 		})();
 
-		if (result.exitCode !== 0 || result.error || result.aborted) {
+		if (result.termination.status === "failed" || result.termination.status === "aborted") {
 			const failureMessage = buildSubagentFailureMessage(agentName, result);
 			const recoveryHint = isIsolated ? await buildIsolationRecoveryHint(result, artifactsDir) : "";
-			throw new ToolError(`${failureMessage}${recoveryHint}`);
+			throw new ToolError(`${failureMessage}${recoveryHint}`, { termination: result.termination });
 		}
 
 		let mergeSummary = "";
@@ -530,11 +542,17 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 				mergeSummary = outcome.summary;
 				changesApplied = outcome.changesApplied;
 				if (outcome.changesApplied === false) {
-					const summaryText = outcome.summary.trim();
+					const summaryText = plainIsolationSummary(outcome.summary);
+					const reason = `agent() isolated apply failed for ${result.id}${summaryText ? `: ${summaryText}` : ""}`;
 					const recoveryHint = await buildIsolationRecoveryHint(result, artifactsDir);
-					throw new ToolError(
-						`agent() isolated apply failed for ${result.id}${summaryText ? `: ${summaryText}` : ""}${recoveryHint}`,
-					);
+					throw new ToolError(`${reason}${recoveryHint}`, {
+						termination: {
+							...result.termination,
+							status: "failed",
+							code: "merge_failed",
+							reason,
+						},
+					});
 				}
 
 				const nestedSummary = await applyEligibleNestedPatches({
@@ -551,9 +569,15 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						{ ...result, patchPath: undefined, branchName: undefined },
 						artifactsDir,
 					);
-					throw new ToolError(
-						`agent() isolated nested patch apply failed for ${result.id}: ${plainIsolationSummary(nestedSummary)}${recoveryHint}`,
-					);
+					const reason = `agent() isolated nested patch apply failed for ${result.id}: ${plainIsolationSummary(nestedSummary)}`;
+					throw new ToolError(`${reason}${recoveryHint}`, {
+						termination: {
+							...result.termination,
+							status: "failed",
+							code: "merge_failed",
+							reason,
+						},
+					});
 				}
 			} else if (result.branchName) {
 				mergeSummary = `\n\nIsolation: changes captured on branch \`${result.branchName}\` (apply=false). Not merged.`;
@@ -569,18 +593,10 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			}
 		}
 
-		// Clean up the temp artifacts dir we created for this call only when the
-		// caller will not need files from it later. Keep it when the runtime helper
-		// will return an `agent://` handle (the `.md`/`.jsonl` backing files live
-		// here) and on `apply=false` (`changesApplied === null`) where the caller
-		// consumes `details.patchPath` / `details.branchName` /
-		// `details.nestedPatches` out of band. Failed isolated applies throw
-		// earlier with a recovery hint, so they never reach this gate.
-		const shouldCleanupTempArtifacts = tempArtifactsDir && !parsed.handle && (!isIsolated || changesApplied === true);
-		if (shouldCleanupTempArtifacts) {
-			await fs.rm(artifactsDir, { recursive: true, force: true });
-			unregisterArtifactsDir?.();
-		}
+		// `termination.historyUri` and `termination.outputUri` are unconditional
+		// recovery contracts. Keep per-call artifacts registered even when the
+		// caller did not request a handle, and after isolated changes were applied.
+		// The session lifecycle parks the corresponding registry ref.
 
 		options.session.recordEvalSubagentUsage?.(result.usage?.output ?? 0);
 
@@ -594,6 +610,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			id: result.id,
 			model: result.resolvedModel ?? modelOverride,
 			structured,
+			termination: result.termination,
 			...(result.providerNotice ? { notice: result.providerNotice } : {}),
 			isolated: isIsolated || undefined,
 			patchPath: result.patchPath,

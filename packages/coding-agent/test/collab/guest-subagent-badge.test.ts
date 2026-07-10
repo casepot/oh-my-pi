@@ -29,17 +29,23 @@ function makeState(): Extract<CollabFrame, { t: "welcome" }>["state"] {
 	};
 }
 
-function makeAgents(ids: string[]): AgentSnapshot[] {
-	return ids.map((id, index) => ({
+function makeAgent(
+	id: string,
+	index: number,
+	status: AgentSnapshot["status"] = "running",
+	statusDetail?: AgentSnapshot["statusDetail"],
+): AgentSnapshot {
+	return {
 		id,
 		displayName: `Remote ${index + 1}`,
 		kind: "sub",
 		parentId: "Main",
-		status: "running",
+		status,
+		statusDetail,
 		hasSessionFile: true,
 		createdAt: 1000 + index,
 		lastActivity: 2000 + index,
-	}));
+	};
 }
 
 function makeGuestContext(counts: number[]): InteractiveModeContext {
@@ -114,7 +120,7 @@ afterEach(() => {
 });
 
 describe("collab guest running-subagents badge", () => {
-	it("uses the guest mirror registry and refreshes on join, resnapshot, and leave", async () => {
+	it("preserves six-state snapshots and detail while counting only running agents", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
 		const roomId = "badge-room-1";
 		const roomKey = generateRoomKey();
@@ -122,7 +128,25 @@ describe("collab guest running-subagents badge", () => {
 		const link = formatCollabLink("ws://localhost:8788", roomId, roomKey);
 		const hostSocket = new CollabSocket({ wsUrl: `ws://localhost:8788/r/${roomId}`, role: "host", key: cryptoKey });
 		const hostOpen = Promise.withResolvers<void>();
-		let nextWelcomeAgents = makeAgents(["remote-one"]);
+		const waitingDetail = {
+			code: "provider_retry",
+			reason: "provider retry backoff",
+			since: 1_500,
+			consecutive: 2,
+			limit: 4,
+		} satisfies NonNullable<AgentSnapshot["statusDetail"]>;
+		let nextWelcomeAgents = [
+			makeAgent("remote-running", 0),
+			makeAgent("remote-waiting", 1, "waiting", waitingDetail),
+			makeAgent("remote-paused", 2, "paused", {
+				code: "no_progress",
+				reason: "no observable progress",
+				since: 1_600,
+			}),
+			makeAgent("remote-idle", 3, "idle"),
+			makeAgent("remote-parked", 4, "parked"),
+			makeAgent("remote-aborted", 5, "aborted"),
+		];
 		const sendWelcome = (agents: AgentSnapshot[]) => {
 			hostSocket.send({
 				t: "welcome",
@@ -150,14 +174,49 @@ describe("collab guest running-subagents badge", () => {
 			expect(counts).toEqual([0, 1]);
 			expect(ctx.statusLine.subagentCount).toBe(1);
 
-			nextWelcomeAgents = makeAgents(["remote-one", "remote-two"]);
+			expect(guest.agentRegistry.get("remote-waiting")).toMatchObject({
+				status: "waiting",
+				statusDetail: waitingDetail,
+			});
+			expect(guest.agentRegistry.list().map(ref => ref.status)).toEqual([
+				"running",
+				"waiting",
+				"paused",
+				"idle",
+				"parked",
+				"aborted",
+			]);
+
+			const pausedDetail = {
+				code: "no_progress",
+				reason: "paused after repeated tool loops",
+				since: 2_500,
+				consecutive: 3,
+				limit: 3,
+			} satisfies NonNullable<AgentSnapshot["statusDetail"]>;
+			const agentsFrameApplied = Promise.withResolvers<void>();
+			const unsubscribe = guest.agentRegistry.onChange(event => {
+				if (event.ref.id === "remote-waiting" && event.ref.status === "paused") agentsFrameApplied.resolve();
+			});
+			nextWelcomeAgents = nextWelcomeAgents.map(agent =>
+				agent.id === "remote-waiting" ? { ...agent, status: "paused", statusDetail: pausedDetail } : agent,
+			);
+			hostSocket.send({ t: "agents", agents: nextWelcomeAgents });
+			await agentsFrameApplied.promise;
+			unsubscribe();
+			expect(guest.agentRegistry.get("remote-waiting")).toMatchObject({
+				status: "paused",
+				statusDetail: pausedDetail,
+			});
+			expect(ctx.statusLine.subagentCount).toBe(1);
+
 			const secondSnapshot = Promise.withResolvers<void>();
 			const originalSync = ctx.syncRunningSubagentBadge.bind(ctx);
 			ctx.syncRunningSubagentBadge = () => {
 				originalSync();
 				if (ctx.statusLine.subagentCount === 2) secondSnapshot.resolve();
 			};
-			sendWelcome(nextWelcomeAgents);
+			hostSocket.send({ t: "agents", agents: [...nextWelcomeAgents, makeAgent("remote-two", 6)] });
 			await secondSnapshot.promise;
 			expect(ctx.statusLine.subagentCount).toBe(2);
 

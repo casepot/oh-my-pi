@@ -4,9 +4,9 @@
  * Replaces the old auto-reply model: a `send` never blocks on the recipient
  * generating anything. Delivery resolves the recipient via the global
  * AgentRegistry — parked agents are revived through the
- * AgentLifecycleManager, idle agents are woken with a real turn, and busy
- * agents receive the message as a non-interrupting aside at the next step
- * boundary (see AgentSession.deliverIrcMessage). Replies are real turns by
+ * AgentLifecycleManager, live agents are handed to their session, and an
+ * active `wait` consumes matching messages directly without a second session
+ * delivery (see AgentSession.deliverIrcMessage). Replies are real turns by
  * the recipient, observed via `wait` — with one exception: when the sender
  * awaits a reply and the recipient cannot run a real reply turn in time
  * (mid-turn with async execution disabled — possibly blocked in a
@@ -30,6 +30,8 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Generated from existing context without tools or lifecycle changes. */
+	automated?: true;
 }
 
 export interface IrcDeliveryReceipt {
@@ -77,8 +79,8 @@ export class IrcBus {
 	/**
 	 * Fire-and-forget delivery. Never blocks on the recipient generating
 	 * anything: the receipt reports how the message reached the recipient
-	 * (waiter/aside = "injected", idle wake = "woken", park revival =
-	 * "revived"), not what they did with it.
+	 * (waiter/aside = "injected", deliberate live wake = "woken", parked
+	 * revival = "revived"), not what they did with it.
 	 *
 	 * Mailbox semantics: a successfully delivered message never lingers in
 	 * the recipient's mailbox — injection/wake puts the full body into their
@@ -115,6 +117,7 @@ export class IrcBus {
 				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
 			};
 		}
+		const resumePausedOnWake = ref.status === "paused";
 
 		let revived = false;
 		if (ref.status === "parked") {
@@ -147,6 +150,12 @@ export class IrcBus {
 
 		try {
 			const delivery = await session.deliverIrcMessage(message, opts);
+			// A paused session may accept a deliberate IRC wake without emitting
+			// its own registry transition. Resume only when delivery began in
+			// paused and it is still paused; a concurrent transition wins.
+			if (delivery === "woken" && resumePausedOnWake && this.#registry.get(message.to)?.status === "paused") {
+				this.#registry.setStatus(message.to, "running");
+			}
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
@@ -167,15 +176,16 @@ export class IrcBus {
 	 * Block until a message for `agentId` (optionally from `filter.from`)
 	 * arrives; consume + return it. Null on timeout (`timeoutMs <= 0` waits
 	 * forever). Rejects when `signal` aborts. By default, already-buffered
-	 * mail satisfies the wait before parking a future waiter; callers that
-	 * need a strictly future reply can disable that drain.
+	 * mail satisfies the wait before registering a future waiter; callers that
+	 * need a strictly future reply can disable that drain. `onWaitStarted`
+	 * runs only when a future waiter is actually needed.
 	 */
 	async wait(
 		agentId: string,
 		filter: { from?: string },
 		timeoutMs: number,
 		signal?: AbortSignal,
-		options?: { drainPending?: boolean },
+		options?: { drainPending?: boolean; onWaitStarted?: () => void },
 	): Promise<IrcMessage | null> {
 		if (signal?.aborted) {
 			throw signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted");
@@ -228,6 +238,12 @@ export class IrcBus {
 			this.#waiters.set(agentId, waiters);
 		}
 		waiters.push(waiter);
+		try {
+			options?.onWaitStarted?.();
+		} catch (error) {
+			cleanup();
+			throw error;
+		}
 		return promise;
 	}
 
@@ -304,9 +320,16 @@ export class IrcBus {
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:relay",
-			content: `[IRC \`${message.from}\` → \`${message.to}\`]\n\n${message.body}`,
+			content:
+				`[IRC \`${message.from}\` → \`${message.to}\`${message.automated ? " · AUTOMATIC NO-TOOLS CONTEXT ONLY" : ""}]\n\n` +
+				message.body,
 			display: true,
-			details: { from: message.from, to: message.to, body: message.body },
+			details: {
+				from: message.from,
+				to: message.to,
+				body: message.body,
+				...(message.automated ? { automated: true as const } : {}),
+			},
 			attribution: "agent",
 			timestamp: message.ts,
 		};

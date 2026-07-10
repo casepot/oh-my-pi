@@ -522,6 +522,91 @@
             }
           },
           "additionalProperties": true
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "not": {
+                    "enum": [
+                      "get_subagents",
+                      "get_observable_sessions"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "required": [
+                "data"
+              ],
+              "properties": {
+                "command": {
+                  "const": "get_subagents"
+                },
+                "success": {
+                  "const": true
+                },
+                "data": {
+                  "type": "object",
+                  "required": [
+                    "subagents"
+                  ],
+                  "properties": {
+                    "subagents": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/rpcSubagentSnapshot"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "required": [
+                "data"
+              ],
+              "properties": {
+                "command": {
+                  "const": "get_observable_sessions"
+                },
+                "success": {
+                  "const": true
+                },
+                "data": {
+                  "type": "object",
+                  "required": [
+                    "sessions"
+                  ],
+                  "properties": {
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/rpcObservableSessionView"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            {
+              "properties": {
+                "command": {
+                  "enum": [
+                    "get_subagents",
+                    "get_observable_sessions"
+                  ]
+                },
+                "success": {
+                  "const": false
+                }
+              }
+            }
+          ]
         }
       ]
     },
@@ -1006,6 +1091,677 @@
         }
       ]
     },
+    "subagentTerminalStatus": {
+      "enum": [
+        "completed",
+        "failed",
+        "aborted",
+        "paused"
+      ]
+    },
+    "subagentTerminationCode": {
+      "enum": [
+        "yielded",
+        "yield_aborted",
+        "caller_cancelled",
+        "pre_start_cancelled",
+        "runtime_limit",
+        "no_progress",
+        "provider_error",
+        "execution_error",
+        "schema_error",
+        "missing_yield",
+        "merge_failed"
+      ]
+    },
+    "subagentRuntimePolicy": {
+      "type": "object",
+      "required": [
+        "request",
+        "wallClock",
+        "stall",
+        "spawn",
+        "idle"
+      ],
+      "properties": {
+        "request": {
+          "type": "object",
+          "required": [
+            "termination",
+            "advisory"
+          ],
+          "properties": {
+            "termination": {
+              "const": "disabled"
+            },
+            "advisory": {
+              "type": "object",
+              "required": [
+                "mode",
+                "afterAssistantTurns"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "off",
+                    "advisory"
+                  ]
+                },
+                "afterAssistantTurns": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "wallClock": {
+          "type": "object",
+          "required": [
+            "maxRuntimeMs"
+          ],
+          "properties": {
+            "maxRuntimeMs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "stall": {
+          "type": "object",
+          "required": [
+            "action",
+            "afterAssistantTurns"
+          ],
+          "properties": {
+            "action": {
+              "enum": [
+                "off",
+                "pause",
+                "fail"
+              ]
+            },
+            "afterAssistantTurns": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "spawn": {
+          "type": "object",
+          "required": [
+            "remainingDepth"
+          ],
+          "properties": {
+            "remainingDepth": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "idle": {
+          "type": "object",
+          "required": [
+            "resumable",
+            "parkingTtlMs"
+          ],
+          "properties": {
+            "resumable": {
+              "type": "boolean"
+            },
+            "parkingTtlMs": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "subagentTerminationBase": {
+      "type": "object",
+      "required": [
+        "status",
+        "code",
+        "reason",
+        "resumable",
+        "historyUri",
+        "outputUri",
+        "policy"
+      ],
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/subagentTerminalStatus"
+        },
+        "code": {
+          "$ref": "#/$defs/subagentTerminationCode"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "historyUri": {
+          "type": "string",
+          "pattern": "^history://[^\\s]+$"
+        },
+        "outputUri": {
+          "type": "string",
+          "pattern": "^agent://[^\\s]+$"
+        },
+        "policy": {
+          "$ref": "#/$defs/subagentRuntimePolicy"
+        }
+      },
+      "additionalProperties": false
+    },
+    "subagentTermination": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/subagentTerminationBase"
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "code": {
+                  "not": {
+                    "const": "no_progress"
+                  }
+                }
+              }
+            },
+            {
+              "properties": {
+                "code": {
+                  "const": "no_progress"
+                }
+              },
+              "anyOf": [
+                {
+                  "properties": {
+                    "status": {
+                      "const": "paused"
+                    },
+                    "resumable": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "status": {
+                      "const": "failed"
+                    },
+                    "resumable": {
+                      "const": false
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "largeContentRef": {
+      "type": "object",
+      "required": [
+        "kind",
+        "uri",
+        "bytes",
+        "preview"
+      ],
+      "properties": {
+        "kind": {
+          "const": "artifact"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "preview": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rpcTaskResult": {
+      "type": "object",
+      "required": [
+        "id",
+        "parentId",
+        "index",
+        "agentType",
+        "status",
+        "summary",
+        "truncated",
+        "termination"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "parentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agentType": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/subagentTerminalStatus"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "outputRef": {
+          "$ref": "#/$defs/largeContentRef"
+        },
+        "termination": {
+          "$ref": "#/$defs/subagentTermination"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rpcSubagentSnapshotBase": {
+      "type": "object",
+      "required": [
+        "id",
+        "index",
+        "agent",
+        "agentSource",
+        "status",
+        "lastUpdate"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent": {
+          "type": "string"
+        },
+        "agentSource": {
+          "enum": [
+            "bundled",
+            "user",
+            "project"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "waiting",
+            "running",
+            "paused",
+            "completed",
+            "failed",
+            "aborted"
+          ]
+        },
+        "task": {
+          "type": "string"
+        },
+        "assignment": {
+          "type": "string"
+        },
+        "sessionFile": {
+          "type": "string"
+        },
+        "lastUpdate": {
+          "type": "number"
+        },
+        "progress": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "parentToolCallId": {
+          "type": "string"
+        },
+        "termination": {
+          "$ref": "#/$defs/subagentTermination"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rpcSubagentSnapshot": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/rpcSubagentSnapshotBase"
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "pending",
+                    "waiting",
+                    "running"
+                  ]
+                }
+              },
+              "not": {
+                "required": [
+                  "termination"
+                ]
+              }
+            },
+            {
+              "required": [
+                "termination"
+              ],
+              "properties": {
+                "status": {
+                  "$ref": "#/$defs/subagentTerminalStatus"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "rpcObservableSessionView": {
+      "type": "object",
+      "required": [
+        "id",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "parentId": {
+          "type": "string"
+        },
+        "sessionFile": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "active",
+            "completed",
+            "failed",
+            "aborted",
+            "paused"
+          ]
+        },
+        "agentType": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "termination": {
+          "$ref": "#/$defs/subagentTermination"
+        }
+      },
+      "additionalProperties": false
+    },
+    "subagentLifecyclePayloadBase": {
+      "type": "object",
+      "required": [
+        "id",
+        "agent",
+        "agentSource",
+        "status",
+        "index"
+      ],
+      "properties": {
+        "toolCallId": {
+          "type": "string"
+        },
+        "taskRunId": {
+          "type": "string"
+        },
+        "parentTaskRunId": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "agentSource": {
+          "enum": [
+            "bundled",
+            "user",
+            "project"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "started"
+            },
+            {
+              "$ref": "#/$defs/subagentTerminalStatus"
+            }
+          ]
+        },
+        "sessionFile": {
+          "type": "string"
+        },
+        "parentToolCallId": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "termination": {
+          "$ref": "#/$defs/subagentTermination"
+        },
+        "detached": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "subagentLifecyclePayload": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/subagentLifecyclePayloadBase"
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "status": {
+                  "const": "started"
+                }
+              },
+              "not": {
+                "required": [
+                  "termination"
+                ]
+              }
+            },
+            {
+              "required": [
+                "termination"
+              ],
+              "properties": {
+                "status": {
+                  "$ref": "#/$defs/subagentTerminalStatus"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "taskSubagentLifecycleFrameBase": {
+      "type": "object",
+      "required": [
+        "type",
+        "schemaVersion",
+        "subagentId",
+        "parentSubagentId",
+        "status",
+        "agentType",
+        "index"
+      ],
+      "properties": {
+        "type": {
+          "const": "subagent_lifecycle"
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "toolCallId": {
+          "type": "string"
+        },
+        "taskRunId": {
+          "type": "string"
+        },
+        "parentTaskRunId": {
+          "type": "string"
+        },
+        "subagentId": {
+          "type": "string"
+        },
+        "parentSubagentId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "const": "started"
+            },
+            {
+              "$ref": "#/$defs/subagentTerminalStatus"
+            }
+          ]
+        },
+        "agentType": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "sessionFile": {
+          "type": "string"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "termination": {
+          "$ref": "#/$defs/subagentTermination"
+        }
+      },
+      "additionalProperties": true
+    },
+    "taskSubagentLifecycleFrame": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/taskSubagentLifecycleFrameBase"
+        },
+        {
+          "anyOf": [
+            {
+              "properties": {
+                "status": {
+                  "const": "started"
+                }
+              },
+              "not": {
+                "required": [
+                  "termination"
+                ]
+              }
+            },
+            {
+              "required": [
+                "termination"
+              ],
+              "properties": {
+                "status": {
+                  "$ref": "#/$defs/subagentTerminalStatus"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "subagentLifecycleObserverFrame": {
+      "type": "object",
+      "required": [
+        "type",
+        "payload"
+      ],
+      "properties": {
+        "type": {
+          "const": "subagent_lifecycle"
+        },
+        "payload": {
+          "$ref": "#/$defs/subagentLifecyclePayload"
+        }
+      },
+      "additionalProperties": true
+    },
     "taskFrame": {
       "allOf": [
         {
@@ -1015,56 +1771,106 @@
           "anyOf": [
             {
               "type": "object",
-              "required": ["type", "schemaVersion", "taskRunId", "agents"],
+              "required": [
+                "type",
+                "schemaVersion",
+                "taskRunId",
+                "agents"
+              ],
               "properties": {
-                "type": { "const": "task_progress" },
-                "schemaVersion": { "type": "integer", "minimum": 1 },
-                "toolCallId": { "type": "string" },
-                "taskRunId": { "type": "string" },
-                "parentTaskRunId": { "type": "string" },
-                "subagentId": { "type": "string" },
-                "agents": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+                "type": {
+                  "const": "task_progress"
+                },
+                "schemaVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "toolCallId": {
+                  "type": "string"
+                },
+                "taskRunId": {
+                  "type": "string"
+                },
+                "parentTaskRunId": {
+                  "type": "string"
+                },
+                "subagentId": {
+                  "type": "string"
+                },
+                "agents": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
               },
               "additionalProperties": true
             },
             {
               "type": "object",
-              "required": ["type", "schemaVersion", "taskRunId", "results"],
+              "required": [
+                "type",
+                "schemaVersion",
+                "taskRunId",
+                "results"
+              ],
               "properties": {
-                "type": { "const": "task_result" },
-                "schemaVersion": { "type": "integer", "minimum": 1 },
-                "toolCallId": { "type": "string" },
-                "taskRunId": { "type": "string" },
-                "parentTaskRunId": { "type": "string" },
-                "subagentId": { "type": "string" },
-                "results": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+                "type": {
+                  "const": "task_result"
+                },
+                "schemaVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "toolCallId": {
+                  "type": "string"
+                },
+                "taskRunId": {
+                  "type": "string"
+                },
+                "parentTaskRunId": {
+                  "type": "string"
+                },
+                "subagentId": {
+                  "type": "string"
+                },
+                "results": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/rpcTaskResult"
+                  }
+                }
               },
               "additionalProperties": true
             },
             {
-              "type": "object",
-              "required": ["type", "schemaVersion", "subagentId", "parentSubagentId", "status", "agentType", "index"],
-              "properties": {
-                "type": { "const": "subagent_lifecycle" },
-                "schemaVersion": { "type": "integer", "minimum": 1 },
-                "toolCallId": { "type": "string" },
-                "taskRunId": { "type": "string" },
-                "parentTaskRunId": { "type": "string" },
-                "subagentId": { "type": "string" },
-                "parentSubagentId": { "type": ["string", "null"] },
-                "status": { "enum": ["started", "completed", "failed", "aborted"] },
-                "agentType": { "type": "string" },
-                "index": { "type": "integer", "minimum": 0 }
-              },
-              "additionalProperties": true
+              "$ref": "#/$defs/taskSubagentLifecycleFrame"
+            },
+            {
+              "$ref": "#/$defs/subagentLifecycleObserverFrame"
             },
             {
               "type": "object",
-              "required": ["type", "schemaVersion", "sessions"],
+              "required": [
+                "type",
+                "schemaVersion",
+                "sessions"
+              ],
               "properties": {
-                "type": { "const": "observable_session_update" },
-                "schemaVersion": { "type": "integer", "minimum": 1 },
-                "sessions": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+                "type": {
+                  "const": "observable_session_update"
+                },
+                "schemaVersion": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "sessions": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/rpcObservableSessionView"
+                  }
+                }
               },
               "additionalProperties": true
             }

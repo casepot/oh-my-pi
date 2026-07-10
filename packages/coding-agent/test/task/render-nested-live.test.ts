@@ -65,6 +65,21 @@ describe("task renderer: nested live rendering", () => {
 			durationMs: 500,
 			tokens: 200,
 			requests: 0,
+			termination: {
+				status: "completed",
+				code: "yielded",
+				reason: "Nested subagent yielded a result",
+				resumable: false,
+				historyUri: `history://${id}`,
+				outputUri: `agent://${id}`,
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+					wallClock: { maxRuntimeMs: null },
+					stall: { action: "off", afterAssistantTurns: null },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
 		};
 	}
 
@@ -269,7 +284,26 @@ describe("task renderer: nested live rendering", () => {
 	it("wraps the completed run summary in bracket glyphs, dropping the Total: label", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const ok = makeCompletedSubResult("Alpha", "did the thing");
-		const bad: SingleResult = { ...makeCompletedSubResult("Beta", "blew up"), exitCode: 1, error: "boom" };
+		const bad: SingleResult = {
+			...makeCompletedSubResult("Beta", "blew up"),
+			exitCode: 1,
+			error: "boom",
+			termination: {
+				status: "failed",
+				code: "execution_error",
+				reason: "boom",
+				resumable: false,
+				historyUri: "history://Beta",
+				outputUri: "agent://Beta",
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+					wallClock: { maxRuntimeMs: null },
+					stall: { action: "off", afterAssistantTurns: null },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
+		};
 		const details: TaskToolDetails = {
 			projectAgentsDir: null,
 			results: [ok, bad],

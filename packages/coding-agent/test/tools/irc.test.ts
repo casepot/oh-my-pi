@@ -132,6 +132,86 @@ describe("IRC", () => {
 			expect(bus.unreadCount("0-Sub")).toBe(0);
 		});
 
+		it("send delivers directly to a waiting recipient without changing its wait state", async () => {
+			const sub = makeFakeSession();
+			const statusDetail = {
+				code: "provider_retry" as const,
+				reason: "Waiting for provider retry",
+				since: Date.now(),
+			};
+			registry.register({
+				id: "0-Waiting",
+				displayName: "task",
+				kind: "sub",
+				session: sub.session,
+				status: "waiting",
+				statusDetail,
+			});
+
+			const receipt = await bus.send({ from: "0-Main", to: "0-Waiting", body: "while you wait" });
+
+			expect(receipt).toEqual({ to: "0-Waiting", outcome: "injected" });
+			expect(sub.delivered.map(msg => msg.body)).toEqual(["while you wait"]);
+			expect(registry.get("0-Waiting")).toMatchObject({ status: "waiting", statusDetail });
+		});
+
+		it("a successful wake resumes paused recipients only while they remain paused", async () => {
+			const paused = makeFakeSession();
+			paused.setOutcome("woken");
+			registry.register({
+				id: "0-Paused",
+				displayName: "task",
+				kind: "sub",
+				session: paused.session,
+				status: "paused",
+				statusDetail: {
+					code: "no_progress",
+					reason: "No progress after 3 attempts",
+					since: Date.now(),
+					consecutive: 3,
+					limit: 3,
+				},
+			});
+
+			const resumed = await bus.send({ from: "0-Main", to: "0-Paused", body: "continue with this" });
+			expect(resumed).toEqual({ to: "0-Paused", outcome: "woken" });
+			expect(registry.get("0-Paused")).toMatchObject({ status: "running", statusDetail: undefined });
+
+			const raced = makeFakeSession();
+			raced.setOutcome("woken");
+			registry.register({
+				id: "0-Raced",
+				displayName: "task",
+				kind: "sub",
+				session: raced.session,
+				status: "paused",
+			});
+			raced.onDeliver(() => registry.setStatus("0-Raced", "idle"));
+
+			const receipt = await bus.send({ from: "0-Main", to: "0-Raced", body: "new work" });
+			expect(receipt).toEqual({ to: "0-Raced", outcome: "woken" });
+			expect(registry.get("0-Raced")?.status).toBe("idle");
+
+			const newlyPaused = makeFakeSession();
+			newlyPaused.setOutcome("woken");
+			registry.register({
+				id: "0-NewlyPaused",
+				displayName: "task",
+				kind: "sub",
+				session: newlyPaused.session,
+				status: "idle",
+			});
+			const concurrentPause = {
+				code: "no_progress" as const,
+				reason: "Paused during delivery",
+				since: Date.now(),
+			};
+			newlyPaused.onDeliver(() => registry.setStatus("0-NewlyPaused", "paused", concurrentPause));
+
+			await bus.send({ from: "0-Main", to: "0-NewlyPaused", body: "new work" });
+			expect(registry.get("0-NewlyPaused")).toMatchObject({ status: "paused", statusDetail: concurrentPause });
+		});
+
 		it("relays only subagent-to-subagent traffic to the main UI", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "Main", displayName: "main", kind: "main", session: main.session });
@@ -410,7 +490,7 @@ describe("IRC", () => {
 			expect(IrcTool.createIf(session)).toBeNull();
 		});
 
-		it("op=list includes parked peers, unread counts, and parent ids", async () => {
+		it("op=list carries lifecycle details, unread counts, parent ids, and parked peers", async () => {
 			const sub = makeFakeSession();
 			registry.register({
 				id: "0-AuthLoader",
@@ -418,6 +498,18 @@ describe("IRC", () => {
 				kind: "sub",
 				parentId: "0-Main",
 				session: sub.session,
+			});
+			registry.register({
+				id: "0-Waiting",
+				displayName: "task",
+				kind: "sub",
+				session: makeFakeSession().session,
+				status: "waiting",
+				statusDetail: {
+					code: "external_wait",
+					reason: "Waiting for an IRC reply",
+					since: Date.now(),
+				},
 			});
 			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
 			const main = makeFakeSession();
@@ -430,10 +522,17 @@ describe("IRC", () => {
 			expect(result.details?.op).toBe("list");
 			expect(result.details?.peers).toMatchObject([
 				{ id: "0-AuthLoader", status: "running", parentId: "0-Main", unread: 1 },
+				{
+					id: "0-Waiting",
+					status: "waiting",
+					unread: 0,
+					statusDetail: { code: "external_wait", reason: "Waiting for an IRC reply" },
+				},
 				{ id: "0-Parked", status: "parked", unread: 0 },
 			]);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("Parked agents are revived automatically");
+			expect(text).toContain("Waiting for an IRC reply");
 		});
 
 		it("op=list hides advisor-kind refs from the peer roster", async () => {
@@ -466,22 +565,54 @@ describe("IRC", () => {
 			expect(sub.delivered.map(msg => msg.body)).toEqual(["ping"]);
 		});
 
-		it("op=send to=all fans out to live peers and reports per-recipient receipts", async () => {
-			const a = makeFakeSession();
-			registry.register({ id: "0-A", displayName: "task", kind: "sub", session: a.session });
-			const b = makeFakeSession();
-			b.setError(new Error("kaput"));
-			registry.register({ id: "0-B", displayName: "task", kind: "sub", session: b.session });
+		it("op=send to=all includes running, waiting, paused, and idle peers", async () => {
+			const running = makeFakeSession();
+			registry.register({ id: "0-Running", displayName: "task", kind: "sub", session: running.session });
+			const failed = makeFakeSession();
+			failed.setError(new Error("kaput"));
+			registry.register({ id: "0-Failed", displayName: "task", kind: "sub", session: failed.session });
+			const waiting = makeFakeSession();
+			registry.register({
+				id: "0-Waiting",
+				displayName: "task",
+				kind: "sub",
+				session: waiting.session,
+				status: "waiting",
+				statusDetail: { code: "provider_retry", reason: "Retrying provider", since: Date.now() },
+			});
+			const paused = makeFakeSession();
+			registry.register({
+				id: "0-Paused",
+				displayName: "task",
+				kind: "sub",
+				session: paused.session,
+				status: "paused",
+				statusDetail: { code: "no_progress", reason: "Needs direction", since: Date.now() },
+			});
+			const idle = makeFakeSession();
+			registry.register({
+				id: "0-Idle",
+				displayName: "task",
+				kind: "sub",
+				session: idle.session,
+				status: "idle",
+			});
 			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
 
 			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
 			const result = await tool.execute("call-1", { op: "send", to: "all", message: "anyone there?" });
-			// Broadcast skips parked agents; one failure does not block the other delivery.
+
 			expect(result.details?.receipts).toEqual([
-				{ to: "0-A", outcome: "injected" },
-				{ to: "0-B", outcome: "failed", error: "kaput" },
+				{ to: "0-Running", outcome: "injected" },
+				{ to: "0-Failed", outcome: "failed", error: "kaput" },
+				{ to: "0-Waiting", outcome: "injected" },
+				{ to: "0-Paused", outcome: "injected" },
+				{ to: "0-Idle", outcome: "injected" },
 			]);
-			expect(a.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+			expect(running.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+			expect(waiting.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+			expect(paused.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+			expect(idle.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
 		});
 
 		it("op=send to=all does not relay sibling legs when the broadcast also reaches main", async () => {
@@ -519,6 +650,40 @@ describe("IRC", () => {
 			expect(result.details?.waited?.body).toBe("pong");
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("pong");
+			expect(result.details?.waited?.automated).toBeUndefined();
+			expect(text).not.toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
+		});
+
+		it("op=send await=true labels automatic replies in model-facing output", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			sub.onDeliver(msg => {
+				void bus.send({
+					from: "0-Sub",
+					to: msg.from,
+					body: "generated answer",
+					replyTo: msg.id,
+					automated: true,
+				});
+			});
+
+			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", {
+				op: "send",
+				to: "0-Sub",
+				message: "answer from current context",
+				await: true,
+			});
+
+			expect(result.details?.waited).toMatchObject({
+				body: "generated answer",
+				automated: true,
+			});
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
+			expect(text).toContain("generated answer");
 		});
 
 		it("op=send await=true ignores buffered stale mail and waits for a future reply", async () => {
@@ -611,11 +776,80 @@ describe("IRC", () => {
 			expect(text).toContain("No message");
 		});
 
+		it("op=wait marks the caller waiting and restores running after delivery", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
+
+			const waiting = tool.execute("call-1", { op: "wait", from: "0-Sub", timeoutMs: 30_000 });
+			expect(registry.get("0-Main")).toMatchObject({
+				status: "waiting",
+				statusDetail: {
+					code: "external_wait",
+					reason: "Waiting for IRC message from 0-Sub",
+				},
+			});
+
+			const receipt = await bus.send({ from: "0-Sub", to: "0-Main", body: "done" });
+			expect(receipt).toEqual({ to: "0-Main", outcome: "injected" });
+			expect((await waiting).details?.waited?.body).toBe("done");
+			expect(registry.get("0-Main")).toMatchObject({ status: "running", statusDetail: undefined });
+		});
+
+		it("op=wait restoration never overwrites a concurrent non-waiting state", async () => {
+			for (const status of ["paused", "idle", "parked", "aborted"] as const) {
+				const id = `0-${status}`;
+				const caller = makeFakeSession();
+				registry.register({ id, displayName: "task", kind: "sub", session: caller.session });
+				const tool = new IrcTool(makeToolSession(registry, id));
+				const controller = new AbortController();
+				const waiting = tool.execute("call-1", { op: "wait", timeoutMs: 30_000 }, controller.signal);
+				expect(registry.get(id)?.status).toBe("waiting");
+
+				const statusDetail =
+					status === "paused"
+						? ({ code: "no_progress", reason: "Paused concurrently", since: Date.now() } as const)
+						: undefined;
+				registry.setStatus(id, status, statusDetail);
+				controller.abort(new Error(`concurrent ${status}`));
+
+				await expect(waiting).rejects.toThrow(`concurrent ${status}`);
+				expect(registry.get(id)).toMatchObject({ status, statusDetail });
+			}
+		});
+
+		it("op=wait consumes queued bus mail without entering waiting", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			const sub = makeFakeSession();
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
+			main.setError(new Error("temporarily unavailable"));
+			await bus.send({ from: "0-Sub", to: "0-Main", body: "already queued" });
+			const statuses: string[] = [];
+			const unsubscribe = registry.onChange(event => {
+				if (event.ref.id === "0-Main" && event.type === "status_changed") statuses.push(event.ref.status);
+			});
+
+			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
+			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 30_000 });
+			unsubscribe();
+
+			expect(result.details?.waited?.body).toBe("already queued");
+			expect(statuses).not.toContain("waiting");
+			expect(registry.get("0-Main")?.status).toBe("running");
+		});
+
 		it("op=wait consumes a pending IRC aside before honoring a queued interrupt abort", async () => {
 			const { session } = createRealSession();
 			sessions.push(session);
 			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
 			registry.register({ id: "0-Running", displayName: "task", kind: "sub", session });
+			const statuses: string[] = [];
+			const unsubscribe = registry.onChange(event => {
+				if (event.ref.id === "0-Running" && event.type === "status_changed") statuses.push(event.ref.status);
+			});
 
 			const delivery = await session.deliverIrcMessage({
 				id: "msg-wait-pending",
@@ -623,6 +857,8 @@ describe("IRC", () => {
 				to: "0-Running",
 				body: "queued interrupt note",
 				ts: Date.now(),
+				replyTo: "msg-original",
+				automated: true,
 			});
 			expect(delivery).toBe("injected");
 
@@ -631,6 +867,7 @@ describe("IRC", () => {
 			controller.abort(new Error("queued IRC interrupt"));
 
 			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 30_000 }, controller.signal);
+			unsubscribe();
 
 			expect(result.isError).toBeFalsy();
 			expect(result.details?.waited).toMatchObject({
@@ -638,9 +875,14 @@ describe("IRC", () => {
 				from: "0-Main",
 				to: "0-Running",
 				body: "queued interrupt note",
+				replyTo: "msg-original",
+				automated: true,
 			});
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("queued interrupt note");
+			expect(text).toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
+			expect(statuses).not.toContain("waiting");
+			expect(registry.get("0-Running")?.status).toBe("running");
 
 			const empty = await tool.execute("call-2", { op: "inbox" });
 			expect(empty.details?.inbox).toEqual([]);
@@ -658,15 +900,24 @@ describe("IRC", () => {
 				to: "0-Running",
 				body: "parallel note",
 				ts: Date.now(),
+				replyTo: "msg-request",
+				automated: true,
 			});
 			expect(delivery).toBe("injected");
 
 			const tool = new IrcTool(makeToolSession(registry, "0-Running"));
 			const result = await tool.execute("call-1", { op: "inbox" });
 
-			expect(result.details?.inbox?.map(msg => msg.body)).toEqual(["parallel note"]);
+			expect(result.details?.inbox).toEqual([
+				expect.objectContaining({
+					body: "parallel note",
+					replyTo: "msg-request",
+					automated: true,
+				}),
+			]);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("parallel note");
+			expect(text).toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
 		});
 
 		it("op=inbox peek surfaces a pending IRC aside and prevents it auto-injecting", async () => {
@@ -786,6 +1037,52 @@ describe("IRC", () => {
 			expect(parentSteer.content).toContain("change approach");
 		});
 
+		it("preserves automatic provenance when a parent reply becomes streaming steering", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			registry.register({ id: "0-Child", displayName: "task", kind: "sub", parentId: "Main", session });
+			const incomingEvent = new Promise<CustomMessage>(resolve => {
+				session.subscribe(event => {
+					if (event.type === "irc_message" && event.message.customType === "irc:incoming") {
+						resolve(event.message);
+					}
+				});
+			});
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-parent-automatic",
+				from: "Main",
+				to: "0-Child",
+				body: "The report is ready.",
+				ts: Date.now(),
+				replyTo: "request-1",
+				automated: true,
+			});
+			const queued = session.agent.peekSteeringQueue();
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(queued).toHaveLength(1);
+			const parentSteer = queued[0];
+			expect(parentSteer?.role).toBe("user");
+			if (parentSteer?.role !== "user") throw new Error("expected queued parent IRC steer");
+			expect(parentSteer.content).toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
+			expect(parentSteer.content).toContain("replying to request-1");
+			expect(parentSteer.content).toContain("no tools ran while generating this reply");
+			expect(parentSteer.content).not.toContain("no agent lifecycle changed");
+
+			const record = await incomingEvent;
+			expect(record.details).toMatchObject({
+				id: "msg-parent-automatic",
+				from: "Main",
+				message: "The report is ready.",
+				replyTo: "request-1",
+				automated: true,
+			});
+			expect(record.content).not.toContain("no agent lifecycle changed");
+		});
+
 		it("auto-replies via an ephemeral side turn when the sender awaits and async execution is disabled", async () => {
 			const { session } = createRealSession({ "async.enabled": false });
 			sessions.push(session);
@@ -819,11 +1116,17 @@ describe("IRC", () => {
 			expect(reply?.from).toBe("Main");
 			expect(reply?.body).toBe("auto answer");
 			expect(reply?.replyTo).toBeTruthy();
+			expect(reply?.automated).toBe(true);
 			expect(ephemeralSpy.mock.calls[0]?.[0]?.promptText).toContain("which PR did you mean?");
 
 			// The recipient records what was said on its behalf.
 			const record = await autoReplyEvent;
-			expect(record.details).toMatchObject({ to: "0-Sub", body: "auto answer" });
+			expect(record.details).toMatchObject({
+				to: "0-Sub",
+				body: "auto answer",
+				replyTo: reply?.replyTo,
+				automated: true,
+			});
 		});
 
 		it("does not auto-reply when async execution is enabled or the sender does not await", async () => {

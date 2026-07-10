@@ -59,6 +59,21 @@ function finalSnapshot(output: string): {
 		durationMs: 1234,
 		tokens: 10,
 		requests: 1,
+		termination: {
+			status: "completed",
+			code: "yielded",
+			reason: "Yielded structured result",
+			resumable: true,
+			historyUri: "history://Anna",
+			outputUri: "agent://Anna",
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "pause", afterAssistantTurns: 10 },
+				spawn: { remainingDepth: null },
+				idle: { resumable: true, parkingTtlMs: null },
+			},
+		},
 	};
 	return {
 		content: [{ type: "text", text: output }],

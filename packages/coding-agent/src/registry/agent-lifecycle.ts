@@ -1,11 +1,11 @@
 /**
- * AgentLifecycleManager - Owns the idle → parked → revived lifecycle of
- * adopted subagents.
+ * AgentLifecycleManager - Owns the idle/paused → parked → revived lifecycle
+ * of adopted subagents.
  *
- * The task executor hands a finished agent over via {@link AgentLifecycleManager.adopt};
- * from then on the manager arms a TTL timer whenever the agent goes `idle`,
- * parks it on expiry (disposes the live session, keeps the AgentRef +
- * sessionFile), and revives it on demand through
+ * The task executor hands an agent over via {@link AgentLifecycleManager.adopt};
+ * from then on the manager arms a TTL timer whenever the agent is `idle` or
+ * recoverably `paused`, parks it on expiry (disposes the live session, keeps
+ * the AgentRef + sessionFile), and revives it on demand through
  * {@link AgentLifecycleManager.ensureLive}. Only this manager flips
  * `parked` ↔ `idle`.
  */
@@ -26,7 +26,7 @@ export type AgentReviver = () => Promise<AgentSession>;
 export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentReviver | undefined>;
 
 export interface AdoptOptions {
-	/** TTL before an idle agent is parked. <= 0 disables parking. */
+	/** TTL before an idle or paused agent is parked. <= 0 disables parking. */
 	idleTtlMs: number;
 	/** Recreates a live AgentSession from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
 	revive?: AgentReviver;
@@ -93,12 +93,13 @@ export class AgentLifecycleManager {
 	}
 
 	/**
-	 * Take ownership of a finished subagent. Caller has already set registry
-	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
+	 * Take ownership of a live or parked subagent. Arms the TTL only when its
+	 * current status is quiescent (`idle` or recoverably `paused`).
 	 */
 	adopt(id: string, opts: AdoptOptions): void {
 		if (id === MAIN_AGENT_ID) return;
-		if (!this.#registry.get(id)) {
+		const ref = this.#registry.get(id);
+		if (!ref) {
 			logger.warn("AgentLifecycleManager.adopt: unknown agent id", { id });
 			return;
 		}
@@ -106,7 +107,7 @@ export class AgentLifecycleManager {
 		clearTimeout(existing?.timer);
 		const adopted: AdoptedAgent = { idleTtlMs: opts.idleTtlMs, revive: opts.revive };
 		this.#adopted.set(id, adopted);
-		this.#armTimer(id, adopted);
+		if (ref.status === "idle" || ref.status === "paused") this.#armTimer(id, adopted);
 	}
 
 	/** True if the id is adopted (parked or live). */
@@ -258,13 +259,11 @@ export class AgentLifecycleManager {
 			return;
 		}
 		if (event.type !== "status_changed") return;
-		if (event.ref.status === "running") {
-			if (adopted.timer) {
-				clearTimeout(adopted.timer);
-				adopted.timer = undefined;
-			}
-		} else if (event.ref.status === "idle") {
+		if (event.ref.status === "idle" || event.ref.status === "paused") {
 			this.#armTimer(event.ref.id, adopted);
+		} else if (adopted.timer) {
+			clearTimeout(adopted.timer);
+			adopted.timer = undefined;
 		}
 	}
 }

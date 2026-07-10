@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import type { SingleResult, SubagentTerminalStatus } from "../task/types";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -27,14 +28,38 @@ interface PollEscalationState {
 	lastPollEndAt: number;
 }
 
+export type AsyncTaskJobStatus = "waiting" | "running" | SubagentTerminalStatus;
+
+export interface AsyncTaskRunResult {
+	kind: "task";
+	/** Model-facing presentation text; the structured result remains authoritative. */
+	text: string;
+	result: SingleResult;
+}
+
+export type AsyncJobRunResult = string | AsyncTaskRunResult;
+
+export interface AsyncTextJobDelivery {
+	kind: "text";
+	text: string;
+}
+
+export type AsyncJobDeliveryPayload = AsyncTextJobDelivery | AsyncTaskRunResult;
+
 export interface AsyncJob {
 	id: string;
 	type: "bash" | "task";
+	/** Scheduler state. Task termination lives separately in taskStatus/result. */
 	status: "running" | "completed" | "failed" | "cancelled";
 	startTime: number;
 	label: string;
 	abortController: AbortController;
 	promise: Promise<void>;
+	/** Exact settled delivery. String jobs use the text discriminator. */
+	result?: AsyncJobDeliveryPayload;
+	/** TaskTool state only. Text-only task registrations such as /tan leave this unset. */
+	taskStatus?: AsyncTaskJobStatus;
+	/** Legacy presentation fields retained for text-only bash and /tan jobs. */
 	resultText?: string;
 	errorText?: string;
 	/**
@@ -53,14 +78,14 @@ export interface AsyncJob {
 }
 
 export interface AsyncJobManagerOptions {
-	onJobComplete: (jobId: string, text: string, job?: AsyncJob) => void | Promise<void>;
+	onJobComplete: (jobId: string, payload: AsyncJobDeliveryPayload, job?: AsyncJob) => void | Promise<void>;
 	maxRunningJobs?: number;
 	retentionMs?: number;
 }
 
 interface AsyncJobDelivery {
 	jobId: string;
-	text: string;
+	payload: AsyncJobDeliveryPayload;
 	attempt: number;
 	nextAttemptAt: number;
 	lastError?: string;
@@ -160,7 +185,7 @@ export class AsyncJobManager {
 			reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
 			/** Clear the queued flag once the job actually starts executing. */
 			markRunning: () => void;
-		}) => Promise<string>,
+		}) => Promise<AsyncJobRunResult>,
 		options?: AsyncJobRegisterOptions,
 	): string {
 		if (this.#disposed) {
@@ -193,6 +218,7 @@ export class AsyncJobManager {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			queued: options?.queued === true,
+			...(type === "task" && options?.queued === true ? { taskStatus: "waiting" as const } : {}),
 		};
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
@@ -208,33 +234,43 @@ export class AsyncJobManager {
 		};
 		job.promise = (async () => {
 			try {
-				const text = await run({
+				const runResult = await run({
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
 					markRunning: () => {
 						job.queued = false;
+						if (job.taskStatus === "waiting") job.taskStatus = "running";
 					},
 				});
+				const payload: AsyncJobDeliveryPayload =
+					typeof runResult === "string" ? { kind: "text", text: runResult } : runResult;
+				job.result = payload;
+				if (payload.kind === "task") {
+					job.taskStatus = payload.result.termination.status;
+				} else {
+					job.resultText = payload.text;
+				}
 				if (job.status === "cancelled") {
-					job.resultText = text;
 					this.#scheduleEviction(id);
 					return;
 				}
 				job.status = "completed";
-				job.resultText = text;
-				this.#enqueueDelivery(id, text);
+				this.#enqueueDelivery(id, payload);
 				this.#scheduleEviction(id);
 			} catch (error) {
+				const errorText = error instanceof Error ? error.message : String(error);
+				job.errorText = errorText;
 				if (job.status === "cancelled") {
-					job.errorText = error instanceof Error ? error.message : String(error);
+					job.taskStatus = undefined;
 					this.#scheduleEviction(id);
 					return;
 				}
-				const errorText = error instanceof Error ? error.message : String(error);
 				job.status = "failed";
-				job.errorText = errorText;
-				this.#enqueueDelivery(id, errorText);
+				job.taskStatus = undefined;
+				const payload: AsyncTextJobDelivery = { kind: "text", text: errorText };
+				job.result = payload;
+				this.#enqueueDelivery(id, payload);
 				this.#scheduleEviction(id);
 			}
 		})();
@@ -254,6 +290,7 @@ export class AsyncJobManager {
 		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
+		job.taskStatus = undefined;
 		job.abortController.abort();
 		this.#scheduleEviction(id);
 		return true;
@@ -371,12 +408,12 @@ export class AsyncJobManager {
 			if (!jobId) continue;
 			if (!this.#suppressedDeliveries.delete(jobId)) continue;
 			const job = this.#jobs.get(jobId);
-			if (!job || (job.status !== "completed" && job.status !== "failed")) continue;
+			if (!job || (job.status !== "completed" && job.status !== "failed") || !job.result) continue;
 			const queued =
 				this.#deliveries.some(delivery => delivery.jobId === jobId) ||
 				this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
 			if (queued) continue;
-			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
+			this.#enqueueDelivery(jobId, job.result);
 		}
 	}
 
@@ -388,6 +425,7 @@ export class AsyncJobManager {
 	cancelAll(filter?: AsyncJobFilter): void {
 		for (const job of this.getRunningJobs(filter)) {
 			job.status = "cancelled";
+			job.taskStatus = undefined;
 			job.abortController.abort();
 			this.#scheduleEviction(job.id);
 		}
@@ -587,14 +625,14 @@ export class AsyncJobManager {
 		return this.#suppressedDeliveries.has(jobId) || this.#watchedJobs.has(jobId);
 	}
 
-	#enqueueDelivery(jobId: string, text: string): void {
+	#enqueueDelivery(jobId: string, payload: AsyncJobDeliveryPayload): void {
 		// Skip delivery if already acknowledged
 		if (this.isDeliverySuppressed(jobId)) {
 			return;
 		}
 		this.#deliveries.push({
 			jobId,
-			text,
+			payload,
 			attempt: 0,
 			nextAttemptAt: Date.now(),
 			ownerId: this.#jobs.get(jobId)?.ownerId,
@@ -647,7 +685,7 @@ export class AsyncJobManager {
 		const promise = (async () => {
 			this.#inFlightDeliveries.push(delivery);
 			try {
-				await this.#onJobComplete(delivery.jobId, delivery.text, this.#jobs.get(delivery.jobId));
+				await this.#onJobComplete(delivery.jobId, delivery.payload, this.#jobs.get(delivery.jobId));
 			} catch (error) {
 				delivery.attempt += 1;
 				delivery.lastError = error instanceof Error ? error.message : String(error);

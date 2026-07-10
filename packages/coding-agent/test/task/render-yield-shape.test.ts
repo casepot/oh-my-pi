@@ -47,6 +47,21 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 			durationMs: 250,
 			tokens: 100,
 			requests: 0,
+			termination: {
+				status: "completed",
+				code: "yielded",
+				reason: "Reviewer yielded a result",
+				resumable: false,
+				historyUri: "history://reviewer",
+				outputUri: "agent://reviewer",
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+					wallClock: { maxRuntimeMs: null },
+					stall: { action: "off", afterAssistantTurns: null },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
 			// Cast deliberately: production typings declare `unknown[]`, but the
 			// renderer must defend against a stray non-array value — that's
 			// exactly what this regression test exercises.

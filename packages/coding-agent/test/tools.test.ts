@@ -8,6 +8,7 @@ import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { DEFAULT_BASH_INTERCEPTOR_RULES, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -1382,8 +1383,8 @@ function b() {
 		it("should keep short commands inline when auto-background is enabled", async () => {
 			const deliveries: string[] = [];
 			const asyncJobManager = new AsyncJobManager({
-				onJobComplete: async (_jobId, text) => {
-					deliveries.push(text);
+				onJobComplete: async (_jobId, payload) => {
+					if (payload.kind === "text") deliveries.push(payload.text);
 				},
 			});
 			const autoBackgroundBashTool = wrapToolWithMetaNotice(
@@ -1415,8 +1416,8 @@ function b() {
 		it("should auto-background long-running commands when enabled", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const asyncJobManager = new AsyncJobManager({
-				onJobComplete: async (jobId, text) => {
-					deliveries.push({ jobId, text });
+				onJobComplete: async (jobId, payload) => {
+					if (payload.kind === "text") deliveries.push({ jobId, text: payload.text });
 				},
 			});
 			const autoBackgroundBashTool = wrapToolWithMetaNotice(
@@ -1461,8 +1462,8 @@ function b() {
 		it("should background instead of timing out when auto-background wait exceeds the effective timeout", async () => {
 			const deliveries: Array<{ jobId: string; text: string }> = [];
 			const asyncJobManager = new AsyncJobManager({
-				onJobComplete: async (jobId, text) => {
-					deliveries.push({ jobId, text });
+				onJobComplete: async (jobId, payload) => {
+					if (payload.kind === "text") deliveries.push({ jobId, text: payload.text });
 				},
 			});
 			const autoBackgroundBashTool = wrapToolWithMetaNotice(
@@ -1595,6 +1596,14 @@ function b() {
 	});
 
 	describe("JobTool", () => {
+		beforeEach(() => {
+			AgentRegistry.resetGlobalForTests();
+		});
+
+		afterEach(() => {
+			AgentRegistry.resetGlobalForTests();
+		});
+
 		it("should wait for jobs and acknowledge deliveries to prevent race conditions", async () => {
 			const manager = new AsyncJobManager({
 				onJobComplete: async () => {},
@@ -1611,7 +1620,7 @@ function b() {
 
 			// Ensure poll finished
 			const result = await resultPromise;
-			expect(getTextOutput(result)).toContain("Completed");
+			expect(getTextOutput(result)).toContain("— completed");
 
 			// Wait for deliveries to be processed
 			await manager.drainDeliveries({ timeoutMs: 100 });
@@ -1646,7 +1655,7 @@ function b() {
 			// Once the job settles, the result is informative — flag absent.
 			gate.resolve("done");
 			const settled = await jobTool.execute("test-call-useless-settled", { poll: [jobId] });
-			expect(getTextOutput(settled)).toContain("Completed");
+			expect(getTextOutput(settled)).toContain("— completed");
 			expect(settled.useless).toBeUndefined();
 
 			// Nothing left to wait for: noise once consumed.
@@ -1658,6 +1667,153 @@ function b() {
 			const missing = await jobTool.execute("test-call-useless-missing", { poll: ["no-such-job"] });
 			expect(getTextOutput(missing)).toContain("No matching jobs found");
 			expect(missing.useless).toBe(true);
+		});
+
+		it("reports matching task agent activity without changing running list semantics", async () => {
+			const manager = new AsyncJobManager({
+				onJobComplete: async () => {},
+			});
+			const registry = AgentRegistry.global();
+			const now = 125_000;
+			const dateNow = vi.spyOn(Date, "now").mockReturnValue(now - 25_000);
+			registry.register({
+				id: "TaskObserver",
+				displayName: "TaskObserver",
+				kind: "sub",
+				session: null,
+				status: "waiting",
+			});
+			dateNow.mockReturnValue(now - 5_000);
+			registry.setActivity("TaskObserver", "Inspecting scheduler queue");
+			dateNow.mockReturnValue(now);
+
+			const gate = Promise.withResolvers<string>();
+			const jobId = manager.register("task", "TaskObserver", () => gate.promise, { id: "TaskObserver" });
+			const session = createTestToolSession(testDir, Settings.isolated(), {
+				asyncJobManager: manager,
+				agentRegistry: registry,
+			});
+
+			try {
+				const result = await new JobTool(session).execute("test-call-agent-diagnostic", { list: true });
+				const job = result.details?.jobs.find(candidate => candidate.id === jobId);
+
+				expect(job).toMatchObject({
+					id: "TaskObserver",
+					type: "task",
+					status: "running",
+					schedulerStatus: "running",
+					agent: {
+						status: "waiting",
+						lastActivity: now - 5_000,
+						activity: "Inspecting scheduler queue",
+					},
+				});
+				expect(getTextOutput(result)).toContain("— agent waiting · active 5.0s ago · Inspecting scheduler queue");
+				expect(result.useless).toBe(true);
+			} finally {
+				gate.resolve("done");
+				await manager.getJob(jobId)?.promise;
+				await manager.dispose({ timeoutMs: 100 });
+			}
+		});
+
+		it("omits agent diagnostics from a bash job whose id collides with an agent", async () => {
+			const manager = new AsyncJobManager({
+				onJobComplete: async () => {},
+			});
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: "SharedBackgroundId",
+				displayName: "SharedBackgroundId",
+				kind: "sub",
+				session: null,
+				status: "running",
+			});
+			registry.setActivity("SharedBackgroundId", "This belongs only to the agent");
+
+			const gate = Promise.withResolvers<string>();
+			const jobId = manager.register("bash", "collision-safe bash", () => gate.promise, {
+				id: "SharedBackgroundId",
+			});
+			const session = createTestToolSession(testDir, Settings.isolated(), {
+				asyncJobManager: manager,
+				agentRegistry: registry,
+			});
+
+			try {
+				const result = await new JobTool(session).execute("test-call-bash-collision", { list: true });
+				const job = result.details?.jobs.find(candidate => candidate.id === jobId);
+				const output = getTextOutput(result);
+
+				expect(job).toMatchObject({
+					id: "SharedBackgroundId",
+					type: "bash",
+					status: "running",
+					schedulerStatus: "running",
+				});
+				expect(job?.agent).toBeUndefined();
+				expect(output).toContain("`SharedBackgroundId` [bash] — running — collision-safe bash");
+				expect(output).not.toContain("This belongs only to the agent");
+				expect(output).not.toContain("— agent ");
+				expect(result.useless).toBe(true);
+			} finally {
+				gate.resolve("done");
+				await manager.getJob(jobId)?.promise;
+				await manager.dispose({ timeoutMs: 100 });
+			}
+		});
+
+		it("uses the task label when a collision suffix matches an unrelated agent", async () => {
+			const manager = new AsyncJobManager({
+				onJobComplete: async () => {},
+			});
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: "Alpha",
+				displayName: "Alpha",
+				kind: "sub",
+				session: null,
+				status: "running",
+			});
+			registry.setActivity("Alpha", "Correct task agent");
+			registry.register({
+				id: "Alpha-2",
+				displayName: "Unrelated",
+				kind: "sub",
+				session: null,
+				status: "running",
+			});
+			registry.setActivity("Alpha-2", "Unrelated suffixed agent");
+
+			const occupyingGate = Promise.withResolvers<string>();
+			const taskGate = Promise.withResolvers<string>();
+			const occupyingJobId = manager.register("bash", "occupying job", () => occupyingGate.promise, { id: "Alpha" });
+			const taskJobId = manager.register("task", "Alpha", () => taskGate.promise, { id: "Alpha" });
+			const session = createTestToolSession(testDir, Settings.isolated(), {
+				asyncJobManager: manager,
+				agentRegistry: registry,
+			});
+
+			try {
+				expect(occupyingJobId).toBe("Alpha");
+				expect(taskJobId).toBe("Alpha-2");
+				const result = await new JobTool(session).execute("test-call-task-suffix-collision", { list: true });
+				const taskJob = result.details?.jobs.find(candidate => candidate.id === taskJobId);
+				const output = getTextOutput(result);
+
+				expect(taskJob?.agent).toMatchObject({
+					status: "running",
+					activity: "Correct task agent",
+				});
+				expect(output).toContain("Correct task agent");
+				expect(output).not.toContain("Unrelated suffixed agent");
+			} finally {
+				occupyingGate.resolve("done");
+				taskGate.resolve("done");
+				await Promise.all([manager.getJob(occupyingJobId)?.promise, manager.getJob(taskJobId)?.promise]);
+				await manager.dispose({ timeoutMs: 100 });
+			}
 		});
 	});
 

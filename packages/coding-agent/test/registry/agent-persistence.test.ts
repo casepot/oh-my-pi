@@ -82,6 +82,69 @@ describe("persisted agent refs", () => {
 		});
 	});
 
+	it("parses waiting, paused detail, and legacy records additively", () => {
+		const records = collectLatestPersistedAgentRefs([
+			customEntry({
+				schemaVersion: 1,
+				id: "Legacy",
+				displayName: "Legacy",
+				kind: "sub",
+				status: "idle",
+				sessionFile: "/tmp/legacy.jsonl",
+			}),
+			customEntry({
+				schemaVersion: 1,
+				id: "Waiting",
+				displayName: "Waiting",
+				kind: "sub",
+				status: "waiting",
+				sessionFile: "/tmp/waiting.jsonl",
+			}),
+			customEntry({
+				schemaVersion: 1,
+				id: "Paused",
+				displayName: "Paused",
+				kind: "sub",
+				status: "paused",
+				statusDetail: {
+					code: "no_progress",
+					reason: "No observable progress for 10 cycles",
+					since: 42,
+					consecutive: 10,
+					limit: 10,
+				},
+				sessionFile: "/tmp/paused.jsonl",
+			}),
+			customEntry({
+				schemaVersion: 1,
+				id: "MalformedDetail",
+				displayName: "Malformed",
+				kind: "sub",
+				status: "paused",
+				statusDetail: { code: "no_progress", reason: 42, since: "now" },
+				sessionFile: "/tmp/malformed.jsonl",
+			}),
+		]);
+
+		expect(records.map(record => record.id)).toEqual(["Legacy", "Waiting", "Paused", "MalformedDetail"]);
+		expect(records.find(record => record.id === "Legacy")?.statusDetail).toBeUndefined();
+		expect(records.find(record => record.id === "Waiting")?.status).toBe("waiting");
+		expect(records.find(record => record.id === "MalformedDetail")).toMatchObject({
+			status: "paused",
+			statusDetail: undefined,
+		});
+		expect(records.find(record => record.id === "Paused")).toMatchObject({
+			status: "paused",
+			statusDetail: {
+				code: "no_progress",
+				reason: "No observable progress for 10 cycles",
+				since: 42,
+				consecutive: 10,
+				limit: 10,
+			},
+		});
+	});
+
 	it("restores refs as parked, never running, and revives only resumable agents", async () => {
 		const registry = AgentRegistry.global();
 		const lifecycle = AgentLifecycleManager.global();
@@ -110,6 +173,29 @@ describe("persisted agent refs", () => {
 				}),
 				customEntry({
 					schemaVersion: 1,
+					id: "WaitingAgent",
+					displayName: "Waiting",
+					kind: "sub",
+					status: "waiting",
+					sessionFile: "/tmp/waiting.jsonl",
+					resumable: true,
+				}),
+				customEntry({
+					schemaVersion: 1,
+					id: "PausedAgent",
+					displayName: "Paused",
+					kind: "sub",
+					status: "paused",
+					statusDetail: {
+						code: "no_progress",
+						reason: "No progress",
+						since: 42,
+					},
+					sessionFile: "/tmp/paused.jsonl",
+					resumable: true,
+				}),
+				customEntry({
+					schemaVersion: 1,
 					id: "AbortedAgent",
 					displayName: "Aborted",
 					kind: "sub",
@@ -127,13 +213,27 @@ describe("persisted agent refs", () => {
 			},
 		});
 
-		expect(restored).toBe(3);
+		expect(restored).toBe(5);
 		expect(registry.get("RunningAgent")?.status).toBe("parked");
 		expect(registry.get("RunningAgent")?.session).toBeNull();
 		expect(registry.get("IsolatedAgent")?.status).toBe("parked");
+		expect(registry.get("WaitingAgent")).toMatchObject({
+			status: "parked",
+			session: null,
+			sessionFile: "/tmp/waiting.jsonl",
+			statusDetail: undefined,
+		});
+		expect(registry.get("PausedAgent")).toMatchObject({
+			status: "parked",
+			session: null,
+			sessionFile: "/tmp/paused.jsonl",
+			statusDetail: undefined,
+		});
 		expect(registry.get("AbortedAgent")?.status).toBe("aborted");
 		expect(lifecycle.has("RunningAgent")).toBe(true);
 		expect(lifecycle.has("IsolatedAgent")).toBe(true);
+		expect(lifecycle.has("WaitingAgent")).toBe(true);
+		expect(lifecycle.has("PausedAgent")).toBe(true);
 		expect(lifecycle.has("AbortedAgent")).toBe(false);
 
 		expect(await lifecycle.ensureLive("RunningAgent")).toBe(revived);
@@ -162,5 +262,23 @@ describe("persisted agent refs", () => {
 
 		emit({ type: "agent_end", messages: [] });
 		expect(registry.get("RevivedAgent")?.status).toBe("idle");
+
+		const pauseDetail = {
+			code: "no_progress" as const,
+			reason: "No observable progress",
+			since: 42,
+			consecutive: 10,
+			limit: 10,
+		};
+		registry.setStatus("RevivedAgent", "paused", pauseDetail);
+		emit({ type: "agent_end", messages: [] });
+		expect(registry.get("RevivedAgent")).toMatchObject({
+			status: "paused",
+			statusDetail: pauseDetail,
+		});
+
+		registry.setStatus("RevivedAgent", "aborted");
+		emit({ type: "agent_end", messages: [] });
+		expect(registry.get("RevivedAgent")?.status).toBe("aborted");
 	});
 });

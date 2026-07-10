@@ -17,6 +17,7 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "../../task";
+import type { SubagentTermination } from "../../task/types";
 import type { TodoPhase } from "../../tools/todo";
 
 export type JsonPrimitive = string | number | boolean | null;
@@ -427,23 +428,23 @@ export interface RpcObservableSessionView {
 	parentId?: string;
 	sessionFile?: string;
 	label?: string;
-	status: string;
+	status: "active" | SubagentTermination["status"];
 	agentType?: string;
 	summary?: string;
 	startedAt?: string;
 	updatedAt?: string;
+	termination?: SubagentTermination;
 }
 
 export const RPC_SUBAGENT_SUBSCRIPTION_LEVELS = Object.freeze(["off", "progress", "events"] as const);
 export type RpcSubagentSubscriptionLevel = (typeof RPC_SUBAGENT_SUBSCRIPTION_LEVELS)[number];
 
-export interface RpcSubagentSnapshot {
+interface RpcSubagentSnapshotBase {
 	id: string;
 	index: number;
 	agent: string;
 	agentSource: AgentProgress["agentSource"];
 	description?: string;
-	status: AgentProgress["status"];
 	task?: string;
 	assignment?: string;
 	sessionFile?: string;
@@ -451,6 +452,15 @@ export interface RpcSubagentSnapshot {
 	progress?: AgentProgress;
 	parentToolCallId?: string;
 }
+
+export type RpcSubagentSnapshot = RpcSubagentSnapshotBase &
+	(
+		| {
+				status: Exclude<AgentProgress["status"], SubagentTermination["status"]>;
+				termination?: never;
+		  }
+		| { status: SubagentTermination["status"]; termination: SubagentTermination }
+	);
 
 export interface RpcSubagentMessagesResult {
 	sessionFile: string;
@@ -584,13 +594,14 @@ export interface RpcTaskResult {
 	parentId: string | null;
 	index: number;
 	agentType: string;
-	status: "completed" | "failed" | "aborted";
+	status: SubagentTermination["status"];
 	summary: string;
 	truncated: boolean;
 	outputRef?: RpcLargeContentRef;
+	termination: SubagentTermination;
 }
 
-export type RpcTaskSubagentLifecycleFrame = RpcFrameMetadata &
+type RpcTaskSubagentLifecycleFrameBase = RpcFrameMetadata &
 	RpcCorrelation & {
 		type: "subagent_lifecycle";
 		schemaVersion: 1;
@@ -599,12 +610,17 @@ export type RpcTaskSubagentLifecycleFrame = RpcFrameMetadata &
 		toolCallId?: string;
 		taskRunId?: string;
 		parentTaskRunId?: string;
-		status: "started" | "completed" | "failed" | "aborted";
 		agentType: string;
 		description?: string;
 		sessionFile?: string;
 		index: number;
 	};
+
+export type RpcTaskSubagentLifecycleFrame = RpcTaskSubagentLifecycleFrameBase &
+	(
+		| { status: "started"; termination?: never }
+		| { status: SubagentTermination["status"]; termination: SubagentTermination }
+	);
 
 export type RpcObservableSessionUpdateFrame = RpcFrameMetadata & {
 	type: "observable_session_update";
@@ -624,9 +640,17 @@ export type RpcShutdownFrame = RpcFrameMetadata & {
 // Subagent Events (stdout)
 // ============================================================================
 
+type RpcSubagentLifecyclePayloadBase = Omit<SubagentLifecyclePayload, "status" | "termination">;
+
+export type RpcSubagentLifecyclePayload = RpcSubagentLifecyclePayloadBase &
+	(
+		| { status: "started"; termination?: never }
+		| { status: SubagentTermination["status"]; termination: SubagentTermination }
+	);
+
 export interface RpcSubagentLifecycleFrame {
 	type: "subagent_lifecycle";
-	payload: SubagentLifecyclePayload;
+	payload: RpcSubagentLifecyclePayload;
 }
 
 export interface RpcSubagentProgressFrame {

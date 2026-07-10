@@ -3,7 +3,6 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
 import {
-	type AgentProgress,
 	type SubagentEventPayload,
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -15,6 +14,7 @@ import type { EventBus } from "../../utils/event-bus";
 import type {
 	RpcSubagentEventFrame,
 	RpcSubagentFrame,
+	RpcSubagentLifecyclePayload,
 	RpcSubagentMessagesResult,
 	RpcSubagentSnapshot,
 	RpcSubagentSubscriptionLevel,
@@ -32,14 +32,6 @@ const MAX_RETAINED_TRANSCRIPT_REFERENCES = 256;
 
 function isSessionMessageEntry(entry: FileEntry): entry is SessionMessageEntry {
 	return entry.type === "message";
-}
-
-function statusFromLifecycle(status: SubagentLifecyclePayload["status"]): AgentProgress["status"] {
-	return status === "started" ? "running" : status;
-}
-
-function isTerminalLifecycleStatus(status: SubagentLifecyclePayload["status"]): boolean {
-	return status !== "started";
 }
 
 function hasSameOwner(
@@ -158,6 +150,10 @@ export class RpcSubagentRegistry {
 		return [...this.#subagents.values()].sort((a, b) => a.index - b.index || a.id.localeCompare(b.id));
 	}
 
+	getSubagent(id: string): RpcSubagentSnapshot | undefined {
+		return this.#subagents.get(id);
+	}
+
 	#rememberTranscriptSession(subagentId: string, sessionFile: string | undefined): void {
 		if (!sessionFile) return;
 		this.#transcriptSessionFilesBySubagentId.delete(subagentId);
@@ -182,18 +178,26 @@ export class RpcSubagentRegistry {
 	handleLifecycle(payload: SubagentLifecyclePayload): void {
 		const existing = this.#subagents.get(payload.id);
 		if (existing && !hasSameOwner(payload, existing)) return;
-		if (!existing && payload.status !== "started") return;
+		if (!existing && payload.status !== "started" && this.#staleSubagentIds.has(payload.id)) return;
 		if (payload.status === "started") {
 			this.#staleSubagentIds.delete(payload.id);
 		}
+		const termination = payload.status === "started" ? undefined : payload.termination;
+		if (payload.status !== "started" && !termination) {
+			throw new Error(`Terminal subagent lifecycle is missing termination: ${payload.id}`);
+		}
+		if (termination && payload.status !== termination.status) {
+			throw new Error(
+				`Subagent lifecycle status ${payload.status} does not match termination status ${termination.status}: ${payload.id}`,
+			);
+		}
 		const sessionFile = payload.sessionFile ?? existing?.sessionFile;
-		const snapshot: RpcSubagentSnapshot = {
+		const snapshotBase = {
 			id: payload.id,
 			index: payload.index,
 			agent: payload.agent,
 			agentSource: payload.agentSource,
 			description: payload.description ?? existing?.description,
-			status: statusFromLifecycle(payload.status),
 			task: existing?.task,
 			assignment: existing?.assignment,
 			sessionFile,
@@ -201,14 +205,13 @@ export class RpcSubagentRegistry {
 			lastUpdate: Date.now(),
 			progress: existing?.progress,
 		};
+		const snapshot: RpcSubagentSnapshot = termination
+			? { ...snapshotBase, status: termination.status, termination }
+			: { ...snapshotBase, status: "running" };
 		this.#rememberTranscriptSession(payload.id, sessionFile);
-		if (isTerminalLifecycleStatus(payload.status)) {
-			this.#subagents.delete(payload.id);
-		} else {
-			this.#subagents.set(payload.id, snapshot);
-		}
+		this.#subagents.set(payload.id, snapshot);
 		if (this.#subscriptionLevel !== "off") {
-			this.#output({ type: "subagent_lifecycle", payload });
+			this.#output({ type: "subagent_lifecycle", payload: payload as RpcSubagentLifecyclePayload });
 		}
 	}
 
@@ -217,7 +220,12 @@ export class RpcSubagentRegistry {
 		if (this.#staleSubagentIds.has(progress.id)) return;
 		const existing = this.#subagents.get(progress.id);
 		if (!existing) return;
+		if (existing.termination) return;
 		if (!hasSameOwner(payload, existing)) return;
+		const status =
+			progress.status === "pending" || progress.status === "waiting" || progress.status === "running"
+				? progress.status
+				: existing.status;
 		const sessionFile = payload.sessionFile ?? existing?.sessionFile;
 		this.#rememberTranscriptSession(progress.id, sessionFile);
 		this.#subagents.set(progress.id, {
@@ -226,7 +234,7 @@ export class RpcSubagentRegistry {
 			agent: payload.agent,
 			agentSource: payload.agentSource,
 			description: progress.description ?? existing?.description,
-			status: progress.status,
+			status,
 			task: payload.task,
 			assignment: payload.assignment,
 			sessionFile,

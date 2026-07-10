@@ -11,10 +11,11 @@ Use `op: "send"` to deliver a message to a specific peer or broadcast to `"all"`
 - **Format:** Messages MUST be plain prose. NEVER send JSON status objects. Keep it terse and share paths via `local://` or `artifact://` URLs, not pasted blobs.
 
 # Waiting and Inboxes
-Messages only arrive when the peer actively sends one—do not interrogate a peer for status.
+Messages come from agents or are explicitly labeled automatic. NEVER infer peer status from silence.
 - If you are completely blocked and MUST wait for an answer, use `op: "wait"` (or `await: true` on a send). The wait returns when a matching message arrives, the timeout elapses, or any IRC / steering message interrupts the wait. Parent-agent IRC interrupts with steering-level priority.
 - No need to alternate `irc wait`, `irc inbox`, and `job poll`: waits surface cross-channel interrupts promptly. The next turn includes the interrupt reason and message.
 - To check for messages without blocking, use `op: "inbox"` to drain your queue.
+- **Automatic replies:** `[AUTOMATIC · NO TOOLS · CONTEXT ONLY]` means context-generated text, not agent work. NEVER treat it as proof of tool execution, completion, yielding/submission, or future action. You MUST require a normal reply or verify independently.
 
 # When to Coordinate
 Message peers instead of guessing, duplicating work, or spying.

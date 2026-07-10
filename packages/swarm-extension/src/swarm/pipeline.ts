@@ -173,9 +173,10 @@ export class PipelineController {
 						return { agentName, result };
 					} catch (err) {
 						const error = err instanceof Error ? err.message : String(err);
+						const id = `swarm-${this.#def.name}-${agentName}-${iteration}`;
 						const failResult: SingleResult = {
 							index: currentIndex,
-							id: `swarm-${this.#def.name}-${agentName}-${iteration}`,
+							id,
 							agent: agentName,
 							agentSource: "project" as AgentSource,
 							task: agent.task,
@@ -187,6 +188,21 @@ export class PipelineController {
 							tokens: 0,
 							requests: 0,
 							error,
+							termination: {
+								status: "failed",
+								code: "execution_error",
+								reason: error,
+								resumable: false,
+								historyUri: `history://${id}`,
+								outputUri: `agent://${id}`,
+								policy: {
+									request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+									wallClock: { maxRuntimeMs: null },
+									stall: { action: "off", afterAssistantTurns: null },
+									spawn: { remainingDepth: null },
+									idle: { resumable: true, parkingTtlMs: null },
+								},
+							},
 						};
 						return { agentName, result: failResult };
 					}

@@ -189,21 +189,49 @@ describe("SessionFocusController", () => {
 		]);
 	});
 
-	it("parking the focused agent auto-unfocuses back to the main session", async () => {
+	it("keeps waiting and paused live agents focused", async () => {
 		const h = makeHarness();
 		const worker = makeSessionStub();
 		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
 
 		await h.controller.focusAgent("Worker");
-		expect(h.controller.focusedAgentId).toBe("Worker");
-
-		h.registry.setStatus("Worker", "parked");
+		h.registry.setStatus("Worker", "waiting", {
+			code: "external_wait",
+			reason: "waiting for a dependency",
+			since: Date.now(),
+		});
 		await flushAsync();
+		expect(h.controller.focusedAgentId).toBe("Worker");
+		expect(h.controller.target).toBe(worker.session);
 
-		expect(h.controller.focusedAgentId).toBeUndefined();
-		expect(h.setSessionCalls).toEqual([
-			[worker.session, "Worker"],
-			[h.main.session, undefined],
-		]);
+		h.registry.setStatus("Worker", "paused", {
+			code: "no_progress",
+			reason: "progress cap reached",
+			since: Date.now(),
+		});
+		await flushAsync();
+		expect(h.controller.focusedAgentId).toBe("Worker");
+		expect(h.controller.target).toBe(worker.session);
+		expect(h.setSessionCalls).toEqual([[worker.session, "Worker"]]);
+	});
+
+	it("parking or aborting the focused agent auto-unfocuses back to the main session", async () => {
+		for (const status of ["parked", "aborted"] as const) {
+			const h = makeHarness();
+			const worker = makeSessionStub();
+			registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+			await h.controller.focusAgent("Worker");
+			expect(h.controller.focusedAgentId).toBe("Worker");
+
+			h.registry.setStatus("Worker", status);
+			await flushAsync();
+
+			expect(h.controller.focusedAgentId).toBeUndefined();
+			expect(h.setSessionCalls).toEqual([
+				[worker.session, "Worker"],
+				[h.main.session, undefined],
+			]);
+		}
 	});
 });

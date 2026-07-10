@@ -491,9 +491,9 @@ describe("runSubprocess yield reminders", () => {
 		});
 		expect(prompts).toHaveLength(4);
 		expect(result.exitCode).toBe(1);
-		expect(result.aborted).toBe(false);
-		expect(result.stderr).toBe(SUBAGENT_WARNING_MISSING_YIELD);
-		expect(result.abortReason).toBeUndefined();
+		expect(result.termination.status).toBe("failed");
+		expect(result.termination.code).toBe("missing_yield");
+		expect(result.termination.reason).toBe(SUBAGENT_WARNING_MISSING_YIELD);
 	});
 
 	it("surfaces abort reason when yield reports aborted status", async () => {
@@ -518,8 +518,9 @@ describe("runSubprocess yield reminders", () => {
 		mockCreateAgentSession(session);
 
 		const result = await runSubprocess({ ...baseOptions, id: "subagent-aborted-yield" });
-		expect(result.aborted).toBe(true);
-		expect(result.abortReason).toBe("blocked by permissions");
+		expect(result.termination.status).toBe("aborted");
+		expect(result.termination.code).toBe("yield_aborted");
+		expect(result.termination.reason).toBe("blocked by permissions");
 	});
 
 	it("marks pre-aborted subprocess with a concrete reason", async () => {
@@ -532,17 +533,41 @@ describe("runSubprocess yield reminders", () => {
 			signal: abortController.signal,
 		});
 
-		expect(result.aborted).toBe(true);
-		expect(result.abortReason).toBe("Cancelled before start");
+		expect(result.termination.status).toBe("aborted");
+		expect(result.termination.code).toBe("pre_start_cancelled");
+		expect(result.termination.reason).toBe("Cancelled before start");
 		expect(result.stderr).toBe("Cancelled before start");
+		expect(result.termination.historyUri).toBe("history://subagent-cancelled-before-start");
+		expect(result.termination.outputUri).toBe("agent://subagent-cancelled-before-start");
+		expect(result.outputPath).toBeString();
+		expect(await Bun.file(result.outputPath!).text()).toBe("");
+	});
+
+	it("classifies terminal provider errors without issuing yield reminders", async () => {
+		const prompts: string[] = [];
+		const session = createMockSession(({ text, emit, state }) => {
+			prompts.push(text);
+			const providerError: AssistantMessage = {
+				...createAssistantStopMessage(""),
+				stopReason: "error",
+				errorMessage: "429 Too Many Requests: rate limit exceeded",
+			};
+			state.messages.push(providerError);
+			emit({ type: "message_end", message: providerError });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-provider-error" });
+
+		expect(prompts).toHaveLength(1);
+		expect(result.termination.status).toBe("failed");
+		expect(result.termination.code).toBe("provider_error");
+		expect(result.termination.reason).toContain("rate limit");
 	});
 
 	it("surfaces the assistant abort message instead of 'Cancelled by caller' on an internal turn abort", async () => {
-		// No caller signal and no runtime limit: the subagent's own turn ended with
-		// stopReason "aborted" (e.g. a merged request-signal abort). abortReason is
-		// undefined, so the executor must report the assistant's real errorMessage,
-		// not the generic caller-cancellation fallback. This is also what the eval
-		// agent() bridge re-raises, so a blank/misleading reason here surfaces as an
+		// No caller signal and no runtime limit: an internally aborted model turn
+		// is an execution failure with the assistant's concrete error message.
 		// opaque "bridge call '__agent__' failed".
 		const session = createMockSession(({ emit, state }) => {
 			const aborted: AssistantMessage = {
@@ -558,10 +583,10 @@ describe("runSubprocess yield reminders", () => {
 
 		const result = await runSubprocess({ ...baseOptions, id: "subagent-internal-abort" });
 
-		expect(result.aborted).toBe(true);
-		expect(result.exitCode).toBe(1);
-		expect(result.abortReason).toBe("Request was aborted");
-		expect(result.abortReason).not.toBe("Cancelled by caller");
+		expect(result.termination.status).toBe("failed");
+		expect(result.termination.code).toBe("execution_error");
+		expect(result.termination.reason).toBe("Request was aborted");
+		expect(result.termination.reason).not.toBe("Cancelled by caller");
 		expect(result.error).toBeUndefined();
 		expect(result.stderr).toBe("");
 	});
@@ -632,10 +657,10 @@ describe("runSubprocess yield reminders", () => {
 			parentId: "Main",
 			agentName: "task",
 			role: "Persistence specialist",
-			sessionFile: null,
-			resumable: false,
+			sessionFile: expect.stringContaining(`${id}.jsonl`),
+			resumable: true,
 		});
-		expect(records[1]).toMatchObject({ id, status: "idle", resumable: false });
+		expect(records[1]).toMatchObject({ id, status: "idle", resumable: true });
 	});
 
 	it("rejects when options.authStorage and options.modelRegistry.authStorage are different instances", async () => {
@@ -720,7 +745,8 @@ describe("runSubprocess yield reminders", () => {
 			signal: abortController.signal,
 		});
 
-		expect(result.aborted).toBe(true);
+		expect(result.termination.status).toBe("aborted");
+		expect(result.termination.code).toBe("caller_cancelled");
 		expect(errorSpy).not.toHaveBeenCalledWith("Subagent prompt failed", expect.anything());
 		expect(debugSpy).toHaveBeenCalledWith("Subagent prompt aborted");
 	});

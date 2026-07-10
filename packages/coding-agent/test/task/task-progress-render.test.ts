@@ -4,7 +4,12 @@ import type { SettingPath, SettingValue } from "@oh-my-pi/pi-coding-agent/config
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { taskToolRenderer } from "@oh-my-pi/pi-coding-agent/task/renderer";
-import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
+import type {
+	AgentProgress,
+	SingleResult,
+	SubagentTermination,
+	TaskToolDetails,
+} from "@oh-my-pi/pi-coding-agent/task/types";
 
 function runningProgress(overrides: Partial<AgentProgress> = {}): AgentProgress {
 	return {
@@ -25,10 +30,29 @@ function runningProgress(overrides: Partial<AgentProgress> = {}): AgentProgress 
 	};
 }
 
+function makeTermination(id: string, status: SubagentTermination["status"] = "completed"): SubagentTermination {
+	return {
+		status,
+		code: status === "completed" ? "yielded" : "execution_error",
+		reason: status === "completed" ? "Subagent yielded a result" : "boom",
+		resumable: false,
+		historyUri: `history://${id}`,
+		outputUri: `agent://${id}`,
+		policy: {
+			request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+			wallClock: { maxRuntimeMs: null },
+			stall: { action: "off", afterAssistantTurns: null },
+			spawn: { remainingDepth: null },
+			idle: { resumable: true, parkingTtlMs: null },
+		},
+	};
+}
+
 function finishedResult(overrides: Partial<SingleResult> = {}): SingleResult {
+	const id = overrides.id ?? "Agent";
 	return {
 		index: 0,
-		id: "Agent",
+		id,
 		agent: "task",
 		agentSource: "bundled",
 		task: "investigate hot paths",
@@ -39,6 +63,7 @@ function finishedResult(overrides: Partial<SingleResult> = {}): SingleResult {
 		durationMs: 0,
 		tokens: 0,
 		requests: 0,
+		termination: makeTermination(id),
 		...overrides,
 	};
 }
@@ -333,7 +358,14 @@ describe("task progress rendering", () => {
 				finishedResult({ index: 2, id: "FastThree", durationMs: 3000 }),
 				finishedResult({ index: 3, id: "SlowOne", durationMs: 8000 }),
 				finishedResult({ index: 4, id: "SlowTwo", durationMs: 9000 }),
-				finishedResult({ index: 5, id: "SlowFailed", exitCode: 1, error: "boom", durationMs: 10000 }),
+				finishedResult({
+					index: 5,
+					id: "SlowFailed",
+					exitCode: 1,
+					error: "boom",
+					durationMs: 10000,
+					termination: makeTermination("SlowFailed", "failed"),
+				}),
 			],
 			totalDurationMs: 10000,
 		};

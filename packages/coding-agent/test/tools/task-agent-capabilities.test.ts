@@ -37,6 +37,21 @@ function createResult(options: ExecutorOptions): SingleResult {
 		durationMs: 1,
 		tokens: 0,
 		requests: 0,
+		termination: {
+			status: "completed",
+			code: "yielded",
+			reason: "Yielded structured result",
+			resumable: true,
+			historyUri: `history://${options.id}`,
+			outputUri: `agent://${options.id}`,
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "pause", afterAssistantTurns: 10 },
+				spawn: { remainingDepth: null },
+				idle: { resumable: true, parkingTtlMs: null },
+			},
+		},
 	};
 }
 

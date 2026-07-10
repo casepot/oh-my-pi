@@ -12,23 +12,26 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, type AgentStatus } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const AGENT_ID = "Worker";
 const TEST_CWD = path.resolve("agent-hub-cwd");
 
-function makeHub(focusAgent: (id: string) => Promise<void>) {
+function makeHub(focusAgent: (id: string) => Promise<void>, status: AgentStatus = "running") {
 	const agents = new AgentRegistry();
 	agents.register({
 		id: AGENT_ID,
 		displayName: AGENT_ID,
 		kind: "sub",
 		parentId: "Main",
-		session: { subscribe: () => () => {} } as unknown as AgentSession,
+		session:
+			status === "parked" || status === "aborted"
+				? null
+				: ({ subscribe: () => () => {} } as unknown as AgentSession),
 		sessionFile: null,
-		status: "running",
+		status,
 	});
 	let doneCalls = 0;
 	const done = Promise.withResolvers<void>();
@@ -74,6 +77,31 @@ describe("Agent hub Enter activation", () => {
 		expect(focusedIds).toEqual([AGENT_ID]);
 		expect(doneCalls()).toBe(1);
 		hub.dispose();
+	});
+
+	it("Enter keeps waiting, paused, and idle agents activatable", async () => {
+		for (const status of ["waiting", "paused", "idle"] as const) {
+			const focusedIds: string[] = [];
+			const { hub, done } = makeHub(async id => {
+				focusedIds.push(id);
+			}, status);
+
+			hub.handleInput("\r");
+			await done;
+
+			expect(focusedIds).toEqual([AGENT_ID]);
+			hub.dispose();
+		}
+	});
+
+	it("r does not revive waiting, paused, or idle agents", () => {
+		for (const status of ["waiting", "paused", "idle"] as const) {
+			const { hub } = makeHub(async () => {}, status);
+			hub.handleInput("r");
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain(`Agent "${AGENT_ID}" is ${status} — only parked agents can be revived.`);
+			hub.dispose();
+		}
 	});
 
 	it("a focus failure keeps the hub open and shows the error as a notice", async () => {

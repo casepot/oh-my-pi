@@ -4226,23 +4226,23 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Agent Idle TTL",
 			description:
-				"How long an idle subagent stays live in memory before being parked to disk (ms). Parked agents are revived automatically when messaged or resumed. 0 keeps idle agents live until exit.",
+				"How long a resumable idle subagent stays live in memory before being parked to disk (ms). Resumable parked agents are revived when deliberately messaged or resumed. One-shot and isolated runs retain no live session. 0 keeps eligible idle agents live until exit.",
 		},
 	},
 
 	"task.softRequestBudget": {
 		type: "number",
-		default: 90,
+		default: 0,
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
-			label: "Soft Subagent Request Budget",
+			label: "Advisory Subagent Request Budget",
 			description:
-				"Soft per-subagent request budget (assistant requests per run). Crossing it can inject a steering notice when task.softRequestBudgetNotice is enabled; at 1.5x the budget the run is aborted gracefully, salvaging partial output. 0 disables the guard. Bundled explore/sonic agents use a lower built-in budget.",
+				"Optional per-subagent completed-assistant-turn threshold. When enabled together with task.softRequestBudgetNotice, crossing it injects one advisory steering notice. There is no request-count termination or hidden hard cap. 0 disables the notice.",
 			options: [
-				{ value: "0", label: "Disabled" },
+				{ value: "0", label: "Disabled", description: "Default" },
 				{ value: "40", label: "40 requests" },
-				{ value: "90", label: "90 requests", description: "Default" },
+				{ value: "90", label: "90 requests" },
 				{ value: "150", label: "150 requests" },
 			],
 		},
@@ -4254,9 +4254,26 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
-			label: "Soft Request Budget Notice",
+			label: "Request Budget Advisory",
 			description:
-				"Inject one steering notice when a subagent crosses its soft request budget. Off by default; enabling it asks the child to wrap up before the 1.5x graceful abort guard.",
+				"Inject one advisory steering notice when a subagent reaches its configured request budget. The notice never aborts or pauses the run.",
+		},
+	},
+	"task.noProgressCycleLimit": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "No-Progress Stall Limit",
+			description:
+				"Apply the execution mode's stall action after this many consecutive completed assistant turns without a successful tool result or yield. Successful tool results reset the counter; waiting time does not increment it. Shared retained sessions pause and remain resumable; one-shot and isolated runs fail without retaining a live session. 0 disables the guard.",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "5", label: "5 turns" },
+				{ value: "10", label: "10 turns", description: "Default" },
+				{ value: "20", label: "20 turns" },
+			],
 		},
 	},
 

@@ -13,6 +13,8 @@ interface JsonSchemaObject {
 	const?: unknown;
 	minimum?: number;
 	items?: JsonSchema;
+	additionalProperties?: boolean | JsonSchema;
+	pattern?: string;
 	$defs?: Record<string, JsonSchema>;
 }
 
@@ -93,6 +95,9 @@ function validate(
 	if (schema.minimum !== undefined && typeof value === "number" && value < schema.minimum) {
 		errors.push(`${location}: expected >= ${schema.minimum}`);
 	}
+	if (schema.pattern !== undefined && typeof value === "string" && !new RegExp(schema.pattern).test(value)) {
+		errors.push(`${location}: did not match ${schema.pattern}`);
+	}
 	if (schema.required && isObject(value)) {
 		for (const key of schema.required) {
 			if (!(key in value)) errors.push(`${location}.${key}: missing required property`);
@@ -101,6 +106,24 @@ function validate(
 	if (schema.properties && isObject(value)) {
 		for (const [key, child] of Object.entries(schema.properties)) {
 			if (key in value) errors.push(...validate(value[key], child, root, `${location}.${key}`, seenRefs));
+		}
+	}
+	if (schema.additionalProperties === false && schema.properties && isObject(value)) {
+		for (const key of Object.keys(value)) {
+			if (!(key in schema.properties)) errors.push(`${location}.${key}: unexpected property`);
+		}
+	}
+	if (
+		schema.additionalProperties !== undefined &&
+		schema.additionalProperties !== true &&
+		schema.additionalProperties !== false &&
+		schema.properties &&
+		isObject(value)
+	) {
+		for (const [key, child] of Object.entries(value)) {
+			if (!(key in schema.properties)) {
+				errors.push(...validate(child, schema.additionalProperties, root, `${location}.${key}`, seenRefs));
+			}
 		}
 	}
 	if (schema.items && Array.isArray(value)) {
@@ -193,6 +216,14 @@ describe("RPC schema artifact", () => {
 		expect(taskResults[0]).toMatchObject({
 			id: "agent_1",
 			outputRef: { kind: "artifact", uri: "agent://agent_1" },
+			status: "paused",
+			termination: {
+				status: "paused",
+				code: "no_progress",
+				resumable: true,
+				historyUri: "history://agent_1",
+				outputUri: "agent://agent_1",
+			},
 		});
 		expect(hostTools.get("host_1")).toMatchObject({ toolCallId: "tool_1" });
 		expect(pendingUi.get("ui_1")).toMatchObject({ method: "confirm", responseSchema: { kind: "boolean" } });
@@ -209,6 +240,207 @@ describe("RPC schema artifact", () => {
 			sessionId: "session_abc",
 		};
 		expect(validate(malformedReady, schema, schema)).not.toEqual([]);
+	});
+
+	test("task and lifecycle frames require the exact structured subagent termination contract", async () => {
+		const schema = (await Bun.file(
+			path.join(import.meta.dir, "..", "src", "modes", "rpc", "rpc.schema.json"),
+		).json()) as JsonSchemaObject;
+		const base = {
+			seq: 100,
+			timestamp: "2026-06-05T12:00:00.100Z",
+			sessionId: "session_abc",
+		};
+		const termination = {
+			status: "paused",
+			code: "no_progress",
+			reason: "Paused after 3 no-progress cycles",
+			resumable: true,
+			historyUri: "history://agent_1",
+			outputUri: "agent://agent_1",
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "advisory", afterAssistantTurns: 20 } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "pause", afterAssistantTurns: 3 },
+				spawn: { remainingDepth: null },
+				idle: { resumable: true, parkingTtlMs: null },
+			},
+		};
+		const taskResult = {
+			...base,
+			type: "task_result",
+			schemaVersion: 1,
+			taskRunId: "task_1",
+			results: [
+				{
+					id: "agent_1",
+					parentId: null,
+					index: 0,
+					agentType: "task",
+					status: "paused",
+					summary: "Paused",
+					truncated: false,
+					termination,
+				},
+			],
+		};
+		const taskLifecycle = {
+			...base,
+			type: "subagent_lifecycle",
+			schemaVersion: 1,
+			taskRunId: "task_1",
+			subagentId: "agent_1",
+			parentSubagentId: null,
+			status: "paused",
+			agentType: "task",
+			index: 0,
+			termination,
+		};
+		const observerLifecycle = {
+			...base,
+			type: "subagent_lifecycle",
+			payload: {
+				id: "agent_1",
+				agent: "task",
+				agentSource: "bundled",
+				status: "paused",
+				index: 0,
+				termination,
+			},
+		};
+		const observableUpdate = {
+			...base,
+			type: "observable_session_update",
+			schemaVersion: 1,
+			sessions: [{ id: "agent_1", status: "paused", termination }],
+		};
+		const getSubagentsResponse = {
+			...base,
+			type: "response",
+			command: "get_subagents",
+			success: true,
+			data: {
+				subagents: [
+					{
+						id: "agent_1",
+						index: 0,
+						agent: "task",
+						agentSource: "bundled",
+						status: "paused",
+						lastUpdate: 1,
+						termination,
+					},
+				],
+			},
+		};
+		const getObservableSessionsResponse = {
+			...base,
+			type: "response",
+			command: "get_observable_sessions",
+			success: true,
+			data: { sessions: observableUpdate.sessions },
+		};
+
+		const failedNoProgress = {
+			...taskResult,
+			results: [
+				{
+					...taskResult.results[0],
+					status: "failed",
+					termination: {
+						...termination,
+						status: "failed",
+						resumable: false,
+						policy: {
+							...termination.policy,
+							stall: { action: "fail", afterAssistantTurns: 3 },
+							idle: { resumable: false, parkingTtlMs: null },
+						},
+					},
+				},
+			],
+		};
+
+		for (const frame of [
+			taskResult,
+			taskLifecycle,
+			observerLifecycle,
+			observableUpdate,
+			getSubagentsResponse,
+			getObservableSessionsResponse,
+			failedNoProgress,
+		]) {
+			expect(validate(frame, schema, schema)).toEqual([]);
+		}
+
+		const [{ termination: _missingTaskTermination, ...taskResultWithoutTermination }] = taskResult.results;
+		expect(validate({ ...taskResult, results: [taskResultWithoutTermination] }, schema, schema)).not.toEqual([]);
+		const { termination: _missingLifecycleTermination, ...taskLifecycleWithoutTermination } = taskLifecycle;
+		expect(validate(taskLifecycleWithoutTermination, schema, schema)).not.toEqual([]);
+		const [{ termination: _missingSnapshotTermination, ...snapshotWithoutTermination }] =
+			getSubagentsResponse.data.subagents;
+		expect(
+			validate(
+				{
+					...getSubagentsResponse,
+					data: { subagents: [snapshotWithoutTermination] },
+				},
+				schema,
+				schema,
+			),
+		).not.toEqual([]);
+		expect(
+			validate(
+				{
+					...taskResult,
+					results: [
+						{
+							...taskResult.results[0],
+							termination: { ...termination, abortReason: "legacy" },
+						},
+					],
+				},
+				schema,
+				schema,
+			),
+		).not.toEqual([]);
+		expect(
+			validate(
+				{
+					...taskResult,
+					results: [
+						{
+							...taskResult.results[0],
+							status: "paused",
+							termination: { ...termination, status: "paused", resumable: false },
+						},
+					],
+				},
+				schema,
+				schema,
+			),
+		).not.toEqual([]);
+
+		const terminationSchema = schema.$defs?.subagentTerminationBase;
+		if (terminationSchema === undefined || terminationSchema === true || terminationSchema === false) {
+			throw new Error("Missing subagentTerminationBase schema");
+		}
+		expect(terminationSchema.required).toEqual([
+			"status",
+			"code",
+			"reason",
+			"resumable",
+			"historyUri",
+			"outputUri",
+			"policy",
+		]);
+		expect(Object.keys(terminationSchema.properties ?? {})).toEqual(terminationSchema.required ?? []);
+		const policySchema = schema.$defs?.subagentRuntimePolicy;
+		if (policySchema === undefined || policySchema === true || policySchema === false) {
+			throw new Error("Missing subagentRuntimePolicy schema");
+		}
+		expect(policySchema.required).toEqual(["request", "wallClock", "stall", "spawn", "idle"]);
+		expect(Object.keys(policySchema.properties ?? {})).toEqual(policySchema.required ?? []);
 	});
 
 	test("inbound command and host/UI response schemas enforce required fields", async () => {

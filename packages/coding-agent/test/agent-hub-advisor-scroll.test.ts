@@ -14,7 +14,12 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { AgentHubRemote } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
 import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import {
+	AgentRegistry,
+	type AgentStatus,
+	type AgentStatusDetail,
+} from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -132,6 +137,52 @@ describe("AgentTranscriptViewer", () => {
 			Object.defineProperty(process.stdout, "rows", rowsDesc);
 		} else {
 			Object.defineProperty(process.stdout, "rows", { configurable: true, value: undefined, writable: true });
+		}
+	});
+
+	it("renders all six lifecycle labels and compact status reasons", () => {
+		const states: ReadonlyArray<readonly [AgentStatus, AgentStatusDetail?]> = [
+			["running"],
+			["waiting", { code: "provider_retry", reason: "provider retry", since: Date.now() }],
+			["paused", { code: "no_progress", reason: "progress cap", since: Date.now() }],
+			["idle"],
+			["parked"],
+			["aborted"],
+		];
+
+		for (const [status, statusDetail] of states) {
+			const registry = new AgentRegistry();
+			registry.register({
+				id: "Worker",
+				displayName: "Worker",
+				kind: "sub",
+				parentId: "Main",
+				session: status === "parked" || status === "aborted" ? null : ({} as AgentSession),
+				sessionFile: null,
+				status,
+				statusDetail,
+			});
+			const viewer = new AgentTranscriptViewer({
+				agentId: "Worker",
+				registry,
+				ui: { requestRender: () => {}, requestComponentRender: () => {} } as never,
+				cwd: "/tmp",
+				expandKeys: ["ctrl+o"],
+				hubKeys: ["ctrl+s"],
+				requestRender: () => {},
+				onClose: () => {},
+				onHubClose: () => {},
+			});
+			try {
+				const header = viewer
+					.render(120)
+					.map(line => Bun.stripANSI(line))
+					.find(line => line.includes("Worker") && line.includes(status));
+				expect(header).toBeDefined();
+				if (statusDetail) expect(header).toContain(statusDetail.reason);
+			} finally {
+				viewer.dispose();
+			}
 		}
 	});
 

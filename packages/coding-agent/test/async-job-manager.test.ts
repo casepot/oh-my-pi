@@ -1,13 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { JobTool } from "@oh-my-pi/pi-coding-agent/tools/job";
 
 describe("AsyncJobManager", () => {
 	test("forwards progress updates and delivers completion", async () => {
 		const progressEvents: Array<{ text: string; details?: Record<string, unknown> }> = [];
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({
-			onJobComplete: async (jobId, text) => {
-				completions.push({ jobId, text });
+			onJobComplete: async (jobId, payload) => {
+				completions.push({ jobId, text: payload.text });
 			},
 		});
 
@@ -31,13 +34,231 @@ describe("AsyncJobManager", () => {
 		expect(progressEvents).toEqual([{ text: "running step", details: { async: { state: "running" } } }]);
 		expect(completions).toEqual([{ jobId, text: "final output" }]);
 		expect(manager.getJob(jobId)?.status).toBe("completed");
+		expect(manager.getJob(jobId)?.resultText).toBe("final output");
+		expect(manager.getJob(jobId)?.result).toEqual({ kind: "text", text: "final output" });
+		expect(manager.getJob(jobId)?.taskStatus).toBeUndefined();
+	});
+
+	test("preserves an exact task result through waiting, storage, polling, and delivery", async () => {
+		const delivered: unknown[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async (_jobId, payload) => {
+				delivered.push(payload);
+			},
+		});
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const singleResult: SingleResult = {
+			index: 0,
+			id: "PausedAgent",
+			agent: "task",
+			agentSource: "bundled",
+			task: "inspect the stalled work",
+			exitCode: 0,
+			output: "Checkpoint preserved.",
+			stderr: "",
+			truncated: false,
+			durationMs: 1_234,
+			tokens: 55,
+			requests: 3,
+			termination: {
+				status: "paused",
+				code: "no_progress",
+				reason: "No measurable progress after three cycles.",
+				resumable: true,
+				historyUri: "history://PausedAgent",
+				outputUri: "agent://PausedAgent",
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "advisory", afterAssistantTurns: 12 } },
+					wallClock: { maxRuntimeMs: 90_000 },
+					stall: { action: "pause", afterAssistantTurns: 3 },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
+		};
+		const taskPayload = {
+			kind: "task" as const,
+			text: "<task-result>Checkpoint preserved.</task-result>",
+			result: singleResult,
+		};
+		const jobId = manager.register(
+			"task",
+			"PausedAgent",
+			async ({ markRunning }) => {
+				await gate.promise;
+				markRunning();
+				started.resolve();
+				await release.promise;
+				return taskPayload;
+			},
+			{ id: "PausedAgent", queued: true },
+		);
+		const tool = new JobTool({
+			asyncJobManager: manager,
+			settings: { get: () => "5s" },
+			getAgentId: () => null,
+		} as unknown as ToolSession);
+
+		const waiting = await tool.execute("waiting", { list: true });
+		expect(waiting.details?.jobs).toMatchObject([{ id: jobId, status: "waiting", schedulerStatus: "running" }]);
+
+		gate.resolve();
+		await started.promise;
+		const running = await tool.execute("running", { list: true });
+		expect(running.details?.jobs).toMatchObject([{ id: jobId, status: "running", schedulerStatus: "running" }]);
+
+		release.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+		const polled = await tool.execute("paused", { poll: [jobId] });
+		const snapshot = polled.details?.jobs[0];
+		expect(snapshot).toMatchObject({
+			id: jobId,
+			status: "paused",
+			schedulerStatus: "completed",
+			result: taskPayload,
+		});
+		expect(snapshot?.result).toBe(taskPayload);
+		expect(snapshot?.result?.kind === "task" ? snapshot.result.result.termination : undefined).toEqual(
+			singleResult.termination,
+		);
+		const pollText = polled.content.find(part => part.type === "text")?.text ?? "";
+		expect(pollText.match(/No measurable progress after three cycles\./g)).toHaveLength(1);
+		expect(manager.getJob(jobId)?.result).toBe(taskPayload);
+		expect(manager.getJob(jobId)?.taskStatus).toBe("paused");
+		expect(delivered).toEqual([taskPayload]);
+		expect(delivered[0]).toBe(taskPayload);
+	});
+
+	test("keeps text-only task registrations on the legacy text path", async () => {
+		const deliveries: unknown[] = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async (_jobId, payload) => {
+				deliveries.push(payload);
+			},
+		});
+
+		const jobId = manager.register("task", "/tan inspect", async () => "tan assistant text");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		expect(manager.getJob(jobId)).toMatchObject({
+			type: "task",
+			status: "completed",
+			resultText: "tan assistant text",
+			result: { kind: "text", text: "tan assistant text" },
+		});
+		expect(manager.getJob(jobId)?.taskStatus).toBeUndefined();
+		expect(deliveries).toEqual([{ kind: "text", text: "tan assistant text" }]);
+	});
+
+	test("keeps completed, failed, aborted, and paused task terminations distinct from scheduler state", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		const terminations: SingleResult["termination"][] = [
+			{
+				status: "completed",
+				code: "yielded",
+				reason: "Work yielded.",
+				resumable: false,
+				historyUri: "history://CompletedAgent",
+				outputUri: "agent://CompletedAgent",
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+					wallClock: { maxRuntimeMs: null },
+					stall: { action: "off", afterAssistantTurns: null },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
+			{
+				status: "failed",
+				code: "execution_error",
+				reason: "Provider request failed.",
+				resumable: false,
+				historyUri: "history://FailedAgent",
+				outputUri: "agent://FailedAgent",
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+					wallClock: { maxRuntimeMs: null },
+					stall: { action: "off", afterAssistantTurns: null },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
+			{
+				status: "aborted",
+				code: "caller_cancelled",
+				reason: "Cancelled by caller.",
+				resumable: false,
+				historyUri: "history://AbortedAgent",
+				outputUri: "agent://AbortedAgent",
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+					wallClock: { maxRuntimeMs: null },
+					stall: { action: "off", afterAssistantTurns: null },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
+			{
+				status: "paused",
+				code: "no_progress",
+				reason: "No measurable progress.",
+				resumable: true,
+				historyUri: "history://PausedAgent",
+				outputUri: "agent://PausedAgent",
+				policy: {
+					request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+					wallClock: { maxRuntimeMs: null },
+					stall: { action: "pause", afterAssistantTurns: 3 },
+					spawn: { remainingDepth: null },
+					idle: { resumable: true, parkingTtlMs: null },
+				},
+			},
+		];
+
+		for (const [index, termination] of terminations.entries()) {
+			const id = `${termination.status}-agent`;
+			const result: SingleResult = {
+				index,
+				id,
+				agent: "task",
+				agentSource: "bundled",
+				task: `${termination.status} task`,
+				exitCode: termination.status === "failed" ? 1 : 0,
+				output: `${termination.status} output`,
+				stderr: "",
+				truncated: false,
+				durationMs: 10,
+				tokens: 1,
+				requests: 1,
+				termination,
+			};
+			manager.register("task", id, async () => ({ kind: "task", text: result.output, result }), { id });
+		}
+		await manager.waitForAll();
+
+		const tool = new JobTool({
+			asyncJobManager: manager,
+			settings: { get: () => "5s" },
+			getAgentId: () => null,
+		} as unknown as ToolSession);
+		const listed = await tool.execute("all-statuses", { list: true });
+		expect(listed.details?.jobs.map(job => ({ status: job.status, schedulerStatus: job.schedulerStatus }))).toEqual([
+			{ status: "completed", schedulerStatus: "completed" },
+			{ status: "failed", schedulerStatus: "completed" },
+			{ status: "aborted", schedulerStatus: "completed" },
+			{ status: "paused", schedulerStatus: "completed" },
+		]);
 	});
 
 	test("swallows progress callback errors without failing the job", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({
-			onJobComplete: async (jobId, text) => {
-				completions.push({ jobId, text });
+			onJobComplete: async (jobId, payload) => {
+				completions.push({ jobId, text: payload.text });
 			},
 		});
 
@@ -65,8 +286,8 @@ describe("AsyncJobManager", () => {
 	test("delivers error text when run fails", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({
-			onJobComplete: async (jobId, text) => {
-				completions.push({ jobId, text });
+			onJobComplete: async (jobId, payload) => {
+				completions.push({ jobId, text: payload.text });
 			},
 		});
 
@@ -85,8 +306,8 @@ describe("AsyncJobManager", () => {
 	test("cancels a running job by id", async () => {
 		const completions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({
-			onJobComplete: async (jobId, text) => {
-				completions.push({ jobId, text });
+			onJobComplete: async (jobId, payload) => {
+				completions.push({ jobId, text: payload.text });
 			},
 		});
 
@@ -305,13 +526,13 @@ describe("AsyncJobManager", () => {
 		const subagentCompletions: Array<{ jobId: string; text: string }> = [];
 		const manager = new AsyncJobManager({
 			retentionMs: 0,
-			onJobComplete: async (jobId, text) => {
+			onJobComplete: async (jobId, payload) => {
 				if (jobId === mainJobId) {
 					notifyMainDeliveryStarted();
 					await mainDeliveryReleased;
 					return;
 				}
-				subagentCompletions.push({ jobId, text });
+				subagentCompletions.push({ jobId, text: payload.text });
 			},
 		});
 

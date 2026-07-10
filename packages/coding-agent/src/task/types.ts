@@ -35,6 +35,56 @@ export const TASK_SUBAGENT_PROGRESS_CHANNEL = "task:subagent:progress";
 /** EventBus channel for subagent lifecycle (start/end) */
 export const TASK_SUBAGENT_LIFECYCLE_CHANNEL = "task:subagent:lifecycle";
 
+export type SubagentTerminalStatus = "completed" | "failed" | "aborted" | "paused";
+
+export type SubagentTerminationCode =
+	| "yielded"
+	| "yield_aborted"
+	| "caller_cancelled"
+	| "pre_start_cancelled"
+	| "runtime_limit"
+	| "no_progress"
+	| "provider_error"
+	| "execution_error"
+	| "schema_error"
+	| "missing_yield"
+	| "merge_failed";
+
+/** Canonical policy snapshot used by prompts, execution, and settled-run audit data. */
+export interface SubagentRuntimePolicy {
+	request: {
+		termination: "disabled";
+		advisory: { mode: "off"; afterAssistantTurns: null } | { mode: "advisory"; afterAssistantTurns: number };
+	};
+	wallClock: {
+		maxRuntimeMs: number | null;
+	};
+	stall: { action: "off"; afterAssistantTurns: null } | { action: "pause" | "fail"; afterAssistantTurns: number };
+	spawn: {
+		remainingDepth: number | null;
+	};
+	idle: { resumable: false; parkingTtlMs: null } | { resumable: true; parkingTtlMs: number | null };
+}
+
+/** Mandatory settled-run contract. Recovery URIs MUST resolve for the returned agent id. */
+export interface SubagentTermination {
+	status: SubagentTerminalStatus;
+	code: SubagentTerminationCode;
+	reason: string;
+	resumable: boolean;
+	historyUri: `history://${string}`;
+	outputUri: `agent://${string}`;
+	policy: SubagentRuntimePolicy;
+}
+
+export interface RuntimePolicyPrompt {
+	request: string;
+	wallClock: string;
+	stall: string;
+	spawn: string;
+	idle: string;
+}
+
 /** Payload emitted on TASK_SUBAGENT_PROGRESS_CHANNEL */
 export interface SubagentProgressPayload {
 	toolCallId?: string;
@@ -67,10 +117,11 @@ export interface SubagentLifecyclePayload {
 	agent: string;
 	agentSource: AgentSource;
 	description?: string;
-	status: "started" | "completed" | "failed" | "aborted";
+	status: "started" | SubagentTerminalStatus;
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
+	termination?: SubagentTermination;
 	/**
 	 * Spawn runs as a detached background job: the parent turn keeps working
 	 * while this agent runs. Sync task spawns (parent blocked on the call) and
@@ -357,7 +408,7 @@ export interface AgentProgress {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
-	status: "pending" | "running" | "completed" | "failed" | "aborted";
+	status: "pending" | "waiting" | "running" | "paused" | "completed" | "failed" | "aborted";
 	task: string;
 	assignment?: string;
 	description?: string;
@@ -368,7 +419,7 @@ export interface AgentProgress {
 	recentTools: Array<{ tool: string; args: string; endMs: number }>;
 	recentOutput: string[];
 	toolCount: number;
-	/** Count of assistant requests (assistant message_end events) across the run. Drives the soft request budget guard. */
+	/** Count of assistant responses (`message_end` events) across this run. */
 	requests: number;
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
@@ -389,6 +440,12 @@ export interface AgentProgress {
 	resolvedModel?: string;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
+	noProgress?: {
+		consecutive: number;
+		limit: number;
+		paused: boolean;
+		reason?: string;
+	};
 	/**
 	 * Auto-retry state when the subagent is sleeping between provider retries
 	 * (e.g. 429 rate-limit with retry-after). Cleared when the retry resolves
@@ -451,8 +508,7 @@ export interface SingleResult {
 	resolvedModel?: string;
 	providerNotice?: string;
 	error?: string;
-	aborted?: boolean;
-	abortReason?: string;
+	termination: SubagentTermination;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
 	/** Output path for the task result */
@@ -494,8 +550,9 @@ export interface TaskToolDetails {
 	usage?: Usage;
 	outputPaths?: string[];
 	progress?: AgentProgress[];
+	effectivePolicies?: Record<string, SubagentRuntimePolicy>;
 	async?: {
-		state: "running" | "completed" | "failed";
+		state: "waiting" | "running" | SubagentTerminalStatus;
 		jobId: string;
 		type: "task";
 	};

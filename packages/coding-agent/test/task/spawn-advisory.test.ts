@@ -94,6 +94,21 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 				durationMs: 1,
 				tokens: 0,
 				requests: 1,
+				termination: {
+					status: "completed",
+					code: "yielded",
+					reason: "Yielded structured result",
+					resumable: true,
+					historyUri: `history://${options.id ?? "X"}`,
+					outputUri: `agent://${options.id ?? "X"}`,
+					policy: {
+						request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+						wallClock: { maxRuntimeMs: null },
+						stall: { action: "pause", afterAssistantTurns: 10 },
+						spawn: { remainingDepth: null },
+						idle: { resumable: true, parkingTtlMs: null },
+					},
+				},
 			}),
 		);
 		const tool = await TaskTool.create(session(suppress));

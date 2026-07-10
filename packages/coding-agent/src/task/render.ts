@@ -67,8 +67,12 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
 	switch (status) {
 		case "pending":
 			return formatStatusIcon("pending", theme);
+		case "waiting":
+			return formatStatusIcon("pending", theme);
 		case "running":
 			return formatStatusIcon("running", theme, spinnerFrame);
+		case "paused":
+			return formatStatusIcon("warning", theme);
 		case "completed":
 			return formatStatusIcon("success", theme);
 		case "failed":
@@ -855,7 +859,9 @@ function renderAgentProgress(
 			? "success"
 			: progress.status === "failed" || progress.status === "aborted"
 				? "error"
-				: "accent";
+				: progress.status === "paused"
+					? "warning"
+					: "accent";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
 	const trimmedDescription = progress.description?.trim();
@@ -864,7 +870,7 @@ function renderAgentProgress(
 	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
 	const indent = prefix ? `${prefix} ` : "";
 	let statusLine: string;
-	if (progress.status === "running" || progress.status === "pending") {
+	if (progress.status === "running" || progress.status === "pending" || progress.status === "waiting") {
 		// Live (or queued) agents use the same dot finished rows keep: detached
 		// async spawns can stay "pending" while real work is running, so a
 		// pending/hourglass or spinner glyph reads wrong in the transcript. Keep
@@ -892,19 +898,23 @@ function renderAgentProgress(
 		statusLine += ` ${formatBadge("retrying", "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
 		statusLine += ` ${formatBadge("rate-limited", "error", theme)}`;
-	} else if (progress.status === "failed" || progress.status === "aborted") {
-		const statusLabel = progress.status === "failed" ? "failed" : "aborted";
-		statusLine += ` ${formatBadge(statusLabel, iconColor, theme)}`;
+	} else if (
+		progress.status === "waiting" ||
+		progress.status === "paused" ||
+		progress.status === "failed" ||
+		progress.status === "aborted"
+	) {
+		statusLine += ` ${formatBadge(progress.status, iconColor, theme)}`;
 	}
 
 	const showBadge = settings.get("task.showResolvedModelBadge");
-	if (progress.status === "running") {
+	if (progress.status === "running" || progress.status === "waiting") {
 		if (!description) {
 			const taskPreview = previewLine(progress.assignment ?? progress.task, 40);
 			statusLine += ` ${theme.fg("muted", taskPreview)}`;
 		}
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
-	} else if (progress.status === "completed") {
+	} else if (progress.status === "paused" || progress.status === "completed") {
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
 	}
 
@@ -956,6 +966,11 @@ function renderAgentProgress(
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("error", summary)}`);
 	}
 
+	if (progress.status === "paused" && progress.noProgress?.reason) {
+		lines.push(
+			`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", previewLine(progress.noProgress.reason, 90))}`,
+		);
+	}
 	// Render extracted tool data inline (e.g., review findings)
 	if (progress.extractedToolData) {
 		// For completed tasks, prefer review verdicts assembled from incremental
@@ -1170,6 +1185,21 @@ function renderFindings(
 	return lines;
 }
 
+function formatTerminationPolicy(termination: SingleResult["termination"]): string | undefined {
+	if (termination.code === "no_progress") {
+		const { action, afterAssistantTurns } = termination.policy.stall;
+		if (action !== "off" && afterAssistantTurns !== null) {
+			return `Policy: ${action} after ${afterAssistantTurns} consecutive assistant ${afterAssistantTurns === 1 ? "turn" : "turns"} without successful tool progress`;
+		}
+		return "Policy: stall guard off";
+	}
+	const maxRuntimeMs = termination.policy.wallClock.maxRuntimeMs;
+	if (termination.code === "runtime_limit" && maxRuntimeMs !== null) {
+		return `Policy: OMP wall-clock cap ${formatDuration(maxRuntimeMs)}`;
+	}
+	return undefined;
+}
+
 /**
  * Render final result for a single agent.
  */
@@ -1185,27 +1215,23 @@ function renderAgentResult(
 	const lines: string[] = [];
 
 	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingYieldWarning(result.output);
-	const aborted = result.aborted ?? false;
-	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
-	const success = !aborted && result.exitCode === 0 && !result.error;
+	const { termination } = result;
+	const completed = termination.status === "completed";
+	const mergeFailed = completed && !!result.error;
+	const success = completed && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
-	const icon = aborted
-		? theme.status.aborted
-		: needsWarning
-			? theme.status.warning
-			: success
-				? theme.styledSymbol("status.done", "text")
-				: theme.status.error;
-	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
-	const statusText = aborted
-		? "aborted"
-		: needsWarning
-			? "warning"
-			: success
-				? "done"
-				: mergeFailed
-					? "merge failed"
-					: "failed";
+	const outputForRendering = outputWithoutWarning.trim() === termination.reason.trim() ? "" : outputWithoutWarning;
+	const icon =
+		termination.status === "aborted"
+			? theme.status.aborted
+			: termination.status === "failed"
+				? theme.status.error
+				: termination.status === "paused" || needsWarning || mergeFailed
+					? theme.status.warning
+					: theme.styledSymbol("status.done", "text");
+	const iconColor =
+		termination.status === "paused" || needsWarning || mergeFailed ? "warning" : success ? "success" : "error";
+	const statusColor = completed ? "success" : termination.status === "paused" ? "warning" : "error";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
 	const trimmedDescription = result.description?.trim();
@@ -1215,7 +1241,15 @@ function renderAgentResult(
 	let statusLine = `${prefix ? `${prefix} ` : ""}${theme.fg(iconColor, icon)} ${theme.fg(
 		success && !needsWarning ? "text" : "accent",
 		titlePart,
-	)} ${formatBadge(statusText, iconColor, theme)}`;
+	)} ${formatBadge(termination.status, statusColor, theme)}`;
+	if (mergeFailed) {
+		statusLine += ` ${formatBadge("merge failed", "warning", theme)}`;
+	} else if (needsWarning) {
+		statusLine += ` ${formatBadge("warning", "warning", theme)}`;
+	}
+	if (termination.resumable) {
+		statusLine += ` ${formatBadge("resumable", "accent", theme)}`;
+	}
 	const showBadge = settings.get("task.showResolvedModelBadge");
 	statusLine = appendAgentStats(
 		statusLine,
@@ -1240,10 +1274,19 @@ function renderAgentResult(
 
 	lines.push(...renderTaskSection(result.assignment ?? result.task, continuePrefix, expanded, theme));
 
-	if (aborted && result.abortReason) {
+	const reasonColor = termination.status === "paused" ? "warning" : completed ? "dim" : "error";
+	lines.push(`${continuePrefix}${theme.fg(reasonColor, `Reason: ${previewLine(termination.reason, 90)}`)}`);
+	if (result.retryFailure) {
+		const attempts = `${result.retryFailure.attempt} attempt${result.retryFailure.attempt === 1 ? "" : "s"}`;
+		const diagnostic = previewLine(replaceTabs(result.retryFailure.errorMessage), 90);
+		lines.push(`${continuePrefix}${theme.fg("error", `Retry failure after ${attempts}: ${diagnostic}`)}`);
+	}
+	if (!completed) {
 		lines.push(
-			`${continuePrefix}${theme.fg("error", theme.status.aborted)} ${theme.fg("dim", previewLine(result.abortReason, 80))}`,
+			`${continuePrefix}${theme.fg("dim", `Recovery: ${termination.historyUri}${theme.sep.dot}${termination.outputUri}`)}`,
 		);
+		const policy = formatTerminationPolicy(termination);
+		if (policy) lines.push(`${continuePrefix}${theme.fg("dim", policy)}`);
 	}
 	if (result.providerNotice) {
 		lines.push(
@@ -1360,7 +1403,7 @@ function renderAgentResult(
 	// Fallback to output preview if no custom rendering
 	if (!hasCustomRendering) {
 		lines.push(
-			...renderOutputSection(outputWithoutWarning, continuePrefix, expanded, theme, 3, 12, missingCompleteWarning),
+			...renderOutputSection(outputForRendering, continuePrefix, expanded, theme, 3, 12, missingCompleteWarning),
 		);
 	}
 
@@ -1368,14 +1411,15 @@ function renderAgentResult(
 		lines.push(...deferredToolLines);
 	}
 
-	if (result.patchPath && !aborted && result.exitCode === 0) {
+	if (result.patchPath && completed) {
 		lines.push(`${continuePrefix}${theme.fg("dim", `Patch: ${result.patchPath}`)}`);
-	} else if (result.branchName && !aborted && result.exitCode === 0) {
+	} else if (result.branchName && completed) {
 		lines.push(`${continuePrefix}${theme.fg("dim", `Branch: ${result.branchName}`)}`);
 	}
 
-	// Error message
-	if (result.error && (!success || mergeFailed) && (!aborted || result.error !== result.abortReason)) {
+	// Host-side errors (for example isolation merge failures) remain distinct
+	// from the subagent's termination reason and are never rendered twice.
+	if (result.error && result.error !== termination.reason) {
 		lines.push(`${continuePrefix}${theme.fg(mergeFailed ? "warning" : "error", previewLine(result.error, 70))}`);
 	}
 
@@ -1383,17 +1427,17 @@ function renderAgentResult(
 }
 
 /**
- * Order live progress entries so finished agents render first — sorted by
- * runtime ascending, matching {@link orderResultsForDisplay} — while
- * unfinished (pending/running) ones stay pinned at the bottom in dispatch
- * order. Because a finished agent's runtime is fixed, finalization renders
- * the same order and rows never reshuffle.
+ * Order live progress entries so settled agents render first — sorted by
+ * runtime ascending, matching {@link orderResultsForDisplay} — while active,
+ * waiting, and paused agents stay pinned at the bottom in dispatch order.
+ * Because a settled agent's runtime is fixed, finalization renders the same
+ * order and rows never reshuffle.
  */
 function orderProgressForDisplay(progress: readonly AgentProgress[]): AgentProgress[] {
 	const finished: AgentProgress[] = [];
 	const unfinished: AgentProgress[] = [];
 	for (const p of progress) {
-		(p.status === "pending" || p.status === "running" ? unfinished : finished).push(p);
+		(p.status === "completed" || p.status === "failed" || p.status === "aborted" ? finished : unfinished).push(p);
 	}
 	finished.sort((a, b) => a.durationMs - b.durationMs || a.index - b.index);
 	return finished.concat(unfinished);
@@ -1415,6 +1459,8 @@ function orderResultsForDisplay(results: readonly SingleResult[]): SingleResult[
 function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme): string {
 	const counts: Record<AgentProgress["status"], number> = {
 		pending: 0,
+		waiting: 0,
+		paused: 0,
 		running: 0,
 		completed: 0,
 		failed: 0,
@@ -1422,6 +1468,8 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 	};
 	for (const p of hidden) counts[p.status]++;
 	const parts: string[] = [];
+	if (counts.paused > 0) parts.push(theme.fg("warning", `${counts.paused} paused`));
+	if (counts.waiting > 0) parts.push(theme.fg("warning", `${counts.waiting} waiting`));
 	if (counts.completed > 0) parts.push(theme.fg("dim", `${counts.completed} done`));
 	if (counts.running > 0) parts.push(theme.fg("dim", `${counts.running} running`));
 	if (counts.pending > 0) parts.push(theme.fg("dim", `${counts.pending} pending`));
@@ -1437,16 +1485,16 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 
 /**
  * Pick the agent rows that stay visible when a finalized batch is collapsed:
- * problem rows (aborted/failed/merge-failed) claim slots first so they are
- * never folded away, then fastest finishers fill the remainder. The pick is
- * filtered out of the display order, so visible rows keep the expanded layout.
+ * paused, failed, aborted, and host-side merge failures claim slots first so
+ * recovery-relevant rows are never folded away. Fastest completed agents fill
+ * any remainder; visible rows retain the expanded display order.
  */
 function selectCollapsedResults(ordered: readonly SingleResult[]): readonly SingleResult[] {
 	if (ordered.length <= COLLAPSED_AGENT_LIMIT) return ordered;
 	const picked = new Set<SingleResult>();
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
-		if (result.aborted || result.exitCode !== 0 || result.error) picked.add(result);
+		if (result.termination.status !== "completed" || result.error) picked.add(result);
 	}
 	for (const result of ordered) {
 		if (picked.size >= COLLAPSED_AGENT_LIMIT) break;
@@ -1501,6 +1549,7 @@ export function renderResult(
 	// counts/totals. This block re-runs ~30×/sec via the 33ms spinner render; the
 	// previous form did 3× `.some()` here plus 3× `.filter()` + `.reduce()` again
 	// inside the frame below (7+ full passes per tick).
+	let pausedCount = 0;
 	let abortedCount = 0;
 	let failCount = 0;
 	let mergeFailedCount = 0;
@@ -1509,18 +1558,31 @@ export function renderResult(
 	if (hasResults) {
 		for (const r of details.results) {
 			requestTotal += r.requests ?? 0;
-			if (r.aborted) abortedCount++;
-			else if (r.exitCode !== 0) failCount++;
-			else if (r.error) mergeFailedCount++;
-			else successCount++;
+			switch (r.termination.status) {
+				case "aborted":
+					abortedCount++;
+					break;
+				case "failed":
+					failCount++;
+					break;
+				case "paused":
+					pausedCount++;
+					break;
+				case "completed":
+					if (r.error) mergeFailedCount++;
+					else successCount++;
+					break;
+			}
 		}
 	}
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
+	const paused = pausedCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
 	const isError = aborted || failed;
+	const hasWarning = paused || mergeFailed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
-	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
+	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : hasWarning ? "warning" : "success";
 	// Surface the dispatched agent type (e.g. `Reviewer`) alongside the count
 	// so the header reads `Task 1 agent: Reviewer`.
 	const countLabel = agentCount > 0 ? `${agentCount} ${agentCount === 1 ? "agent" : "agents"}` : undefined;
@@ -1552,10 +1614,10 @@ export function renderResult(
 			Boolean(details.progress && details.progress.length > 0) && (isPartial || details.results.length === 0);
 		if (shouldRenderProgress && details.progress) {
 			const ordered = orderProgressForDisplay(details.progress);
-			// Collapsed view keeps the live edge: finished rows sort to the top of
-			// the display order, so folding from the top keeps running/pending
-			// agents (and their current-tool lines) visible while one summary line
-			// stands in for everything above it.
+			// Collapsed view keeps the live edge: settled rows sort to the top of
+			// the display order, so folding from the top keeps pending, running,
+			// waiting, and paused agents visible while one summary line stands in
+			// for everything above it.
 			const visible = expanded ? ordered : ordered.slice(Math.max(0, ordered.length - COLLAPSED_AGENT_LIMIT));
 			if (visible.length < ordered.length) {
 				lines.push(formatHiddenProgressLine(ordered.slice(0, ordered.length - visible.length), theme));
@@ -1577,6 +1639,7 @@ export function renderResult(
 			}
 
 			const summaryParts: string[] = [];
+			if (pausedCount > 0) summaryParts.push(theme.fg("warning", `${pausedCount} paused`));
 			if (abortedCount > 0) summaryParts.push(theme.fg("error", `${abortedCount} aborted`));
 			if (successCount > 0) summaryParts.push(theme.fg("success", `${successCount} succeeded`));
 			if (mergeFailedCount > 0) summaryParts.push(theme.fg("warning", `${mergeFailedCount} merge failed`));
@@ -1593,7 +1656,7 @@ export function renderResult(
 			);
 		}
 
-		const state = isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
+		const state = isPartial ? "running" : isError ? "error" : hasWarning ? "warning" : "success";
 		const borderColor = isError ? "error" : "borderMuted";
 
 		if (lines.length === 0) {

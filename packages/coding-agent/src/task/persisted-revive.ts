@@ -4,6 +4,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
+import { installRegistryStatusSync } from "../registry/agent-persistence";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
@@ -118,10 +119,7 @@ export function createPersistedSubagentReviverFactory(
 			// doesn't wire this generically (the live path does it in the executor).
 			// Without it the idle-TTL timer never clears on a turn and the lifecycle
 			// could park the agent mid-run.
-			session.subscribe(event => {
-				if (event.type === "agent_start") registry.setStatus(ref.id, "running");
-				else if (event.type === "agent_end") registry.setStatus(ref.id, "idle");
-			});
+			installRegistryStatusSync(ref.id, session, registry);
 			return session;
 		};
 	};

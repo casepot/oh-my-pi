@@ -15,13 +15,21 @@ import { oneLineLabel } from "../task/types";
 export const MAIN_AGENT_ID = "Main";
 
 /**
- * - `running`: a turn is in flight.
- * - `idle`: live AgentSession in memory, awaiting work. Finished agents are
- *   `idle`, not removed.
- * - `parked`: session disposed; AgentRef + sessionFile retained, revivable.
- * - `aborted`: hard-killed, terminal.
+ * - `running`: a model turn is executing.
+ * - `waiting`: a live turn is blocked on an external wait or retry.
+ * - `paused`: autonomous work stopped by recoverable policy.
+ * - `idle`: live AgentSession awaiting deliberate work.
+ * - `parked`: session disposed; ref + sessionFile retained, revivable.
+ * - `aborted`: hard-killed, terminal, transcript retained.
  */
-export type AgentStatus = "running" | "idle" | "parked" | "aborted";
+export type AgentStatus = "running" | "waiting" | "paused" | "idle" | "parked" | "aborted";
+export interface AgentStatusDetail {
+	code: "no_progress" | "provider_retry" | "external_wait";
+	reason: string;
+	since: number;
+	consecutive?: number;
+	limit?: number;
+}
 /**
  * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
  * - `advisor`: a passive review transcript persisted like a subagent for usage
@@ -38,6 +46,7 @@ export interface AgentRef {
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
 	session: AgentSession | null;
+	statusDetail?: AgentStatusDetail;
 	sessionFile: string | null;
 	createdAt: number;
 	lastActivity: number;
@@ -60,6 +69,20 @@ export interface RegisterInput {
 	session: AgentSession | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
+	statusDetail?: AgentStatusDetail;
+}
+
+function sameStatusDetail(left: AgentStatusDetail | undefined, right: AgentStatusDetail | undefined): boolean {
+	return (
+		left === right ||
+		(left !== undefined &&
+			right !== undefined &&
+			left.code === right.code &&
+			left.reason === right.reason &&
+			left.since === right.since &&
+			left.consecutive === right.consecutive &&
+			left.limit === right.limit)
+	);
 }
 
 export class AgentRegistry {
@@ -92,19 +115,22 @@ export class AgentRegistry {
 			sessionFile: input.sessionFile ?? null,
 			createdAt: now,
 			lastActivity: now,
+			statusDetail: input.statusDetail,
 		};
 		this.#refs.set(ref.id, ref);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
 
-	setStatus(id: string, status: AgentStatus): void {
+	setStatus(id: string, status: AgentStatus, statusDetail?: AgentStatusDetail): void {
 		const ref = this.#refs.get(id);
-		if (!ref || ref.status === status) return;
+		if (!ref) return;
+		if (ref.status === status && sameStatusDetail(ref.statusDetail, statusDetail)) return;
 		ref.status = status;
-		// Activity describes current work; it is meaningless once the agent
-		// leaves `running`, so drop it to avoid showing stale work in rosters.
-		if (status !== "running") ref.activity = undefined;
+		ref.statusDetail = statusDetail;
+		// Waiting may retain the activity it is blocked on. Quiescent and
+		// terminal states use statusDetail instead of stale work text.
+		if (status !== "running" && status !== "waiting") ref.activity = undefined;
 		ref.lastActivity = Date.now();
 		this.#emit({ type: "status_changed", ref });
 	}
@@ -113,20 +139,14 @@ export class AgentRegistry {
 	 * Record a short activity gist for the work-aware roster. Display-only and
 	 * read on demand (`irc list`, peer roster), so it emits no event — keeping
 	 * the per-tool-call update rate off the registry listener path (same as
-	 * `attachSession`, which also bumps `lastActivity` without emitting). Only a
-	 * `running` agent has current work: a heartbeat for any other status is
-	 * dropped, so a late progress flush can't resurrect activity on a ref that
-	 * `setStatus` just cleared. Every running heartbeat refreshes `lastActivity`
-	 * — even when the gist text is unchanged — so the roster's "active … ago" and
-	 * recency sort track real work, not just the last status change.
-	 * The gist is normalized to one bounded line (`oneLineLabel`) so model-derived
-	 * intent text can neither break the roster nor smuggle terminal escapes —
-	 * every caller is safe without sanitizing at its own call site.
+	 * `attachSession`, which also bumps `lastActivity` without emitting). A live
+	 * running/waiting agent has current work; every heartbeat refreshes
+	 * `lastActivity` even when the gist is unchanged.
 	 */
 	setActivity(id: string, activity: string): void {
 		const ref = this.#refs.get(id);
 		if (!ref) return;
-		if (ref.status !== "running") return;
+		if (ref.status !== "running" && ref.status !== "waiting") return;
 		const gist = oneLineLabel(activity);
 		ref.lastActivity = Date.now();
 		if (ref.activity === gist) return;
@@ -163,13 +183,15 @@ export class AgentRegistry {
 	}
 
 	/**
-	 * Returns every alive agent (running | idle) except the caller. Advisor refs
-	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
+	 * Returns every live/messageable agent except the caller. Advisor refs are
+	 * observability-only transcripts, never peers.
 	 */
 	listVisibleTo(id: string): AgentRef[] {
 		return this.list().filter(
-			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
+			ref =>
+				ref.id !== id &&
+				ref.kind !== "advisor" &&
+				(ref.status === "running" || ref.status === "waiting" || ref.status === "paused" || ref.status === "idle"),
 		);
 	}
 

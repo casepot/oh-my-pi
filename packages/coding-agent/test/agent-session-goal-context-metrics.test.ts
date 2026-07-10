@@ -60,6 +60,21 @@ function sideAgentResult(options: ExecutorOptions, data: unknown): SingleResult 
 		tokens: 7,
 		requests: 1,
 		modelOverride: options.modelOverride,
+		termination: {
+			status: "completed",
+			code: "yielded",
+			reason: "Goal side agent yielded a result",
+			resumable: false,
+			historyUri: `history://${options.id}`,
+			outputUri: `agent://${options.id}`,
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "off", afterAssistantTurns: null },
+				spawn: { remainingDepth: null },
+				idle: { resumable: true, parkingTtlMs: null },
+			},
+		},
 	};
 }
 

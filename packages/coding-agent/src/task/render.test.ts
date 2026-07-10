@@ -66,10 +66,42 @@ function makeParentWithNestedProgress(childCount: number): AgentProgress {
 	};
 }
 
+function makeTermination(
+	id: string,
+	status: SingleResult["termination"]["status"],
+	reason = `Task ${status}.`,
+): SingleResult["termination"] {
+	const code =
+		status === "completed"
+			? "yielded"
+			: status === "failed"
+				? "execution_error"
+				: status === "aborted"
+					? "caller_cancelled"
+					: "no_progress";
+	const paused = status === "paused";
+	return {
+		status,
+		code,
+		reason,
+		resumable: paused,
+		historyUri: `history://${id}`,
+		outputUri: `agent://${id}`,
+		policy: {
+			request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+			wallClock: { maxRuntimeMs: null },
+			stall: paused ? { action: "pause", afterAssistantTurns: 3 } : { action: "off", afterAssistantTurns: null },
+			spawn: { remainingDepth: null },
+			idle: paused ? { resumable: true, parkingTtlMs: null } : { resumable: false, parkingTtlMs: null },
+		},
+	};
+}
+
 function makeSingleResult(index: number, overrides?: Partial<SingleResult>): SingleResult {
+	const id = overrides?.id ?? `Done${index + 1}`;
 	return {
 		index,
-		id: `Done${index + 1}`,
+		id,
 		agent: "task",
 		agentSource: "bundled",
 		task: `finished child ${index + 1}`,
@@ -81,6 +113,7 @@ function makeSingleResult(index: number, overrides?: Partial<SingleResult>): Sin
 		tokens: 0,
 		requests: 1,
 		...overrides,
+		termination: overrides?.termination ?? makeTermination(id, "completed"),
 	};
 }
 
@@ -90,9 +123,15 @@ function makeParentWithNestedResults(childCount: number): TaskToolDetails {
 		// Failure on the LAST child in display order (equal durations, index tiebreak):
 		// a plain head-of-list pick would elide it, so its visibility proves the
 		// failure-first selection of `selectCollapsedResults`.
-		results: Array.from({ length: childCount }, (_, index) =>
-			makeSingleResult(index, index === childCount - 1 ? { exitCode: 1, error: "boom" } : undefined),
-		),
+		results: Array.from({ length: childCount }, (_, index) => {
+			const id = `Done${index + 1}`;
+			return makeSingleResult(
+				index,
+				index === childCount - 1
+					? { termination: makeTermination(id, "failed", "Nested child failed."), error: "boom" }
+					: undefined,
+			);
+		}),
 		totalDurationMs: 1,
 	};
 	const parent = makeSingleResult(0, { id: "Parent", extractedToolData: { task: [nested] } });
@@ -185,6 +224,34 @@ describe("task live progress rendering", () => {
 		expect(collapsedText).not.toContain("raw output:");
 	});
 
+	it("renders waiting and paused live progress as visible states", () => {
+		const waiting: AgentProgress = {
+			...makeProgress([]),
+			id: "WaitingLive",
+			status: "waiting",
+		};
+		const paused: AgentProgress = {
+			...makeProgress([]),
+			id: "PausedLive",
+			status: "paused",
+			noProgress: {
+				consecutive: 3,
+				limit: 3,
+				paused: true,
+				reason: "No successful tool result for three cycles.",
+			},
+		};
+
+		const waitingText = renderProgressText(waiting, false, uiTheme);
+		expect(waitingText).toContain("WaitingLive");
+		expect(waitingText).toContain("⟦waiting⟧");
+
+		const pausedText = renderProgressText(paused, false, uiTheme);
+		expect(pausedText).toContain("PausedLive");
+		expect(pausedText).toContain("⟦paused⟧");
+		expect(pausedText).toContain("No successful tool result for three cycles.");
+	});
+
 	it("caps collapsed nested task progress at four rows plus an elision line", () => {
 		setViewportRows(40);
 		const text = renderProgressText(makeParentWithNestedProgress(6), false, uiTheme);
@@ -226,6 +293,99 @@ describe("task live progress rendering", () => {
 			expect(text).toContain(`Done${index}`);
 		}
 		expect(text).not.toContain("more agents");
+	});
+
+	it("renders required termination states, reasons, and recovery metadata without exit-code inference", () => {
+		const results = [
+			makeSingleResult(0, {
+				id: "Completed",
+				exitCode: 9,
+				termination: makeTermination("Completed", "completed", "Yield accepted."),
+			}),
+			makeSingleResult(1, {
+				id: "Failed",
+				termination: makeTermination("Failed", "failed", "Provider exhausted retries."),
+			}),
+			makeSingleResult(2, {
+				id: "Aborted",
+				termination: makeTermination("Aborted", "aborted", "Cancelled by caller."),
+			}),
+			makeSingleResult(3, {
+				id: "Paused",
+				termination: makeTermination("Paused", "paused", "No progress for three cycles."),
+			}),
+		];
+		const text = renderResultText({ projectAgentsDir: null, results, totalDurationMs: 1 }, true, uiTheme);
+
+		for (const status of ["completed", "failed", "aborted", "paused"]) {
+			expect(text).toContain(`⟦${status}⟧`);
+		}
+		for (const reason of [
+			"Yield accepted.",
+			"Provider exhausted retries.",
+			"Cancelled by caller.",
+			"No progress for three cycles.",
+		]) {
+			expect(text.split(reason)).toHaveLength(2);
+		}
+		expect(text).not.toContain("history://Completed");
+		for (const id of ["Failed", "Aborted", "Paused"]) {
+			expect(text).toContain(`history://${id}`);
+			expect(text).toContain(`agent://${id}`);
+		}
+		expect(text).toContain("⟦resumable⟧");
+		expect(text).toContain("Policy: pause after 3 consecutive assistant turns without successful tool progress");
+	});
+
+	it("renders provider and retry continuation failures separately", () => {
+		const providerError = "503 server error";
+		const continuationError = "Retry continuation failed: Cannot continue from message role: assistant";
+		const result = makeSingleResult(0, {
+			id: "RetryFailure",
+			exitCode: 1,
+			error: providerError,
+			output: providerError,
+			retryFailure: {
+				attempt: 2,
+				errorMessage: `${providerError}\n${continuationError}`,
+			},
+			termination: makeTermination("RetryFailure", "failed", providerError),
+		});
+		const text = renderResultText({ projectAgentsDir: null, results: [result], totalDurationMs: 1 }, true, uiTheme);
+
+		expect(text).toContain(`Reason: ${providerError}`);
+		expect(text).toContain("Retry failure after 2 attempts");
+		expect(text).toContain("Retry continuation failed:");
+		expect(text).toContain("Cannot continue from message role:");
+	});
+
+	it("prioritizes paused, failed, and aborted results when collapsed", () => {
+		const results = [
+			makeSingleResult(0, { id: "Completed1" }),
+			makeSingleResult(1, { id: "Completed2" }),
+			makeSingleResult(2, { id: "Completed3" }),
+			makeSingleResult(3, { id: "Completed4" }),
+			makeSingleResult(4, {
+				id: "PausedPriority",
+				termination: makeTermination("PausedPriority", "paused"),
+			}),
+			makeSingleResult(5, {
+				id: "FailedPriority",
+				termination: makeTermination("FailedPriority", "failed"),
+			}),
+			makeSingleResult(6, {
+				id: "AbortedPriority",
+				termination: makeTermination("AbortedPriority", "aborted"),
+			}),
+		];
+		const text = renderResultText({ projectAgentsDir: null, results, totalDurationMs: 1 }, false, uiTheme);
+
+		expect(text).toContain("PausedPriority");
+		expect(text).toContain("FailedPriority");
+		expect(text).toContain("AbortedPriority");
+		expect(text).toContain("Completed1");
+		expect(text).not.toContain("Completed2");
+		expect(text).toContain("3 more agents");
 	});
 
 	it("does not request spinner ticks for static partial progress", () => {

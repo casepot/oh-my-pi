@@ -25,7 +25,7 @@ import {
 	formatActiveRepoWatchdogPrompt,
 	formatAdvisorContextPrompt,
 } from "./advisor";
-import { type AsyncJob, AsyncJobManager } from "./async";
+import { type AsyncJob, type AsyncJobDeliveryPayload, AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { type Rule, setActiveRules } from "./capability/rule";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
@@ -141,6 +141,7 @@ import {
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
+import type { SubagentTermination } from "./task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -208,6 +209,7 @@ import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 type AsyncResultEntry = {
 	jobId: string;
 	result: string;
+	termination?: SubagentTermination;
 	job: AsyncJob | undefined;
 	durationMs: number | undefined;
 };
@@ -217,6 +219,7 @@ type AsyncResultJobDetails = {
 	type?: "bash" | "task";
 	label?: string;
 	durationMs?: number;
+	termination?: SubagentTermination;
 };
 
 type AsyncResultDetails = {
@@ -233,6 +236,9 @@ function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessag
 	const jobs = entries.map(entry => ({
 		jobId: entry.jobId,
 		result: entry.result,
+		termination: entry.termination,
+		task: entry.termination !== undefined,
+		status: entry.termination?.status ?? "completed",
 		type: entry.job?.type,
 		label: entry.job?.label,
 		durationMs: entry.durationMs,
@@ -243,6 +249,7 @@ function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessag
 			type: job.type,
 			label: job.label,
 			durationMs: job.durationMs,
+			termination: job.termination,
 		})),
 	};
 	return {
@@ -250,6 +257,7 @@ function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessag
 		customType: "async-result",
 		content: prompt.render(asyncResultTemplate, {
 			multiple: jobs.length > 1,
+			hasTask: jobs.some(job => job.task),
 			jobs,
 		}),
 		display: true,
@@ -1486,15 +1494,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		!options.parentTaskPrefix && !AsyncJobManager.instance()
 			? new AsyncJobManager({
 					maxRunningJobs: asyncMaxJobs,
-					onJobComplete: async (jobId, result, job) => {
+					onJobComplete: async (jobId, payload: AsyncJobDeliveryPayload, job) => {
 						if (!session || asyncJobManager!.isDeliverySuppressed(jobId)) return;
-						const formattedResult = await formatAsyncResultForFollowUp(result);
+						const formattedResult = await formatAsyncResultForFollowUp(payload.text);
 						if (asyncJobManager!.isDeliverySuppressed(jobId)) return;
 
 						const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
 						session.yieldQueue.enqueue<AsyncResultEntry>("async-result", {
 							jobId,
 							result: formattedResult,
+							termination: payload.kind === "task" ? payload.result.termination : undefined,
 							job,
 							durationMs,
 						});
@@ -1510,13 +1519,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
 	/**
-	 * Forget the agent ref on teardown — unless the agent is being parked (or is
-	 * already parked). Parking disposes the session but keeps the ref addressable
-	 * (history://, revive); only process teardown / explicit kill unregisters.
+	 * Forget the agent ref on ordinary teardown unless its lifecycle explicitly
+	 * retains a transcript. Parking keeps the ref revivable; an aborted ref with
+	 * a session file remains addressable through history:// until explicit release.
 	 */
-	const unregisterUnlessParked = (): void => {
-		if (agentRegistry.get(resolvedAgentId)?.status === "parked") return;
+	const unregisterUnlessTranscriptRetained = (): void => {
+		const ref = agentRegistry.get(resolvedAgentId);
+		if (ref?.status === "parked") return;
 		if (AgentLifecycleManager.global().isParking(resolvedAgentId)) return;
+		if (ref?.status === "aborted" && ref.sessionFile) {
+			agentRegistry.detachSession(resolvedAgentId);
+			return;
+		}
 		agentRegistry.unregister(resolvedAgentId);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
@@ -3045,7 +3059,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		// Attach the live session to the pre-registered ref so peers can route IRC
 		// messages here. Refresh sessionFile in case it was unavailable at pre-register
-		// time. The dispose wrapper below unregisters on teardown (unless parked).
+		// time. The dispose wrapper below retains only lifecycle-owned transcript refs.
 		agentRegistry.attachSession(resolvedAgentId, session, sessionManager.getSessionFile() ?? null);
 		{
 			const originalDispose = session.dispose.bind(session);
@@ -3064,7 +3078,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 					await originalDispose();
 				} finally {
-					unregisterUnlessParked();
+					unregisterUnlessTranscriptRetained();
 					unsubscribeCredentialDisabled?.();
 				}
 			};
@@ -3263,7 +3277,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (hasSession) {
 				await session.dispose();
 			} else {
-				if (hasRegistered) unregisterUnlessParked();
+				if (hasRegistered) unregisterUnlessTranscriptRetained();
 				if (asyncJobManager) {
 					if (AsyncJobManager.instance() === asyncJobManager) {
 						AsyncJobManager.setInstance(undefined);

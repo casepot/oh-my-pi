@@ -26,6 +26,8 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Changed subagent request budgets to disabled-by-default advisory notices with no hidden request cap, replacing request-count termination with an assistant-turn stall guard that pauses resumable shared runs, fails non-resumable one-shot/isolated runs, and exposes each spawn's exact policy snapshot in prompts, acknowledgments, and termination audit data.
+- Changed task, background-job, eval, RPC, IRC, and TUI subagent lifecycle transport to preserve exact termination reasons, resumability, recovery URIs, and distinct waiting, paused, idle, parked, and aborted states.
 - Changed the advisor prompt to use phase-aware product judgment without turning phases into workflow gates: planning shortens implementation, implementation keeps behavior ahead of proof scaffolds, verification seeks claim/risk-matched real signal, final handoff blocks only false completion, and both speed without correctness and correctness theater are failures.
 - Changed goal-mode context persistence to write goal-state sidecar refs, routing capsules, narrow `goal({op:"get"})` views, and approved-plan execution contracts instead of replaying full proof/planning bodies in active context.
 - Changed goal checkpoint evidence to carry stable signal, scenario-row, workstream, verification-command, and evidence refs so proof projections can dedupe checkpoint support without replaying full evidence bodies.
@@ -77,6 +79,8 @@
 - Changed the default automatic compaction strategy from snapcompact to context-full so default maintenance uses provider-native remote compaction when available instead of image archives.
 
 ### Fixed
+- Fixed rejected retry continuations and retry-cancellation races leaving subagent tasks stuck or retry lifecycle events unpaired.
+- Clarified automatic IRC replies as context-only no-tools messages, surfaced task-agent activity and retry diagnostics, and made missing `agent://` output errors state-aware.
 - Fixed shake auto-compaction continuations and provider-call maintenance so a successful shake history rewrite resumes the agent instead of requiring a summary compaction entry, falling back to context-full, or pausing behind the stricter summary-compaction recovery band.
 - Fixed source checkout migration to refuse local commits before relinking to the fork-backed `origin/main` update channel.
 - Fixed branched sessions to copy referenced artifact logs into the new session artifact directory.

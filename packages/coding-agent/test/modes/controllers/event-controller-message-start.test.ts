@@ -168,13 +168,20 @@ describe("EventController message_start (user role)", () => {
 	});
 });
 
-function createIrcMessage(timestamp: number): CustomMessage<{ from: string; message: string }> {
+type IrcCardDetails = {
+	from: string;
+	message: string;
+	replyTo?: string;
+	automated?: true;
+};
+
+function createIrcMessage(timestamp: number, overrides: Partial<IrcCardDetails> = {}): CustomMessage<IrcCardDetails> {
 	return {
 		role: "custom",
 		customType: "irc:incoming",
 		content: "Ready",
 		display: true,
-		details: { from: "0-Main", message: `Ready ${timestamp}` },
+		details: { from: "0-Main", message: `Ready ${timestamp}`, ...overrides },
 		timestamp,
 	};
 }
@@ -234,6 +241,38 @@ describe("EventController IRC expiry", () => {
 		vi.advanceTimersByTime(1);
 		expect(chatContainer.children).toHaveLength(1);
 		expect(requestRender).toHaveBeenCalledTimes(2);
+	});
+
+	it("renders automatic provenance from IRC transcript-card details without labeling an explicit reply", async () => {
+		vi.useFakeTimers();
+		const automatic = createIrcMessage(5, {
+			message: "generated context reply",
+			replyTo: "msg-request",
+			automated: true,
+		});
+		const automaticContext = createIrcContext();
+		const automaticController = new EventController(automaticContext.ctx);
+
+		await automaticController.handleEvent({ type: "irc_message", message: automatic });
+
+		const automaticCard = automaticContext.chatContainer.render(200).join("\n");
+		expect(automaticCard).toContain("generated context reply");
+		expect(automaticCard).toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
+
+		const explicit = createIrcMessage(6, {
+			message: "ordinary explicit reply",
+			replyTo: "msg-request",
+		});
+		const explicitContext = createIrcContext();
+		const explicitController = new EventController(explicitContext.ctx);
+
+		await explicitController.handleEvent({ type: "irc_message", message: explicit });
+
+		const explicitCard = explicitContext.chatContainer.render(200).join("\n");
+		expect(explicitCard).toContain("ordinary explicit reply");
+		expect(explicitCard).not.toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
+		automaticController.dispose();
+		explicitController.dispose();
 	});
 
 	it("keeps a card whose rows may already be committed (no live block above)", async () => {

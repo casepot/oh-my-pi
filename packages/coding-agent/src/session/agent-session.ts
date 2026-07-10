@@ -2169,7 +2169,7 @@ type ScheduledAgentContinueOptions = {
 	generation?: number;
 	shouldContinue?: () => boolean;
 	onSkip?: (reason: AgentContinueSkipReason) => void;
-	onError?: () => void;
+	onError?: (error: unknown) => void | Promise<void>;
 };
 
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
@@ -2324,6 +2324,8 @@ export class AgentSession {
 	#retryAttempt = 0;
 	#retryPromise: Promise<void> | undefined = undefined;
 	#retryResolve: (() => void) | undefined = undefined;
+	#retryStartedAttempt: number | undefined = undefined;
+	#retryStartEventPromise: Promise<void> | undefined = undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined = undefined;
 	#pendingRecoveredRetryErrors: PendingRecoveredRetryError[] = [];
 	// Todo completion reminder state
@@ -4501,6 +4503,8 @@ export class AgentSession {
 						});
 					}
 					const recoveredErrors = await this.#markPendingRecoveredRetryErrors(assistantMsg);
+					this.#retryStartedAttempt = undefined;
+					this.#retryStartEventPromise = undefined;
 					await this.#emitSessionEvent({
 						type: "auto_retry_end",
 						success: true,
@@ -4859,11 +4863,38 @@ export class AgentSession {
 
 	/** Resolve the pending retry promise */
 	#resolveRetry(): void {
+		this.#retryStartedAttempt = undefined;
+		this.#retryStartEventPromise = undefined;
 		if (this.#retryResolve) {
 			this.#retryResolve();
 			this.#retryResolve = undefined;
 			this.#retryPromise = undefined;
 		}
+	}
+
+	#settleRetry(retryPromise: Promise<void>): void {
+		if (this.#retryPromise !== retryPromise) return;
+		this.#clearPendingRecoveredRetryErrors();
+		this.#retryAttempt = 0;
+		this.#resolveRetry();
+	}
+
+	#scheduleRetryCancellationEnd(): void {
+		const attempt = this.#retryStartedAttempt;
+		if (attempt === undefined) return;
+		const startEvent = this.#retryStartEventPromise;
+		this.#retryStartedAttempt = undefined;
+		this.#retryStartEventPromise = undefined;
+		const event = (async () => {
+			if (startEvent) await startEvent;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Retry cancelled",
+			});
+		})();
+		this.#trackPostPromptTask(event);
 	}
 
 	/** Create the TTSR resume gate promise if one doesn't already exist. */
@@ -4942,8 +4973,22 @@ export class AgentSession {
 	}
 
 	#scheduleAgentContinue(options?: ScheduledAgentContinueOptions): void {
+		const delayMs = options?.delayMs ?? 0;
+		const generation = options?.generation;
 		this.#schedulePostPromptTask(
 			async signal => {
+				if (delayMs > 0) {
+					try {
+						await scheduler.wait(delayMs, { signal });
+					} catch {
+						this.#skipAgentContinue("aborted", options);
+						return;
+					}
+				}
+				if (generation !== undefined && this.#promptGeneration !== generation) {
+					this.#skipAgentContinue("stale-generation", options);
+					return;
+				}
 				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
 				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
 				// streaming turn — agent.continue() here would race the handoff's session
@@ -4970,14 +5015,13 @@ export class AgentSession {
 						error: error instanceof Error ? error.message : String(error),
 						stack: error instanceof Error ? error.stack : undefined,
 					});
-					options?.onError?.();
+					await options?.onError?.(error);
 				} finally {
 					this.#endInFlight();
 				}
 			},
 			{
-				delayMs: options?.delayMs,
-				generation: options?.generation,
+				generation,
 				onSkip: reason => this.#skipAgentContinue(reason, options),
 			},
 		);
@@ -14025,6 +14069,41 @@ export class AgentSession {
 		this.#pendingRecoveredRetryErrors = [];
 	}
 
+	#restoreRetryErrorToActiveContext(message: AssistantMessage): void {
+		const lastMessage = this.agent.state.messages.at(-1);
+		if (lastMessage?.role === "assistant" && this.#isSameAssistantMessage(lastMessage as AssistantMessage, message)) {
+			return;
+		}
+		this.agent.appendMessage(message);
+	}
+
+	async #handleScheduledRetryContinuationError(
+		retryPromise: Promise<void>,
+		message: AssistantMessage,
+		attempt: number,
+		providerError: string,
+		continuationError: unknown,
+	): Promise<void> {
+		if (this.#retryPromise !== retryPromise) return;
+		try {
+			this.#restoreRetryErrorToActiveContext(message);
+			const continuationDiagnostic =
+				continuationError instanceof Error
+					? `${continuationError.name}: ${continuationError.message || "(no message)"}`
+					: String(continuationError);
+			this.#retryStartedAttempt = undefined;
+			this.#retryStartEventPromise = undefined;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: `${providerError}\nRetry continuation failed: ${continuationDiagnostic}`,
+			});
+		} finally {
+			this.#settleRetry(retryPromise);
+		}
+	}
+
 	async #persistRetryLifecycleErrorMessage(message: AssistantMessage): Promise<void> {
 		await this.#waitForSessionMessagePersistence(message);
 		if (!isEmptyErrorTurn(message)) return;
@@ -14065,9 +14144,15 @@ export class AgentSession {
 	async #recordPendingRecoveredRetryError(
 		message: AssistantMessage,
 		id: number,
-		options: { switchedCredential: boolean; switchedModel: boolean; delayMs: number },
+		options: {
+			switchedCredential: boolean;
+			switchedModel: boolean;
+			delayMs: number;
+			isCurrent: () => boolean;
+		},
 	): Promise<void> {
 		await this.#persistRetryLifecycleErrorMessage(message);
+		if (!options.isCurrent()) return;
 		const persistenceKey = sessionMessagePersistenceKey(message);
 		if (!persistenceKey) return;
 		let branchEntry: SessionEntry | undefined;
@@ -14162,6 +14247,8 @@ export class AgentSession {
 				provider: assistantMessage.provider,
 			});
 			if (this.#retryAttempt > 0) {
+				this.#retryStartedAttempt = undefined;
+				this.#retryStartEventPromise = undefined;
 				await this.#emitSessionEvent({
 					type: "auto_retry_end",
 					success: false,
@@ -17356,21 +17443,29 @@ export class AgentSession {
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
-		if (!this.#retryPromise) {
+		let retryPromise = this.#retryPromise;
+		if (!retryPromise) {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			this.#retryPromise = promise;
 			this.#retryResolve = resolve;
+			retryPromise = promise;
 		}
+		const attempt = this.#retryAttempt;
+		const isCurrentRetry = () => this.#retryPromise === retryPromise && !this.#isDisposed;
 
 		if (this.#retryAttempt > retrySettings.maxRetries) {
 			await this.#persistRetryLifecycleErrorMessage(message);
+			if (!isCurrentRetry()) return false;
 			// Max retries exceeded, emit final failure and reset
+			this.#retryStartedAttempt = undefined;
+			this.#retryStartEventPromise = undefined;
 			await this.#emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
 				attempt: this.#retryAttempt - 1,
 				finalError: message.errorMessage,
 			});
+			if (!isCurrentRetry()) return false;
 			this.#clearPendingRecoveredRetryErrors();
 			this.#retryAttempt = 0;
 			this.#resolveRetry(); // Resolve so waitForRetry() completes
@@ -17405,6 +17500,7 @@ export class AgentSession {
 					modelId: this.model.id,
 				},
 			);
+			if (!isCurrentRetry()) return false;
 			if (outcome.switched) {
 				switchedCredential = true;
 				delayMs = 0;
@@ -17436,6 +17532,7 @@ export class AgentSession {
 				}
 			}
 		}
+		if (!isCurrentRetry()) return false;
 
 		const allowModelFallback = options?.allowModelFallback !== false;
 		const currentSelector = this.model ? formatRetryFallbackSelector(this.model, this.thinkingLevel) : undefined;
@@ -17445,6 +17542,7 @@ export class AgentSession {
 					this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, { pinFallback: classifierRefusal });
+				if (!isCurrentRetry()) return false;
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed
@@ -17452,6 +17550,7 @@ export class AgentSession {
 			// errors the generic retry classifier would otherwise reject.
 			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
+				if (!isCurrentRetry()) return false;
 			}
 			if (switchedModel) {
 				delayMs = 0;
@@ -17459,6 +17558,7 @@ export class AgentSession {
 				delayMs = parsedRetryAfterMs;
 			}
 		}
+		if (!isCurrentRetry()) return false;
 		if (classifierRefusal && !switchedModel) {
 			this.#retryAttempt = 0;
 			this.#resolveRetry();
@@ -17484,22 +17584,33 @@ export class AgentSession {
 		const maxDelayMs = retrySettings.maxDelayMs;
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
 			await this.#persistRetryLifecycleErrorMessage(message);
+			if (!isCurrentRetry()) return false;
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
+			this.#retryStartedAttempt = undefined;
+			this.#retryStartEventPromise = undefined;
 			await this.#emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
 				attempt,
 				finalError: `Provider requested ${delayMs}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
 			});
+			if (!isCurrentRetry()) return false;
 			this.#clearPendingRecoveredRetryErrors();
 			this.#resolveRetry();
 			return false;
 		}
 
-		await this.#recordPendingRecoveredRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		await this.#recordPendingRecoveredRetryError(message, id, {
+			switchedCredential,
+			switchedModel,
+			delayMs,
+			isCurrent: isCurrentRetry,
+		});
+		if (!isCurrentRetry()) return false;
 
-		await this.#emitSessionEvent({
+		this.#retryStartedAttempt = attempt;
+		const retryStartEvent = this.#emitSessionEvent({
 			type: "auto_retry_start",
 			attempt: this.#retryAttempt,
 			maxAttempts: retrySettings.maxRetries,
@@ -17507,6 +17618,9 @@ export class AgentSession {
 			errorMessage,
 			errorId: message.errorId,
 		});
+		this.#retryStartEventPromise = retryStartEvent;
+		await retryStartEvent;
+		if (!isCurrentRetry()) return false;
 
 		// Remove the failed assistant message from active context before retrying.
 		this.#removeAssistantMessageFromActiveContext(message, "auto-retry");
@@ -17527,17 +17641,18 @@ export class AgentSession {
 				return false;
 			}
 			// Aborted during sleep - emit end event so UI can clean up
-			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
 			this.#retryAbortController = undefined;
-			await this.#emitSessionEvent({
-				type: "auto_retry_end",
-				success: false,
-				attempt,
-				finalError: "Retry cancelled",
-			});
-			this.#clearPendingRecoveredRetryErrors();
-			this.#resolveRetry();
+			if (this.#retryStartedAttempt === attempt) {
+				this.#retryStartedAttempt = undefined;
+				this.#retryStartEventPromise = undefined;
+				await this.#emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt,
+					finalError: "Retry cancelled",
+				});
+			}
+			this.#settleRetry(retryPromise);
 			return false;
 		}
 		if (this.#retryAbortController === retryAbortController) {
@@ -17545,7 +17660,14 @@ export class AgentSession {
 		}
 
 		// Retry via continue() outside the agent_end event callback chain.
-		this.#scheduleAgentContinue({ delayMs: 1, generation });
+		this.#scheduleAgentContinue({
+			delayMs: 1,
+			generation,
+			shouldContinue: () => this.#retryPromise === retryPromise,
+			onSkip: () => this.#settleRetry(retryPromise),
+			onError: error =>
+				this.#handleScheduledRetryContinuationError(retryPromise, message, attempt, errorMessage, error),
+		});
 
 		return true;
 	}
@@ -17583,9 +17705,15 @@ export class AgentSession {
 	 * Cancel in-progress retry.
 	 */
 	abortRetry(): void {
+		const retryPromise = this.#retryPromise;
 		this.#retryAbortController?.abort();
-		// Note: _retryAttempt is reset in the catch block of _autoRetry
-		this.#resolveRetry();
+		this.#scheduleRetryCancellationEnd();
+		if (retryPromise) {
+			this.#settleRetry(retryPromise);
+			return;
+		}
+		this.#clearPendingRecoveredRetryErrors();
+		this.#retryAttempt = 0;
 	}
 
 	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
@@ -17989,6 +18117,7 @@ export class AgentSession {
 				const from = Reflect.get(details, "from");
 				const body = Reflect.get(details, "message");
 				const replyTo = Reflect.get(details, "replyTo");
+				const automated = Reflect.get(details, "automated");
 				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
 					queue.remaining.push(record);
 					continue;
@@ -18008,6 +18137,7 @@ export class AgentSession {
 					body,
 					ts: record.timestamp,
 					...(typeof replyTo === "string" ? { replyTo } : {}),
+					...(automated === true ? { automated: true as const } : {}),
 				});
 			}
 		}
@@ -18048,7 +18178,7 @@ export class AgentSession {
 		// async execution disabled (no step boundary until the sender's own batch
 		// ends), or idle in plan mode (autonomous wake turns are suppressed).
 		const planModeIdle = !this.isStreaming && this.#planModeState?.enabled === true;
-		const autoReply =
+		const shouldAutoReply =
 			(opts?.expectsReply ?? false) && ((this.isStreaming && !this.settings.get("async.enabled")) || planModeIdle);
 		const record: CustomMessage = {
 			role: "custom",
@@ -18057,11 +18187,18 @@ export class AgentSession {
 				from: msg.from,
 				message: msg.body,
 				replyTo: msg.replyTo ?? "",
-				autoReplied: autoReply,
+				automated: msg.automated === true,
+				autoReplied: shouldAutoReply,
 				interrupting: this.isStreaming,
 			}),
 			display: true,
-			details: { id: msg.id, from: msg.from, message: msg.body, ...(msg.replyTo ? { replyTo: msg.replyTo } : {}) },
+			details: {
+				id: msg.id,
+				from: msg.from,
+				message: msg.body,
+				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
+				...(msg.automated === true ? { automated: true } : {}),
+			},
 			attribution: "agent",
 			timestamp: msg.ts,
 		};
@@ -18071,7 +18208,12 @@ export class AgentSession {
 			if (recipientParentId === msg.from) {
 				this.agent.steer({
 					role: "user",
-					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: msg.body }),
+					content: prompt.render(parentIrcSteerTemplate, {
+						from: msg.from,
+						message: msg.body,
+						replyTo: msg.replyTo ?? "",
+						automated: msg.automated === true,
+					}),
 					attribution: "agent",
 					timestamp: msg.ts,
 					steering: true,
@@ -18079,7 +18221,7 @@ export class AgentSession {
 			} else {
 				this.#pendingIrcInterrupts.push(record);
 			}
-			if (autoReply) void this.#runIrcAutoReply(msg);
+			if (shouldAutoReply) void this.#runIrcAutoReply(msg);
 			return "injected";
 		}
 		// Plan mode: record into context but do not wake an autonomous turn.
@@ -18092,7 +18234,7 @@ export class AgentSession {
 				record.details,
 				record.attribution ?? "agent",
 			);
-			if (autoReply) void this.#runIrcAutoReply(msg);
+			if (shouldAutoReply) void this.#runIrcAutoReply(msg);
 			return "injected";
 		}
 		// Idle: wake a real turn so the recipient responds (shared with the stranded-aside resume).
@@ -18123,9 +18265,9 @@ export class AgentSession {
 			const record: CustomMessage = {
 				role: "custom",
 				customType: "irc:autoreply",
-				content: `[IRC you → \`${msg.from}\` (auto)]\n\n${body}`,
+				content: `[IRC you → \`${msg.from}\` (AUTOMATIC · NO TOOLS · CONTEXT ONLY)]\n\n${body}`,
 				display: true,
-				details: { to: msg.from, body, replyTo: msg.id },
+				details: { to: msg.from, body, replyTo: msg.id, automated: true },
 				attribution: "agent",
 				timestamp: Date.now(),
 			};
@@ -18135,7 +18277,13 @@ export class AgentSession {
 			this.#pendingIrcAsides.push(record);
 			// `from` must be the id the sender addressed (msg.to) so their
 			// from-filtered waiter matches.
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
+			const receipt = await IrcBus.global().send({
+				from: msg.to,
+				to: msg.from,
+				body,
+				replyTo: msg.id,
+				automated: true,
+			});
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}

@@ -5,6 +5,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import type { GoalModeState } from "../../goals/state";
 import { AgentProtocolHandler } from "../../internal-urls/agent-protocol";
+import { HistoryProtocolHandler } from "../../internal-urls/history-protocol";
 import { resetRegisteredArtifactDirsForTests } from "../../internal-urls/registry-helpers";
 import type { PlanModeState } from "../../plan-mode/state";
 import { AgentRegistry } from "../../registry/agent-registry";
@@ -14,8 +15,16 @@ import type { ExecutorOptions } from "../../task/executor";
 import * as taskExecutor from "../../task/executor";
 import * as isolationRunner from "../../task/isolation-runner";
 import { AgentOutputManager } from "../../task/output-manager";
-import type { AgentDefinition, AgentProgress, SingleResult } from "../../task/types";
+import { createSubagentRuntimePolicy, createSubagentTermination } from "../../task/runtime-policy";
+import type {
+	AgentDefinition,
+	AgentProgress,
+	SingleResult,
+	SubagentRuntimePolicy,
+	SubagentTermination,
+} from "../../task/types";
 import type { ToolSession } from "../../tools";
+import { ToolError } from "../../tools/tool-errors";
 import { EVAL_AGENT_MAX_DEPTH, runEvalAgent } from "../agent-bridge";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { IdleTimeout } from "../idle-timeout";
@@ -113,6 +122,28 @@ function mockAgents(agents: AgentDefinition[] = [taskAgent, reviewerAgent]): voi
 	vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({ agents, projectAgentsDir: null });
 }
 
+const TEST_RUNTIME_POLICY = createSubagentRuntimePolicy({
+	requestBudget: 0,
+	requestBudgetNotice: false,
+	noProgressCycleLimit: 10,
+	maxRuntimeMs: 0,
+	maxRecursionDepth: 2,
+	taskDepth: 0,
+	idleTtlMs: 420_000,
+	resumable: false,
+});
+
+function makeTermination(
+	id: string,
+	status: SubagentTermination["status"] = "completed",
+	code: SubagentTermination["code"] = "yielded",
+	reason = "Subagent yielded a result",
+	resumable = false,
+	policy: SubagentRuntimePolicy = TEST_RUNTIME_POLICY,
+): SubagentTermination {
+	return createSubagentTermination({ id, status, code, reason, resumable, policy });
+}
+
 function singleResult(options: ExecutorOptions, overrides: Partial<SingleResult> = {}): SingleResult {
 	return {
 		index: options.index,
@@ -129,6 +160,7 @@ function singleResult(options: ExecutorOptions, overrides: Partial<SingleResult>
 		durationMs: 1,
 		tokens: 0,
 		requests: 0,
+		termination: makeTermination(overrides.id ?? options.id),
 		...overrides,
 	};
 }
@@ -386,22 +418,23 @@ describe("runEvalAgent", () => {
 		expect(options.keepAlive).toBe(false);
 	});
 
-	it("registers temp artifact dirs for in-memory handle results so agent URLs resolve", async () => {
+	it("keeps temp artifacts for termination output URIs even without a handle", async () => {
 		mockAgents();
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			if (!options.artifactsDir) throw new Error("artifactsDir missing");
+			expect(options.persistArtifacts).toBe(true);
 			await fs.mkdir(options.artifactsDir, { recursive: true });
 			await fs.writeFile(path.join(options.artifactsDir, `${options.id}.md`), "recoverable output");
 			return singleResult(options, { output: "recoverable output" });
 		});
 
-		const result = await runEvalAgent({ prompt: "hello", handle: true }, { session: makeSession() });
-		const resource = await new AgentProtocolHandler().resolve(new URL(`agent://${result.details.id}`) as never);
+		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession() });
+		const resource = await new AgentProtocolHandler().resolve(new URL(result.details.termination.outputUri) as never);
 
 		expect(resource.content).toBe("recoverable output");
 	});
 
-	it("unregisters eval subagents through the bridge cleanup path", async () => {
+	it("parks eval subagents so termination history URIs remain registered", async () => {
 		AgentRegistry.resetGlobalForTests();
 		mockAgents();
 		let disposed = false;
@@ -411,112 +444,199 @@ describe("runEvalAgent", () => {
 			},
 		} as unknown as AgentSession;
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
+			if (!options.artifactsDir) throw new Error("artifactsDir missing");
+			const sessionFile = path.join(options.artifactsDir, `${options.id}.jsonl`);
+			await fs.writeFile(sessionFile, "");
 			AgentRegistry.global().register({
 				id: options.id,
 				displayName: options.id,
 				kind: "sub",
 				session: cleanupSession,
+				sessionFile,
 				status: "idle",
 			});
+			const termination = makeTermination(options.id);
 			await taskExecutor.finalizeSubagentLifecycle({
 				id: options.id,
 				session: cleanupSession,
-				aborted: false,
+				termination,
 				keepAlive: options.keepAlive !== false,
 				isolated: options.worktree !== undefined,
 				agentIdleTtlMs: 0,
 				reviveSession: null,
+				displayName: options.id,
 			});
-			return singleResult(options);
+			return singleResult(options, { termination });
 		});
 
-		await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
+		const result = await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
+		const ref = AgentRegistry.global().get("Cleanup");
+		const history = await new HistoryProtocolHandler().resolve(
+			new URL(result.details.termination.historyUri) as never,
+		);
 
 		expect(disposed).toBe(true);
-		expect(AgentRegistry.global().get("Cleanup")).toBeUndefined();
-		expect(
-			AgentRegistry.global()
-				.listVisibleTo("Main")
-				.map(ref => ref.id),
-		).not.toContain("Cleanup");
+		expect(ref?.status).toBe("parked");
+		expect(ref?.session).toBeNull();
+		expect(history.content).toContain("Cleanup (parked)");
 	});
 
-	it("maps successful and failed subagent results", async () => {
+	it("maps successful and failed subagent terminations exactly", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess");
+		const completedTermination = makeTermination("0-EvalAgent");
 		runSpy.mockImplementationOnce(async options =>
 			singleResult(options, {
 				id: "0-EvalAgent",
 				output: "done",
 				resolvedModel: "p/model",
+				termination: completedTermination,
 			}),
 		);
-		runSpy.mockImplementationOnce(async options =>
-			singleResult(options, {
-				exitCode: 1,
+		let failedTermination: SubagentTermination | undefined;
+		runSpy.mockImplementationOnce(async options => {
+			failedTermination = makeTermination(options.id, "failed", "execution_error", "boom");
+			return singleResult(options, {
 				output: "",
-				stderr: "stderr",
+				stderr: "boom",
 				error: "boom",
-			}),
-		);
+				termination: failedTermination,
+			});
+		});
 
 		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession() });
 		expect(result).toEqual({
 			text: "done",
-			details: { agent: "task", id: "0-EvalAgent", model: "p/model", structured: false },
+			details: {
+				agent: "task",
+				id: "0-EvalAgent",
+				model: "p/model",
+				structured: false,
+				termination: completedTermination,
+			},
 		});
-		await expect(runEvalAgent({ prompt: "fail" }, { session: makeSession() })).rejects.toThrow("boom");
+		expect(result.details.termination).toBe(completedTermination);
+
+		let thrown: unknown;
+		try {
+			await runEvalAgent({ prompt: "fail" }, { session: makeSession() });
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ToolError);
+		const toolError = thrown as ToolError;
+		expect(toolError.message).toBe("boom");
+		expect(toolError.context?.termination).toBe(failedTermination);
 	});
 
-	// Regression: a runtime-limit abort returns exitCode=1, stderr="", error=undefined,
-	// aborted=true, abortReason="Subagent runtime limit exceeded (...)". The previous
-	// failure-message coalesce stopped at the empty `stderr` (since `??` only skips
-	// nullish values) and shipped an empty error through the bridge — Python then
-	// surfaced the generic `bridge call '__agent__' failed`. See #2006.
-	it("surfaces abortReason for aborts that leave stderr empty", async () => {
+	it("surfaces exact termination reasons once for failed and aborted runs", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess");
-		runSpy.mockImplementationOnce(async options =>
-			singleResult(options, {
-				exitCode: 1,
+		let runtimeTermination: SubagentTermination | undefined;
+		let callerTermination: SubagentTermination | undefined;
+		let genericTermination: SubagentTermination | undefined;
+		runSpy.mockImplementationOnce(async options => {
+			runtimeTermination = makeTermination(
+				options.id,
+				"aborted",
+				"runtime_limit",
+				"Subagent runtime limit exceeded (task.maxRuntimeMs=900000)",
+			);
+			return singleResult(options, {
 				output: "",
 				stderr: "",
 				error: undefined,
-				aborted: true,
-				abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=900000)",
-			}),
-		);
-		runSpy.mockImplementationOnce(async options =>
-			singleResult(options, {
-				exitCode: 1,
+				termination: runtimeTermination,
+			});
+		});
+		runSpy.mockImplementationOnce(async options => {
+			callerTermination = makeTermination(options.id, "aborted", "caller_cancelled", "Cancelled by caller");
+			return singleResult(options, {
 				output: "",
 				stderr: "   ",
 				error: "   ",
-				aborted: true,
-				abortReason: "Cancelled by caller",
-			}),
-		);
-		runSpy.mockImplementationOnce(async options =>
-			singleResult(options, {
-				exitCode: 1,
+				termination: callerTermination,
+			});
+		});
+		runSpy.mockImplementationOnce(async options => {
+			genericTermination = makeTermination(
+				options.id,
+				"failed",
+				"execution_error",
+				"agent() subagent 'task' failed.",
+			);
+			return singleResult(options, {
 				output: "",
 				stderr: "",
 				error: undefined,
-			}),
-		);
+				termination: genericTermination,
+			});
+		});
 
-		await expect(runEvalAgent({ prompt: "slow" }, { session: makeSession() })).rejects.toThrow(
-			"Subagent runtime limit exceeded (task.maxRuntimeMs=900000)",
-		);
-		// Whitespace-only stderr/error must not mask abortReason either.
-		await expect(runEvalAgent({ prompt: "cancelled" }, { session: makeSession() })).rejects.toThrow(
-			"Cancelled by caller",
-		);
-		// Last resort: still produce a non-empty message even when nothing useful is set,
-		// so Python never falls back to `bridge call '__agent__' failed`.
-		await expect(runEvalAgent({ prompt: "blank" }, { session: makeSession() })).rejects.toThrow(
-			"agent() subagent 'task' failed.",
-		);
+		const captureError = async (promptText: string): Promise<ToolError> => {
+			try {
+				await runEvalAgent({ prompt: promptText }, { session: makeSession() });
+			} catch (error) {
+				expect(error).toBeInstanceOf(ToolError);
+				return error as ToolError;
+			}
+			throw new Error("Expected runEvalAgent to reject");
+		};
+
+		const runtimeError = await captureError("slow");
+		expect(runtimeError.message).toBe("Subagent runtime limit exceeded (task.maxRuntimeMs=900000)");
+		expect(runtimeError.context?.termination).toBe(runtimeTermination);
+
+		const callerError = await captureError("cancelled");
+		expect(callerError.message).toBe("Cancelled by caller");
+		expect(callerError.context?.termination).toBe(callerTermination);
+
+		const genericError = await captureError("blank");
+		expect(genericError.message).toBe("agent() subagent 'task' failed.");
+		expect(genericError.context?.termination).toBe(genericTermination);
+	});
+
+	it("surfaces no-progress as a non-resumable one-shot failure", async () => {
+		mockAgents();
+		let termination: SubagentTermination | undefined;
+		vi.spyOn(taskExecutor, "runSubprocess").mockImplementationOnce(async options => {
+			const policy = options.effectivePolicy;
+			if (!policy) throw new Error("Expected an applied runtime policy");
+			termination = makeTermination(
+				options.id,
+				"failed",
+				"no_progress",
+				"Stopped after 5 consecutive assistant turns",
+				false,
+				policy,
+			);
+			return singleResult(options, {
+				exitCode: 1,
+				output: "partial result",
+				termination,
+			});
+		});
+
+		let thrown: unknown;
+		try {
+			await runEvalAgent(
+				{ prompt: "stall" },
+				{ session: makeSession({ settings: Settings.isolated({ "task.noProgressCycleLimit": 5 }) }) },
+			);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ToolError);
+		expect((thrown as ToolError).context?.termination).toBe(termination);
+		expect(termination).toMatchObject({
+			status: "failed",
+			code: "no_progress",
+			resumable: false,
+			policy: {
+				stall: { action: "fail", afterAssistantTurns: 5 },
+				idle: { resumable: false, parkingTtlMs: null },
+			},
+		});
 	});
 });
 
@@ -587,7 +707,12 @@ describe("agent() through eval runtimes", () => {
 		mockAgents();
 		vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => {
 			if (options.assignment === "bad") {
-				return singleResult(options, { exitCode: 1, output: "", stderr: "boom", error: "boom" });
+				return singleResult(options, {
+					output: "",
+					stderr: "boom",
+					error: "boom",
+					termination: makeTermination(options.id, "failed", "execution_error", "boom"),
+				});
 			}
 			return singleResult(options, { output: options.assignment ?? "" });
 		});
@@ -1037,6 +1162,49 @@ describe("runEvalAgent isolation", () => {
 		expect(mergeSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("constructs isolated setup failures with effective policy and a non-empty reason fallback", async () => {
+		mockAgents();
+		mockIsolationContext();
+		let setupTermination: SubagentTermination | undefined;
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementationOnce(async opts => {
+			const result = opts.buildFailureResult(new Error("   "));
+			setupTermination = result.termination;
+			return result;
+		});
+		const session = isolatedSession({
+			"task.softRequestBudget": 90,
+			"task.softRequestBudgetNotice": true,
+			"task.noProgressCycleLimit": 5,
+			"task.maxRuntimeMs": 123_456,
+		});
+
+		let thrown: unknown;
+		try {
+			await runEvalAgent({ prompt: "setup", isolated: true }, { session });
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ToolError);
+		const toolError = thrown as ToolError;
+		expect(toolError.message).toBe("agent() isolated setup failed for task.");
+		expect(toolError.context?.termination).toBe(setupTermination);
+		expect(setupTermination).toEqual({
+			status: "failed",
+			code: "execution_error",
+			reason: "agent() isolated setup failed for task.",
+			resumable: false,
+			historyUri: "history://task",
+			outputUri: "agent://task",
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "advisory", afterAssistantTurns: 90 } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "fail", afterAssistantTurns: 5 },
+				spawn: { remainingDepth: 1 },
+				idle: { resumable: false, parkingTtlMs: null },
+			},
+		});
+	});
+
 	it("preserves temp artifacts for non-isolated handle outputs", async () => {
 		mockAgents();
 		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
@@ -1241,6 +1409,12 @@ describe("runEvalAgent isolation", () => {
 				output: "ran",
 				patchPath: `/artifacts/${opts.agentId}.patch`,
 				error: "Merge failed: remote: garbage at end of loose object '4de7bad'",
+				termination: makeTermination(
+					opts.baseOptions.id,
+					"failed",
+					"merge_failed",
+					"Merge failed: remote: garbage at end of loose object '4de7bad'",
+				),
 			}),
 		);
 		const mergeSpy = vi.spyOn(isolationRunner, "mergeIsolatedChanges");
@@ -1433,7 +1607,7 @@ describe("runEvalAgent isolation", () => {
 		expect(removedArtifactsDir).toBe(false);
 	});
 
-	it("still cleans the temp artifacts dir when apply succeeds", async () => {
+	it("preserves the temp artifacts dir after apply so termination URIs remain valid", async () => {
 		mockAgents();
 		mockIsolationContext();
 		const rmSpy = vi.spyOn(fs, "rm").mockResolvedValue(undefined);
@@ -1452,7 +1626,7 @@ describe("runEvalAgent isolation", () => {
 		const removedArtifactsDir = rmSpy.mock.calls.some(
 			([target]) => typeof target === "string" && target.includes("omp-eval-agent-"),
 		);
-		expect(removedArtifactsDir).toBe(true);
+		expect(removedArtifactsDir).toBe(false);
 	});
 
 	it("preserves the temp artifacts dir after a successful apply when handle is requested", async () => {

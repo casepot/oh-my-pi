@@ -575,7 +575,7 @@ export class CollabGuestLink {
 		}
 		for (const snap of agents) {
 			if (this.agentRegistry.get(snap.id)) {
-				this.agentRegistry.setStatus(snap.id, snap.status);
+				this.agentRegistry.setStatus(snap.id, snap.status, snap.statusDetail);
 			} else {
 				this.agentRegistry.register({
 					id: snap.id,
@@ -584,6 +584,7 @@ export class CollabGuestLink {
 					parentId: snap.parentId,
 					session: null,
 					status: snap.status,
+					statusDetail: snap.statusDetail,
 				});
 			}
 			// Refs are returned by reference: patch host timestamps directly so

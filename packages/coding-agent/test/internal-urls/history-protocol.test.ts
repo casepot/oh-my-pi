@@ -112,6 +112,27 @@ describe("history:// protocol", () => {
 		expect(resource.notes).toContain("Source: live session");
 	});
 
+	it("history://<id> renders a paused live ref without losing its status", async () => {
+		AgentRegistry.global().register({
+			id: "PausedAgent",
+			displayName: "task",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "paused transcript", timestamp: 1 }]),
+			status: "paused",
+			statusDetail: {
+				code: "no_progress",
+				reason: "No observable progress",
+				since: 42,
+			},
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://PausedAgent");
+
+		expect(resource.content).toContain("# PausedAgent (paused)");
+		expect(resource.content).toContain("paused transcript");
+		expect(resource.notes).toContain("Source: live session");
+	});
+
 	it("resolves agent ids case-insensitively", async () => {
 		AgentRegistry.global().register({
 			id: "HubAgent",
@@ -141,6 +162,29 @@ describe("history:// protocol", () => {
 			const resource = await InternalUrlRouter.instance().resolve("history://Sleeper");
 
 			expect(resource.content).toContain("# Sleeper (parked)");
+			expect(resource.content).toContain("parked hello");
+			expect(resource.content).toContain("parked reply");
+			expect(resource.sourcePath).toBe(sessionFile);
+			expect(resource.notes?.join("\n")).toContain("read-only");
+		});
+	});
+
+	it("history://<id> renders an aborted ref read-only from its retained session file", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "aborted.jsonl");
+			await Bun.write(sessionFile, sessionFixtureJsonl());
+			AgentRegistry.global().register({
+				id: "AbortedAgent",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile,
+				status: "aborted",
+			});
+
+			const resource = await InternalUrlRouter.instance().resolve("history://AbortedAgent");
+
+			expect(resource.content).toContain("# AbortedAgent (aborted)");
 			expect(resource.content).toContain("parked hello");
 			expect(resource.content).toContain("parked reply");
 			expect(resource.sourcePath).toBe(sessionFile);

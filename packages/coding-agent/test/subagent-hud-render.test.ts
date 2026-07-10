@@ -107,8 +107,8 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("SchemaMigrator: Migrating the users table");
 	});
 
-	it("only shows active subagents and clears once everything finished", () => {
-		const finishedStates = ["completed", "failed", "aborted"] as const;
+	it("only shows active subagents and clears once no work is running", () => {
+		const finishedStates = ["paused", "completed", "failed", "aborted"] as const;
 		const sessions: ObservableSession[] = [
 			{ id: "main", kind: "main", label: "Main Session", status: "active", lastUpdate: Date.now() },
 			...finishedStates.map(status => makeSession({ id: `Done-${status}`, status, description: "old work" })),
@@ -161,6 +161,22 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("Detached: background work");
 		expect(out).toContain("FromProgress: background work");
 		expect(out).not.toContain("Inline");
+	});
+
+	it("records a paused lifecycle update and removes it from the running HUD", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus);
+
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle("Paused", 0, "recoverable work", true));
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			...makeLifecycle("Paused", 0, "recoverable work", true),
+			status: "paused",
+		});
+
+		expect(registry.getSessions().find(session => session.id === "Paused")?.status).toBe("paused");
+		expect(registry.getActiveSubagentCount()).toBe(0);
+		expect(renderSubagentHudLines(registry.getSessions(), 120)).toEqual([]);
 	});
 
 	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {

@@ -429,15 +429,13 @@ describe("collab TUI guest ui-request handling (#4049)", () => {
 	});
 });
 
-// ── Proto handshake (#4049: ui-request frames require COLLAB_PROTO >= 3) ───
+// ── Proto handshake (lifecycle detail snapshots require COLLAB_PROTO >= 4) ─
 //
-// The ui-request/ui-response grammar shipped without a proto bump, so v2
-// guests joined fine and silently dropped host asks. These tests pin the
-// enforcement: a real CollabHost must reject stale-proto hellos with an
-// observable error frame (never a welcome), current-proto guests must still
-// complete a full ui-request round trip, and a rejected CollabGuestLink
-// join must fail fast with the host's reason instead of hanging until the
-// welcome timeout.
+// Every wire grammar change is strict: a real CollabHost must reject the
+// immediately prior protocol with an observable error frame (never a welcome),
+// current-proto guests must still complete a full ui-request round trip, and a
+// rejected CollabGuestLink join must fail fast with the host's reason instead
+// of hanging until the welcome timeout.
 
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
 function makeHostContext(): InteractiveModeContext {
@@ -537,7 +535,7 @@ describe("collab proto handshake (#4049)", () => {
 		}
 	});
 
-	it("welcomes a current-proto guest at v3 and round-trips a ui-request", async () => {
+	it("welcomes a current-proto guest at v4 and round-trips a ui-request", async () => {
 		const host = new CollabHost(makeHostContext());
 		await host.start("ws://localhost:8787");
 		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
@@ -545,7 +543,7 @@ describe("collab proto handshake (#4049)", () => {
 			const welcome = await guest.nextFrame();
 			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
 			expect(welcome.proto).toBe(COLLAB_PROTO);
-			expect(welcome.proto).toBe(3);
+			expect(welcome.proto).toBe(4);
 
 			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
 			if (!pending) throw new Error("expected writable guest UI request");

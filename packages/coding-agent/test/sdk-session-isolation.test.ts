@@ -7,6 +7,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -114,6 +116,49 @@ describe("createAgentSession session storage isolation", () => {
 		} finally {
 			await session.dispose();
 		}
+	});
+
+	it("retains an aborted session-backed ref on ordinary disposal until explicit release", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-aborted-history-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, `project-${Snowflake.next()}`);
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd, { recursive: true });
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const agentId = "AbortedWorker";
+
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			modelRegistry: sharedModelRegistry,
+			settings: Settings.isolated(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			agentRegistry: registry,
+			agentId,
+			agentDisplayName: "task",
+			taskDepth: 1,
+		});
+		const sessionFile = session.sessionFile;
+		if (!sessionFile) throw new Error("Expected session file path");
+		registry.setStatus(agentId, "aborted");
+
+		await session.dispose();
+
+		expect(registry.get(agentId)).toMatchObject({
+			status: "aborted",
+			session: null,
+			sessionFile,
+		});
+		await lifecycle.release(agentId);
+		expect(registry.get(agentId)).toBeUndefined();
+		await lifecycle.dispose();
 	});
 	it("wires the discovered TTSR manager into the created session", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-ttsr-${Snowflake.next()}-`));

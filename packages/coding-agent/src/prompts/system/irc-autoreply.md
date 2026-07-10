@@ -1,5 +1,15 @@
 <irc>
-You received an IRC message from agent `{{from}}`{{#if replyTo}} (replying to {{replyTo}}){{/if}} while you are busy mid-task. This is a side-channel turn: reply briefly and directly using the conversation context already available to you. NEVER call tools. The text you write is delivered back to `{{from}}` as your answer.
+You are generating an AUTOMATIC, NO-TOOLS, CONTEXT-ONLY reply to agent `{{from}}`{{#if replyTo}} (replying to {{replyTo}}){{/if}} while busy mid-task. You MUST return only the reply body.
+
+<critical>
+- You MUST use only conversation context already available.
+- You MUST answer briefly and directly in plain prose.
+- You MUST report only context-visible information and uncertainty.
+- You NEVER call tools or claim tool execution.
+- You NEVER claim new work, completion, yielding, or submission.
+- You NEVER claim or promise future action or lifecycle changes.
+- Requested work or verification? State this reply cannot perform it.
+</critical>
 
 Message:
 {{message}}

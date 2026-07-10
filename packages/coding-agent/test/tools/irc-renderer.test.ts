@@ -34,7 +34,7 @@ describe("ircToolRenderer send", () => {
 						from: "Main",
 						to: "AuthLoader",
 						receipts: [{ to: "AuthLoader", outcome: "revived" }],
-						waited: msg({ body: "go ahead, auth.ts is yours." }),
+						waited: msg({ body: "go ahead, auth.ts is yours.", automated: true }),
 					} satisfies IrcDetails,
 				},
 				{ expanded: false, isPartial: false },
@@ -46,6 +46,7 @@ describe("ircToolRenderer send", () => {
 		expect(rendered[0]).toContain("revived");
 		expect(rendered.some(line => line.includes("Are you done with auth.ts?"))).toBe(true);
 		expect(rendered.some(line => line.includes("go ahead, auth.ts is yours."))).toBe(true);
+		expect(rendered.some(line => line.includes("AUTOMATIC · NO TOOLS · CONTEXT ONLY"))).toBe(true);
 	});
 
 	it("lists per-recipient outcomes with error text when a broadcast partially fails", async () => {
@@ -126,7 +127,7 @@ describe("ircToolRenderer wait", () => {
 			ircToolRenderer.renderResult(
 				{
 					content: [{ type: "text", text: "" }],
-					details: { op: "wait", from: "Main", waited: msg({}) } satisfies IrcDetails,
+					details: { op: "wait", from: "Main", waited: msg({ automated: true }) } satisfies IrcDetails,
 				},
 				{ expanded: false, isPartial: false },
 				uiTheme,
@@ -135,6 +136,7 @@ describe("ircToolRenderer wait", () => {
 		);
 		expect(rendered[0]).toContain("AuthLoader");
 		expect(rendered.some(line => line.includes("session-store rename is merged."))).toBe(true);
+		expect(rendered.some(line => line.includes("AUTOMATIC · NO TOOLS · CONTEXT ONLY"))).toBe(true);
 	});
 
 	it("marks a timed-out wait without inventing a message", async () => {
@@ -166,7 +168,7 @@ describe("ircToolRenderer inbox", () => {
 						op: "inbox",
 						from: "Main",
 						inbox: [
-							msg({ from: "AuthLoader", body: "bus landed." }),
+							msg({ from: "AuthLoader", body: "bus landed.", automated: true }),
 							msg({ from: "RateLimiter", body: "receipts carry outcome.", replyTo: "7181122334455667791" }),
 						],
 					} satisfies IrcDetails,
@@ -181,6 +183,11 @@ describe("ircToolRenderer inbox", () => {
 		expect(rendered.some(line => line.includes("bus landed."))).toBe(true);
 		expect(rendered.some(line => line.includes("RateLimiter"))).toBe(true);
 		expect(rendered.some(line => line.includes("receipts carry outcome."))).toBe(true);
+		const automaticLine = rendered.find(line => line.includes("AUTOMATIC · NO TOOLS · CONTEXT ONLY"));
+		expect(automaticLine).toContain("AuthLoader");
+		const explicitReplyLine = rendered.find(line => line.includes("RateLimiter"));
+		expect(explicitReplyLine).toBeDefined();
+		expect(explicitReplyLine).not.toContain("AUTOMATIC · NO TOOLS · CONTEXT ONLY");
 	});
 });
 
@@ -230,6 +237,112 @@ describe("ircToolRenderer list", () => {
 		expect(authIndex).toBeGreaterThan(0);
 		expect(authIndex).toBeLessThan(rateIndex);
 		expect(rendered.some(line => line.includes("RateLimiter") && line.includes("2 unread"))).toBe(true);
+	});
+
+	it("orders and distinguishes all six lifecycle states with wait and pause reasons", async () => {
+		const uiTheme = await theme();
+		const now = Date.now();
+		const rendered = lines(
+			ircToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						op: "list",
+						from: "Main",
+						peers: [
+							{
+								id: "Aborted",
+								displayName: "task",
+								kind: "sub",
+								status: "aborted",
+								parentId: "Main",
+								unread: 0,
+								lastActivity: now - 6_000,
+							},
+							{
+								id: "Parked",
+								displayName: "task",
+								kind: "sub",
+								status: "parked",
+								parentId: "Main",
+								unread: 0,
+								lastActivity: now - 5_000,
+							},
+							{
+								id: "Idle",
+								displayName: "task",
+								kind: "sub",
+								status: "idle",
+								parentId: "Main",
+								unread: 0,
+								lastActivity: now - 4_000,
+							},
+							{
+								id: "Paused",
+								displayName: "task",
+								kind: "sub",
+								status: "paused",
+								statusDetail: {
+									code: "no_progress",
+									reason: "No progress after 3 attempts",
+									since: now - 3_000,
+									consecutive: 3,
+									limit: 3,
+								},
+								parentId: "Main",
+								unread: 0,
+								lastActivity: now - 3_000,
+							},
+							{
+								id: "Waiting",
+								displayName: "task",
+								kind: "sub",
+								status: "waiting",
+								statusDetail: {
+									code: "external_wait",
+									reason: "Waiting for AuthLoader",
+									since: now - 2_000,
+								},
+								parentId: "Main",
+								unread: 0,
+								lastActivity: now - 2_000,
+							},
+							{
+								id: "Running",
+								displayName: "task",
+								kind: "sub",
+								status: "running",
+								parentId: "Main",
+								unread: 0,
+								lastActivity: now - 1_000,
+							},
+						],
+					} satisfies IrcDetails,
+				},
+				{ expanded: true, isPartial: false },
+				uiTheme,
+				{ op: "list" },
+			),
+			300,
+		);
+
+		for (const status of ["running", "waiting", "paused", "idle", "parked", "aborted"]) {
+			expect(rendered[0]).toContain(`1 ${status}`);
+		}
+		const running = rendered.findIndex(line => line.includes("Running"));
+		const waiting = rendered.findIndex(line => line.includes("Waiting"));
+		const paused = rendered.findIndex(line => line.includes("Paused"));
+		const idle = rendered.findIndex(line => line.includes("Idle"));
+		const parked = rendered.findIndex(line => line.includes("Parked"));
+		const aborted = rendered.findIndex(line => line.includes("Aborted"));
+		expect(running).toBeGreaterThan(0);
+		expect(running).toBeLessThan(waiting);
+		expect(waiting).toBeLessThan(paused);
+		expect(paused).toBeLessThan(idle);
+		expect(idle).toBeLessThan(parked);
+		expect(parked).toBeLessThan(aborted);
+		expect(rendered[waiting]).toContain("Waiting for AuthLoader");
+		expect(rendered[paused]).toContain("No progress after 3 attempts");
 	});
 
 	it("renders a peer's role displayName and current activity in the row", async () => {

@@ -13,6 +13,8 @@ import {
 	resolveAbortLabel,
 	shouldRenderAbortReason,
 } from "../../session/messages";
+import { formatRuntimePolicySummary } from "../../task/runtime-policy";
+import type { SubagentTermination } from "../../task/types";
 import { createIrcMessageCard } from "../../tools/irc";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
@@ -34,7 +36,14 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 			type?: "bash" | "task";
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: "bash" | "task"; label?: string; durationMs?: number }>;
+			termination?: SubagentTermination;
+			jobs?: Array<{
+				jobId?: string;
+				type?: "bash" | "task";
+				label?: string;
+				durationMs?: number;
+				termination?: SubagentTermination;
+			}>;
 		}>
 	).details;
 	const jobs =
@@ -46,6 +55,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 						type: details?.type,
 						label: details?.label,
 						durationMs: details?.durationMs,
+						termination: details?.termination,
 					},
 				];
 	const block = new TranscriptBlock();
@@ -53,8 +63,29 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 		const jobId = job.jobId ?? "unknown";
 		const typeLabel = job.type ? `[${job.type}]` : "[job]";
 		const duration = typeof job.durationMs === "number" ? formatDuration(job.durationMs) : undefined;
+		const termination = job.termination;
+		if (!termination) {
+			const line = [
+				theme.fg("success", `${theme.status.done} Background job completed`),
+				theme.fg("dim", typeLabel),
+				theme.fg("accent", jobId),
+				duration ? theme.fg("dim", `(${duration})`) : undefined,
+			]
+				.filter(Boolean)
+				.join(" ");
+			block.addChild(new Text(line, 1, 0));
+			continue;
+		}
+		const presentation =
+			termination.status === "completed"
+				? { color: "success" as const, icon: theme.status.done, label: "completed" }
+				: termination.status === "paused"
+					? { color: "warning" as const, icon: theme.icon.pause || theme.status.pending, label: "paused" }
+					: termination.status === "aborted"
+						? { color: "error" as const, icon: theme.status.aborted, label: "aborted" }
+						: { color: "error" as const, icon: theme.status.error, label: "failed" };
 		const line = [
-			theme.fg("success", `${theme.status.done} Background job completed`),
+			theme.fg(presentation.color, `${presentation.icon} Background task ${presentation.label}`),
 			theme.fg("dim", typeLabel),
 			theme.fg("accent", jobId),
 			duration ? theme.fg("dim", `(${duration})`) : undefined,
@@ -62,6 +93,15 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
 			.filter(Boolean)
 			.join(" ");
 		block.addChild(new Text(line, 1, 0));
+		const reason = replaceTabs(termination.reason).replace(/\s+/gu, " ").trim();
+		const recovery = [
+			`${termination.code}: ${reason}`,
+			termination.resumable ? "resumable" : "not resumable",
+			termination.historyUri,
+			termination.outputUri,
+			`policy ${formatRuntimePolicySummary(termination.policy)}`,
+		].join(" · ");
+		block.addChild(new Text(theme.fg("dim", recovery), 2, 0));
 	}
 	return block;
 }
@@ -73,7 +113,14 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): TranscriptB
  */
 export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: () => boolean): Component {
 	const details = (
-		message as CustomMessage<{ from?: string; to?: string; message?: string; body?: string; replyTo?: string }>
+		message as CustomMessage<{
+			from?: string;
+			to?: string;
+			message?: string;
+			body?: string;
+			replyTo?: string;
+			automated?: true;
+		}>
 	).details;
 	const kind =
 		message.customType === "irc:incoming"
@@ -88,6 +135,7 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 			to: details?.to,
 			body: kind === "incoming" ? details?.message : details?.body,
 			replyTo: details?.replyTo,
+			automated: details?.automated,
 			timestamp: message.timestamp,
 		},
 		getExpanded,

@@ -103,10 +103,11 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		});
 		const elapsedMs = Date.now() - startedAt;
 
-		expect(result.aborted).toBe(true);
+		expect(result.termination.status).toBe("aborted");
+		expect(result.termination.code).toBe("runtime_limit");
 		expect(result.exitCode).toBe(1);
-		expect(result.abortReason).toContain("runtime limit exceeded");
-		expect(result.abortReason).toContain("task.maxRuntimeMs=50");
+		expect(result.termination.reason).toContain("runtime limit exceeded");
+		expect(result.termination.reason).toContain("task.maxRuntimeMs=50");
 		expect(handle.abortCalls()).toBeGreaterThanOrEqual(1);
 		// Sanity: must finish in roughly the configured window (allow generous slack
 		// for CI; the contract is "doesn't hang for hours", not "exactly 50 ms").
@@ -155,8 +156,8 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			settings,
 		});
 
-		expect(result.aborted).toBe(false);
-		expect(result.abortReason).toBeUndefined();
+		expect(result.termination.status).toBe("completed");
+		expect(result.termination.code).toBe("yielded");
 	});
 
 	it("aborts before prompting when the timer fires during session setup", async () => {
@@ -188,10 +189,11 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			settings,
 		});
 
-		expect(result.aborted).toBe(true);
+		expect(result.termination.status).toBe("aborted");
+		expect(result.termination.code).toBe("runtime_limit");
 		expect(result.exitCode).toBe(1);
-		expect(result.abortReason).toContain("runtime limit exceeded");
-		expect(result.abortReason).toContain("task.maxRuntimeMs=30");
+		expect(result.termination.reason).toContain("runtime limit exceeded");
+		expect(result.termination.reason).toContain("task.maxRuntimeMs=30");
 		// The whole point: we never reached session.prompt(), because the abort
 		// was observed before issuing the model call.
 		expect(promptCalls).toBe(0);
@@ -252,9 +254,10 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		});
 
 		expect(abortCount).toBeGreaterThanOrEqual(1);
-		expect(result.aborted).toBe(true);
+		expect(result.termination.status).toBe("aborted");
+		expect(result.termination.code).toBe("runtime_limit");
 		expect(result.exitCode).toBe(1);
-		expect(result.abortReason).toContain("runtime limit exceeded");
+		expect(result.termination.reason).toContain("runtime limit exceeded");
 		// Yield data is preserved for inspection — the regression was only in
 		// the exit status / abort flag, not in the captured payload.
 		expect(result.extractedToolData?.yield).toBeDefined();
@@ -310,7 +313,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			settings,
 		});
 
-		expect(result.aborted).toBe(false);
+		expect(result.termination.status).toBe("completed");
 		expect(result.contextTokens).toBe(12345);
 		// contextWindow is only populated when the model registry resolves one;
 		// here we mock createAgentSession so it stays undefined. The async-task

@@ -14,9 +14,30 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { AgentRegistry } from "../registry/agent-registry";
 import { applyQuery, pathToQuery } from "./json-query";
 import { artifactsDirsFromRegistry } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+
+function knownAgentWithoutOutputError(outputId: string): Error | undefined {
+	const ref = AgentRegistry.global().get(outputId);
+	if (!ref || ref.kind === "advisor") return undefined;
+
+	const guidance = `Read the transcript at history://${ref.id}.\nUse job({ list: true }) to inspect task completion state.`;
+	switch (ref.status) {
+		case "running":
+			return new Error(`Agent ${ref.id} is still running and has not yielded output yet.\n${guidance}`);
+		case "waiting":
+			return new Error(`Agent ${ref.id} is waiting and has not yielded output yet.\n${guidance}`);
+		case "paused":
+			return new Error(`Agent ${ref.id} is paused and has not yielded output yet.\n${guidance}`);
+		case "aborted":
+			return new Error(`Agent ${ref.id} ended before yielding output (status: aborted).\n${guidance}`);
+		case "idle":
+		case "parked":
+			return new Error(`Agent ${ref.id} is ${ref.status}; no yielded artifact is available.\n${guidance}`);
+	}
+}
 
 /**
  * Handler for agent:// URLs.
@@ -44,10 +65,6 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 
 		const dirs = artifactsDirsFromRegistry();
-
-		if (dirs.length === 0) {
-			throw new Error("No session - agent outputs unavailable");
-		}
 
 		let foundPath: string | undefined;
 		let anyDirExists = false;
@@ -79,11 +96,15 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 		}
 
-		if (!anyDirExists) {
-			throw new Error("No artifacts directory found");
-		}
-
 		if (!foundPath) {
+			const knownAgentError = knownAgentWithoutOutputError(outputId);
+			if (knownAgentError) throw knownAgentError;
+			if (dirs.length === 0) {
+				throw new Error("No session - agent outputs unavailable");
+			}
+			if (!anyDirExists) {
+				throw new Error("No artifacts directory found");
+			}
 			const availableStr = availableIds.size > 0 ? [...availableIds].join(", ") : "none";
 			throw new Error(`Not found: ${outputId}\nAvailable: ${availableStr}`);
 		}

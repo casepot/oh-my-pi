@@ -1,4 +1,12 @@
 <task-result id="{{id}}" agent="{{agentName}}" status="{{status}}" duration="{{duration}}">
+<termination>
+{{terminationJson}}
+</termination>
+{{#if retryFailureJson}}
+<retry-failure>
+{{retryFailureJson}}
+</retry-failure>
+{{/if}}
 {{#if meta}}<meta lines="{{meta.lineCount}}" size="{{meta.charSize}}" />{{/if}}
 {{#if providerNotice}}<notice>{{providerNotice}}</notice>{{/if}}
 {{#if truncated}}

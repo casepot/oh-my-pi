@@ -9,9 +9,10 @@ import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/ta
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 function createResult(overrides: Partial<SingleResult> = {}): SingleResult {
+	const id = overrides.id ?? "0-Task";
 	return {
 		index: 0,
-		id: "0-Task",
+		id,
 		agent: "task",
 		agentSource: "bundled",
 		task: "do work",
@@ -22,6 +23,21 @@ function createResult(overrides: Partial<SingleResult> = {}): SingleResult {
 		durationMs: 1,
 		tokens: 0,
 		requests: 0,
+		termination: {
+			status: "completed",
+			code: "yielded",
+			reason: "Subagent yielded a result",
+			resumable: false,
+			historyUri: `history://${id}`,
+			outputUri: `agent://${id}`,
+			policy: {
+				request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+				wallClock: { maxRuntimeMs: null },
+				stall: { action: "off", afterAssistantTurns: null },
+				spawn: { remainingDepth: null },
+				idle: { resumable: true, parkingTtlMs: null },
+			},
+		},
 		...overrides,
 	};
 }
@@ -124,7 +140,27 @@ describe("runEvalAgent", () => {
 		];
 
 		for (const error of errors) {
-			runSubprocessSpy.mockResolvedValueOnce(createResult({ exitCode: 1, error }));
+			runSubprocessSpy.mockResolvedValueOnce(
+				createResult({
+					exitCode: 1,
+					error,
+					termination: {
+						status: "failed",
+						code: "provider_error",
+						reason: error,
+						resumable: false,
+						historyUri: "history://0-Task",
+						outputUri: "agent://0-Task",
+						policy: {
+							request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+							wallClock: { maxRuntimeMs: null },
+							stall: { action: "off", afterAssistantTurns: null },
+							spawn: { remainingDepth: null },
+							idle: { resumable: true, parkingTtlMs: null },
+						},
+					},
+				}),
+			);
 			await expect(runEvalAgent({ prompt: "do work", agentType: "task" }, { session })).rejects.toThrow(error);
 		}
 	});

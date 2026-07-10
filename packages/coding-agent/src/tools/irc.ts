@@ -2,9 +2,9 @@
  * IRC tool — agent-to-agent messaging over the process-global IrcBus.
  *
  * `send` is fire-and-forget: the bus routes the message to the recipient
- * (waking idle agents with a real turn, reviving parked ones via the
- * lifecycle manager, injecting a non-interrupting aside into busy ones) and
- * returns delivery receipts immediately. Replies are real turns by the
+ * (reviving parked agents, deliberately waking paused/idle agents, and
+ * injecting a non-interrupting aside into running/waiting ones) and returns
+ * delivery receipts immediately. Replies are real turns by the
  * recipient, observed with `wait` (or the `await: true` send sugar). `inbox`
  * drains pending messages; `list` shows every addressable peer.
  */
@@ -19,7 +19,12 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../irc/bus";
 import type { Theme } from "../modes/theme/theme";
 import ircDescription from "../prompts/tools/irc.md" with { type: "text" };
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import {
+	type AgentRegistry,
+	type AgentStatus,
+	type AgentStatusDetail,
+	MAIN_AGENT_ID,
+} from "../registry/agent-registry";
 import { canSpawnAtDepth } from "../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
@@ -66,7 +71,8 @@ interface IrcPeerInfo {
 	id: string;
 	displayName: string;
 	kind: string;
-	status: string;
+	status: AgentStatus;
+	statusDetail?: AgentStatusDetail;
 	parentId?: string;
 	unread: number;
 	lastActivity: number;
@@ -84,9 +90,15 @@ export interface IrcDetails {
 	peers?: IrcPeerInfo[];
 }
 
+const AUTOMATED_REPLY_LABEL = "AUTOMATIC · NO TOOLS · CONTEXT ONLY";
+
+function automatedReplyTag(msg: IrcMessage): string {
+	return msg.automated ? ` [${AUTOMATED_REPLY_LABEL}]` : "";
+}
+
 function formatIncoming(msg: IrcMessage): string {
 	const replyTag = msg.replyTo ? ` (reply to ${msg.replyTo})` : "";
-	return `[${msg.id}] ${msg.from}${replyTag}: ${msg.body}`;
+	return `[${msg.id}] ${msg.from}${automatedReplyTag(msg)}${replyTag}: ${msg.body}`;
 }
 
 export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
@@ -105,7 +117,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			call: { op: "list" },
 		},
 		{
-			caption: "Fire-and-forget DM — same send wakes idle/parked peers",
+			caption: "Fire-and-forget DM — wakes paused/idle peers or revives parked ones",
 			call: {
 				op: "send",
 				to: "AuthLoader",
@@ -189,6 +201,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 				displayName: ref.displayName,
 				kind: ref.kind,
 				status: ref.status,
+				statusDetail: ref.statusDetail,
 				parentId: ref.parentId,
 				unread: bus.unreadCount(ref.id),
 				lastActivity: ref.lastActivity,
@@ -201,6 +214,11 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			lines.push(`${peers.length} peer(s):`);
 			for (const peer of peers) {
 				const extras = [
+					peer.statusDetail?.reason
+						? `reason ${replaceTabs(peer.statusDetail.reason)
+								.replace(/[\r\n]+/g, " ")
+								.trim()}`
+						: undefined,
 					peer.activity || undefined,
 					peer.unread > 0 ? `unread ${peer.unread}` : undefined,
 					peer.parentId ? `parent ${peer.parentId}` : undefined,
@@ -277,9 +295,10 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 		}
 
 		try {
-			// Broadcasts fan out to live peers only (running | idle); reviving every
-			// parked agent on a broadcast would be a stampede. Direct sends go
-			// through the bus unfiltered so parked recipients are revived.
+			// Broadcasts fan out to messageable live peers (running | waiting |
+			// paused | idle); reviving every parked agent on a broadcast would
+			// be a stampede. Direct sends go through the bus unfiltered so a
+			// parked recipient can be revived.
 			const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
 			// A broadcast that also reaches the main agent delivers the body to it
 			// directly (its own incoming card); relaying the sibling legs to the
@@ -334,7 +353,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 					} else {
 						waited = reply.message;
 						if (waited) {
-							lines.push(`Reply from ${waited.from}:`);
+							lines.push(`Reply from ${waited.from}${automatedReplyTag(waited)}:`);
 							lines.push(waited.body);
 						} else {
 							lines.push(
@@ -386,20 +405,37 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			};
 		}
 		const timeoutMs = this.#resolveTimeoutMs(params);
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal);
-		if (!waited) {
-			const filterNote = from ? ` from ${from}` : "";
-			return {
-				content: [{ type: "text", text: `No message${filterNote} within ${formatDuration(timeoutMs)}.` }],
-				details: { op: "wait", from: senderId, waited: null },
-				// A clean wait timeout carries no information once consumed.
-				useless: true,
-			};
-		}
-		return {
-			content: [{ type: "text", text: formatIncoming(waited) }],
-			details: { op: "wait", from: senderId, waited },
+		const statusDetail: AgentStatusDetail = {
+			code: "external_wait",
+			reason: from ? `Waiting for IRC message from ${from}` : "Waiting for IRC message",
+			since: Date.now(),
 		};
+		let enteredWaiting = false;
+		try {
+			const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+				onWaitStarted: () => {
+					enteredWaiting = true;
+					registry.setStatus(senderId, "waiting", statusDetail);
+				},
+			});
+			if (!waited) {
+				const filterNote = from ? ` from ${from}` : "";
+				return {
+					content: [{ type: "text", text: `No message${filterNote} within ${formatDuration(timeoutMs)}.` }],
+					details: { op: "wait", from: senderId, waited: null },
+					// A clean wait timeout carries no information once consumed.
+					useless: true,
+				};
+			}
+			return {
+				content: [{ type: "text", text: formatIncoming(waited) }],
+				details: { op: "wait", from: senderId, waited },
+			};
+		} finally {
+			if (enteredWaiting && registry.get(senderId)?.status === "waiting") {
+				registry.setStatus(senderId, "running");
+			}
+		}
 	}
 
 	#executeInbox(registry: AgentRegistry, senderId: string, params: IrcParams): AgentToolResult<IrcDetails> {
@@ -460,7 +496,14 @@ const BODY_LINES_COLLAPSED = 2;
 const BODY_LINES_EXPANDED = 12;
 const BODY_LINE_WIDTH = 100;
 
-const PEER_STATUS_ORDER: Record<string, number> = { running: 0, idle: 1, parked: 2 };
+const PEER_STATUS_ORDER: Record<AgentStatus, number> = {
+	running: 0,
+	waiting: 1,
+	paused: 2,
+	idle: 3,
+	parked: 4,
+	aborted: 5,
+};
 
 function ircGlyph(theme: Theme): string {
 	return theme.styledSymbol("tool.irc", "accent");
@@ -480,16 +523,20 @@ function outcomeColor(outcome: IrcDeliveryReceipt["outcome"]): ToolUIColor {
 }
 
 /** Glyph + status word, matching the agent-hub status conventions. */
-function peerStatusBadge(status: string, theme: Theme): string {
+function peerStatusBadge(status: AgentStatus, theme: Theme): string {
 	switch (status) {
 		case "running":
 			return theme.fg("accent", `${theme.status.running} running`);
+		case "waiting":
+			return theme.fg("accent", `${theme.status.pending} waiting`);
+		case "paused":
+			return theme.fg("warning", `${theme.status.warning} paused`);
 		case "idle":
 			return theme.fg("success", `${theme.status.enabled} idle`);
 		case "parked":
 			return theme.fg("muted", `${theme.status.shadowed} parked`);
-		default:
-			return theme.fg("error", `${theme.status.aborted} ${status}`);
+		case "aborted":
+			return theme.fg("error", `${theme.status.aborted} aborted`);
 	}
 }
 
@@ -581,6 +628,7 @@ export function createIrcMessageCard(
 		to?: string;
 		body?: string;
 		replyTo?: string;
+		automated?: true;
 		timestamp?: number;
 	},
 	getExpanded: () => boolean,
@@ -595,7 +643,9 @@ export function createIrcMessageCard(
 				: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
 	const body = card.body ?? "";
 	const meta: string[] = [];
-	if (card.kind === "autoreply") meta.push("auto");
+	if (card.kind === "autoreply" || card.automated) {
+		meta.push(formatBadge(AUTOMATED_REPLY_LABEL, "warning", uiTheme));
+	}
 	if (card.replyTo) meta.push("reply");
 	const age = messageAge(card.timestamp);
 	if (age) meta.push(age);
@@ -682,8 +732,9 @@ function renderSendResult(
 
 	if (waited) {
 		const age = messageAge(waited.ts);
+		const automated = waited.automated ? ` ${formatBadge(AUTOMATED_REPLY_LABEL, "warning", theme)}` : "";
 		lines.push(
-			`  ${theme.fg("dim", theme.nav.back)} ${theme.fg("accent", waited.from)}${age ? ` ${theme.fg("dim", age)}` : ""}`,
+			`  ${theme.fg("dim", theme.nav.back)} ${theme.fg("accent", waited.from)}${age ? ` ${theme.fg("dim", age)}` : ""}${automated}`,
 		);
 		lines.push(...bodyLines(waited.body, expanded, theme, { indent: "  " }));
 	} else if (timedOut) {
@@ -711,6 +762,7 @@ function renderWaitResult(
 		];
 	}
 	const meta = [messageAge(waited.ts)];
+	if (waited.automated) meta.push(formatBadge(AUTOMATED_REPLY_LABEL, "warning", theme));
 	if (waited.replyTo) meta.push("reply");
 	return [
 		renderStatusLine({ iconOverride: ircGlyph(theme), title: `IRC ${theme.nav.back} ${waited.from}`, meta }, theme),
@@ -740,7 +792,8 @@ function renderInboxResult(
 			renderItem: msg => {
 				const age = messageAge(msg.ts);
 				const replyBadge = msg.replyTo ? ` ${formatBadge("reply", "muted", theme)}` : "";
-				const head = `${theme.fg("accent", msg.from)}${age ? ` ${theme.fg("dim", age)}` : ""}${replyBadge}`;
+				const automatedBadge = msg.automated ? ` ${formatBadge(AUTOMATED_REPLY_LABEL, "warning", theme)}` : "";
+				const head = `${theme.fg("accent", msg.from)}${age ? ` ${theme.fg("dim", age)}` : ""}${automatedBadge}${replyBadge}`;
 				return [head, ...bodyLines(msg.body, expanded, theme, { collapsedLines: 1 })];
 			},
 		},
@@ -774,8 +827,16 @@ function renderListResult(details: Partial<IrcDetails>, expanded: boolean, theme
 				const unread = peer.unread > 0 ? ` ${formatBadge(`${peer.unread} unread`, "warning", theme)}` : "";
 				const age = messageAge(peer.lastActivity);
 				const activity = peer.activity ? ` ${theme.fg("dim", replaceTabs(peer.activity))}` : "";
+				const statusReason = peer.statusDetail?.reason
+					? ` ${theme.fg(
+							"warning",
+							`reason: ${replaceTabs(peer.statusDetail.reason)
+								.replace(/[\r\n]+/g, " ")
+								.trim()}`,
+						)}`
+					: "";
 				const name = theme.fg("dim", replaceTabs(peer.displayName));
-				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${name} ${theme.fg("dim", kindText)}${activity}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
+				return `${peerStatusBadge(peer.status, theme)} ${theme.bold(replaceTabs(peer.id))} ${name} ${theme.fg("dim", kindText)}${statusReason}${activity}${unread}${age ? ` ${theme.fg("dim", age)}` : ""}`;
 			},
 		},
 		theme,

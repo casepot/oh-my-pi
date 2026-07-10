@@ -554,11 +554,11 @@ function isTaskToolDetails(value: unknown): value is TaskToolDetails {
 	return Array.isArray(details.results) || Array.isArray(details.progress);
 }
 
-function taskOutputRef(id: string, output: string): RpcTaskResult["outputRef"] {
+function taskOutputRef(uri: RpcTaskResult["termination"]["outputUri"], output: string): RpcTaskResult["outputRef"] {
 	if (!output) return undefined;
 	return {
 		kind: "artifact",
-		uri: `agent://${id}`,
+		uri,
 		bytes: Buffer.byteLength(output, "utf8"),
 		preview: previewText(output),
 	};
@@ -600,7 +600,11 @@ function collectNestedProgress(details: TaskToolDetails | undefined, parentId: s
 	return agents;
 }
 
-function taskResultToRpcResult(result: SingleResult, parentId: string | null = null, idPrefix = ""): RpcTaskResult[] {
+export function taskResultToRpcResult(
+	result: SingleResult,
+	parentId: string | null = null,
+	idPrefix = "",
+): RpcTaskResult[] {
 	const id = idPrefix ? nestedTaskId(idPrefix, result.id) : result.id;
 	const output = result.output || result.error || result.task || "";
 	const rows: RpcTaskResult[] = [
@@ -609,10 +613,11 @@ function taskResultToRpcResult(result: SingleResult, parentId: string | null = n
 			parentId,
 			index: result.index,
 			agentType: result.agent,
-			status: result.aborted ? "aborted" : result.exitCode === 0 ? "completed" : "failed",
+			status: result.termination.status,
 			summary: previewText(output),
 			truncated: result.truncated || output.length > 1000,
-			outputRef: taskOutputRef(id, result.output),
+			outputRef: taskOutputRef(result.termination.outputUri, result.output),
+			termination: result.termination,
 		},
 	];
 	const nestedDetails = result.extractedToolData?.task;
@@ -1044,15 +1049,19 @@ export async function runRpcMode(
 	setToolUIContext?.(rpcUiContext, true);
 
 	const observerToViews = (): RpcObservableSessionView[] =>
-		observerRegistry.getSessions().map(item => ({
-			id: item.id,
-			sessionFile: item.sessionFile,
-			label: item.label,
-			status: item.status,
-			agentType: item.agent,
-			summary: item.progress?.lastIntent ?? item.description,
-			updatedAt: new Date(item.lastUpdate).toISOString(),
-		}));
+		observerRegistry.getSessions().map(item => {
+			const termination = subagentRegistry?.getSubagent(item.id)?.termination;
+			return {
+				id: item.id,
+				sessionFile: item.sessionFile,
+				label: item.label,
+				status: termination?.status ?? item.status,
+				agentType: item.agent,
+				summary: item.progress?.lastIntent ?? item.description,
+				updatedAt: new Date(item.lastUpdate).toISOString(),
+				termination,
+			};
+		});
 
 	await writer.write({ type: "ready", ...protocolInfo() });
 
@@ -1094,7 +1103,27 @@ export async function runRpcMode(
 				payload.taskRunId ?? taskRunIdsBySubagentId.get(payload.id) ?? taskRunIdFor(payload.id, payload.id);
 			taskRunIdsBySubagentId.set(payload.id, taskRunId);
 			if (payload.parentTaskRunId) parentTaskRunIdsBySubagentId.set(payload.id, payload.parentTaskRunId);
-			output({ type: "subagent_lifecycle", payload: { ...payload, taskRunId } });
+			const frame = {
+				type: "subagent_lifecycle",
+				schemaVersion: 1,
+				toolCallId: payload.toolCallId,
+				taskRunId,
+				parentTaskRunId: payload.parentTaskRunId,
+				subagentId: payload.id,
+				parentSubagentId: null,
+				agentType: payload.agent,
+				description: payload.description,
+				sessionFile: payload.sessionFile,
+				index: payload.index,
+			} as const;
+			if (payload.status === "started") {
+				output({ ...frame, status: "started" });
+				return;
+			}
+			if (!payload.termination) {
+				throw new Error(`Terminal subagent lifecycle is missing termination: ${payload.id}`);
+			}
+			output({ ...frame, status: payload.termination.status, termination: payload.termination });
 		});
 		observerRegistry.onChange(() => {
 			output({ type: "observable_session_update", schemaVersion: 1, sessions: observerToViews() });

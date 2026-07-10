@@ -1,6 +1,6 @@
 // Gallery fixtures for the agentic orchestration tools (task, irc, goal, job).
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TaskToolDetails } from "../../task/types";
+import type { SubagentTermination, TaskToolDetails } from "../../task/types";
 import type { IrcDetails } from "../../tools/irc";
 import type { GalleryFixture } from "./types";
 
@@ -15,6 +15,22 @@ const fixtureUsage = (tokens: { input: number; output: number }, costTotal: numb
 	cacheWrite: 0,
 	totalTokens: tokens.input + tokens.output,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: costTotal },
+});
+
+const fixtureTermination = (id: string, status: "completed" | "failed", reason: string): SubagentTermination => ({
+	status,
+	code: status === "completed" ? "yielded" : "execution_error",
+	reason,
+	resumable: false,
+	historyUri: `history://${id}`,
+	outputUri: `agent://${id}`,
+	policy: {
+		request: { termination: "disabled", advisory: { mode: "off", afterAssistantTurns: null } },
+		wallClock: { maxRuntimeMs: null },
+		stall: { action: "off", afterAssistantTurns: null },
+		spawn: { remainingDepth: null },
+		idle: { resumable: true, parkingTtlMs: null },
+	},
 });
 
 export const agenticFixtures: Record<string, GalleryFixture> = {
@@ -96,6 +112,7 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 						contextWindow: 200_000,
 						resolvedModel: "anthropic/claude-sonnet",
 						usage: fixtureUsage({ input: 52_600, output: 8_800 }, 0.12),
+						termination: fixtureTermination("AuthLoader", "completed", "Subagent yielded a result"),
 						outputMeta: { lineCount: 3, charCount: 214 },
 					},
 				],
@@ -135,6 +152,11 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 						resolvedModel: "anthropic/claude-sonnet",
 						usage: fixtureUsage({ input: 10_900, output: 1_400 }, 0.1),
 						error: "Subagent exited 1: target file packages/server/src/auth/rate-limit.ts does not exist.",
+						termination: fixtureTermination(
+							"RateLimiter",
+							"failed",
+							"Target file packages/server/src/auth/rate-limit.ts does not exist",
+						),
 						outputMeta: { lineCount: 0, charCount: 0 },
 					},
 				],

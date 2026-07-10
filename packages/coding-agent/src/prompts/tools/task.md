@@ -13,11 +13,14 @@ Execution blocks your turn: the call only returns once the work is completely fi
 - **No overhead:** Each assignment MUST instruct its agent to skip formatters, linters, and project-wide test suites. You will run those once at the end.
 - **One-pass agents:** Prefer agents that investigate **and** edit in a single pass; only spin a read-only discovery step (e.g. `explore`) when the affected files are genuinely unknown.
 
-# Lifecycle
-{{#if ircEnabled}}
-- Finished agents stay alive: `idle`, then `parked`; `irc` can wake them. Prefer a context-rich prior agent over spawning fresh.
-{{/if}}
-- `history://<id>` is the transcript; `agent://<id>` is latest output.
+# Effective Child Policy
+Shared runs default to the policy below; every spawn acknowledgment returns the exact per-agent snapshot in `details.effectivePolicies`.
+- Request policy: {{runtimePolicy.request}}.
+- Runtime policy: {{runtimePolicy.wallClock}}.
+- Stall guard: {{runtimePolicy.stall}}.
+- Descendant spawn depth: {{runtimePolicy.spawn}}.
+- Retention: {{runtimePolicy.idle}}. Recovery uses `history://<id>` for the transcript and `agent://<id>` for latest output. Messages resume `paused`/`idle` sessions only while resumable; `parked` revival also requires a retained resumable session.
+{{#if isolationEnabled}}- Isolated runs retain no live session; their stall action is `fail`, not `pause`.{{/if}}
 
 # Inputs
 - `agent` (optional): The base agent type to use (e.g., `explore`, `reviewer`). Defaults to `{{defaultAgent}}`{{#if defaultAgentIsGeneric}} (the general-purpose worker){{/if}} — omit it for the default worker instead of passing `agent: "{{defaultAgent}}"`.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}

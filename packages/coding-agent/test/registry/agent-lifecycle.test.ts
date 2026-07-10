@@ -73,6 +73,72 @@ describe("AgentLifecycleManager", () => {
 		expect(lifecycle.has("1-Sub")).toBe(true);
 	});
 
+	it("parks a paused agent after TTL, retains history, and revives it", async () => {
+		vi.useFakeTimers();
+		const paused = makeSessionStub();
+		const revived = makeSessionStub();
+		registerIdleSub("Paused-Sub", paused.session, "/tmp/Paused-Sub.jsonl");
+		registry.setStatus("Paused-Sub", "paused", {
+			code: "no_progress",
+			reason: "No observable progress",
+			since: 42,
+		});
+		lifecycle.adopt("Paused-Sub", {
+			idleTtlMs: TTL,
+			revive: async () => revived.session,
+		});
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+
+		expect(paused.disposeCalls()).toBe(1);
+		expect(registry.get("Paused-Sub")).toMatchObject({
+			status: "parked",
+			session: null,
+			sessionFile: "/tmp/Paused-Sub.jsonl",
+			statusDetail: undefined,
+		});
+		expect(await lifecycle.ensureLive("Paused-Sub")).toBe(revived.session);
+		expect(registry.get("Paused-Sub")).toMatchObject({
+			status: "idle",
+			session: revived.session,
+			sessionFile: "/tmp/Paused-Sub.jsonl",
+		});
+	});
+
+	it("does not TTL-park a waiting agent and disarms a paused timer when waiting resumes", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		registerIdleSub("Waiting-Sub", stub.session);
+		registry.setStatus("Waiting-Sub", "waiting", {
+			code: "external_wait",
+			reason: "Waiting for a peer",
+			since: 42,
+		});
+		lifecycle.adopt("Waiting-Sub", { idleTtlMs: TTL });
+
+		vi.advanceTimersByTime(TTL * 10);
+		await flushAsync();
+		expect(registry.get("Waiting-Sub")?.status).toBe("waiting");
+		expect(stub.disposeCalls()).toBe(0);
+
+		registry.setStatus("Waiting-Sub", "paused", {
+			code: "no_progress",
+			reason: "No observable progress",
+			since: 43,
+		});
+		registry.setStatus("Waiting-Sub", "waiting", {
+			code: "external_wait",
+			reason: "Waiting for a peer",
+			since: 44,
+		});
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+		expect(registry.get("Waiting-Sub")?.status).toBe("waiting");
+		expect(registry.get("Waiting-Sub")?.session).toBe(stub.session);
+		expect(stub.disposeCalls()).toBe(0);
+	});
+
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();

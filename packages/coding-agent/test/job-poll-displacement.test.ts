@@ -35,6 +35,7 @@ function pollResult(statuses: JobStatus[], extra: { cancelled?: boolean; isError
 				id: `j${i}`,
 				type: "task" as const,
 				status,
+				schedulerStatus: status,
 				label: `job ${i}`,
 				durationMs: 1_000,
 			})),
