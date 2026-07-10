@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Upgraded the collaboration protocol to version 4. Agent snapshots now carry the six-state subagent lifecycle and optional structured status detail; guests using version 3 are rejected during the handshake.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

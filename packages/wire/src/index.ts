@@ -235,12 +235,30 @@ export interface SessionState {
 	isAborting?: boolean;
 }
 
+/**
+ * Cross-process lifecycle state for user-facing agents.
+ *
+ * Waiting and paused agents retain a live, messageable session; parked agents
+ * have been disposed and may be revived; aborted agents are terminal.
+ */
+export type AgentStatus = "running" | "waiting" | "paused" | "idle" | "parked" | "aborted";
+
+/** Structured reason attached to lifecycle states that need explanation. */
+export interface AgentStatusDetail {
+	code: "no_progress" | "provider_retry" | "external_wait";
+	reason: string;
+	since: number;
+	consecutive?: number;
+	limit?: number;
+}
+
 export interface AgentSnapshot {
 	id: string;
 	displayName: string;
 	kind: "main" | "sub";
 	parentId?: string;
-	status: "running" | "idle" | "parked" | "aborted";
+	status: AgentStatus;
+	statusDetail?: AgentStatusDetail;
 	/** Whether the host has a transcript file for this agent (gates remote transcript fetch). */
 	hasSessionFile: boolean;
 	createdAt: number;
@@ -393,8 +411,13 @@ export type WireFrame = GuestFrame | HostFrame;
  *   answered by the `ui-response` guest frame. Guests that predate the
  *   grammar would silently drop `ui-request` (asks hang forever on the
  *   host), so they must be rejected at hello.
+ * - `4`: agent snapshots carry the six-state lifecycle
+ *   (`running`/`waiting`/`paused`/`idle`/`parked`/`aborted`) and optional
+ *   structured status detail. Older guests cannot render/control live
+ *   waiting/paused agents truthfully or preserve their detail, so they must be
+ *   rejected.
  */
-export const COLLAB_PROTO = 3;
+export const COLLAB_PROTO = 4;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";
