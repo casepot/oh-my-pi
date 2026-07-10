@@ -801,6 +801,8 @@ function compactionDeadEndWarning(remedies: string): string {
  */
 const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
 
+const PROVIDER_USAGE_FLOOR_RESET_CUSTOM_TYPE = "provider_usage_floor_reset";
+
 /**
  * Idle gap after which the supersede pass may flush the whole sent region (the
  * provider cache is cold, so re-writing it is free). MUST exceed the maximum
@@ -5013,6 +5015,8 @@ export class AgentSession {
 				promptText,
 				{
 					skipPostPromptRecoveryWait: true,
+					skipCompactionCheck: true,
+					skipPrePromptCompaction: true,
 					prependMessages,
 					skipGoalModeContext,
 				},
@@ -7617,8 +7621,8 @@ export class AgentSession {
 			model: this.model ? `${this.model.provider}/${this.model.id}` : undefined,
 		});
 
-		const runInlineCompaction = async (): Promise<void> => {
-			await this.#runAutoCompaction("threshold", false, false, false, {
+		const runInlineCompaction = async (): Promise<CompactionCheckResult> => {
+			return await this.#runAutoCompaction("threshold", false, false, false, {
 				autoContinue: false,
 				suppressContinuation: true,
 				suppressHandoff: true,
@@ -7629,14 +7633,20 @@ export class AgentSession {
 			});
 		};
 
+		let result: CompactionCheckResult | undefined;
 		try {
-			await runInlineCompaction();
+			result = await runInlineCompaction();
 		} catch (error) {
 			if (signal?.aborted) throw error;
 			const message = error instanceof Error ? error.message : String(error);
 			throw new ContextMaintenanceError(`Context maintenance failed before provider call: ${message}`, {
 				cause: error,
 			});
+		}
+
+		if (result?.historyRewritten === true) {
+			this.#syncActiveAgentContextFromSession(context);
+			return;
 		}
 
 		if (signal?.aborted) return;
@@ -7650,8 +7660,9 @@ export class AgentSession {
 					baseLeafId: beforeBranchLeafId,
 					currentLeafId: afterBranchLeafId,
 				});
+				let retryResult: CompactionCheckResult | undefined;
 				try {
-					await runInlineCompaction();
+					retryResult = await runInlineCompaction();
 				} catch (error) {
 					if (signal?.aborted) throw error;
 					const message = error instanceof Error ? error.message : String(error);
@@ -7659,6 +7670,10 @@ export class AgentSession {
 						`Context maintenance failed before provider call after branch changed: ${message}`,
 						{ cause: error },
 					);
+				}
+				if (retryResult?.historyRewritten === true) {
+					this.#syncActiveAgentContextFromSession(context);
+					return;
 				}
 				if (signal?.aborted) return;
 				const retryCompactionId = getLatestCompactionEntry(this.sessionManager.getBranch())?.id;
@@ -7692,12 +7707,15 @@ export class AgentSession {
 			effectiveEstimate: Math.max(localEstimate, usageFloor),
 		};
 	}
-
 	#estimateProviderUsageFloor(model: Model, pendingMessages: readonly AgentMessage[]): number {
 		const branch = this.sessionManager.getBranch();
 		let searchStart = 0;
 		for (let i = branch.length - 1; i >= 0; i--) {
-			if (branch[i].type === "compaction") {
+			const entry = branch[i];
+			if (
+				entry.type === "compaction" ||
+				(entry.type === "custom" && entry.customType === PROVIDER_USAGE_FLOOR_RESET_CUSTOM_TYPE)
+			) {
 				searchStart = i + 1;
 				break;
 			}
@@ -10641,6 +10659,7 @@ export class AgentSession {
 		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "skipGoalModeContext"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
+			skipPrePromptCompaction?: boolean;
 		},
 	): Promise<void> {
 		this.#beginInFlight();
@@ -10799,9 +10818,11 @@ export class AgentSession {
 				}
 			}
 
-			await this.#runPrePromptCompactionIfNeeded(messages);
-			if (this.#promptGeneration !== generation) {
-				return;
+			if (!options?.skipPrePromptCompaction) {
+				await this.#runPrePromptCompactionIfNeeded(messages);
+				if (this.#promptGeneration !== generation) {
+					return;
+				}
 			}
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
@@ -12558,6 +12579,14 @@ export class AgentSession {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher, targetPlanMatcher] };
 	}
 
+	#appendProviderUsageFloorReset(kind: string, data: Record<string, unknown> = {}): void {
+		this.sessionManager.appendCustomEntry(PROVIDER_USAGE_FLOOR_RESET_CUSTOM_TYPE, {
+			kind,
+			at: Date.now(),
+			...data,
+		});
+	}
+
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.settings.getGroup("compaction");
 		const branchEntries = this.sessionManager.getBranch();
@@ -12579,6 +12608,10 @@ export class AgentSession {
 		}
 
 		await this.sessionManager.rewriteEntries();
+		this.#appendProviderUsageFloorReset("prune_tool_outputs", {
+			prunedCount: result.prunedCount,
+			tokensSaved: result.tokensSaved,
+		});
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
@@ -12615,6 +12648,10 @@ export class AgentSession {
 		if (result.prunedCount === 0) {
 			return undefined;
 		}
+		this.#appendProviderUsageFloorReset("prune_stale_tool_results", {
+			prunedCount: result.prunedCount,
+			tokensSaved: result.tokensSaved,
+		});
 
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -12667,6 +12704,7 @@ export class AgentSession {
 			return { removed: 0 };
 		}
 		await this.sessionManager.rewriteEntries();
+		this.#appendProviderUsageFloorReset("drop_images", { removed });
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
@@ -12724,6 +12762,13 @@ export class AgentSession {
 		applyShakeRegions(items);
 
 		await this.sessionManager.rewriteEntries();
+		const tokensFreed = Math.max(0, originalTokens - replacementTokens);
+		this.#appendProviderUsageFloorReset("shake", {
+			mode,
+			toolResultsDropped,
+			blocksDropped,
+			tokensFreed,
+		});
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
@@ -12733,7 +12778,7 @@ export class AgentSession {
 			mode,
 			toolResultsDropped,
 			blocksDropped,
-			tokensFreed: Math.max(0, originalTokens - replacementTokens),
+			tokensFreed,
 			artifactId,
 		};
 	}
@@ -16549,13 +16594,12 @@ export class AgentSession {
 					noProgressDeadEnd = true;
 				}
 			} else if (reason !== "idle") {
-				// Mirror the shake recovery-band check: only auto-continue when compaction
-				// landed residual context under `COMPACTION_RECOVERY_BAND × threshold`.
-				// Re-firing on a history that still sits just over the line is the
-				// snapcompact thrash, so require genuine headroom, not a bare fit. Even
-				// when auto-continue is disabled, a no-headroom threshold pass must still
-				// block later automatic continuations (todo reminders/session_stop hooks)
-				// from re-entering the same oversized context.
+				// Summary/snapcompact rewrites keep recent history verbatim, so require
+				// genuine post-maintenance headroom before auto-continuing. Shake uses a
+				// separate raw-threshold check in #runAutoShake because it rewrites heavy
+				// content in place and then resumes through this same maintenance prompt;
+				// applying the recovery band there made successful shakes pause instead
+				// of continuing.
 				let hasHeadroom = this.#compactionCreatedHeadroom();
 				if (!hasHeadroom && !fallbackFromShake) {
 					const rescue = await this.#tryShakeRescueForDeadEnd(autoCompactionSignal);
@@ -16680,16 +16724,14 @@ export class AgentSession {
 			// the situation actually resolves; "idle" is exempt because its 60s+ timer
 			// re-checks usage before re-firing and cannot dead-loop on its own.
 			//
-			// #2275: the post-shake check MUST stay provider-anchored when caller
-			// usage and local estimates diverge. The local estimator undercounts
-			// thinking-signature payloads, so thinking-heavy sessions can read well
-			// below the provider usage that fired the threshold. Prefer the caller's
-			// context figure when supplied, then subtract shake's own savings and add
-			// hysteresis (80% recovery band) so we don't oscillate at the boundary.
-			// Threshold callers pass the provider-billed trigger after accounting for
-			// any supersede/drop-useless pruning that already rewrote the next prompt;
-			// without that pre-shake savings, shake can fall through to context-full
-			// even though the post-prune history is already inside the recovery band.
+			// Keep this check anchored to the raw threshold, not the stricter recovery
+			// band used by summary/snapcompact. Shake is the configured lightweight
+			// maintenance path; if it has brought the next prompt back below the user's
+			// threshold, pausing or falling back to context-full is the annoying "auto
+			// compaction stops" behavior this strategy is meant to avoid. The
+			// auto-continue prompt skips its own pre-send compaction check, so the same
+			// stale provider-usage number cannot immediately re-trigger shake before the
+			// resumed turn gets fresh usage.
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const compactionSettings = this.settings.getGroup("compaction");
 			let stillOverThreshold = false;
@@ -16697,8 +16739,7 @@ export class AgentSession {
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
 					const correctedTokens = Math.max(0, triggerContextTokens - result.tokensFreed);
 					const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
-					const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
-					stillOverThreshold = correctedTokens > recoveryBand;
+					stillOverThreshold = correctedTokens > thresholdTokens;
 				} else {
 					const postShakeTokens = this.getContextUsage({ contextWindow })?.tokens ?? 0;
 					stillOverThreshold = shouldCompact(postShakeTokens, contextWindow, compactionSettings);

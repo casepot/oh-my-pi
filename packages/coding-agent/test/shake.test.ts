@@ -117,6 +117,41 @@ describe("AgentSession shake", () => {
 			expect(text).toContain("shaken");
 		});
 
+		it("resets stale provider usage floors after eliding history", async () => {
+			seedHeavyToolResult("X".repeat(4000));
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "after tool" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 11_000,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			});
+			session.settings.set("compaction.thresholdTokens", 10_000);
+			session.settings.set("compaction.thresholdPercent", -1);
+
+			const shakeResult = await session.shake("elide");
+			expect(shakeResult.tokensFreed).toBeGreaterThan(0);
+
+			const preflight = await session.preflightProviderContext({
+				agentContext: {
+					messages: session.agent.state.messages,
+					systemPrompt: session.agent.state.systemPrompt,
+					tools: session.agent.state.tools,
+				},
+				providerContext: { messages: [], systemPrompt: [], tools: [] },
+			});
+
+			expect(preflight.action).toBe("continue");
+		});
+
 		it("returns zero counts for an empty branch", async () => {
 			const result = await session.shake("elide");
 			expect(result.toolResultsDropped).toBe(0);
@@ -159,8 +194,8 @@ describe("AgentSession shake", () => {
 			session.settings.set("compaction.thresholdPercent", 1);
 
 			// Reclaim enough that the corrected (provider − tokensFreed) figure lands
-			// inside the 80% recovery band — otherwise the #2275 post-shake check would
-			// (correctly) declare pressure unresolved and fall back to context-full.
+			// below the configured threshold, so shake handles the maintenance pass
+			// without falling back to context-full.
 			const shakeSpy = vi
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10_000 });
@@ -191,6 +226,53 @@ describe("AgentSession shake", () => {
 			const end = events.filter(e => e.type === "auto_compaction_end");
 			expect(end).toHaveLength(1);
 			expect(end[0]).toMatchObject({ type: "auto_compaction_end", action: "shake" });
+		});
+
+		it("continues after auto-shake when reclaimed context is below the configured threshold", async () => {
+			session.settings.set("compaction.strategy", "shake");
+			session.settings.override("compaction.autoContinue", true);
+			session.settings.set("compaction.thresholdTokens", 10_000);
+			session.settings.set("compaction.thresholdPercent", -1);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_500 });
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockImplementation(async () => undefined);
+			const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_end" && event.action === "shake") onCompactionDone();
+			});
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_500,
+					output: 500,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+
+			await compactionDone;
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(promptSpy).toHaveBeenCalledTimes(1);
+			const shakeEnd = events.find(event => event.type === "auto_compaction_end" && event.action === "shake");
+			expect(shakeEnd).toMatchObject({ type: "auto_compaction_end", action: "shake", willRetry: false });
+			const fullStart = events.find(
+				event => event.type === "auto_compaction_start" && event.action === "context-full",
+			);
+			expect(fullStart).toBeUndefined();
 		});
 
 		it("keeps a successful overflow shake recovery committed before retrying", async () => {

@@ -86,7 +86,7 @@ describe("AgentSession inline provider-call maintenance", () => {
 
 	function createHarness(options?: {
 		model?: Model;
-		strategy?: "context-full" | "handoff" | "snapcompact";
+		strategy?: "context-full" | "handoff" | "shake" | "snapcompact";
 		seedContext?: boolean;
 		firstUsageTokens?: number;
 		mockMatchesSessionModel?: boolean;
@@ -315,6 +315,32 @@ describe("AgentSession inline provider-call maintenance", () => {
 				event.message.includes("Compaction freed too little context"),
 		);
 		expect(noProgressNotices).toHaveLength(0);
+	});
+
+	it("accepts inline shake rewrites without requiring a compaction entry", async () => {
+		const { mock, sessionManager, events } = createHarness({ strategy: "shake" });
+		const shakeSpy = vi.spyOn(session!, "shake").mockImplementation(async () => {
+			session!.settings.override("compaction.thresholdTokens", RESTING_THRESHOLD_TOKENS);
+			return { mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 100_000 };
+		});
+
+		await session!.prompt("use the echo tool");
+
+		expect(shakeSpy).toHaveBeenCalled();
+		expect(mock.calls).toHaveLength(2);
+		expect(session!.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		const shakeStart = events.find(event => event.type === "auto_compaction_start" && event.action === "shake");
+		expect(shakeStart).toMatchObject({ type: "auto_compaction_start", reason: "threshold", action: "shake" });
+		const shakeEnd = events.find(
+			event => event.type === "auto_compaction_end" && event.action === "shake" && event.skipped === false,
+		);
+		expect(shakeEnd).toMatchObject({
+			type: "auto_compaction_end",
+			action: "shake",
+			skipped: false,
+			willRetry: false,
+		});
 	});
 
 	it("fails closed and keeps an empty maintenance assistant error out of persisted history", async () => {

@@ -77,6 +77,7 @@
 - Changed the default automatic compaction strategy from snapcompact to context-full so default maintenance uses provider-native remote compaction when available instead of image archives.
 
 ### Fixed
+- Fixed shake auto-compaction continuations and provider-call maintenance so a successful shake history rewrite resumes the agent instead of requiring a summary compaction entry, falling back to context-full, or pausing behind the stricter summary-compaction recovery band.
 - Fixed source checkout migration to refuse local commits before relinking to the fork-backed `origin/main` update channel.
 - Fixed branched sessions to copy referenced artifact logs into the new session artifact directory.
 - Fixed RPC one-shot and `shutdown_after` operation commands to wait for terminal operation frames before exiting.
