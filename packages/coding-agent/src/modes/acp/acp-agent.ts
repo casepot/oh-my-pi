@@ -1011,7 +1011,7 @@ export class AcpAgent implements Agent {
 		this.#connection.signal.addEventListener(
 			"abort",
 			() => {
-				void this.#disposeAllSessions();
+				void this.dispose();
 			},
 			{ once: true },
 		);
@@ -2400,6 +2400,10 @@ export class AcpAgent implements Agent {
 		} catch (error) {
 			logger.warn("Failed to dispose ACP session", { error });
 		}
+	}
+
+	async dispose(): Promise<void> {
+		await this.#disposeAllSessions();
 	}
 
 	async #disposeAllSessions(): Promise<void> {

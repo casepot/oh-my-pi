@@ -96,6 +96,7 @@ export interface RpcModeOptions {
 	mode?: RpcMode;
 	oneShotCommand?: string;
 	eventBus?: EventBus;
+	beforeExit?: () => Promise<void>;
 }
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
@@ -1870,8 +1871,10 @@ export async function runRpcMode(
 		if (session.extensionRunner?.hasHandlers("session_shutdown")) {
 			await session.extensionRunner.emit({ type: "session_shutdown" });
 		}
+		await session.dispose();
 		output({ type: "shutdown", reason, status });
 		await writer.drain();
+		await options.beforeExit?.();
 		process.exit(0);
 	};
 

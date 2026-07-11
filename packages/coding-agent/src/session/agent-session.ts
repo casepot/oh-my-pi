@@ -18564,13 +18564,16 @@ export class AgentSession {
 			this.#pendingIrcAsides.push(record);
 			// `from` must be the id the sender addressed (msg.to) so their
 			// from-filtered waiter matches.
-			const receipt = await IrcBus.global().send({
-				from: msg.to,
-				to: msg.from,
-				body,
-				replyTo: msg.id,
-				automated: true,
-			});
+			const receipt = await IrcBus.global().send(
+				{
+					from: msg.to,
+					to: msg.from,
+					body,
+					replyTo: msg.id,
+					automated: true,
+				},
+				{ origin: "auto_reply" },
+			);
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}

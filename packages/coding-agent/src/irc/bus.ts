@@ -40,6 +40,22 @@ export interface IrcDeliveryReceipt {
 	error?: string;
 }
 
+export type IrcMessageOrigin = "tool" | "auto_reply" | "api";
+
+export interface IrcSendOptions {
+	expectsReply?: boolean;
+	suppressRelay?: boolean;
+	origin?: IrcMessageOrigin;
+}
+
+export interface IrcMessageCreatedEvent {
+	readonly type: "message_created";
+	readonly origin: IrcMessageOrigin;
+	readonly message: Readonly<IrcMessage>;
+}
+
+export type IrcMessageCreatedListener = (event: IrcMessageCreatedEvent) => void | Promise<void>;
+
 interface IrcWaiter {
 	from?: string;
 	resolve: (msg: IrcMessage) => void;
@@ -68,12 +84,23 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	readonly #messageCreatedListeners = new Set<IrcMessageCreatedListener>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	observeMessages(listener: IrcMessageCreatedListener): () => void {
+		this.#messageCreatedListeners.add(listener);
+		let subscribed = true;
+		return () => {
+			if (!subscribed) return;
+			subscribed = false;
+			this.#messageCreatedListeners.delete(listener);
+		};
 	}
 
 	/**
@@ -100,11 +127,26 @@ export class IrcBus {
 	 * agent directly: the main agent then already sees the body as its own
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
-	async send(
-		msg: Omit<IrcMessage, "id" | "ts">,
-		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
-	): Promise<IrcDeliveryReceipt> {
+	#emitMessageCreated(message: IrcMessage, origin: IrcMessageOrigin): void {
+		const event = Object.freeze({
+			type: "message_created" as const,
+			origin,
+			message: Object.freeze({ ...message }),
+		});
+		for (const listener of [...this.#messageCreatedListeners]) {
+			try {
+				Promise.resolve(listener(event)).catch(() => {
+					logger.warn("IRC message observer failed");
+				});
+			} catch {
+				logger.warn("IRC message observer failed");
+			}
+		}
+	}
+
+	async send(msg: Omit<IrcMessage, "id" | "ts">, opts?: IrcSendOptions): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		this.#emitMessageCreated(message, opts?.origin ?? "api");
 		const ref = this.#registry.get(message.to);
 		if (!ref || ref.status === "aborted") {
 			return { to: message.to, outcome: "failed", error: `Unknown or terminated agent "${message.to}".` };

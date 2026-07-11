@@ -3834,6 +3834,45 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"irc.observer.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "IRC Observer",
+			description: "Export raw inter-agent traffic after the next OMP restart",
+		},
+	},
+	"irc.observer.endpoint": {
+		type: "string",
+		default: "ircs://127.0.0.1:6697",
+	},
+	"irc.observer.caFile": {
+		type: "string",
+		default: "~/.omp/irc-observer/ca.pem",
+	},
+	"irc.observer.account": {
+		type: "string",
+		default: "omp-publisher",
+	},
+	"irc.observer.passwordFile": {
+		type: "string",
+		default: "~/.omp/irc-observer/publisher-password",
+	},
+	"irc.observer.operName": {
+		type: "string",
+		default: "omp-observer",
+	},
+	"irc.observer.operPasswordFile": {
+		type: "string",
+		default: "~/.omp/irc-observer/oper-password",
+	},
+	"irc.observer.viewerNick": {
+		type: "string",
+		default: "omp-viewer",
+	},
+
 	"bash.autoBackground.thresholdMs": {
 		type: "number",
 		default: 60_000,

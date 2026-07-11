@@ -50,6 +50,7 @@ import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { startIrcObserver } from "./irc/observer/parent";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -86,12 +87,17 @@ import {
 } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 
-type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
+type RunAcpMode = (createSession: AcpSessionFactory, beforeExit?: () => Promise<void>) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
 type RunRpcMode = (
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
-	options?: { mode?: "rpc" | "rpc-ui"; eventBus?: EventBus; oneShotCommand?: string },
+	options?: {
+		mode?: "rpc" | "rpc-ui";
+		eventBus?: EventBus;
+		oneShotCommand?: string;
+		beforeExit?: () => Promise<void>;
+	},
 ) => Promise<void>;
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
@@ -397,6 +403,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	afterSessionDispose?: () => Promise<void>,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -406,6 +413,7 @@ async function runInteractiveMode(
 		lspServers,
 		mcpManager,
 		eventBus,
+		afterSessionDispose,
 	);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -1283,9 +1291,17 @@ export async function runRootCommand(
 		}
 	}
 
+	const ircObserver = await startIrcObserver({ settings: settingsInstance, cwd });
+	if (ircObserver) {
+		postmortem.register("irc-observer", () => ircObserver.stop("postmortem"));
+	}
+
 	const createAgentSessionImpl = deps.createAgentSession ?? createAgentSession;
 	const createSession = async (options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> => {
 		const result = await logger.time("createAgentSession", createAgentSessionImpl, options);
+		const agentId = result.session.getAgentId();
+		if (agentId) ircObserver?.bindTopLevel(agentId, result.session);
+		else if (ircObserver) logger.warn("IRC observer root unscoped", { code: "missing_agent_id" });
 		// Kick off background model discovery only after createAgentSession finishes its parallel
 		// discovery arms; running these concurrently contends for the event loop and stretches
 		// every parallel arm by ~30ms.
@@ -1307,7 +1323,7 @@ export async function runRootCommand(
 		// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 		const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
 		stopStartupWatchdog();
-		await runAcpMode(createAcpSession);
+		await runAcpMode(createAcpSession, () => ircObserver?.stop("normal") ?? Promise.resolve());
 	} else {
 		// Resolve extension-registered CLI flags before creating the session so a
 		// bad `@file` fails fast WITHOUT leaving a junk session/breadcrumb
@@ -1418,6 +1434,7 @@ export async function runRootCommand(
 				mode,
 				eventBus,
 				oneShotCommand: parsedArgs.rpcOneShot,
+				beforeExit: () => ircObserver?.stop("normal") ?? Promise.resolve(),
 			});
 		} else if (isInteractive) {
 			const updateStatusPromise = checkForUpdateStatus(VERSION).catch(() => undefined);
@@ -1460,6 +1477,7 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
+				() => ircObserver?.stop("normal") ?? Promise.resolve(),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
@@ -1476,6 +1494,7 @@ export async function runRootCommand(
 				logger.printTimings();
 			}
 			await session.dispose();
+			await ircObserver?.stop("normal");
 			stopThemeWatcher();
 			await postmortem.quit(0);
 		}

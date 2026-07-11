@@ -27,6 +27,9 @@ import {
 import { declareWorkerHostEntry, installWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { smokeTestIrcObserverWorker } from "./irc/observer/parent";
+import { IRC_OBSERVER_WORKER_ARG } from "./irc/observer/protocol";
+import { startIrcObserverWorker } from "./irc/observer/worker";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -89,6 +92,7 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestJsEvalWorker();
 	await smokeTestTtsWorker();
 	await smokeTestMnemopiEmbedWorker();
+	await smokeTestIrcObserverWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
 
@@ -157,6 +161,10 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		return true;
+	}
+	if (arg === IRC_OBSERVER_WORKER_ARG) {
+		await runIpcSubprocessWorker(startIrcObserverWorker);
 		return true;
 	}
 	return false;

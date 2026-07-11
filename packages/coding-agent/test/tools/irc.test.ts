@@ -428,6 +428,89 @@ describe("IRC", () => {
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.unreadCount("0-Parked")).toBe(0);
 		});
+
+		it("observes one immutable creation event before routing without affecting delivery", async () => {
+			const { promise: deliveryGate, resolve: releaseDelivery } = Promise.withResolvers<void>();
+			const recipient = makeFakeSession();
+			recipient.onDeliver(() => {
+				void deliveryGate;
+			});
+			const originalDeliver = recipient.session.deliverIrcMessage.bind(recipient.session);
+			recipient.session.deliverIrcMessage = async message => {
+				await deliveryGate;
+				return originalDeliver(message);
+			};
+			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: recipient.session });
+
+			const events: unknown[] = [];
+			bus.observeMessages(event => {
+				events.push(event);
+				expect(Object.isFrozen(event)).toBe(true);
+				expect(Object.isFrozen(event.message)).toBe(true);
+				throw new Error("listener failure");
+			});
+			bus.observeMessages(async () => {
+				throw new Error("async listener failure");
+			});
+			const unsubscribe = bus.observeMessages(event => {
+				events.push(event);
+			});
+
+			const pending = bus.send({ from: "0-Main", to: "0-Sub", body: "accepted immediately" }, { origin: "tool" });
+			expect(events).toHaveLength(2);
+			expect(events[0]).toMatchObject({
+				type: "message_created",
+				origin: "tool",
+				message: { from: "0-Main", to: "0-Sub", body: "accepted immediately" },
+			});
+
+			releaseDelivery();
+			expect(await pending).toEqual({ to: "0-Sub", outcome: "injected" });
+			unsubscribe();
+			unsubscribe();
+			await bus.send({ from: "0-Main", to: "missing", body: "no replay" });
+			expect(events).toHaveLength(3);
+		});
+
+		it("emits exactly once across waiter and every failed routing branch", async () => {
+			const live = makeFakeSession();
+			const throwing = makeFakeSession();
+			throwing.setError(new Error("delivery failed"));
+			registry.register({ id: "live", displayName: "live", kind: "sub", session: live.session });
+			registry.register({ id: "throwing", displayName: "throwing", kind: "sub", session: throwing.session });
+			registry.register({ id: "advisor", displayName: "advisor", kind: "advisor", session: null });
+			registry.register({ id: "detached", displayName: "detached", kind: "sub", session: null });
+			registry.register({ id: "parked", displayName: "parked", kind: "sub", session: null, status: "parked" });
+			AgentLifecycleManager.global().adopt("parked", {
+				idleTtlMs: 0,
+				revive: async () => {
+					throw new Error("revival failed");
+				},
+			});
+			const events: IrcMessage[] = [];
+			bus.observeMessages(event => {
+				events.push(event.message as IrcMessage);
+			});
+
+			const waiter = bus.wait("live", { from: "sender" }, 1_000);
+			await bus.send({ from: "sender", to: "live", body: "waiter" });
+			await waiter;
+			await bus.send({ from: "sender", to: "unknown", body: "unknown" });
+			await bus.send({ from: "sender", to: "advisor", body: "advisor" });
+			await bus.send({ from: "sender", to: "detached", body: "detached" });
+			await bus.send({ from: "sender", to: "parked", body: "parked" });
+			await bus.send({ from: "sender", to: "throwing", body: "throwing" });
+
+			expect(events.map(event => event.body)).toEqual([
+				"waiter",
+				"unknown",
+				"advisor",
+				"detached",
+				"parked",
+				"throwing",
+			]);
+			expect(new Set(events.map(event => event.id)).size).toBe(events.length);
+		});
 	});
 
 	describe("IrcTool", () => {
@@ -621,6 +704,10 @@ describe("IRC", () => {
 			const b = makeFakeSession();
 			registry.register({ id: "0-B", displayName: "task", kind: "sub", session: b.session });
 			registry.register({ id: "0-A", displayName: "task", kind: "sub", session: makeFakeSession().session });
+			const created: Array<{ origin: string; to: string }> = [];
+			bus.observeMessages(event => {
+				created.push({ origin: event.origin, to: event.message.to });
+			});
 
 			const tool = new IrcTool(makeToolSession(registry, "0-A"));
 			await tool.execute("call-1", { op: "send", to: "all", message: "anyone there?" });
@@ -631,6 +718,21 @@ describe("IRC", () => {
 			// would render the identical body a second time.
 			expect(main.relayed).toEqual([]);
 			expect(b.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
+			expect(created).toEqual([
+				{ origin: "tool", to: "Main" },
+				{ origin: "tool", to: "0-B" },
+			]);
+		});
+
+		it("op=send to=all creates no event when there are no resolved targets", async () => {
+			const origins: string[] = [];
+			bus.observeMessages(event => {
+				origins.push(event.origin);
+			});
+			const tool = new IrcTool(makeToolSession(registry, "only-agent"));
+			const result = await tool.execute("call-1", { op: "send", to: "all", message: "anyone?" });
+			expect(result.isError).toBeFalsy();
+			expect(origins).toEqual([]);
 		});
 
 		it("op=send await=true round-trips the recipient's reply", async () => {
@@ -1100,6 +1202,14 @@ describe("IRC", () => {
 					}
 				});
 			});
+			const created: Array<{ id: string; origin: string; replyTo?: string }> = [];
+			bus.observeMessages(event => {
+				created.push({
+					id: event.message.id,
+					origin: event.origin,
+					...(event.message.replyTo ? { replyTo: event.message.replyTo } : {}),
+				});
+			});
 
 			// The sender parks a waiter (the `await: true` path), then sends with
 			// the expectsReply hint — exactly what the irc tool does.
@@ -1117,6 +1227,10 @@ describe("IRC", () => {
 			expect(reply?.body).toBe("auto answer");
 			expect(reply?.replyTo).toBeTruthy();
 			expect(reply?.automated).toBe(true);
+			expect(created).toEqual([
+				{ id: created[0]?.id, origin: "api" },
+				{ id: created[1]?.id, origin: "auto_reply", replyTo: created[0]?.id },
+			]);
 			expect(ephemeralSpy.mock.calls[0]?.[0]?.promptText).toContain("which PR did you mean?");
 
 			// The recipient records what was said on its behalf.

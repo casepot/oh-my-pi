@@ -13,11 +13,21 @@ export function createAcpConnection(
 	return new AgentSideConnection(conn => new AcpAgent(conn, createSession, initialSession), transport);
 }
 
-export async function runAcpMode(createSession: AcpSessionFactory, initialSession?: AgentSession): Promise<never> {
+export async function runAcpMode(
+	createSession: AcpSessionFactory,
+	beforeExit?: () => Promise<void>,
+	initialSession?: AgentSession,
+): Promise<never> {
 	const input = stream.Writable.toWeb(process.stdout);
 	const output = stream.Readable.toWeb(process.stdin);
 	const transport = ndJsonStream(input, output);
-	const connection = createAcpConnection(transport, createSession, initialSession);
+	let agent: AcpAgent | undefined;
+	const connection = new AgentSideConnection(conn => {
+		agent = new AcpAgent(conn, createSession, initialSession);
+		return agent;
+	}, transport);
 	await connection.closed;
+	await agent?.dispose();
+	await beforeExit?.();
 	process.exit(0);
 }

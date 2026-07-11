@@ -367,6 +367,12 @@ export class Settings {
 		return resolved as SettingValue<P>;
 	}
 
+	/** Read only the global configuration layer, ignoring project files and runtime overrides. */
+	getGlobal<P extends SettingPath>(path: P): SettingValue<P> {
+		const value = getByPath(this.#global, SETTING_PATH_SEGMENTS[path]);
+		return (value !== undefined ? value : getDefault(path)) as SettingValue<P>;
+	}
+
 	/**
 	 * Whether `path` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.

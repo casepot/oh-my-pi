@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added a globally configured, fail-open IRC observer that exports attributed inter-agent traffic through a bounded supervised subprocess to private Ergo channels for encrypted Repartee viewing.
 - Added non-context goal context metrics and queryable proof-graph projection records for goal-mode storage/context sizing.
 - Added a reusable `plan-review` skill and target-planning prompt guidance for explicit planning review evidence.
 - Added goal target-plan linting, target cards, scenario-matrix metadata, and a live target status panel for goal planning.

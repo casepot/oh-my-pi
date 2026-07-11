@@ -1,6 +1,13 @@
 ## Context
 
 OMP’s current `irc` tool routes direct agent messages through the process-global in-memory `IrcBus`; it does not expose a network IRC server or named channels. The requested end state is observation-only: 2–5 or more concurrent OMP processes, each with 3–10 active agents, attempt to publish every correctly attributed traffic leg into Repartee without rebuilding a frontend or allowing IRC input to control OMP; if the selected hard RAM bound forces loss, Repartee receives an explicit counted gap instead of silent omission. Main and all subagents belonging to one top-level OMP session share a Repartee channel, while `/new`, resume, fork, and distinct processes use their session’s own channel so unrelated conversations never mix. Observation remains fail-open and RAM-bounded—raw traffic is not spooled by OMP, and OMP delivery never waits on storage or the viewer.
+## Implementation status — 2026-07-11
+
+- Implemented the creation-time bus observer, immutable event snapshots, origin attribution, top-level session index, process-incarnated record/channel identity, bounded canonical parent lanes with emergency GAP accounting, child supervision/heartbeat, global-only secure configuration, native TLS IRC worker, lifecycle shutdown hooks, worker-host smoke probe, operator guide, and changelog entry.
+- Added focused bus, attribution, settings, renderer, lifecycle-regression, source-worker, build, and compiled-worker verification. Test TLS fixtures include loopback IPv4/IPv6 SANs.
+- Repository checks pass. The source and compiled `--smoke-test` probes pass after rebuilding the repository-native addon.
+- Pinned live Ergo v2.18.0/Repartee v1.6.1 acceptance remains an operator-environment check; no Ergo or Repartee service is installed in this repository workspace.
+
 ## Approach
 
 ### 1. Add one canonical, creation-time bus observation event
