@@ -418,12 +418,56 @@ export function applyShakeRegion(region: ShakeRegion, replacement: string): void
  * Apply many regions at once. Block regions are applied highest-start-first so
  * that splicing one region never shifts the offsets of another in the same text
  * block; tool-result regions are independent.
+ *
+ * Returns an idempotent rollback that restores each affected text slot and
+ * tool-result message to its exact pre-mutation state.
  */
-export function applyShakeRegions(items: Array<{ region: ShakeRegion; replacement: string }>): void {
+export function applyShakeRegions(items: Array<{ region: ShakeRegion; replacement: string }>): () => void {
+	const blockRollbacks = new Map<SessionMessageEntry | CustomMessageEntry, Map<number, () => void>>();
+	const toolResultRollbacks = new Map<ToolResultMessage, () => void>();
+
+	for (const { region } of items) {
+		if (region.kind === "toolResult") {
+			const message = getToolResultMessage(region.entry);
+			if (!message) continue;
+			if (toolResultRollbacks.has(message)) continue;
+			const content = message.content;
+			const hadPrunedAt = Object.prototype.hasOwnProperty.call(message, "prunedAt");
+			const prunedAt = message.prunedAt;
+			toolResultRollbacks.set(message, () => {
+				message.content = content;
+				if (hadPrunedAt) message.prunedAt = prunedAt;
+				else delete message.prunedAt;
+			});
+			continue;
+		}
+
+		let entryRollbacks = blockRollbacks.get(region.entry);
+		if (!entryRollbacks) {
+			entryRollbacks = new Map();
+			blockRollbacks.set(region.entry, entryRollbacks);
+		}
+		if (entryRollbacks.has(region.blockIndex)) continue;
+		const slot = getBlockTextSlot(region.entry, region.blockIndex);
+		if (!slot) continue;
+		const originalText = slot.read();
+		entryRollbacks.set(region.blockIndex, () => slot.write(originalText));
+	}
+
 	const ordered = [...items].sort((a, b) => {
 		const aStart = a.region.kind === "block" ? a.region.start : -1;
 		const bStart = b.region.kind === "block" ? b.region.start : -1;
 		return bStart - aStart;
 	});
 	for (const { region, replacement } of ordered) applyShakeRegion(region, replacement);
+
+	let rolledBack = false;
+	return () => {
+		if (rolledBack) return;
+		rolledBack = true;
+		for (const rollback of toolResultRollbacks.values()) rollback();
+		for (const entryRollbacks of blockRollbacks.values()) {
+			for (const rollback of entryRollbacks.values()) rollback();
+		}
+	};
 }
