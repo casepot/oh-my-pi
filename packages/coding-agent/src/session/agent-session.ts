@@ -2254,6 +2254,7 @@ export class AgentSession {
 	#exitRecorded = false;
 	#unsubscribeAppendOnly?: () => void;
 	#unsubscribeModelRoles?: () => void;
+	#unsubscribePersistenceState?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -2989,6 +2990,21 @@ export class AgentSession {
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+		this.#unsubscribePersistenceState = this.sessionManager.onPersistenceStateChanged(state => {
+			if (state.status === "failed") {
+				this.emitNotice(
+					"error",
+					"Session writes are paused. Changes remain in memory; the next flush or history rewrite will retry.",
+					"session-persistence",
+				);
+				return;
+			}
+			this.emitNotice(
+				"info",
+				"Session persistence recovered. The current in-memory snapshot is saved.",
+				"session-persistence",
+			);
+		});
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
 		this.#unsubscribeModelRoles = onModelRolesChanged(() => {
@@ -6615,6 +6631,10 @@ export class AgentSession {
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
 			this.#unsubscribeAppendOnly = undefined;
+		}
+		if (this.#unsubscribePersistenceState) {
+			this.#unsubscribePersistenceState();
+			this.#unsubscribePersistenceState = undefined;
 		}
 		if (this.#unsubscribeModelRoles) {
 			this.#unsubscribeModelRoles();
@@ -12719,16 +12739,84 @@ export class AgentSession {
 	 */
 	async dropImages(): Promise<{ removed: number }> {
 		const branchEntries = this.sessionManager.getBranch();
+		const rollbacks: Array<() => void> = [];
 		let removed = 0;
 		for (const entry of branchEntries) {
 			if (entry.type === "message") {
-				removed += stripImagesFromMessage(entry.message);
+				const message = entry.message;
+				let rollback: (() => void) | undefined;
+				switch (message.role) {
+					case "user": {
+						const content = message.content;
+						rollback = () => {
+							message.content = content;
+						};
+						break;
+					}
+					case "developer": {
+						const content = message.content;
+						rollback = () => {
+							message.content = content;
+						};
+						break;
+					}
+					case "custom": {
+						const content = message.content;
+						rollback = () => {
+							message.content = content;
+						};
+						break;
+					}
+					case "hookMessage": {
+						const content = message.content;
+						rollback = () => {
+							message.content = content;
+						};
+						break;
+					}
+					case "toolResult": {
+						const content = message.content;
+						const details = message.details;
+						let restoreDetailsImages: (() => void) | undefined;
+						if (details && typeof details === "object" && "images" in details && Array.isArray(details.images)) {
+							const images = details.images;
+							restoreDetailsImages = () => {
+								details.images = images;
+							};
+						}
+						rollback = () => {
+							message.content = content;
+							restoreDetailsImages?.();
+						};
+						break;
+					}
+					case "fileMention": {
+						const restoreFileImages: Array<() => void> = [];
+						for (const file of message.files) {
+							if (!file.image) continue;
+							const image = file.image;
+							restoreFileImages.push(() => {
+								file.image = image;
+							});
+						}
+						rollback = () => {
+							for (const restore of restoreFileImages) restore();
+						};
+						break;
+					}
+				}
+				const dropped = stripImagesFromMessage(message);
+				if (dropped > 0) {
+					removed += dropped;
+					if (rollback) rollbacks.push(rollback);
+				}
 				continue;
 			}
 			if (entry.type === "custom_message" && typeof entry.content !== "string") {
+				const originalContent = entry.content;
 				const kept: typeof entry.content = [];
 				let dropped = 0;
-				for (const part of entry.content) {
+				for (const part of originalContent) {
 					if (part.type === "image") {
 						dropped++;
 					} else {
@@ -12740,6 +12828,9 @@ export class AgentSession {
 						kept.push({ type: "text", text: "[image removed]" });
 					}
 					entry.content = kept;
+					rollbacks.push(() => {
+						entry.content = originalContent;
+					});
 					removed += dropped;
 				}
 			}
@@ -12747,7 +12838,12 @@ export class AgentSession {
 		if (removed === 0) {
 			return { removed: 0 };
 		}
-		await this.sessionManager.rewriteEntries();
+		try {
+			await this.sessionManager.rewriteEntries();
+		} catch (error) {
+			for (let i = rollbacks.length - 1; i >= 0; i--) rollbacks[i]();
+			throw error;
+		}
 		this.#appendProviderUsageFloorReset("drop_images", { removed });
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -12803,9 +12899,14 @@ export class AgentSession {
 			return { region, replacement };
 		});
 
-		applyShakeRegions(items);
+		const rollback = applyShakeRegions(items);
 
-		await this.sessionManager.rewriteEntries();
+		try {
+			await this.sessionManager.rewriteEntries();
+		} catch (error) {
+			rollback();
+			throw error;
+		}
 		const tokensFreed = Math.max(0, originalTokens - replacementTokens);
 		this.#appendProviderUsageFloorReset("shake", {
 			mode,
@@ -12827,30 +12928,26 @@ export class AgentSession {
 		};
 	}
 
-	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {
-		if (artifactId) {
-			return `[shaken ~${region.tokens} tokens — recover: artifact://${artifactId} (region ${index + 1})]`;
-		}
-		return `[shaken ~${region.tokens} tokens]`;
+	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string): string {
+		return `[shaken ~${region.tokens} tokens — recover: artifact://${artifactId} (region ${index + 1})]`;
 	}
 
 	/**
 	 * Concatenate the original region contents into one session artifact so the
-	 * agent can read them back via `artifact://<id>`. Returns `undefined` when
-	 * the session is not persisted or the write fails — callers degrade to a
-	 * bare placeholder.
+	 * agent can read them back via `artifact://<id>`. Elision cannot begin until
+	 * this recovery artifact has been persisted successfully.
 	 */
-	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
+	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string> {
 		const parts: string[] = [];
 		for (let i = 0; i < regions.length; i++) {
 			const region = regions[i];
 			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
 		}
-		try {
-			return await this.sessionManager.saveArtifact(parts.join("\n"), "shake");
-		} catch {
-			return undefined;
+		const artifactId = await this.sessionManager.saveArtifact(parts.join("\n"), "shake");
+		if (!artifactId) {
+			throw new Error("Shake recovery artifact was not persisted");
 		}
+		return artifactId;
 	}
 
 	/**

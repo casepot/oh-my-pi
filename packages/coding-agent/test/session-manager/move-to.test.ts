@@ -126,6 +126,30 @@ describe("SessionManager.moveTo", () => {
 		expect(targetSessions.some(item => item.path === movedFile)).toBe(true);
 	});
 
+	it("rejects an occupied destination without changing either session file", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "source sentinel", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+
+		const sourceFile = session.getSessionFile();
+		if (!sourceFile) throw new Error("Expected source session file");
+		const sourceBytes = await fsp.readFile(sourceFile);
+		const destinationFile = path.join(SessionManager.getDefaultSessionDir(cwdB), path.basename(sourceFile));
+		const destinationBytes = Buffer.from('{"sentinel":"occupied destination"}\n');
+		await fsp.mkdir(path.dirname(destinationFile), { recursive: true });
+		await fsp.writeFile(destinationFile, destinationBytes);
+
+		await expect(session.moveTo(cwdB)).rejects.toThrow(
+			`Session move destination already contains "${path.basename(destinationFile)}"`,
+		);
+
+		expect(session.getCwd()).toBe(path.resolve(cwdA));
+		expect(session.getSessionFile()).toBe(sourceFile);
+		expect(await fsp.readFile(sourceFile)).toEqual(sourceBytes);
+		expect(await fsp.readFile(destinationFile)).toEqual(destinationBytes);
+	});
+
 	it("succeeds on fresh session without ENOENT, then deferred persistence works", async () => {
 		const session = SessionManager.create(cwdA);
 		// No messages — file never written to disk

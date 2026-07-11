@@ -117,6 +117,73 @@ describe("AgentSession shake", () => {
 			expect(text).toContain("shaken");
 		});
 
+		it("does not mutate session state when saving the recovery artifact fails", async () => {
+			seedHeavyToolResult("A".repeat(4000));
+			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+			await sessionManager.flush();
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session file");
+			const initialToolResult = branchToolResults()[0];
+			if (!initialToolResult) throw new Error("Expected a seeded tool result");
+			const before = {
+				branch: structuredClone(sessionManager.getBranch()),
+				prunedAt: initialToolResult.prunedAt,
+				agentMessages: structuredClone(session.agent.state.messages),
+				durableJsonl: await Bun.file(sessionFile).text(),
+			};
+			const saveArtifactSpy = vi
+				.spyOn(sessionManager, "saveArtifact")
+				.mockRejectedValueOnce(new Error("artifact write failed"));
+
+			await expect(session.shake("elide")).rejects.toThrow("artifact write failed");
+
+			const failedToolResult = branchToolResults()[0];
+			if (!failedToolResult) throw new Error("Expected the tool result after the failed shake");
+			expect(saveArtifactSpy).toHaveBeenCalledTimes(1);
+			expect({
+				branch: sessionManager.getBranch(),
+				prunedAt: failedToolResult.prunedAt,
+				agentMessages: session.agent.state.messages,
+				durableJsonl: await Bun.file(sessionFile).text(),
+			}).toEqual(before);
+		});
+
+		it("rolls back elision when rewriting fails and allows a subsequent retry", async () => {
+			seedHeavyToolResult("R".repeat(4000));
+			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+			const initialToolResult = branchToolResults()[0];
+			if (!initialToolResult) throw new Error("Expected a seeded tool result");
+			const before = {
+				content: structuredClone(initialToolResult.content),
+				prunedAt: initialToolResult.prunedAt,
+				agentMessages: structuredClone(session.agent.state.messages),
+			};
+			const rewriteSpy = vi
+				.spyOn(sessionManager, "rewriteEntries")
+				.mockRejectedValueOnce(new Error("session rewrite failed"));
+
+			await expect(session.shake("elide")).rejects.toThrow("session rewrite failed");
+
+			const rolledBackToolResult = branchToolResults()[0];
+			if (!rolledBackToolResult) throw new Error("Expected the tool result after rollback");
+			expect(rewriteSpy).toHaveBeenCalledTimes(1);
+			expect({
+				content: rolledBackToolResult.content,
+				prunedAt: rolledBackToolResult.prunedAt,
+				agentMessages: session.agent.state.messages,
+			}).toEqual(before);
+
+			const retry = await session.shake("elide");
+
+			expect(rewriteSpy).toHaveBeenCalledTimes(2);
+			expect(retry.artifactId).toBeDefined();
+			const retriedToolResult = branchToolResults()[0];
+			if (!retriedToolResult) throw new Error("Expected the retried tool result");
+			const retriedText = retriedToolResult.content.map(block => (block.type === "text" ? block.text : "")).join("");
+			expect(retriedToolResult.prunedAt).toBeGreaterThan(0);
+			expect(retriedText).toContain(`artifact://${retry.artifactId}`);
+		});
+
 		it("resets stale provider usage floors after eliding history", async () => {
 			seedHeavyToolResult("X".repeat(4000));
 			sessionManager.appendMessage({
@@ -177,6 +244,44 @@ describe("AgentSession shake", () => {
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
 			expect(content.some(b => b.type === "image")).toBe(false);
+		});
+
+		it("rolls back image removal when rewriting fails and allows a subsequent retry", async () => {
+			const png: ImageContent = { type: "image", data: "rollback-image", mimeType: "image/png" };
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "keep this image until commit" }, png],
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+			const userEntry = sessionManager
+				.getBranch()
+				.find(entry => entry.type === "message" && entry.message.role === "user");
+			if (!userEntry || userEntry.type !== "message" || userEntry.message.role !== "user") {
+				throw new Error("Expected a seeded user message");
+			}
+			const before = {
+				content: structuredClone(userEntry.message.content),
+				agentMessages: structuredClone(session.agent.state.messages),
+			};
+			const rewriteSpy = vi
+				.spyOn(sessionManager, "rewriteEntries")
+				.mockRejectedValueOnce(new Error("image rewrite failed"));
+
+			await expect(session.shake("images")).rejects.toThrow("image rewrite failed");
+
+			expect(rewriteSpy).toHaveBeenCalledTimes(1);
+			expect({
+				content: userEntry.message.content,
+				agentMessages: session.agent.state.messages,
+			}).toEqual(before);
+			expect(userEntry.message.content).toEqual([{ type: "text", text: "keep this image until commit" }, png]);
+
+			const retry = await session.shake("images");
+
+			expect(rewriteSpy).toHaveBeenCalledTimes(2);
+			expect(retry.imagesDropped).toBe(1);
+			expect(userEntry.message.content).toEqual([{ type: "text", text: "keep this image until commit" }]);
 		});
 	});
 

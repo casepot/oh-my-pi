@@ -79,6 +79,7 @@
 - Changed the default automatic compaction strategy from snapcompact to context-full so default maintenance uses provider-native remote compaction when available instead of image archives.
 
 ### Fixed
+- Fixed transient session-storage failures permanently poisoning live sessions, made Shake abort or roll back unsafe elisions, and prevented session moves from overwriting existing destinations.
 - Fixed rejected retry continuations and retry-cancellation races leaving subagent tasks stuck or retry lifecycle events unpaired.
 - Clarified automatic IRC replies as context-only no-tools messages, surfaced task-agent activity and retry diagnostics, and made missing `agent://` output errors state-aware.
 - Fixed shake auto-compaction continuations and provider-call maintenance so a successful shake history rewrite resumes the agent instead of requiring a summary compaction entry, falling back to context-full, or pausing behind the stricter summary-compaction recovery band.

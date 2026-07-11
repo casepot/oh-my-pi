@@ -332,6 +332,7 @@ export type ReadonlySessionManager = Pick<
 	| "getSessionDir"
 	| "getSessionId"
 	| "getSessionFile"
+	| "getPersistenceState"
 	| "getSessionName"
 	| "getArtifactsDir"
 	| "getArtifactManager"
@@ -391,6 +392,12 @@ interface SessionManagerStateSnapshot {
 	header: SessionHeader;
 	entries: SessionEntry[];
 }
+
+export type SessionPersistenceState =
+	| { readonly status: "healthy" }
+	| { readonly status: "failed"; readonly error: Error };
+
+export type SessionPersistenceStateListener = (state: SessionPersistenceState) => void;
 
 interface DiskQueueOptions {
 	ignorePriorError?: boolean;
@@ -458,6 +465,8 @@ export class SessionManager {
 	#diskTail: Promise<void> = Promise.resolve();
 	#diskFailure: Error | undefined;
 	#diskFailureLogged = false;
+	#persistenceStateListeners = new Set<SessionPersistenceStateListener>();
+	#recoveryPromise: Promise<void> | undefined;
 	/** Bumped on every sync rewrite / chain reset so stale queued tasks become no-ops. */
 	#diskEpoch = 0;
 	/**
@@ -495,14 +504,32 @@ export class SessionManager {
 		if (!this.#suppressBreadcrumb) writeTerminalBreadcrumb(cwd, sessionFile);
 	}
 
-	#clearDiskError(): void {
+	#notifyPersistenceStateChanged(state: SessionPersistenceState): void {
+		for (const listener of [...this.#persistenceStateListeners]) {
+			try {
+				listener(state);
+			} catch (err) {
+				logger.warn("SessionManager: persistence state listener failed", { error: String(err) });
+			}
+		}
+	}
+
+	#clearDiskError(notifyRecovery = false): void {
+		const recovered = this.#diskFailure !== undefined;
 		this.#diskFailure = undefined;
 		this.#diskFailureLogged = false;
+		if (recovered && notifyRecovery) {
+			this.#notifyPersistenceStateChanged({ status: "healthy" });
+		}
 	}
 
 	#noteDiskFailure(errorLike: unknown): Error {
 		const error = toError(errorLike);
-		if (!this.#diskFailure) this.#diskFailure = error;
+		const firstFailure = this.#diskFailure === undefined;
+		const failure = this.#diskFailure ?? error;
+		if (firstFailure) this.#diskFailure = failure;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
 
 		if (!this.#diskFailureLogged) {
 			this.#diskFailureLogged = true;
@@ -513,7 +540,10 @@ export class SessionManager {
 			});
 		}
 
-		return this.#diskFailure;
+		if (firstFailure) {
+			this.#notifyPersistenceStateChanged({ status: "failed", error: failure });
+		}
+		return failure;
 	}
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
@@ -553,11 +583,16 @@ export class SessionManager {
 		if (writer) void writer.close().catch(() => undefined);
 	}
 
-	async #closeWriterHandle(): Promise<void> {
+	async #closeWriterHandle(acknowledgedError?: Error): Promise<void> {
 		const writer = this.#writer;
 		if (!writer) return;
 		this.#writer = undefined;
-		await writer.close();
+		try {
+			await writer.close();
+		} catch (err) {
+			const error = toError(err);
+			if (!acknowledgedError || error !== acknowledgedError) throw error;
+		}
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -653,33 +688,41 @@ export class SessionManager {
 		if (!this.#persist || !this.#sessionFile) return;
 
 		const startEpoch = this.#diskEpoch;
+		const priorFailure = this.#diskFailure;
 		await this.#scheduleDiskWork(
 			async () => {
-				if (await this.#runFencedAtomicRewrite(startEpoch)) {
+				if (await this.#runFencedAtomicRewrite(startEpoch, priorFailure)) {
 					this.#fileIsCurrent = true;
 					this.#rewriteRequired = false;
 					this.#hasTitleSlot = true;
+					if (priorFailure) this.#clearDiskError(true);
 				}
 			},
-			{ epoch: startEpoch },
+			{ epoch: startEpoch, ignorePriorError: priorFailure !== undefined },
 		);
 	}
 
 	/**
-	 * Shared fenced atomic-rewrite loop used by `#rewriteAtomically` and the
-	 * `#persistTitleChangeEntry` fallback. Holds `#atomicRewriteActive` across
-	 * the writer close and the full-file replace, and loops on
-	 * `#atomicRewriteDirty` so any fenced append that lands during the rewrite
-	 * is captured before the task resolves. Returns `false` when the disk epoch
-	 * moved (a superseding synchronous rewrite has taken over) so callers skip
-	 * their post-publish state updates.
+	 * Shared fenced atomic-rewrite loop used by normal rewrites and persistence
+	 * recovery. Recovery acknowledges only the exact writer/backend error that
+	 * was already surfaced, then replaces the complete in-memory journal.
 	 */
-	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
+	async #runFencedAtomicRewrite(epoch: number, priorFailure?: Error): Promise<boolean> {
 		this.#atomicRewriteFenceEpoch = epoch;
+		let acknowledgedFailure = priorFailure;
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
-				await this.#closeWriterHandle();
+				await this.#closeWriterHandle(acknowledgedFailure);
+				if (acknowledgedFailure) {
+					try {
+						await this.#storage.drain();
+					} catch (err) {
+						const drainError = toError(err);
+						if (drainError !== acknowledgedFailure) throw drainError;
+					}
+					acknowledgedFailure = undefined;
+				}
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
@@ -691,18 +734,13 @@ export class SessionManager {
 			return true;
 		} finally {
 			// Only relinquish the fence if we still own it. A superseding
-			// synchronous rewrite (`flushSync` → `#rewriteSynchronously`) may
-			// have reset `#diskTail`, scheduled a fresh atomic task at the new
-			// epoch, and that task may have taken ownership of the fence while
-			// this stale rewrite was still awaiting storage. Clearing it here
-			// unconditionally would strand appends during the newer publish.
+			// synchronous rewrite may already have installed a newer fence.
 			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
 		}
 	}
 
 	#appendToSessionFile(entry: SessionEntry): void {
 		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#diskFailure) throw this.#diskFailure;
 
 		// Lazy gate: a brand-new session is not written until it has an assistant
 		// message (or someone forced creation), so sessions that never produce
@@ -713,16 +751,21 @@ export class SessionManager {
 		}
 
 		// Atomic replacement window: the old path may be moved aside underneath
-		// any newly-opened append handle (Windows EPERM fallback). Do not open a
-		// writer here; the active rewrite loops and serializes a fresh full body.
-		// A superseding synchronous rewrite bumps `#diskEpoch`, at which point
-		// the pending atomic publish is guaranteed to abandon via its
-		// `commitGuard`, so appends can (and must) take the hot path so they
-		// don't strand in memory while `close()` returns without a rewrite.
+		// any newly-opened append handle. Keep the entry in memory and make the
+		// active rewrite loop serialize a fresh body.
 		if (this.#atomicRewriteFenceEpoch !== null && this.#atomicRewriteFenceEpoch === this.#diskEpoch) {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
 			this.#atomicRewriteDirty = true;
+			return;
+		}
+
+		// A failed append may have left a partial JSON line. Accept subsequent
+		// entries in memory, but never append past the unknown tail; only a full
+		// atomic snapshot can make the journal current again.
+		if (this.#diskFailure) {
+			this.#fileIsCurrent = false;
+			this.#rewriteRequired = true;
 			return;
 		}
 		// Cold/divergent: not on disk yet, or in-memory entries diverged from the
@@ -748,7 +791,6 @@ export class SessionManager {
 
 	async #persistTitleChangeEntry(entry: TitleChangeEntry, update: SessionTitleUpdate): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#diskFailure) throw this.#diskFailure;
 
 		if (!this.#shouldHaveSessionFile()) {
 			this.#fileIsCurrent = false;
@@ -776,11 +818,12 @@ export class SessionManager {
 					await this.#storage.updateSessionTitle(sessionFile, update);
 					if (this.#diskEpoch === epoch) this.#fileIsCurrent = true;
 				} catch {
-					if (!(await this.#runFencedAtomicRewrite(epoch))) return;
-					this.#clearDiskError();
+					const priorFailure = this.#diskFailure;
+					if (!(await this.#runFencedAtomicRewrite(epoch, priorFailure))) return;
 					this.#fileIsCurrent = true;
 					this.#rewriteRequired = false;
 					this.#hasTitleSlot = true;
+					if (priorFailure) this.#clearDiskError(true);
 				}
 			},
 			{ epoch },
@@ -1018,6 +1061,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
+		if (this.#diskFailure) await this.recoverPersistence();
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
@@ -1080,12 +1124,14 @@ export class SessionManager {
 
 	/** Start a new session. Drains and closes any existing writer first. */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
+		if (this.#diskFailure) await this.recoverPersistence();
 		await this.#drainAndCloseWriter();
 		return this.#resetToNewSession(options);
 	}
 
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
 	async dropSession(sessionPath: string): Promise<void> {
+		if (this.#diskFailure) await this.recoverPersistence();
 		await this.#drainAndCloseWriter();
 		try {
 			await this.#storage.deleteSessionWithArtifacts(sessionPath);
@@ -1103,6 +1149,7 @@ export class SessionManager {
 
 		const oldSessionFile = this.#sessionFile;
 		const parentSessionId = this.#sessionId;
+		if (this.#diskFailure) await this.recoverPersistence();
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 
@@ -1160,8 +1207,6 @@ export class SessionManager {
 
 		if (this.#persist && this.#sessionFile) {
 			this.#storage.ensureDirSync(nextSessionDir);
-			await this.#drainAndCloseWriter();
-			this.#clearDiskError();
 
 			const oldSessionFile = this.#sessionFile;
 			const newSessionFile = path.join(nextSessionDir, path.basename(oldSessionFile));
@@ -1169,8 +1214,20 @@ export class SessionManager {
 			const newArtifactsDir = ArtifactManager.directoryForSessionFile(newSessionFile)!;
 			const sessionPathChanged = path.resolve(oldSessionFile) !== path.resolve(newSessionFile);
 			const artifactPathChanged = path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
-			sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 
+			if (sessionPathChanged && this.#storage.existsSync(newSessionFile)) {
+				throw new Error(`Session move destination already contains "${path.basename(newSessionFile)}"`);
+			}
+			if (artifactPathChanged && fs.existsSync(newArtifactsDir)) {
+				throw new Error(
+					`Session move destination already contains artifacts for "${path.basename(newSessionFile)}"`,
+				);
+			}
+
+			if (this.#diskFailure) await this.recoverPersistence();
+			await this.#drainAndCloseWriter();
+			this.#clearDiskError();
+			sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 			let sessionMoved = false;
 			let artifactsMoved = false;
 
@@ -1236,25 +1293,52 @@ export class SessionManager {
 	}
 
 	/**
+	 * Recover a journal after an append/rewrite failure by atomically publishing
+	 * the complete authoritative in-memory state. Concurrent callers share one
+	 * attempt; failure remains latched until a complete snapshot succeeds.
+	 */
+	async recoverPersistence(): Promise<void> {
+		if (!this.#persist || !this.#sessionFile || !this.#diskFailure) return;
+		if (this.#recoveryPromise) return this.#recoveryPromise;
+
+		const recovery = this.#rewriteAtomically();
+		this.#recoveryPromise = recovery;
+		try {
+			await recovery;
+		} finally {
+			if (this.#recoveryPromise === recovery) this.#recoveryPromise = undefined;
+		}
+	}
+
+	/**
 	 * Force the session onto disk even with no assistant message yet (ACP
 	 * session/new must create a discoverable file immediately).
 	 */
 	async ensureOnDisk(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
 		this.#forceFileCreation = true;
+		if (this.#diskFailure) {
+			await this.recoverPersistence();
+			return;
+		}
 		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
 		await this.#rewriteAtomically();
 	}
 
-	/** Flush pending writes. Call before switching sessions or on shutdown. */
+	/** Flush pending writes, recovering a failed journal with a full snapshot. */
 	async flush(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
-		await this.#scheduleDiskWork(async () => {
-			if (this.#writer?.isOpen()) await this.#writer.flush();
-		});
+		if (this.#diskFailure) {
+			await this.recoverPersistence();
+		} else if ((!this.#fileIsCurrent || this.#rewriteRequired) && this.#shouldHaveSessionFile()) {
+			await this.#rewriteAtomically();
+		} else {
+			await this.#scheduleDiskWork(async () => {
+				if (this.#writer?.isOpen()) await this.#writer.flush();
+			});
+		}
 		// Drain any fire-and-forget backing writes (e.g. `writeTextSync` queued
-		// on IndexedSessionStorage during `flushSync`) so callers relying on
-		// flush() see the write durably visible to readers.
+		// on IndexedSessionStorage) so callers see the write durably visible.
 		await this.#storage.drain();
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
@@ -1308,9 +1392,14 @@ export class SessionManager {
 		}
 	}
 
-	/** Flush, then close the append writer. */
+	/** Recover if needed, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
+		if (this.#diskFailure) {
+			await this.recoverPersistence();
+		} else if ((!this.#fileIsCurrent || this.#rewriteRequired) && this.#shouldHaveSessionFile()) {
+			await this.#rewriteAtomically();
+		}
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
 			await this.#closeWriterHandle();
@@ -1318,9 +1407,7 @@ export class SessionManager {
 				this.#fileIsCurrent = true;
 		});
 		await this.#dropIfEmptyAndNoDraft();
-		// Wait for any queued backing writes (IndexedSessionStorage per-path
-		// tail) to become durable so a graceful shutdown does not exit while
-		// a fire-and-forget publish is still on the wire.
+		// Wait for queued backing writes before a graceful shutdown exits.
 		await this.#storage.drain();
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
@@ -1363,6 +1450,16 @@ export class SessionManager {
 
 	getSessionFile(): string | undefined {
 		return this.#sessionFile;
+	}
+	getPersistenceState(): SessionPersistenceState {
+		return this.#diskFailure ? { status: "failed", error: this.#diskFailure } : { status: "healthy" };
+	}
+
+	onPersistenceStateChanged(listener: SessionPersistenceStateListener): () => void {
+		this.#persistenceStateListeners.add(listener);
+		return () => {
+			this.#persistenceStateListeners.delete(listener);
+		};
 	}
 
 	getArtifactsDir(): string | null {
@@ -1684,6 +1781,10 @@ export class SessionManager {
 	 */
 	async rewriteEntries(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
+		if (this.#diskFailure) {
+			await this.recoverPersistence();
+			return;
+		}
 		await this.#rewriteAtomically();
 	}
 
