@@ -758,6 +758,8 @@ export interface Model<TApi extends Api = Api> {
 	transport?: "pi-native";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
+	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */
+	useResponsesLite?: boolean;
 	/** Preferred model to use only for compaction (model id or provider/id); the active session model is unchanged. */
 	compactionModel?: string;
 	/** Provider-native compaction endpoint configuration. */

@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getAgentDir, removeSyncWithRetries, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
-import { MANY_TOOL_COUNT } from "./fixtures/many-tools-mcp";
+import { MANY_TOOL_COUNT, manyToolName } from "./fixtures/many-tools-mcp";
 
 // Contracts for deferred (hasUI) MCP discovery follow-ups:
 //
@@ -20,10 +20,15 @@ import { MANY_TOOL_COUNT } from "./fixtures/many-tools-mcp";
 //    activate `search_tool_bm25`, mark discovery enabled, and expose the MCP
 //    tools as discoverable — instead of force-activating all of them.
 //
-// 2. A session disposed while servers are still connecting MUST NOT be touched
+// 2. Explicit tool lists remain bounded while deferred MCP results arrive, and
+//    requested MCP tools replace their pending placeholders without activating
+//    every tool from the server.
+//
+// 3. A session disposed while servers are still connecting MUST NOT be touched
 //    by the late discovery result: no tools resurrected onto the disposed
 //    session and the manager's transports disconnected.
 const FIXTURE_PATH = path.join(import.meta.dir, "fixtures", "many-tools-mcp.ts");
+const REQUESTED_MCP_TOOL_NAME = `mcp__many_${manyToolName(0)}`;
 
 describe("createAgentSession deferred MCP auto discovery", () => {
 	let registryDir: string;
@@ -99,6 +104,66 @@ describe("createAgentSession deferred MCP auto discovery", () => {
 		hasUI: true,
 	});
 
+	it("keeps an explicit tool list bounded when the initial deferred result arrives", async () => {
+		writeMcpConfig();
+		const { session } = await createAgentSession({
+			...baseOptions(),
+			settings: Settings.isolated({ "tools.discoveryMode": "off", "mcp.discoveryMode": false }),
+			toolNames: ["read", REQUESTED_MCP_TOOL_NAME],
+		});
+		try {
+			// Discovery runs in a real fixture subprocess and exposes no completion
+			// promise; fake timers cannot drive that process, so poll observable state.
+			const deadline = Date.now() + 30_000;
+			while (
+				(session.getAllToolNames().filter(name => name.startsWith("mcp__")).length < MANY_TOOL_COUNT ||
+					!session.getActiveToolNames().includes(REQUESTED_MCP_TOOL_NAME)) &&
+				Date.now() < deadline
+			) {
+				await Bun.sleep(50);
+			}
+
+			expect(session.isMCPDiscoveryEnabled()).toBe(false);
+			expect(session.getAllToolNames().filter(name => name.startsWith("mcp__"))).toHaveLength(MANY_TOOL_COUNT);
+			expect(session.getActiveToolNames().filter(name => name.startsWith("mcp__"))).toEqual([
+				REQUESTED_MCP_TOOL_NAME,
+			]);
+		} finally {
+			await session.dispose();
+		}
+	}, 40_000);
+
+	it("keeps a strict tool list bounded and reactivates its MCP tool after a late refresh", async () => {
+		writeMcpConfig(["--delay", "750"]);
+		const { session } = await createAgentSession({
+			...baseOptions(),
+			settings: Settings.isolated({ "tools.discoveryMode": "off", "mcp.discoveryMode": false }),
+			toolNames: ["read", REQUESTED_MCP_TOOL_NAME],
+			strictToolNames: true,
+		});
+		try {
+			// The initial discovery result returns at the 250 ms startup timeout
+			// without tools. The real tools can therefore arrive only through the
+			// manager's later onToolsChanged callback. Discovery runs in a real
+			// fixture subprocess and exposes no completion promise; fake timers
+			// cannot drive that process, so poll observable state.
+			const deadline = Date.now() + 30_000;
+			while (
+				(session.getAllToolNames().filter(name => name.startsWith("mcp__")).length < MANY_TOOL_COUNT ||
+					!session.getActiveToolNames().includes(REQUESTED_MCP_TOOL_NAME)) &&
+				Date.now() < deadline
+			) {
+				await Bun.sleep(50);
+			}
+
+			expect(session.isMCPDiscoveryEnabled()).toBe(false);
+			expect(session.getAllToolNames().filter(name => name.startsWith("mcp__"))).toHaveLength(MANY_TOOL_COUNT);
+			expect(session.getActiveToolNames()).toEqual(["read", REQUESTED_MCP_TOOL_NAME]);
+		} finally {
+			await session.dispose();
+		}
+	}, 40_000);
+
 	it("flips auto discovery on when the deferred MCP toolset crosses the threshold", async () => {
 		writeMcpConfig();
 		// A small explicit toolset keeps the pre-discovery registry far below the
@@ -122,6 +187,32 @@ describe("createAgentSession deferred MCP auto discovery", () => {
 			expect(activeNames.filter(name => name.startsWith("mcp__"))).toEqual([]);
 			const discoverable = session.getDiscoverableTools({ source: "mcp" });
 			expect(discoverable.length).toBe(MANY_TOOL_COUNT);
+		} finally {
+			await session.dispose();
+		}
+	}, 40_000);
+
+	it("flips auto discovery when MCP tools finish after the startup timeout", async () => {
+		writeMcpConfig(["--delay", "750"]);
+		const { session } = await createAgentSession({ ...baseOptions(), toolNames: ["read"] });
+		try {
+			// The manager returns from startup after 250 ms while this fixture is
+			// still connecting. Its eventual tools arrive through onToolsChanged,
+			// so wait for that observable registry update rather than a fixed delay.
+			const deadline = Date.now() + 30_000;
+			while (
+				session.getAllToolNames().filter(name => name.startsWith("mcp__")).length < MANY_TOOL_COUNT &&
+				Date.now() < deadline
+			) {
+				await Bun.sleep(50);
+			}
+
+			expect(session.isMCPDiscoveryEnabled()).toBe(true);
+			const activeNames = session.getActiveToolNames();
+			expect(activeNames).toContain("read");
+			expect(activeNames).toContain("search_tool_bm25");
+			expect(activeNames.filter(name => name.startsWith("mcp__"))).toEqual([]);
+			expect(session.getDiscoverableTools({ source: "mcp" })).toHaveLength(MANY_TOOL_COUNT);
 		} finally {
 			await session.dispose();
 		}

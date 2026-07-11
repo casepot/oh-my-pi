@@ -633,4 +633,22 @@ describe("AgentSession inline provider-call maintenance", () => {
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 		expect(session!.providerSessionState.size).toBe(0);
 	});
+
+	it("does not reset provider replay state when inline history is unchanged", async () => {
+		const codexModel = modelRegistry.find("openai-codex", "gpt-5.3-codex");
+		if (!codexModel) throw new Error("Expected bundled Codex model");
+		const { mock, sessionManager } = createHarness({
+			model: { ...codexModel, contextWindow: 50_000 },
+			seedContext: false,
+		});
+		const closeSpy = vi.fn();
+		session!.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
+
+		await session!.prompt("use the echo tool");
+
+		expect(mock.calls).toHaveLength(2);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		expect(closeSpy).not.toHaveBeenCalled();
+		expect(session!.providerSessionState.size).toBe(1);
+	});
 });

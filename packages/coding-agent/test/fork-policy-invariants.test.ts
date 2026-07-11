@@ -51,7 +51,7 @@ describe("fork policy invariants", () => {
 		for (const packagePath of packagePaths) {
 			const pkg = (await Bun.file(path.join(repoRoot, packagePath)).json()) as { name?: string };
 			if (packagePath === "package.json") {
-				expect(pkg.name).toBe("omp-monorepo");
+				expect(pkg.name).toBe("omp");
 			} else {
 				expect(pkg.name?.startsWith("@oh-my-pi/")).toBe(true);
 			}

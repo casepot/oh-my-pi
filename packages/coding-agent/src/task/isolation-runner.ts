@@ -323,10 +323,16 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 	const { result, repoRoot, mergeMode } = opts;
 	try {
 		if (mergeMode === "branch") {
-			if (!result.branchName && result.termination.code === "merge_failed" && result.error) {
+			const branchPreparationError =
+				!result.branchName &&
+				(result.termination.code === "merge_failed" ||
+					(result.exitCode === 0 && result.termination.status === "completed"))
+					? result.error
+					: undefined;
+			if (branchPreparationError) {
 				const patchList = result.patchPath ? `\nPatch artifact:\n- ${result.patchPath}` : "";
 				return {
-					summary: `\n\n<system-notification>Branch merge failed before a task branch could be created: ${result.error}\nTask outputs are preserved but changes were not applied.${patchList}</system-notification>`,
+					summary: `\n\n<system-notification>Branch merge failed before a task branch could be created: ${branchPreparationError}\nTask outputs are preserved but changes were not applied.${patchList}</system-notification>`,
 					changesApplied: false,
 					hadAnyChanges: false,
 					mergedBranchForNestedPatches: false,

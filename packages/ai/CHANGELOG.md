@@ -16,6 +16,42 @@
 - Fixed broker-backed auth reloads leaving session stickiness and usage-limit backoff attached to stale credential indices after login/logout or snapshot topology changes, allowing newly available sibling Codex accounts to be selected immediately.
 - Fixed Codex multi-account rotation and usage displays treating stale usage reports whose reset time had already elapsed or whose status contradicted remaining numeric quota as still exhausted, and made definitive preflight OAuth refresh failures disable the bad credential before stale access tokens are selected. These could leave a recovered sibling account blocked or repeatedly fail on another account's usage-limit/invalid-token state.
 - Fixed Codex SSE pre-response timeout handling so the first-event watchdog is cleared after response headers arrive instead of aborting long active response bodies later with a generic operation timeout.
+## [16.4.2] - 2026-07-10
+
+### Fixed
+
+- Fixed compatibility with xAI by automatically downgrading OpenAI-specific tool calls and image detail settings during message history replays.
+- Fixed a race condition in shared SQLite OAuth token refreshes by implementing durable credential ownership and compare-and-set persistence to prevent stale refresh failures.
+- Fixed OpenAI Codex requests to include the required version header for newly gated models.
+
+## [16.4.1] - 2026-07-10
+
+### Changed
+
+- Enforced `all_turns` reasoning context for all Responses Lite requests
+
+## [16.4.0] - 2026-07-10
+
+### Added
+
+- Added "max" as a first-class reasoning effort option across providers (including Anthropic, Google, Bedrock, and OpenAI), supporting a maximum reasoning budget of 32,768 tokens.
+- Added and standardized the "Responses Lite" wire contract and transport, enabling automatic activation via model-level catalog flags, moving tools and instructions into developer input items, disabling parallel tool calls, and stripping image detail instead of falling back to the full transport.
+- Added support for concurrent reasoning summaries on Codex Responses using the sequential-cutoff streaming contract.
+- Added Novita API-key login with authenticated key validation and automatic NOVITA_API_KEY environment variable discovery.
+
+### Changed
+
+- Recognized Pro Lite as a paid plan tier for OpenAI Codex models.
+
+### Fixed
+
+- Fixed xAI SuperGrok multi-account rotation to correctly treat HTTP 403 credit exhaustion and spending limit errors as usage limits, triggering a credential rotation to a sibling account.
+- Fixed error classification for AWS credential-resolution failures (AwsCredentialsError) to correctly map them as authentication failures.
+- Fixed OpenAI-compatible chat-completions streams to preserve vLLM-style trailing cached-token usage chunks, ensuring accurate cacheRead and billable input session statistics.
+- Fixed xai-oauth/grok-4.5 Responses requests to omit the unsupported reasoning.summary field while preserving the reasoning.effort payload.
+- Fixed Codex OAuth credential selection to re-check blocked accounts during ranking and clear stale usage-limit blocks once live usage indicates recovery.
+- Fixed sequential-cutoff reasoning summaries duplicating section headers across Codex reasoning items by tracking the cumulative summary response-globally, so replayed sections and replay-only items no longer re-emit text earlier thinking blocks already streamed.
+
 ## [16.3.15] - 2026-07-09
 
 ### Breaking Changes

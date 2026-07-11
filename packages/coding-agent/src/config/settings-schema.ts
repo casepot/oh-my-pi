@@ -948,7 +948,7 @@ export const SETTINGS_SCHEMA = {
 	// Reasoning and prompts
 	defaultThinkingLevel: {
 		type: "enum",
-		values: [...THINKING_EFFORTS, AUTO_THINKING, "max"],
+		values: [...THINKING_EFFORTS, AUTO_THINKING],
 		default: "high",
 		ui: {
 			tab: "model",
@@ -5101,6 +5101,8 @@ export const SETTINGS_SCHEMA = {
 	"thinkingBudgets.high": { type: "number", default: 16384 },
 
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
+
+	"thinkingBudgets.max": { type: "number", default: 32768 },
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5329,6 +5331,7 @@ export interface ThinkingBudgetsSettings {
 	medium: number;
 	high: number;
 	xhigh: number;
+	max: number;
 }
 
 export interface SttSettings {

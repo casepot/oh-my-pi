@@ -137,6 +137,13 @@ export function createToolScopedAbortReason(
 	return { kind: "tool-scoped-abort", message, toolCallMessages, defaultToolCallMessage };
 }
 
+/**
+ * Marks an abort raised by a completed post-tool hook as terminal for the
+ * current run. External/user aborts still synthesize an aborted assistant
+ * boundary; this reason stops after persisting the completed tool batch.
+ */
+export const TERMINAL_TOOL_RESULT_ABORT_REASON = Symbol.for("pi-agent-core.terminal-tool-result");
+
 const STEERING_INTERRUPT_POLL_MS = 250;
 
 class HarmonyLeakInterruption extends Error {
@@ -857,6 +864,10 @@ async function runLoopBody(
 		let harmonyTruncateResumeCount = 0;
 		let pausedTurnContinuations = 0;
 		let lengthToolCallRecoveryContinuations = 0;
+		// A completed tool committed a real result even if cancellation arrived
+		// in flight. Preserve exactly one provider boundary so that result is
+		// followed by the run's aborted assistant message.
+		let preserveCompletedToolAbortBoundary = false;
 
 		// Soft tool requirement lifecycle (reminder → escalate; see SoftToolRequirement).
 		// `forcedToolChoice` carries a one-turn escalation into the next model call. It
@@ -944,6 +955,8 @@ async function runLoopBody(
 				// Stream assistant response
 				let recovered: HarmonyRecoveredToolCall | undefined;
 				let message: AssistantMessage;
+				const preserveExternalAbortBoundary = preserveCompletedToolAbortBoundary;
+				preserveCompletedToolAbortBoundary = false;
 				try {
 					message = await streamAssistantResponse(
 						currentContext,
@@ -957,6 +970,7 @@ async function runLoopBody(
 						harmonyRetryAttempt,
 						hostToolChoice,
 						forcedToolChoice,
+						preserveExternalAbortBoundary,
 					);
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
@@ -1135,6 +1149,11 @@ async function runLoopBody(
 					);
 
 					toolResults.push(...executionResult.toolResults);
+					// Only executions that actually returned can carry an external abort
+					// into the next provider boundary. Cooperative cancellations remain
+					// eligible for the normal prompt short-circuit.
+					preserveCompletedToolAbortBoundary =
+						executionResult.hasCompletedToolExecution && signal?.aborted === true;
 
 					for (const result of toolResults) {
 						currentContext.messages.push(result);
@@ -1169,6 +1188,12 @@ async function runLoopBody(
 							};
 						}
 					}
+				}
+
+				// A tool hook may mark its completed result as terminal (e.g. subagent yield).
+				// Stop before the next provider call without changing external/user abort semantics.
+				if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) {
+					hasMoreToolCalls = false;
 				}
 
 				if (toolCalls.length > 0) {
@@ -1291,8 +1316,9 @@ async function streamAssistantResponse(
 	harmonyRetryAttempt = 0,
 	hostToolChoice?: ToolChoice,
 	forcedToolChoice?: ToolChoice,
+	preserveCompletedToolAbortBoundary = false,
 ): Promise<AssistantMessage> {
-	if (signal?.aborted) {
+	if (signal?.aborted && !preserveCompletedToolAbortBoundary) {
 		return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 	}
 
@@ -1311,12 +1337,12 @@ async function streamAssistantResponse(
 		exampleDialect,
 		ownedDialect,
 	);
-	if (signal?.aborted) {
+	if (signal?.aborted && !preserveCompletedToolAbortBoundary) {
 		return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 	}
 	let finalized = await finalizeProviderContextForDispatch(initialProviderContext, config, model, ownedDialect);
 	for (let rematerializations = 0; config.preflightProviderContext; ) {
-		if (signal?.aborted) {
+		if (signal?.aborted && !preserveCompletedToolAbortBoundary) {
 			return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 		}
 		let result: ProviderContextPreflightResult;
@@ -1327,12 +1353,12 @@ async function streamAssistantResponse(
 				signal,
 			});
 		} catch (err) {
-			if (signal?.aborted) {
+			if (signal?.aborted && !preserveCompletedToolAbortBoundary) {
 				return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 			}
 			throw err;
 		}
-		if (signal?.aborted) {
+		if (signal?.aborted && !preserveCompletedToolAbortBoundary) {
 			return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 		}
 		if (result.action === "continue") {
@@ -1357,13 +1383,13 @@ async function streamAssistantResponse(
 			exampleDialect,
 			ownedDialect,
 		);
-		if (signal?.aborted) {
+		if (signal?.aborted && !preserveCompletedToolAbortBoundary) {
 			return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 		}
 		finalized = await finalizeProviderContextForDispatch(rematerializedProviderContext, config, model, ownedDialect);
 	}
 
-	if (signal?.aborted) {
+	if (signal?.aborted && !preserveCompletedToolAbortBoundary) {
 		return emitAbortedAssistantMessage(null, false, NO_COMPLETED_TOOL_CALLS, context, config, stream, signal);
 	}
 	const llmContext = finalized.context;
@@ -1866,7 +1892,7 @@ async function executeToolCalls(
 	config: AgentLoopConfig,
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
-): Promise<{ toolResults: ToolResultMessage[] }> {
+): Promise<{ toolResults: ToolResultMessage[]; hasCompletedToolExecution: boolean }> {
 	const tools = currentContext.tools;
 	const {
 		hasSteeringMessages,
@@ -1923,6 +1949,7 @@ async function executeToolCalls(
 			skipped: false,
 			toolResultMessage: undefined as ToolResultMessage | undefined,
 			resultEmitted: false,
+			completedToolExecution: false,
 		};
 	});
 
@@ -2101,7 +2128,6 @@ async function executeToolCalls(
 		let result: AgentToolResult<any> = { content: [], details: {} };
 		let isError = false;
 		let caughtError: unknown;
-		let completedToolExecution = false;
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
@@ -2159,7 +2185,7 @@ async function executeToolCalls(
 					},
 					toolContext,
 				);
-				completedToolExecution = true;
+				record.completedToolExecution = true;
 				const coerced = coerceToolResult(rawResult);
 				result = coerced.result;
 				if (coerced.malformed || result.isError) isError = true;
@@ -2172,7 +2198,7 @@ async function executeToolCalls(
 				isError = true;
 			}
 
-			if (afterToolCall && (!record.signal.aborted || completedToolExecution)) {
+			if (afterToolCall && (!record.signal.aborted || record.completedToolExecution)) {
 				try {
 					const after = await afterToolCall(
 						{
@@ -2315,7 +2341,10 @@ async function executeToolCalls(
 		}
 	}
 
-	return { toolResults: emittedToolResults };
+	return {
+		toolResults: emittedToolResults,
+		hasCompletedToolExecution: records.some(record => record.completedToolExecution),
+	};
 }
 
 /**

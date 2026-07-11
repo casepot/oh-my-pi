@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -56,8 +56,15 @@ describe("AgentSession.switchSession previous-context build", () => {
 		}
 	});
 
-	function buildSession(tempDir: TempDir): { session: AgentSession; sessionManager: SessionManager } {
-		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+	function buildSession(
+		tempDir: TempDir,
+		options: {
+			sessionManager?: SessionManager;
+			promptCacheKey?: string;
+			inheritedProviderPromptCacheKey?: boolean;
+		} = {},
+	): { session: AgentSession; sessionManager: SessionManager } {
+		const sessionManager = options.sessionManager ?? SessionManager.create(tempDir.path(), tempDir.path());
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -65,15 +72,28 @@ describe("AgentSession.switchSession previous-context build", () => {
 				tools: [],
 				messages: [],
 			},
+			promptCacheKey: options.promptCacheKey,
 		});
 		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
+			providerPromptCacheKeySource: options.inheritedProviderPromptCacheKey ? "fork" : undefined,
 		});
 		sessions.push(session);
 		return { session, sessionManager };
+	}
+
+	async function createForkedManager(tempDir: TempDir, label: string): Promise<SessionManager> {
+		const parentManager = SessionManager.create(tempDir.path(), tempDir.path());
+		parentManager.appendMessage({ role: "user", content: label, timestamp: 1 });
+		await parentManager.ensureOnDisk();
+		const parentFile = parentManager.getSessionFile();
+		if (!parentFile) throw new Error("Expected parent session file");
+		const forkedManager = await SessionManager.forkFrom(parentFile, tempDir.path(), tempDir.path());
+		await parentManager.close();
+		return forkedManager;
 	}
 
 	/** Wrap `sessionManager.buildSessionContext` so each call's caller-visible
@@ -130,6 +150,69 @@ describe("AgentSession.switchSession previous-context build", () => {
 		// The previous session's display context MUST NOT be materialized. Only
 		// the new target context (post-`setSessionFile`) should be built.
 		expect(calls).toEqual([{ sessionFile: targetSessionFile!, transcript: undefined }]);
+	});
+
+	it("preserves the target affinity during adoption and restores the live key when switching fails", async () => {
+		const tempDir = TempDir.createSync("@pi-switch-cache-key-rollback-");
+		tempDirs.push(tempDir);
+
+		const sourceManager = await createForkedManager(tempDir, "source");
+		const sourceKey = sourceManager.getHeader()?.providerPromptCacheKey;
+		const sourceFile = sourceManager.getSessionFile();
+		expect(sourceKey).toBeString();
+		expect(sourceFile).toBeString();
+		const { session, sessionManager } = buildSession(tempDir, {
+			sessionManager: sourceManager,
+			promptCacheKey: sourceKey,
+			inheritedProviderPromptCacheKey: true,
+		});
+
+		const targetManager = await createForkedManager(tempDir, "target");
+		const targetKey = targetManager.getHeader()?.providerPromptCacheKey;
+		const targetFile = targetManager.getSessionFile();
+		expect(targetKey).toBeString();
+		expect(targetKey).not.toBe(sourceKey);
+		expect(targetFile).toBeString();
+		await targetManager.close();
+
+		const originalBuildSessionContext = sessionManager.buildSessionContext.bind(sessionManager);
+		const observedTargetAffinity: Array<{ header: string | undefined; live: string | undefined }> = [];
+		sessionManager.buildSessionContext = ((options?: BuildSessionContextOptions): SessionContext => {
+			if (sessionManager.getSessionFile() === targetFile) {
+				observedTargetAffinity.push({
+					header: sessionManager.getHeader()?.providerPromptCacheKey,
+					live: session.agent.promptCacheKey,
+				});
+				throw new Error("forced target context failure");
+			}
+			return originalBuildSessionContext(options);
+		}) as SessionManager["buildSessionContext"];
+
+		let switchError: unknown;
+		try {
+			await session.switchSession(targetFile!);
+		} catch (error) {
+			switchError = error;
+		} finally {
+			sessionManager.buildSessionContext = originalBuildSessionContext;
+		}
+		expect(switchError).toBeInstanceOf(Error);
+		expect(String(switchError)).toContain("forced target context failure");
+
+		expect(observedTargetAffinity).toEqual([{ header: targetKey, live: targetKey }]);
+		expect(session.sessionFile).toBe(sourceFile);
+		expect(sessionManager.getHeader()?.providerPromptCacheKey).toBe(sourceKey);
+		expect(session.agent.promptCacheKey).toBe(sourceKey);
+		session.setThinkingLevel(ThinkingLevel.Off);
+		expect(session.agent.promptCacheKey).toBeUndefined();
+		expect(sessionManager.getHeader()?.providerPromptCacheKey).toBeUndefined();
+
+		const reopenedTarget = await SessionManager.open(targetFile!, tempDir.path());
+		try {
+			expect(reopenedTarget.getHeader()?.providerPromptCacheKey).toBe(targetKey);
+		} finally {
+			await reopenedTarget.close();
+		}
 	});
 
 	it("builds the previous display context for same-session reloads", async () => {

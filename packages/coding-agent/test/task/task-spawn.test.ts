@@ -718,12 +718,17 @@ describe("task spawn routing", () => {
 			projectAgentsDir: null,
 		});
 
+		const defaultTool = await TaskTool.create(createSession({}));
+		expect(defaultTool.description).toContain("At most 32 subagents");
+
 		const cappedTool = await TaskTool.create(createSession({ settings: { "task.maxConcurrency": 1 } }));
 		expect(cappedTool.description).toContain("At most 1 subagent");
 		expect(cappedTool.description).toContain("Concurrency cap");
 
 		const fanoutTool = await TaskTool.create(createSession({ settings: { "task.maxConcurrency": 4 } }));
 		expect(fanoutTool.description).toContain("At most 4 subagents");
+		const fractionalTool = await TaskTool.create(createSession({ settings: { "task.maxConcurrency": 4.9 } }));
+		expect(fractionalTool.description).toContain("At most 4 subagents");
 
 		// `0` = Unlimited in the settings UI; fractional values truncate to 0.
 		for (const maxConcurrency of [0, 0.5]) {

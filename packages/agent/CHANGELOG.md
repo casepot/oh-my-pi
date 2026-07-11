@@ -23,6 +23,29 @@
 - Added provider-call maintenance hooks, materialized-context preflight/rematerialization, abort guards, event-consumption acknowledgements, and a visible `ContextMaintenanceError` lifecycle so embedders can fail closed before sending an unsafe continuation request.
 - Fixed remote compaction to classify caller cancellation separately from timeout, HTTP, malformed-response, and transport failures, preserving cancellation while allowing live remote failures to fall back locally with structured diagnostics.
 - Fixed V2 remote compaction to honor the configured timeout, avoid retrying full request timeouts, send Codex remote-compaction beta feature headers, and skip the V1 remote fallback after a V2 timeout so local fallback starts immediately.
+## [16.4.2] - 2026-07-10
+
+### Fixed
+
+- Fixed serialization of BigInt tool arguments to prevent data loss during remote compaction.
+
+## [16.4.1] - 2026-07-10
+
+### Fixed
+
+- Enabled reasoning encryption content for all Responses Lite compaction requests
+
+## [16.4.0] - 2026-07-10
+
+### Added
+
+- Added the `ThinkingLevel.Max` ("max") configuration option, mapping to the `Effort.Max` tier for supported models.
+
+### Fixed
+
+- Fixed remote compaction behavior for Codex Responses Lite (GPT-5.6 family) models across both V1 and V2 endpoints to ensure correct formatting and routing.
+- Fixed an issue where aborted tool-result hooks could trigger subsequent provider calls before the abort signal fully settled.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added

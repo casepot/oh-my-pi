@@ -308,6 +308,30 @@ describe("SessionManager legacy session migration persistence", () => {
 		}
 	});
 
+	it("durably flushes an authoritative cache-key invalidation", async () => {
+		const sessionFile = path.join(tempDir, "cache-key-invalidation.jsonl");
+		fs.writeFileSync(
+			sessionFile,
+			`${JSON.stringify({
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: "current-session",
+				timestamp: "2025-01-01T00:00:00Z",
+				cwd: tempDir,
+				providerPromptCacheKey: "stale-cache-key",
+			})}\n`,
+		);
+
+		const session = await SessionManager.open(sessionFile, tempDir);
+		expect(session.invalidateProviderPromptCacheKey("stale-cache-key")).toBe(true);
+		await session.flush();
+
+		const persistedEntries = await loadEntriesFromFile(sessionFile);
+		const header = getHeader(persistedEntries);
+		if (!header) throw new Error("Expected session header");
+		expect(header.providerPromptCacheKey).toBeUndefined();
+	});
+
 	it("still rewrites immediately when explicitly requested", async () => {
 		const sessionFile = path.join(tempDir, "legacy-rewrite.jsonl");
 		fs.writeFileSync(

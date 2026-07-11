@@ -24,6 +24,8 @@ import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" w
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
 import { buildActiveSkillsetPromptSummaries } from "./skillsets/prompt";
+import { normalizeConcurrencyLimit } from "./task/parallel";
+import { usesCodexTaskPrompt } from "./task/prompt-policy";
 import { shortenPath } from "./tools/render-utils";
 import { type ActiveRepoContext, resolveActiveRepoContext } from "./utils/active-repo-context";
 import { formatLocalCalendarDate } from "./utils/local-date";
@@ -485,8 +487,12 @@ export interface BuildSystemPromptOptions {
 	eagerTasks?: boolean;
 	/** When true, the Eager Tasks section uses the hard MUST/ONLY wording (`task.eager: always`) rather than the softer `preferred` nudge. */
 	eagerTasksAlways?: boolean;
-	/** Whether `task.batch` is enabled; gates batch-call guidance in the Eager Tasks section. */
+	/** Whether `task.batch` is enabled; selects the centralized delegation guidance's call shape. */
 	taskBatch?: boolean;
+	/** Effective task concurrency limit displayed in centralized delegation guidance. Zero means unlimited. */
+	taskMaxConcurrency?: number;
+	/** Whether IRC-backed parallel coordination can be included in delegation policy. */
+	taskIrcEnabled?: boolean;
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
@@ -495,8 +501,10 @@ export interface BuildSystemPromptOptions {
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Whether the local memory://root summary is active. */
 	memoryRootEnabled?: boolean;
-	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced to the agent. */
+	/** Active model identifier (e.g. "anthropic/claude-opus-4") used by prompt policy and optionally surfaced. */
 	model?: string;
+	/** Whether to surface `model` in the workstation block. Model-specific prompt policy still uses it. Default: true. */
+	includeModelInPrompt?: boolean;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
 	personality?: Personality;
 	/** Whether to include the workspace directory tree in the system prompt. Default: false */
@@ -541,10 +549,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks = false,
 		eagerTasksAlways = false,
 		taskBatch = true,
+		taskMaxConcurrency = 0,
+		taskIrcEnabled = false,
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		memoryRootEnabled = false,
 		model,
+		includeModelInPrompt = true,
 		personality = "default",
 		includeWorkspaceTree = false,
 		renderMermaid = true,
@@ -779,7 +790,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		date,
 		dateTime,
 		cwd: promptCwd,
-		model: model ?? "",
+		model: includeModelInPrompt ? (model ?? "") : "",
+		useCodexTaskPrompt: usesCodexTaskPrompt(model),
 		personality: personality === "none" ? "" : PERSONALITY_SPECS[personality].trim(),
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
@@ -789,6 +801,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		eagerTasks,
 		eagerTasksAlways,
 		taskBatch,
+		MAX_CONCURRENCY: normalizeConcurrencyLimit(taskMaxConcurrency),
+		taskIrcEnabled,
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
 		hasObsidian: hasObsidian(),
