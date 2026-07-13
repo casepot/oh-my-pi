@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added context-span checkpoints with explicit rewind, scoped-Shake and semantic sealing, durable execution manifests, close-time todo preservation, and a no-compaction keep path.
 - Added a globally configured, fail-open IRC observer that exports attributed inter-agent traffic through a bounded supervised subprocess to private Ergo channels for encrypted Repartee viewing.
 - Added non-context goal context metrics and queryable proof-graph projection records for goal-mode storage/context sizing.
 - Added a reusable `plan-review` skill and target-planning prompt guidance for explicit planning review evidence.
@@ -80,6 +81,7 @@
 - Changed the default automatic compaction strategy from snapcompact to context-full so default maintenance uses provider-native remote compaction when available instead of image archives.
 
 ### Fixed
+- Fixed RPC prompts to use the correlated operation lifecycle so clients wait through complete agent/tool continuations instead of receiving an untrackable legacy response.
 - Fixed transient session-storage failures permanently poisoning live sessions, made Shake abort or roll back unsafe elisions, and prevented session moves from overwriting existing destinations.
 - Fixed rejected retry continuations and retry-cancellation races leaving subagent tasks stuck or retry lifecycle events unpaired.
 - Clarified automatic IRC replies as context-only no-tools messages, surfaced task-agent activity and retry diagnostics, and made missing `agent://` output errors state-aware.

@@ -3604,8 +3604,8 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
-			label: "Checkpoint/Rewind",
-			description: "Enable the checkpoint and rewind tools for context checkpointing",
+			label: "Checkpoint Lifecycle",
+			description: "Enable checkpoint, rewind, seal, and keep_checkpoint context lifecycle tools",
 		},
 	},
 

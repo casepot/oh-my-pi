@@ -1362,54 +1362,46 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
-				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
-				if (skillResult) {
-					return success(id, "prompt", skillResult);
-				}
-				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
-					session,
-					sessionManager: session.sessionManager,
-					settings: session.settings,
-					cwd: session.sessionManager.getCwd(),
-					output: text => output({ type: "command_output", text }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-					},
-				});
-				if (builtinResult !== false) {
-					if ("prompt" in builtinResult) {
-						watchAndReportLocalOnlyPromptResult({
-							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
-							output,
-							onError: promptError => output(error(id, "prompt", errorInfoFromUnknown(promptError))),
-							extensionUserMessageTracker,
-						});
-						return success(id, "prompt");
-					}
-					return success(id, "prompt", { agentInvoked: false });
-				}
-
-				// Don't await - events will stream
-				// Extension commands are executed immediately, file prompt templates are expanded
-				// If streaming and streamingBehavior specified, queues via steer/followUp
-				watchAndReportLocalOnlyPromptResult({
+				const started = startOperation(
+					"prompt",
 					id,
-					startPrompt: () =>
-						session.prompt(command.message, {
-							images: command.images,
-							streamingBehavior: command.streamingBehavior,
-						}),
-					output,
-					onError: promptError => output(error(id, "prompt", errorInfoFromUnknown(promptError))),
-					extensionUserMessageTracker,
-				});
-				return success(id, "prompt");
+					async () => {
+						const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
+						if (skillResult) return skillResult;
+						const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+							session,
+							sessionManager: session.sessionManager,
+							settings: session.settings,
+							cwd: session.sessionManager.getCwd(),
+							output: text => output({ type: "command_output", text }),
+							refreshCommands: emitAvailableCommandsUpdate,
+							reloadPlugins: reloadPluginState,
+							notifyTitleChanged: async () => {
+								output({
+									type: "session_info_update",
+									title: session.sessionName,
+									sessionId: session.sessionId,
+								});
+							},
+							notifyConfigChanged: async () => {
+								output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+							},
+						});
+						if (builtinResult !== false && !("prompt" in builtinResult)) return { agentInvoked: false };
+						const message = builtinResult === false ? command.message : builtinResult.prompt;
+						const tracked = extensionUserMessageTracker.watchPrompt(() =>
+							session.prompt(message, {
+								images: command.images,
+								streamingBehavior: command.streamingBehavior,
+							}),
+						);
+						const agentInvoked = await tracked.prompt;
+						if (!agentInvoked) await tracked.waitForAgentMessageTasks();
+						return { agentInvoked: agentInvoked || tracked.hasAgentMessageTask() };
+					},
+					() => session.abort(),
+				);
+				return success(id, "prompt", started);
 			}
 			case "shutdown":
 				shutdownRequested = true;

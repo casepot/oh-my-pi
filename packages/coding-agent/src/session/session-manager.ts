@@ -1790,6 +1790,36 @@ export class SessionManager {
 		}
 		await this.#rewriteAtomically();
 	}
+	/**
+	 * Apply in-memory entry mutations and publish the complete journal once.
+	 * Appends performed by `mutate` stay behind the rewrite fence; failures restore
+	 * the prior entry graph and leaf without exposing a partial transaction.
+	 */
+	async mutateEntriesAtomically<T>(mutate: () => T): Promise<T> {
+		if (!this.#persist || !this.#sessionFile) return mutate();
+		await this.flush();
+		if (this.#atomicRewriteFenceEpoch !== null) throw new Error("Session rewrite transaction already active");
+		const entries = structuredClone(this.#entries) as SessionEntry[];
+		const leafId = this.#index.leafId();
+		const fileIsCurrent = this.#fileIsCurrent;
+		const rewriteRequired = this.#rewriteRequired;
+		const epoch = this.#diskEpoch;
+		this.#atomicRewriteFenceEpoch = epoch;
+		try {
+			const result = mutate();
+			await this.#rewriteAtomically();
+			return result;
+		} catch (error) {
+			this.#entries = entries;
+			this.#index.rebuild(entries);
+			this.#index.setLeaf(leafId);
+			this.#atomicRewriteDirty = false;
+			if (this.#atomicRewriteFenceEpoch === epoch) this.#atomicRewriteFenceEpoch = null;
+			this.#fileIsCurrent = fileIsCurrent;
+			this.#rewriteRequired = rewriteRequired;
+			throw error;
+		}
+	}
 
 	/**
 	 * Append a custom message entry (for extensions) that participates in LLM context.

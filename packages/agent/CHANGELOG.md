@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added strict exclusive Shake boundaries so callers can compact only entries after a validated session checkpoint without silently widening missing scopes.
 
 - Added persisted compaction run metrics and structured lifecycle logs for model, thinking, token, timing, summary-size, and remote-compaction diagnostics.
 

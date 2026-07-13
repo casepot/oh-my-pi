@@ -679,3 +679,53 @@ describe("SessionManager fence handoff across superseded rewrites", () => {
 		expect(storage.detachedLines).toEqual([]);
 	});
 });
+
+describe("SessionManager entry mutation transaction", () => {
+	it("restores the entry graph and leaf when a staged mutation fails", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionManager = SessionManager.create("/cwd", "/sessions", storage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected built-in anthropic model");
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "seed response" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		await sessionManager.flush();
+		const beforeEntries = structuredClone(sessionManager.getEntries());
+		const beforeLeaf = sessionManager.getLeafId();
+
+		await expect(
+			sessionManager.mutateEntriesAtomically(() => {
+				sessionManager.appendCustomEntry("partial", { discarded: true });
+				throw new Error("mutation failed");
+			}),
+		).rejects.toThrow("mutation failed");
+
+		expect(sessionManager.getEntries()).toEqual(beforeEntries);
+		expect(sessionManager.getLeafId()).toBe(beforeLeaf);
+		await sessionManager.mutateEntriesAtomically(() => {
+			sessionManager.appendCustomEntry("committed", { value: 1 });
+			sessionManager.appendCustomEntry("completion", { value: 2 });
+		});
+		expect(
+			sessionManager
+				.getBranch()
+				.slice(-2)
+				.map(entry => (entry.type === "custom" ? entry.customType : entry.type)),
+		).toEqual(["committed", "completion"]);
+		await sessionManager.close();
+	});
+});

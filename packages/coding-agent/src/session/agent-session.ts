@@ -365,6 +365,9 @@ import goalTargetPlanningPrompt from "../prompts/goals/goal-target-planning.md" 
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
+import checkpointCloseErrorTemplate from "../prompts/system/checkpoint-close-error.md" with { type: "text" };
+import checkpointSealManifestTemplate from "../prompts/system/checkpoint-seal-manifest.md" with { type: "text" };
+import checkpointSealReportTemplate from "../prompts/system/checkpoint-seal-report.md" with { type: "text" };
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
@@ -427,7 +430,13 @@ import {
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import { normalizeToolNames } from "../tools/builtin-names";
-import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
+import type {
+	CheckpointState,
+	CompletedRewindState,
+	KeepCheckpointToolDetails,
+	SealReport,
+	SealToolDetails,
+} from "../tools/checkpoint";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
@@ -664,6 +673,72 @@ function checkpointStartedAtFromEntry(entry: SessionEntry): string | undefined {
 		if (startedAt) return startedAt;
 	}
 	return entry.timestamp;
+}
+
+type PendingCheckpointDisposition =
+	| { kind: "rewind"; report: string }
+	| { kind: "keep"; reason: string }
+	| { kind: "seal-summary"; report: SealReport }
+	| { kind: "seal-shake" };
+
+interface CheckpointExecutionManifest {
+	checkpointEntryId: string | null;
+	startedAt: string;
+	completedAt: string;
+	evidenceArtifact: string;
+	entryCount: number;
+	toolCalls: number;
+	toolResults: { succeeded: number; failed: number };
+	errorCount: number;
+	changedPaths: string[];
+	commands: string[];
+	todoStart: TodoPhase[];
+	todoClose: TodoPhase[];
+}
+
+function checkpointCompletionKind(entry: SessionEntry): "keep" | "seal" | undefined {
+	if (entry.type !== "custom_message") return undefined;
+	if (entry.customType === "checkpoint-keep") return "keep";
+	if (entry.customType === "checkpoint-seal") return "seal";
+	return undefined;
+}
+
+function markdownList(items: string[], empty = "None."): string {
+	return items.length > 0 ? items.map(item => `- ${item}`).join("\n") : empty;
+}
+
+function renderSealReport(report: SealReport): string {
+	return prompt.render(checkpointSealReportTemplate, {
+		outcome: report.outcome,
+		durableContext: markdownList(report.durableContext),
+		decisions: markdownList(report.decisions.map(item => `${item.decision} — ${item.reason}`)),
+		verification: markdownList(report.verification.map(item => `${item.contract} — ${item.evidence}`)),
+		remaining: markdownList(report.remaining),
+		next: report.next,
+	});
+}
+
+function toolResultDetails(message: AgentMessage, toolName: string): Record<string, unknown> | undefined {
+	if (message.role !== "toolResult" || message.toolName !== toolName || message.isError === true) return undefined;
+	return message.details && typeof message.details === "object"
+		? (message.details as Record<string, unknown>)
+		: undefined;
+}
+
+function dispositionFromToolResult(message: AgentMessage): PendingCheckpointDisposition | undefined {
+	const rewind = toolResultDetails(message, "rewind");
+	if (rewind?.rewound === true && typeof rewind.report === "string" && rewind.report.trim()) {
+		return { kind: "rewind", report: rewind.report.trim() };
+	}
+	const keep = toolResultDetails(message, "keep_checkpoint") as KeepCheckpointToolDetails | undefined;
+	if (keep?.disposition === "keep" && typeof keep.reason === "string" && keep.reason.trim()) {
+		return { kind: "keep", reason: keep.reason.trim() };
+	}
+	const seal = toolResultDetails(message, "seal") as SealToolDetails | undefined;
+	if (seal?.disposition !== "seal") return undefined;
+	if (seal.strategy === "shake") return { kind: "seal-shake" };
+	if (seal.strategy === "summary" && seal.report) return { kind: "seal-summary", report: seal.report };
+	return undefined;
 }
 
 // A side-channel assistant response is signed for the hidden prompt/history that
@@ -2568,7 +2643,7 @@ export class AgentSession {
 	/** Session-start value of `inlineToolDescriptors`; drives handoff tool pruning. */
 	#pruneToolDescriptions = false;
 	#checkpointState: CheckpointState | undefined = undefined;
-	#pendingRewindReport: string | undefined = undefined;
+	#pendingCheckpointDisposition: PendingCheckpointDisposition | undefined = undefined;
 	#lastCompletedRewind: CompletedRewindState | undefined = undefined;
 	#rewoundToolResultIds = new Set<string>();
 	#lastSuccessfulYieldToolCallId: string | undefined = undefined;
@@ -2857,10 +2932,23 @@ export class AgentSession {
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
-			const rewindReport = this.#extractRewindReport(messages);
-			if (rewindReport) {
-				this.#pendingRewindReport = undefined;
-				await this.#applyRewind(rewindReport, messages);
+			const disposition = this.#extractCheckpointDisposition(messages);
+			if (disposition) {
+				this.#pendingCheckpointDisposition = undefined;
+				try {
+					await this.#applyCheckpointDisposition(disposition, messages);
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					this.sessionManager.appendCustomMessageEntry(
+						"checkpoint-close-error",
+						prompt.render(checkpointCloseErrorTemplate, { reason }),
+						true,
+						{ disposition: disposition.kind, reason, checkpointRemainsOpen: true, activeContextChanged: false },
+						"agent",
+						false,
+					);
+					throw error;
+				}
 			}
 			if (context?.message.role === "assistant") {
 				const detection = this.#activeToolCallLoopGuard()?.recordTurn({
@@ -4671,16 +4759,12 @@ export class AgentSession {
 						checkpointEntryId,
 						startedAt: details?.startedAt ?? new Date().toISOString(),
 					};
-					this.#pendingRewindReport = undefined;
+					this.#pendingCheckpointDisposition = undefined;
 					this.#lastCompletedRewind = undefined;
 				}
-				if (toolName === "rewind" && !isError && this.#checkpointState) {
-					const detailReport = typeof details?.report === "string" ? details.report.trim() : "";
-					const textReport = content?.find(part => part.type === "text")?.text?.trim() ?? "";
-					const report = detailReport || textReport;
-					if (report.length > 0) {
-						this.#pendingRewindReport = report;
-					}
+				if (this.#checkpointState) {
+					const disposition = dispositionFromToolResult(event.message);
+					if (disposition) this.#pendingCheckpointDisposition = disposition;
 				}
 			}
 		}
@@ -10061,7 +10145,7 @@ export class AgentSession {
 
 	#clearCheckpointRuntimeState(): void {
 		this.#checkpointState = undefined;
-		this.#pendingRewindReport = undefined;
+		this.#pendingCheckpointDisposition = undefined;
 		this.#lastCompletedRewind = undefined;
 		this.#rewoundToolResultIds.clear();
 	}
@@ -10098,6 +10182,11 @@ export class AgentSession {
 			if (completedFromEntry) {
 				completed = completedFromEntry;
 				pending = undefined;
+				continue;
+			}
+			if (checkpointCompletionKind(entry)) {
+				completed = undefined;
+				pending = undefined;
 			}
 		}
 		if (pending) {
@@ -10124,7 +10213,7 @@ export class AgentSession {
 		if (state) {
 			this.#lastCompletedRewind = undefined;
 		} else {
-			this.#pendingRewindReport = undefined;
+			this.#pendingCheckpointDisposition = undefined;
 		}
 	}
 
@@ -11883,11 +11972,28 @@ export class AgentSession {
 	}
 
 	#syncTodoPhasesFromBranch(): void {
-		const phases = getLatestTodoPhasesFromEntries(this.sessionManager.getBranch());
-		// Strip completed/abandoned tasks — they were done in a previous run,
-		// so they have no bearing on progress tracking for the new turn.
-		for (const phase of phases) {
-			phase.tasks = phase.tasks.filter(t => t.status !== "completed" && t.status !== "abandoned");
+		const branch = this.sessionManager.getBranch();
+		const phases = getLatestTodoPhasesFromEntries(branch);
+		let preserveTerminal = false;
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (!entry) continue;
+			if (entry.type === "custom_message" && entry.customType === "rewind-report") break;
+			if (checkpointCompletionKind(entry)) {
+				preserveTerminal = true;
+				break;
+			}
+			if (isSuccessfulCheckpointEntry(entry)) {
+				preserveTerminal = true;
+				break;
+			}
+		}
+		if (!preserveTerminal) {
+			// Historical navigation discards terminal tasks. Active or explicitly
+			// closed checkpoints preserve the in-span projection across replay.
+			for (const phase of phases) {
+				phase.tasks = phase.tasks.filter(t => t.status !== "completed" && t.status !== "abandoned");
+			}
 		}
 		this.setTodoPhases(phases.filter(p => p.tasks.length > 0));
 	}
@@ -12966,7 +13072,10 @@ export class AgentSession {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
-	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	async shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; onBeforeCommit?: (result: ShakeResult) => void } = {},
+	): Promise<ShakeResult> {
 		if (mode === "images") {
 			const { removed } = await this.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
@@ -12981,7 +13090,11 @@ export class AgentSession {
 		});
 		const regions = collectShakeRegions(branchEntries, config);
 		if (regions.length === 0) {
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+			const result: ShakeResult = { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+			if (opts.onBeforeCommit) {
+				await this.sessionManager.mutateEntriesAtomically(() => opts.onBeforeCommit?.(result));
+			}
+			return result;
 		}
 
 		const artifactId = await this.#saveShakeArtifact(regions);
@@ -12999,34 +13112,30 @@ export class AgentSession {
 			if (replacement.length > 0) replacementTokens += countTokens(replacement);
 			return { region, replacement };
 		});
-
-		const rollback = applyShakeRegions(items);
-
-		try {
-			await this.sessionManager.rewriteEntries();
-		} catch (error) {
-			rollback();
-			throw error;
-		}
-		const tokensFreed = Math.max(0, originalTokens - replacementTokens);
-		this.#appendProviderUsageFloorReset("shake", {
+		const result: ShakeResult = {
 			mode,
 			toolResultsDropped,
 			blocksDropped,
-			tokensFreed,
+			tokensFreed: Math.max(0, originalTokens - replacementTokens),
+			artifactId,
+		};
+
+		await this.sessionManager.mutateEntriesAtomically(() => {
+			applyShakeRegions(items);
+			this.#appendProviderUsageFloorReset("shake", {
+				mode,
+				toolResultsDropped,
+				blocksDropped,
+				tokensFreed: result.tokensFreed,
+			});
+			opts.onBeforeCommit?.(result);
 		});
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
-		return {
-			mode,
-			toolResultsDropped,
-			blocksDropped,
-			tokensFreed,
-			artifactId,
-		};
+		return result;
 	}
 
 	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string): string {
@@ -14727,12 +14836,12 @@ export class AgentSession {
 	}
 
 	#enforceRewindBeforeYield(): boolean {
-		if (!this.#checkpointState || this.#pendingRewindReport) {
+		if (!this.#checkpointState || this.#pendingCheckpointDisposition) {
 			return false;
 		}
 		const reminder = [
 			"<system-warning>",
-			"You are in an active checkpoint. You MUST call rewind with your investigation findings before yielding. Do NOT yield without completing the checkpoint.",
+			"You are in an active checkpoint. You MUST close it with rewind, seal, or keep_checkpoint before yielding.",
 			"</system-warning>",
 		].join("\n");
 		this.#appendNextTurnDeveloperReminder(reminder);
@@ -14740,22 +14849,343 @@ export class AgentSession {
 		return true;
 	}
 
-	#extractRewindReport(messages: AgentMessage[]): string | undefined {
+	#extractCheckpointDisposition(messages: AgentMessage[]): PendingCheckpointDisposition | undefined {
 		if (!this.#checkpointState) return undefined;
-		if (this.#pendingRewindReport) return this.#pendingRewindReport;
+		if (this.#pendingCheckpointDisposition) return this.#pendingCheckpointDisposition;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
-			if (message?.role !== "toolResult" || message.toolName !== "rewind" || message.isError) continue;
-			const details = message.details;
-			const detailReport =
-				details && typeof details === "object" && "report" in details && typeof details.report === "string"
-					? details.report.trim()
-					: "";
-			const textReport = message.content.find(part => part.type === "text")?.text.trim() ?? "";
-			const report = detailReport || textReport;
-			return report.length > 0 ? report : undefined;
+			if (!message) continue;
+			const disposition = dispositionFromToolResult(message);
+			if (disposition) return disposition;
 		}
 		return undefined;
+	}
+
+	async #applyCheckpointDisposition(
+		disposition: PendingCheckpointDisposition,
+		activeMessages?: AgentMessage[],
+	): Promise<void> {
+		const checkpointState = this.#checkpointState;
+		if (!checkpointState) return;
+		if (disposition.kind === "rewind") {
+			await this.#applyRewind(disposition.report, activeMessages);
+			return;
+		}
+		if (disposition.kind === "keep") {
+			const completedAt = new Date().toISOString();
+			await this.sessionManager.mutateEntriesAtomically(() => {
+				this.sessionManager.appendCustomMessageEntry(
+					"checkpoint-keep",
+					"",
+					false,
+					{
+						goal: this.#checkpointGoal(checkpointState.checkpointEntryId),
+						reason: disposition.reason,
+						startedAt: checkpointState.startedAt,
+						completedAt,
+					},
+					"agent",
+					false,
+				);
+			});
+			this.#checkpointState = undefined;
+			return;
+		}
+		if (disposition.kind === "seal-shake") {
+			if (!checkpointState.checkpointEntryId) {
+				throw new Error(
+					"Shake seal failed because the checkpoint boundary is missing; checkpoint remains open and active context is unchanged.",
+				);
+			}
+			const completedAt = new Date().toISOString();
+			await this.shake("elide", {
+				config: {
+					...AGGRESSIVE_SHAKE_CONFIG,
+					startAfterEntryId: checkpointState.checkpointEntryId,
+					protectedTools: [
+						...AGGRESSIVE_SHAKE_CONFIG.protectedTools,
+						"checkpoint",
+						"rewind",
+						"seal",
+						"keep_checkpoint",
+					],
+				},
+				onBeforeCommit: result => {
+					this.sessionManager.appendCustomMessageEntry(
+						"checkpoint-seal",
+						"",
+						false,
+						{
+							strategy: "shake",
+							startedAt: checkpointState.startedAt,
+							completedAt,
+							toolResultsDropped: result.toolResultsDropped,
+							blocksDropped: result.blocksDropped,
+							tokensFreed: result.tokensFreed,
+							artifactId: result.artifactId,
+						},
+						"agent",
+						false,
+					);
+				},
+			});
+			const sessionContext = this.buildDisplaySessionContext();
+			if (activeMessages) activeMessages.splice(0, activeMessages.length, ...sessionContext.messages);
+			this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
+			this.#checkpointState = undefined;
+			return;
+		}
+		await this.#applySummarySeal(disposition.report, activeMessages);
+	}
+
+	#checkpointGoal(checkpointEntryId: string | null): string {
+		if (!checkpointEntryId) return "";
+		const entry = this.sessionManager.getEntries().find(candidate => candidate.id === checkpointEntryId);
+		if (!entry || !isSuccessfulCheckpointEntry(entry)) return "";
+		const details = entry.message.details;
+		return details && typeof details === "object" && "goal" in details && typeof details.goal === "string"
+			? details.goal
+			: "";
+	}
+
+	#buildCheckpointManifest(
+		span: SessionEntry[],
+		checkpointState: CheckpointState,
+		evidenceArtifact: string,
+		completedAt: string,
+		todoStart: TodoPhase[],
+		todoClose: TodoPhase[],
+	): CheckpointExecutionManifest {
+		let toolCalls = 0;
+		let succeeded = 0;
+		let failed = 0;
+		let errorCount = 0;
+		const changedPaths = new Set<string>();
+		const commands = new Set<string>();
+		const successfulToolCalls = new Set<string>();
+		for (const entry of span) {
+			if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.isError) continue;
+			successfulToolCalls.add(entry.message.toolCallId);
+		}
+		for (const entry of span) {
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			if (message.role === "toolResult") {
+				if (message.isError) {
+					failed++;
+					errorCount++;
+				} else {
+					succeeded++;
+				}
+				continue;
+			}
+			if (message.role !== "assistant") continue;
+			if (message.stopReason === "error") errorCount++;
+			for (const block of message.content) {
+				if (block.type !== "toolCall") continue;
+				toolCalls++;
+				const args =
+					block.arguments && typeof block.arguments === "object"
+						? (block.arguments as Record<string, unknown>)
+						: undefined;
+				if (!args || !successfulToolCalls.has(block.id)) continue;
+				if (block.name === "bash" && typeof args.command === "string") commands.add(args.command);
+				if (block.name === "write" && typeof args.path === "string") changedPaths.add(args.path);
+				if (block.name === "ast_edit" && Array.isArray(args.paths)) {
+					for (const value of args.paths) {
+						if (typeof value === "string") changedPaths.add(value);
+					}
+				}
+				if (
+					block.name === "lsp" &&
+					args.apply === true &&
+					(args.action === "rename" || args.action === "rename_file" || args.action === "code_actions")
+				) {
+					if (typeof args.file === "string") changedPaths.add(args.file);
+					if (args.action === "rename_file" && typeof args.new_name === "string") changedPaths.add(args.new_name);
+				}
+				if (block.name === "edit" && typeof args.patch === "string") {
+					for (const match of args.patch.matchAll(/^\[([^#\r\n]+)#[0-9A-F]{4}\]$/gm)) {
+						const editedPath = match[1];
+						if (editedPath) changedPaths.add(editedPath);
+					}
+				}
+			}
+		}
+		return {
+			checkpointEntryId: checkpointState.checkpointEntryId,
+			startedAt: checkpointState.startedAt,
+			completedAt,
+			evidenceArtifact,
+			entryCount: span.length,
+			toolCalls,
+			toolResults: { succeeded, failed },
+			errorCount,
+			changedPaths: [...changedPaths].sort(),
+			commands: [...commands].sort(),
+			todoStart,
+			todoClose,
+		};
+	}
+
+	async #applySummarySeal(report: SealReport, activeMessages?: AgentMessage[]): Promise<void> {
+		const checkpointState = this.#checkpointState;
+		if (!checkpointState) return;
+		if (this.#goalModeState?.enabled) {
+			throw new Error(
+				"Summary seal refused because goal mode is active; checkpoint remains open and active context is unchanged. Use shake seal or keep_checkpoint.",
+			);
+		}
+		const ownerFilter = { ownerId: this.#agentId };
+		const hasRunningJobs = (this.#asyncJobManager?.getRunningJobs(ownerFilter).length ?? 0) > 0;
+		const hasPendingDeliveries = this.#asyncJobManager?.hasPendingDeliveries(ownerFilter) ?? false;
+		if (
+			hasRunningJobs ||
+			hasPendingDeliveries ||
+			this.agent.hasQueuedMessages() ||
+			this.#pendingNextTurnMessages.length > 0 ||
+			this.#pendingIrcInterrupts.length > 0 ||
+			this.#pendingIrcAsides.length > 0
+		) {
+			throw new Error(
+				"Summary seal refused because asynchronous work or queued delivery remains; checkpoint remains open. Wait, cancel, use shake seal, or keep_checkpoint.",
+			);
+		}
+		const branch = this.sessionManager.getBranch();
+		const checkpointIndex = branch.findIndex(entry => entry.id === checkpointState.checkpointEntryId);
+		if (checkpointIndex < 0) {
+			throw new Error(
+				"Summary seal failed because the checkpoint boundary is missing; checkpoint remains open and active context is unchanged.",
+			);
+		}
+		const span = branch.slice(checkpointIndex + 1);
+		const authoritativeEntry = span.find(entry => {
+			if (entry.type === "custom_message") {
+				const kind = entry.customType.toLowerCase();
+				const hasSystemDirective =
+					typeof entry.content === "string"
+						? entry.content.includes("<system-directive>")
+						: entry.content.some(block => block.type === "text" && block.text.includes("<system-directive>"));
+				return (
+					entry.attribution === "user" ||
+					kind.includes("steer") ||
+					kind.includes("approval") ||
+					kind.includes("pending-action") ||
+					kind.includes("system-directive") ||
+					kind.includes("irc") ||
+					hasSystemDirective
+				);
+			}
+			if (entry.type !== "message") return false;
+			if (entry.message.role === "developer") return true;
+			if (entry.message.role !== "user") return false;
+			const text = this.#extractUserMessageText(entry.message.content).trim();
+			const explicitSealControl =
+				text.startsWith("<checkpoint-seal-control>") &&
+				text.endsWith("</checkpoint-seal-control>") &&
+				!text.includes("<system-directive>");
+			return !explicitSealControl;
+		});
+		if (authoritativeEntry) {
+			throw new Error(
+				"Summary seal refused because authoritative steering entered the checkpoint span; checkpoint remains open. Use shake seal or keep_checkpoint.",
+			);
+		}
+		const todoStart = this.#cloneTodoPhases(getLatestTodoPhasesFromEntries(branch.slice(0, checkpointIndex + 1)));
+		const todoClose = this.#cloneTodoPhases(this.#todoPhases);
+		const artifactId = await this.sessionManager.saveArtifact(JSON.stringify(span, null, 2), "checkpoint-span");
+		if (!artifactId) {
+			throw new Error(
+				"Summary seal failed because raw evidence persistence failed; checkpoint remains open and active context is unchanged.",
+			);
+		}
+		const evidenceArtifact = `artifact://${artifactId}`;
+		const completedAt = new Date().toISOString();
+		const manifest = this.#buildCheckpointManifest(
+			span,
+			checkpointState,
+			evidenceArtifact,
+			completedAt,
+			todoStart,
+			todoClose,
+		);
+		const originalLeaf = this.sessionManager.getLeafId();
+		try {
+			await this.sessionManager.mutateEntriesAtomically(() => {
+				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report.outcome, {
+					startedAt: checkpointState.startedAt,
+					completedAt,
+					disposition: "seal",
+					strategy: "summary",
+				});
+				this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: todoClose });
+				this.sessionManager.appendCustomMessageEntry(
+					"checkpoint-seal-report",
+					renderSealReport(report),
+					false,
+					{
+						disposition: "seal",
+						strategy: "summary",
+						startedAt: checkpointState.startedAt,
+						completedAt,
+						evidenceArtifact,
+						provenance: "assistant",
+						report,
+					},
+					"agent",
+				);
+				this.sessionManager.appendCustomMessageEntry(
+					"checkpoint-seal-manifest",
+					prompt.render(checkpointSealManifestTemplate, {
+						evidenceArtifact,
+						entryCount: manifest.entryCount,
+						toolCalls: manifest.toolCalls,
+						succeeded: manifest.toolResults.succeeded,
+						failed: manifest.toolResults.failed,
+						errorCount: manifest.errorCount,
+						changedPaths: manifest.changedPaths.length > 0 ? manifest.changedPaths.join(", ") : "none observed",
+						commands: manifest.commands.length > 0 ? manifest.commands.join(" | ") : "none observed",
+					}),
+					false,
+					manifest,
+					"agent",
+				);
+				this.sessionManager.appendCustomMessageEntry(
+					"checkpoint-seal",
+					"",
+					false,
+					{
+						disposition: "seal",
+						strategy: "summary",
+						startedAt: checkpointState.startedAt,
+						completedAt,
+						evidenceArtifact,
+						originalLeaf,
+					},
+					"agent",
+					false,
+				);
+			});
+			const sessionContext = this.buildDisplaySessionContext();
+			await this.#restoreMCPSelectionsForSessionContext(sessionContext);
+			if (activeMessages) activeMessages.splice(0, activeMessages.length, ...sessionContext.messages);
+			this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
+			this.#resetAdvisorSessionState();
+			this.#syncTodoPhasesFromBranch();
+			this.setTodoPhases(todoClose);
+			this.#closeCodexProviderSessionsForHistoryRewrite();
+			this.#checkpointState = undefined;
+		} catch (error) {
+			if (originalLeaf === null) this.sessionManager.resetLeaf();
+			else this.sessionManager.branch(originalLeaf);
+			const originalContext = this.buildDisplaySessionContext();
+			await this.#restoreMCPSelectionsForSessionContext(originalContext);
+			if (activeMessages) activeMessages.splice(0, activeMessages.length, ...originalContext.messages);
+			this.agent.replaceMessages(activeMessages ?? originalContext.messages);
+			this.#resetAdvisorSessionState();
+			this.setTodoPhases(todoClose);
+			throw error;
+		}
 	}
 
 	async #applyRewind(report: string, activeMessages?: AgentMessage[]): Promise<void> {
@@ -14802,7 +15232,7 @@ export class AgentSession {
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
-		this.#pendingRewindReport = undefined;
+		this.#pendingCheckpointDisposition = undefined;
 	}
 	#isPlanDecisionTool(name: string): boolean {
 		return PLAN_DECISION_TOOLS[name] === true;
@@ -18846,7 +19276,7 @@ export class AgentSession {
 		// fields from the target branch. On rollback every one must be restored,
 		// or a failed switch leaks the target session's checkpoint state.
 		const previousCheckpointState = this.#checkpointState;
-		const previousPendingRewindReport = this.#pendingRewindReport;
+		const previousPendingCheckpointDisposition = this.#pendingCheckpointDisposition;
 		const previousLastCompletedRewind = this.#lastCompletedRewind;
 		const previousRewoundToolResultIds = new Set(this.#rewoundToolResultIds);
 
@@ -19016,7 +19446,7 @@ export class AgentSession {
 			this.#inheritedProviderPromptCacheKey = previousInheritedProviderPromptCacheKey;
 			this.agent.promptCacheKey = previousProviderPromptCacheKey;
 			this.#checkpointState = previousCheckpointState;
-			this.#pendingRewindReport = previousPendingRewindReport;
+			this.#pendingCheckpointDisposition = previousPendingCheckpointDisposition;
 			this.#lastCompletedRewind = previousLastCompletedRewind;
 			this.#rewoundToolResultIds = previousRewoundToolResultIds;
 			if (previousModel) {

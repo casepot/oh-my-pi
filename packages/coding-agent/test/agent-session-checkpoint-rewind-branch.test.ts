@@ -15,6 +15,38 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 const checkpointSchema = z.object({ goal: z.string() });
 const rewindSchema = z.object({ report: z.string() });
+const keepSchema = z.object({ reason: z.string() });
+const sealSchema = z.object({ strategy: z.string(), report: z.any().optional() });
+
+const keepTool: AgentTool<typeof keepSchema> = {
+	name: "keep_checkpoint",
+	label: "Keep checkpoint",
+	description: "Keep the checkpoint",
+	parameters: keepSchema,
+	async execute(_toolCallId, params) {
+		return {
+			content: [{ type: "text" as const, text: "checkpoint kept" }],
+			details: { disposition: "keep" as const, reason: params.reason },
+		};
+	},
+};
+
+const sealTool: AgentTool<typeof sealSchema> = {
+	name: "seal",
+	label: "Seal checkpoint",
+	description: "Seal the checkpoint",
+	parameters: sealSchema,
+	async execute(_toolCallId, params) {
+		return {
+			content: [{ type: "text" as const, text: "checkpoint sealed" }],
+			details: {
+				disposition: "seal" as const,
+				strategy: params.strategy,
+				...(params.report ? { report: params.report } : {}),
+			},
+		};
+	},
+};
 
 const checkpointTool: AgentTool<typeof checkpointSchema, { startedAt: string }> = {
 	name: "checkpoint",
@@ -67,7 +99,10 @@ function signedThinking(thinking: string, thinkingSignature: string): MockConten
 	return { type: "thinking", thinking, thinkingSignature } as unknown as MockContent;
 }
 
-async function createHarness(responses: MockResponse[]): Promise<Harness & { mock: MockModel }> {
+async function createHarness(
+	responses: MockResponse[],
+	extraTools: AgentTool[] = [],
+): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-checkpoint-rewind-branch-");
 	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
 	authStorage.setRuntimeApiKey("mock", "test-key");
@@ -83,7 +118,13 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { moc
 	});
 	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
 
-	const tools = [checkpointTool as AgentTool, rewindTool as AgentTool];
+	const tools = [
+		checkpointTool as AgentTool,
+		rewindTool as AgentTool,
+		keepTool as AgentTool,
+		sealTool as AgentTool,
+		...extraTools,
+	];
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
@@ -106,6 +147,42 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { moc
 	const harness = { session, authStorage, tempDir, extraSessions: [] };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };
+}
+
+async function createReloadedSession(harness: Harness): Promise<AgentSession> {
+	const mock = createMockModel({ responses: [] });
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"todo.enabled": false,
+		"todo.eager": "default",
+		"todo.reminders": false,
+	});
+	settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+	const tools = [checkpointTool as AgentTool, rewindTool as AgentTool, keepTool as AgentTool, sealTool as AgentTool];
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: {
+			model: mock,
+			systemPrompt: ["Test"],
+			tools,
+			messages: harness.session.sessionManager.buildSessionContext().messages,
+		},
+		convertToLlm,
+		streamFn: mock.stream,
+	});
+	const session = new AgentSession({
+		agent,
+		sessionManager: harness.session.sessionManager,
+		settings,
+		modelRegistry: new ModelRegistry(
+			harness.authStorage,
+			path.join(harness.tempDir.path(), `models-${Date.now()}.yml`),
+		),
+		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+	});
+	harness.extraSessions.push(session);
+	return session;
 }
 
 function messageText(message: Message): string {
@@ -418,5 +495,352 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(rewindResult.content.some(part => part.type === "text" && part.text.includes("Rewind requested"))).toBe(
 			true,
 		);
+	});
+
+	it("rewind restores historical todo filtering instead of carrying terminal checkpoint state", async () => {
+		const harness = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "discard" } }],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "rewind", name: "rewind", arguments: { report: "discarded" } }],
+				stopReason: "toolUse",
+			},
+			{ content: ["continued"], stopReason: "stop" },
+		]);
+		const terminalTodo = [{ name: "phase", tasks: [{ content: "discarded", status: "completed" as const }] }];
+		harness.session.setTodoPhases(terminalTodo);
+		harness.session.sessionManager.appendCustomEntry("user_todo_edit", { phases: terminalTodo });
+
+		await harness.session.prompt("discard the span");
+
+		expect(harness.session.getTodoPhases()).toEqual([]);
+	});
+
+	it("keeps the detailed branch, resumes closed, and permits a new checkpoint", async () => {
+		const harness = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "checkpoint_1", name: "checkpoint", arguments: { goal: "first" } }],
+				stopReason: "toolUse",
+			},
+			{
+				content: [
+					{ type: "toolCall", id: "keep_1", name: "keep_checkpoint", arguments: { reason: "retain details" } },
+				],
+				stopReason: "toolUse",
+			},
+			{ content: ["first done"], stopReason: "stop" },
+			{
+				content: [{ type: "toolCall", id: "checkpoint_2", name: "checkpoint", arguments: { goal: "second" } }],
+				stopReason: "toolUse",
+			},
+			{
+				content: [
+					{ type: "toolCall", id: "keep_2", name: "keep_checkpoint", arguments: { reason: "retain second" } },
+				],
+				stopReason: "toolUse",
+			},
+			{ content: ["second done"], stopReason: "stop" },
+		]);
+
+		const terminalTodo = [{ name: "phase", tasks: [{ content: "retained", status: "completed" as const }] }];
+		harness.session.setTodoPhases(terminalTodo);
+		harness.session.sessionManager.appendCustomEntry("user_todo_edit", { phases: terminalTodo });
+
+		await harness.session.prompt("first span");
+		await harness.session.prompt("second span");
+
+		const branch = harness.session.sessionManager.getBranch();
+		expect(branch.filter(entry => entry.type === "branch_summary")).toHaveLength(0);
+		expect(
+			branch.filter(entry => entry.type === "custom_message" && entry.customType === "checkpoint-keep"),
+		).toHaveLength(2);
+		expect(harness.session.getCheckpointState()).toBeUndefined();
+
+		const reloaded = await createReloadedSession(harness);
+		expect(reloaded.getCheckpointState()).toBeUndefined();
+		expect(reloaded.getTodoPhases()).toEqual(terminalTodo);
+	});
+
+	it("shake-seals only the strict checkpoint suffix and persists recovery metadata", async () => {
+		const blobSchema = z.object({ label: z.string() });
+		const blobTool: AgentTool<typeof blobSchema> = {
+			name: "blob",
+			label: "Blob",
+			description: "Return a heavy payload",
+			parameters: blobSchema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text" as const, text: `${params.label}:${"x".repeat(12_000)}` }],
+				};
+			},
+		};
+		const harness = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "before", name: "blob", arguments: { label: "before" } }],
+					stopReason: "toolUse",
+				},
+				{ content: ["before done"], stopReason: "stop" },
+				{
+					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "shake" } }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [{ type: "toolCall", id: "after", name: "blob", arguments: { label: "after" } }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "shake" } }],
+					stopReason: "toolUse",
+				},
+				{ content: ["after done"], stopReason: "stop" },
+			],
+			[blobTool as AgentTool],
+		);
+
+		const terminalTodo = [{ name: "phase", tasks: [{ content: "shaken", status: "completed" as const }] }];
+		harness.session.setTodoPhases(terminalTodo);
+		harness.session.sessionManager.appendCustomEntry("user_todo_edit", { phases: terminalTodo });
+
+		await harness.session.prompt("create prefix");
+		await harness.session.prompt("shake suffix");
+
+		const blobResults = harness.session.sessionManager
+			.getBranch()
+			.filter(
+				entry =>
+					entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "blob",
+			);
+		expect(blobResults).toHaveLength(2);
+		const beforeText =
+			blobResults[0]?.type === "message" && blobResults[0].message.role === "toolResult"
+				? messageText(blobResults[0].message)
+				: "";
+		const afterText =
+			blobResults[1]?.type === "message" && blobResults[1].message.role === "toolResult"
+				? messageText(blobResults[1].message)
+				: "";
+		expect(beforeText).toStartWith("before:");
+		expect(afterText).toContain("[shaken");
+		const marker = harness.session.sessionManager
+			.getBranch()
+			.find(entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal");
+		expect(marker?.type).toBe("custom_message");
+		if (marker?.type !== "custom_message") throw new Error("Expected checkpoint seal marker");
+		expect(marker.details).toMatchObject({
+			strategy: "shake",
+			toolResultsDropped: 1,
+			artifactId: expect.any(String),
+		});
+		expect(harness.session.getCheckpointState()).toBeUndefined();
+		const reloaded = await createReloadedSession(harness);
+		expect(reloaded.getCheckpointState()).toBeUndefined();
+		expect(reloaded.getTodoPhases()).toEqual(terminalTodo);
+	});
+
+	it("summary-seals to report, manifest, raw evidence, and the exact close-time todo snapshot", async () => {
+		let lifecycleSession: AgentSession | undefined;
+		const completeSchema = z.object({});
+		const closeTodo = [{ name: "phase", tasks: [{ content: "verified", status: "completed" as const }] }];
+		const completeTool: AgentTool<typeof completeSchema> = {
+			name: "complete_phase",
+			label: "Complete phase",
+			description: "Complete the todo phase",
+			parameters: completeSchema,
+			async execute() {
+				if (!lifecycleSession) throw new Error("session unavailable");
+				lifecycleSession.setTodoPhases(closeTodo);
+				lifecycleSession.sessionManager.appendCustomEntry("user_todo_edit", { phases: closeTodo });
+				return { content: [{ type: "text" as const, text: "phase completed" }] };
+			},
+		};
+		const report = {
+			outcome: "Implemented the phase",
+			durableContext: ["Use the persisted contract"],
+			decisions: [{ decision: "Keep API", reason: "Compatibility" }],
+			verification: [{ contract: "Focused behavior", evidence: "targeted test passed" }],
+			remaining: ["None known"],
+			next: "Continue",
+		};
+		const harness = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "ship" } }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [{ type: "toolCall", id: "complete", name: "complete_phase", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "summary", report } }],
+					stopReason: "toolUse",
+				},
+				{ content: ["continued"], stopReason: "stop" },
+			],
+			[completeTool as AgentTool],
+		);
+		lifecycleSession = harness.session;
+		const startTodo = [{ name: "phase", tasks: [{ content: "verified", status: "in_progress" as const }] }];
+		harness.session.setTodoPhases(startTodo);
+		harness.session.sessionManager.appendCustomEntry("user_todo_edit", { phases: startTodo });
+		let rawEvidence = "";
+		const originalSave = harness.session.sessionManager.saveArtifact.bind(harness.session.sessionManager);
+		harness.session.sessionManager.saveArtifact = async (content, type) => {
+			if (type === "checkpoint-span") rawEvidence = content;
+			return originalSave(content, type);
+		};
+
+		await harness.session.prompt("complete the phase");
+
+		const branch = harness.session.sessionManager.getBranch();
+		const todoIndex = branch.findLastIndex(entry => entry.type === "custom" && entry.customType === "user_todo_edit");
+		const reportIndex = branch.findIndex(
+			entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal-report",
+		);
+		const manifestIndex = branch.findIndex(
+			entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal-manifest",
+		);
+		const completionIndex = branch.findLastIndex(
+			entry =>
+				entry.type === "custom_message" &&
+				entry.customType === "checkpoint-seal" &&
+				(entry.details as { strategy?: unknown } | undefined)?.strategy === "summary",
+		);
+		expect(todoIndex).toBeGreaterThan(-1);
+		expect(reportIndex).toBeGreaterThan(todoIndex);
+		expect(manifestIndex).toBeGreaterThan(reportIndex);
+		expect(completionIndex).toBeGreaterThan(manifestIndex);
+		expect(rawEvidence).toContain("complete_phase");
+		expect(rawEvidence).toContain('"toolName": "seal"');
+		expect(
+			harness.session.messages.some(message => message.role === "toolResult" && message.toolName === "seal"),
+		).toBe(false);
+		expect(
+			harness.session.messages.some(
+				message => message.role === "custom" && message.customType === "checkpoint-seal-report",
+			),
+		).toBe(true);
+		expect(harness.session.getTodoPhases()).toEqual(closeTodo);
+		expect(harness.session.getCheckpointState()).toBeUndefined();
+
+		const reportEntry = branch[reportIndex];
+		if (!reportEntry) throw new Error("Expected summary seal report entry");
+		harness.session.sessionManager.branch(reportEntry.id);
+		const partialReload = await createReloadedSession(harness);
+		expect(
+			partialReload.messages.some(
+				message => message.role === "custom" && message.customType === "checkpoint-seal-manifest",
+			),
+		).toBe(false);
+		expect(
+			partialReload.messages.some(
+				message => message.role === "custom" && message.customType === "checkpoint-seal-report",
+			),
+		).toBe(true);
+		expect(partialReload.getTodoPhases()).toEqual(closeTodo);
+		expect(partialReload.getCheckpointState()).toBeDefined();
+
+		const completionEntry = branch[completionIndex];
+		if (!completionEntry) throw new Error("Expected summary seal completion entry");
+		harness.session.sessionManager.branch(completionEntry.id);
+		const completedReload = await createReloadedSession(harness);
+		expect(completedReload.getTodoPhases()).toEqual(closeTodo);
+		expect(completedReload.getCheckpointState()).toBeUndefined();
+	});
+
+	it("leaves the detailed branch active when summary evidence persistence fails", async () => {
+		const report = {
+			outcome: "Outcome",
+			durableContext: [],
+			decisions: [],
+			verification: [],
+			remaining: [],
+			next: "Retry",
+		};
+		const harness = await createHarness([
+			{
+				content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "safe" } }],
+				stopReason: "toolUse",
+			},
+			{
+				content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "summary", report } }],
+				stopReason: "toolUse",
+			},
+		]);
+		harness.session.sessionManager.saveArtifact = async () => undefined;
+
+		await harness.session.prompt("seal safely");
+		expect(harness.session.getCheckpointState()).toBeDefined();
+		expect(
+			harness.session.sessionManager
+				.getBranch()
+				.some(
+					entry =>
+						entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "seal",
+				),
+		).toBe(true);
+		expect(
+			harness.session.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal-report"),
+		).toBe(false);
+	});
+
+	it("fails a shake seal closed when its strict checkpoint boundary is missing", async () => {
+		let lifecycleSession: AgentSession | undefined;
+		const corruptSchema = z.object({});
+		const corruptTool: AgentTool<typeof corruptSchema> = {
+			name: "corrupt_boundary",
+			label: "Corrupt boundary",
+			description: "Test a missing persisted boundary",
+			parameters: corruptSchema,
+			async execute() {
+				if (!lifecycleSession) throw new Error("session unavailable");
+				lifecycleSession.setCheckpointState({
+					checkpointEntryId: "missing-entry",
+					checkpointMessageCount: 0,
+					startedAt: "2026-01-01T00:00:00.000Z",
+				});
+				return { content: [{ type: "text" as const, text: "boundary removed" }] };
+			},
+		};
+		const harness = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "safe shake" } }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [{ type: "toolCall", id: "corrupt", name: "corrupt_boundary", arguments: {} }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "shake" } }],
+					stopReason: "toolUse",
+				},
+			],
+			[corruptTool as AgentTool],
+		);
+		lifecycleSession = harness.session;
+
+		await harness.session.prompt("shake safely");
+
+		expect(harness.session.getCheckpointState()?.checkpointEntryId).toBe("missing-entry");
+		expect(
+			harness.session.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal"),
+		).toBe(false);
+		expect(
+			harness.session.sessionManager
+				.getBranch()
+				.some(
+					entry =>
+						entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "seal",
+				),
+		).toBe(true);
 	});
 });

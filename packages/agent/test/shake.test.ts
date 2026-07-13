@@ -8,6 +8,7 @@ import {
 	collectShakeRegions,
 	DEFAULT_SHAKE_CONFIG,
 	estimateTokens,
+	ShakeBoundaryNotFoundError,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 
@@ -118,6 +119,103 @@ describe("collectShakeRegions — tool results", () => {
 	});
 });
 
+describe("collectShakeRegions — strict lower boundary", () => {
+	test("leaves pre-boundary and boundary entries untouched while collecting post-boundary entries", () => {
+		const before = messageEntry(toolResultMessage("bash", "before ".repeat(200)));
+		const boundary = messageEntry(toolResultMessage("bash", "boundary ".repeat(200)));
+		const after = messageEntry(toolResultMessage("bash", "after ".repeat(200)));
+
+		const regions = collectShakeRegions([before, boundary, after], cfg({ startAfterEntryId: boundary.id }));
+		expect(regions).toHaveLength(1);
+		expect(regions[0].entry).toBe(after);
+
+		applyShakeRegion(regions[0], "[shaken]");
+		expect((before.message as ToolResultMessage).prunedAt).toBeUndefined();
+		expect((boundary.message as ToolResultMessage).prunedAt).toBeUndefined();
+		expect((after.message as ToolResultMessage).prunedAt).toBeGreaterThan(0);
+	});
+
+	test("fails closed with an explicit error when the strict boundary is absent", () => {
+		const entry = messageEntry(toolResultMessage("bash", "payload ".repeat(100)));
+		expect(() => collectShakeRegions([entry], cfg({ startAfterEntryId: "missing" }))).toThrow(
+			ShakeBoundaryNotFoundError,
+		);
+		expect(() => collectShakeRegions([], cfg({ startAfterEntryId: "missing" }))).toThrow(
+			"Shake start boundary entry not found: missing",
+		);
+	});
+
+	test("computes minimum savings from only the scoped suffix", () => {
+		const largeBefore = messageEntry(toolResultMessage("bash", "large ".repeat(2_000)));
+		const boundary = messageEntry(assistantMessage([{ type: "text", text: "checkpoint" }]));
+		const smallAfter = messageEntry(toolResultMessage("bash", "small ".repeat(80)));
+		const threshold = estimateTokens(smallAfter.message);
+		const entries = [largeBefore, boundary, smallAfter];
+
+		expect(collectShakeRegions(entries, cfg({ minSavings: threshold }))).toHaveLength(2);
+		expect(collectShakeRegions(entries, cfg({ minSavings: threshold, startAfterEntryId: boundary.id }))).toHaveLength(
+			0,
+		);
+	});
+
+	test("computes the protect-recent window over post-boundary entries", () => {
+		const hugeBefore = messageEntry(toolResultMessage("bash", "before ".repeat(4_000)));
+		const boundary = messageEntry(toolResultMessage("bash", "boundary ".repeat(4_000)));
+		const olderAfter = messageEntry(toolResultMessage("bash", "word ".repeat(160)));
+		const recentAfter = messageEntry(toolResultMessage("bash", "word ".repeat(160)));
+		const perEntry = estimateTokens(olderAfter.message);
+
+		const regions = collectShakeRegions(
+			[hugeBefore, boundary, olderAfter, recentAfter],
+			cfg({ protectTokens: Math.floor(perEntry * 0.5), startAfterEntryId: boundary.id }),
+		);
+		expect(regions).toHaveLength(1);
+		expect(regions[0].entry).toBe(olderAfter);
+	});
+
+	test("protects a post-boundary result using its pre-boundary tool call", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "cross-boundary-call",
+			name: "read",
+			arguments: { path: "skill://example" },
+		};
+		const callEntry = messageEntry(assistantMessage([toolCall]));
+		const boundary = messageEntry(assistantMessage([{ type: "text", text: "checkpoint" }]));
+		const result = messageEntry(toolResultMessage("read", "protected ".repeat(200), { toolCallId: toolCall.id }));
+		const protectReadCall: ShakeConfig["protectedTools"][number] = ({ toolCall: pairedCall }) =>
+			pairedCall?.name === "read";
+
+		expect(
+			collectShakeRegions(
+				[callEntry, boundary, result],
+				cfg({ protectedTools: [protectReadCall], startAfterEntryId: boundary.id }),
+			),
+		).toHaveLength(0);
+		expect(
+			collectShakeRegions(
+				[callEntry, boundary, result],
+				cfg({ protectedTools: [], startAfterEntryId: boundary.id }),
+			),
+		).toHaveLength(1);
+	});
+
+	test("preserves inclusive keepBoundaryId and whole-branch defaults", () => {
+		const before = messageEntry(toolResultMessage("bash", "before ".repeat(100)));
+		const kept = messageEntry(toolResultMessage("bash", "kept ".repeat(100)));
+		const after = messageEntry(toolResultMessage("bash", "after ".repeat(100)));
+		const entries = [before, kept, after];
+
+		expect(collectShakeRegions(entries, cfg()).map(region => region.entry)).toEqual(entries);
+		expect(collectShakeRegions(entries, cfg({ keepBoundaryId: kept.id })).map(region => region.entry)).toEqual([
+			kept,
+			after,
+		]);
+		expect(collectShakeRegions(entries, cfg({ keepBoundaryId: "missing" })).map(region => region.entry)).toEqual(
+			entries,
+		);
+	});
+});
 describe("collectShakeRegions — fenced / XML blocks", () => {
 	test("detects a large fenced block and applyShakeRegion splices it out", () => {
 		const fence = fencedBlock(120);

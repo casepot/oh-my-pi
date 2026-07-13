@@ -39,6 +39,12 @@ export interface ShakeConfig {
 	 * boundary — that is its job as a compaction-class reducer.
 	 */
 	keepBoundaryId?: string;
+	/**
+	 * Strict checkpoint scope. Only entries after the matching entry are
+	 * eligible. Unlike `keepBoundaryId`, a missing ID throws
+	 * {@link ShakeBoundaryNotFoundError} instead of widening to the whole branch.
+	 */
+	startAfterEntryId?: string;
 }
 
 /** Auto-shake config: protects the live tail, conservative thresholds. */
@@ -85,6 +91,17 @@ export interface BlockShakeRegion {
 }
 
 export type ShakeRegion = ToolResultShakeRegion | BlockShakeRegion;
+
+/** Raised when a strict Shake scope cannot be resolved on the supplied branch. */
+export class ShakeBoundaryNotFoundError extends Error {
+	readonly entryId: string;
+
+	constructor(entryId: string) {
+		super(`Shake start boundary entry not found: ${entryId}`);
+		this.name = "ShakeBoundaryNotFoundError";
+		this.entryId = entryId;
+	}
+}
 
 // Mirror prompt.ts top-level XML detection. Lowercase tag names only —
 // conservative by design (uppercase / mixed-case tags are ignored).
@@ -285,9 +302,18 @@ function scanContentBlocks(
  */
 export function collectShakeRegions(entries: SessionEntry[], config: ShakeConfig): ShakeRegion[] {
 	const n = entries.length;
+
+	// Resolve the strict scope before the empty-branch fast path. A requested
+	// scope must fail closed even when the supplied branch has no entries.
+	let strictBoundaryIndex = -1;
+	if (config.startAfterEntryId !== undefined) {
+		strictBoundaryIndex = entries.findIndex(entry => entry.id === config.startAfterEntryId);
+		if (strictBoundaryIndex === -1) throw new ShakeBoundaryNotFoundError(config.startAfterEntryId);
+	}
 	if (n === 0) return [];
 
-	// Tokens of all entries strictly more recent than index i.
+	// Tokens of all entries strictly more recent than index i. For eligible
+	// entries after a strict boundary, this is exactly the scoped suffix.
 	const accumulatedAfter = new Array<number>(n);
 	let acc = 0;
 	for (let i = n - 1; i >= 0; i--) {
@@ -295,22 +321,25 @@ export function collectShakeRegions(entries: SessionEntry[], config: ShakeConfig
 		acc += entryTokens(entries[i]);
 	}
 
+	// Pair calls against the full branch, not just the eligible suffix. A result
+	// after the strict boundary may belong to a protected call before it.
 	const toolCallsById = collectToolCallsById(entries);
 
-	// Entries before the compaction boundary are summarized away and never sent —
-	// shaking them only churns persisted history (no prompt/cache effect).
-	const boundaryIndex =
+	// keepBoundaryId remains inclusive and retains its legacy missing-ID fallback
+	// to index zero. The strict checkpoint boundary is exclusive and combines
+	// with it by choosing the narrower scope.
+	const keepBoundaryIndex =
 		config.keepBoundaryId === undefined
 			? 0
 			: Math.max(
 					0,
 					entries.findIndex(entry => entry.id === config.keepBoundaryId),
 				);
+	const boundaryIndex = Math.max(keepBoundaryIndex, strictBoundaryIndex + 1);
 
 	const regions: ShakeRegion[] = [];
-	for (let i = 0; i < n; i++) {
+	for (let i = boundaryIndex; i < n; i++) {
 		const entry = entries[i];
-		if (i < boundaryIndex) continue;
 		const toolResult = getToolResultMessage(entry);
 		// Useless-flagged results carry no information once consumed; they are
 		// eligible even inside the protect-recent window.
@@ -432,7 +461,7 @@ export function applyShakeRegions(items: Array<{ region: ShakeRegion; replacemen
 			if (!message) continue;
 			if (toolResultRollbacks.has(message)) continue;
 			const content = message.content;
-			const hadPrunedAt = Object.prototype.hasOwnProperty.call(message, "prunedAt");
+			const hadPrunedAt = Object.hasOwn(message, "prunedAt");
 			const prunedAt = message.prunedAt;
 			toolResultRollbacks.set(message, () => {
 				message.content = content;

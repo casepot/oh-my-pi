@@ -63,7 +63,14 @@ import { AstGrepTool } from "./ast-grep";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import { type BuiltinToolName, normalizeToolNames } from "./builtin-names";
-import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
+import {
+	type CheckpointState,
+	CheckpointTool,
+	type CompletedRewindState,
+	KeepCheckpointTool,
+	RewindTool,
+	SealTool,
+} from "./checkpoint";
 import type { ConflictHistory } from "./conflict-detect";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
@@ -528,6 +535,8 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	browser: s => new BrowserTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
+	seal: SealTool.createIf,
+	keep_checkpoint: KeepCheckpointTool.createIf,
 	task: s => TaskTool.create(s),
 	job: s => new JobTool(s),
 	irc: IrcTool.createIf,
@@ -766,7 +775,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;
 		if (name === "browser") return session.settings.get("browser.enabled");
-		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
+		if (name === "checkpoint" || name === "rewind" || name === "seal" || name === "keep_checkpoint") {
+			return session.settings.get("checkpoint.enabled");
+		}
 		if (name === "irc") return isIrcEnabled(session.settings, session.taskDepth ?? 0);
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");

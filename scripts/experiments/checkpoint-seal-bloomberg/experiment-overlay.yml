@@ -1,0 +1,8 @@
+checkpoint:
+  enabled: true
+compaction:
+  enabled: false
+  midTurnEnabled: false
+  idleEnabled: false
+retry:
+  enabled: false

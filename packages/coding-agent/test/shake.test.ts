@@ -159,7 +159,7 @@ describe("AgentSession shake", () => {
 				agentMessages: structuredClone(session.agent.state.messages),
 			};
 			const rewriteSpy = vi
-				.spyOn(sessionManager, "rewriteEntries")
+				.spyOn(sessionManager, "mutateEntriesAtomically")
 				.mockRejectedValueOnce(new Error("session rewrite failed"));
 
 			await expect(session.shake("elide")).rejects.toThrow("session rewrite failed");
@@ -257,7 +257,7 @@ describe("AgentSession shake", () => {
 			const userEntry = sessionManager
 				.getBranch()
 				.find(entry => entry.type === "message" && entry.message.role === "user");
-			if (!userEntry || userEntry.type !== "message" || userEntry.message.role !== "user") {
+			if (userEntry?.type !== "message" || userEntry.message.role !== "user") {
 				throw new Error("Expected a seeded user message");
 			}
 			const before = {

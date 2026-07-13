@@ -1,15 +1,17 @@
-Creates a context checkpoint before exploratory work so you can later rewind and keep only a concise report.
+Open a neutral, bounded context span that you MUST later close explicitly.
 
-Use this when you need to investigate with many intermediate tool calls (read/grep/glob/lsp/etc.) and want to minimize context cost afterward.
+Use this before coherent work whose detailed trajectory may later be rewound, compacted, or retained.
 
-Rules:
-- You MUST call `rewind` before yielding after starting a checkpoint.
-- You NEVER call `checkpoint` while another checkpoint is active.
-- Not available in subagents.
+<instruction>
+- State the span's concrete goal.
+- NEVER open a second checkpoint while one is active.
+- Close verified successful work with `seal`.
+- Close abandoned work with `rewind`.
+- Close interrupted, uncertain, or detail-dependent work with `keep_checkpoint`.
+- You MUST close the checkpoint before ordinary terminal yield.
+- Checkpoints are unavailable in subagents.
+</instruction>
 
-Typical flow:
-1. `checkpoint(goal: …)`
-2. Perform exploratory work
-3. `rewind(report: …)` with concise findings
-
-After rewind, intermediate checkpoint messages are removed from active context and replaced by the report.
+<critical>
+`checkpoint` does not snapshot or roll back world effects. Choose exactly one closure: `rewind`, `seal`, or `keep_checkpoint`.
+</critical>

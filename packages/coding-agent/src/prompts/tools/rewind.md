@@ -1,14 +1,20 @@
-End an active checkpoint. Rewind context to it, replacing intermediate exploration with your report.
+Abandon an active checkpoint trajectory while retaining a factual report.
 
-Call immediately after `checkpoint`-started investigative work.
+Use `rewind` when the trajectory should leave active context but its lessons must survive.
 
-Requirements:
-- `report` MUST be concise, factual, and actionable.
-- Include key findings, decisions, and any unresolved risks.
-- AVOID raw scratch logs unless essential.
-- You MUST call this before yielding if a checkpoint is active.
+<instruction>
+- Keep `report` concise, factual, and actionable.
+- Include findings, decisions, surviving effects, and unresolved risks.
+- AVOID raw scratch logs unless continuation requires them.
+- Filesystem, process, browser, and network effects are NOT rolled back.
+- Use `seal` instead when accepting successful work.
+- Use `keep_checkpoint` when detailed chronology must remain active.
+</instruction>
 
-Behavior:
-- If no checkpoint is active, this tool errors. If the checkpoint already rewound, continue from the retained report instead of retrying.
-- On success, the session rewinds, keeps your report as retained context, and closes the checkpoint.
-- A successful rewind is final for that checkpoint; repeat calls error.
+<output>
+Success replaces the checkpoint span in active context with the retained report and closes the checkpoint. Legacy `rewind({report})` behavior is preserved.
+</output>
+
+<critical>
+No active checkpoint? Continue normally or create one; NEVER retry a completed rewind.
+</critical>
