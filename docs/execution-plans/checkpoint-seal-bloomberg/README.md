@@ -12,6 +12,7 @@ End-to-end implementation, experiment, quantitative/qualitative analysis, and pr
 6. [`quantitative-analysis.pdf`](quantitative-analysis.pdf) — four-page quantitative/methodology visualization.
 7. [`qualitative-analysis.md`](qualitative-analysis.md) — sub-agent trajectory review, code taxonomy, defect families, treatment behavior, causal assessment, product interventions.
 8. [`product-direction.md`](product-direction.md) — generalized uncertainty-aware continuation and Decision & Evidence Layer product direction.
+9. [`implementation-agent-prompt.md`](implementation-agent-prompt.md) — execution prompt for planning and implementing the first measurable Decision & Evidence Layer slice.
 
 ## Reproducible implementation and analysis
 
