@@ -82,6 +82,7 @@
 - Changed the default automatic compaction strategy from snapcompact to context-full so default maintenance uses provider-native remote compaction when available instead of image archives.
 
 ### Fixed
+- Fixed compaction during active context-span checkpoints: Shake preserves lifecycle results, while context-full summaries carry versioned checkpoint state and neutral continuation context without reviving closed checkpoints.
 - Fixed RPC prompts to use the correlated operation lifecycle so clients wait through complete agent/tool continuations instead of receiving an untrackable legacy response.
 - Fixed transient session-storage failures permanently poisoning live sessions, made Shake abort or roll back unsafe elisions, and prevented session moves from overwriting existing destinations.
 - Fixed rejected retry continuations and retry-cancellation races leaving subagent tasks stuck or retry lifecycle events unpaired.

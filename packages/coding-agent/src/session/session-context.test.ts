@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { CHECKPOINT_COMPACTION_PRESERVE_KEY } from "./checkpoint-compaction";
 import type { CompactionSummaryMessage } from "./messages";
 import { buildSessionContext, type StrippedToolCallsMarker } from "./session-context";
 import type { SessionEntry } from "./session-entries";
@@ -79,6 +80,71 @@ describe("buildSessionContext snapcompact archives", () => {
 
 		expect(summary.images?.map(image => image.data)).toEqual(["base64-frame"]);
 		expect(summary.blocks?.map(block => block.type)).toEqual(["text", "image", "text"]);
+	});
+});
+
+describe("buildSessionContext checkpoint continuation", () => {
+	const checkpointEntries = [
+		{
+			type: "message",
+			id: "checkpoint",
+			parentId: null,
+			timestamp,
+			message: {
+				role: "toolResult",
+				toolCallId: "checkpoint-call",
+				toolName: "checkpoint",
+				content: [{ type: "text", text: "Checkpoint created." }],
+				isError: false,
+				details: { goal: "Preserve the active investigation" },
+				timestamp: 1,
+			},
+		},
+		{
+			type: "compaction",
+			id: "checkpoint-compaction",
+			parentId: "checkpoint",
+			timestamp,
+			summary: "Progress survived compaction.",
+			firstKeptEntryId: "checkpoint",
+			tokensBefore: 1000,
+			preserveData: {
+				[CHECKPOINT_COMPACTION_PRESERVE_KEY]: {
+					schemaVersion: 1,
+					status: "active",
+					checkpointEntryId: "checkpoint",
+					goal: "Preserve the active investigation",
+				},
+			},
+		},
+	] satisfies SessionEntry[];
+
+	it("reconstructs the neutral continuation surface for a matching active checkpoint", () => {
+		const summary = compactionSummary(buildSessionContext(checkpointEntries).messages);
+
+		expect(summary.summary).toContain("Progress survived compaction.");
+		expect(summary.summary).toContain("## Active checkpoint");
+		expect(summary.summary).toContain('Goal: "Preserve the active investigation"');
+		expect(summary.summary).not.toContain("seal");
+	});
+
+	it("does not reconstruct a stale continuation after checkpoint completion", () => {
+		const entries = [
+			...checkpointEntries,
+			{
+				type: "custom_message",
+				id: "checkpoint-seal",
+				parentId: "checkpoint-compaction",
+				timestamp,
+				customType: "checkpoint-seal",
+				content: "",
+				display: false,
+			},
+		] satisfies SessionEntry[];
+
+		const summary = compactionSummary(buildSessionContext(entries).messages);
+
+		expect(summary.summary).toBe("Progress survived compaction.");
 	});
 });
 

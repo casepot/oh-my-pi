@@ -6,6 +6,7 @@ import { parseGoalModeState, serializeGoalModeState } from "../goals/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
+import { renderCheckpointCompactionSummary } from "./checkpoint-compaction";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -592,7 +593,7 @@ export function buildSessionContext(
 		// reading the archived history after every context rebuild.
 		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
 		const compactionSummaryMsg = createCompactionSummaryMessage(
-			compaction.summary,
+			renderCheckpointCompactionSummary(compaction.summary, compaction.preserveData, path),
 			compaction.tokensBefore,
 			compaction.timestamp,
 			compaction.shortSummary,

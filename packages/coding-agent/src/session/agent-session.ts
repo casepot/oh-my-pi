@@ -467,6 +467,12 @@ import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AuthStorage } from "./auth-storage";
+import {
+	buildCheckpointCompactionContext,
+	buildCheckpointContinuation,
+	isSuccessfulCheckpointEntry,
+	mergeCheckpointCompactionPreserveData,
+} from "./checkpoint-compaction";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
 	type CodexAutoRedeemRedeemDecision,
@@ -534,6 +540,8 @@ import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 import { YieldQueue } from "./yield-queue";
+
+const CHECKPOINT_LIFECYCLE_TOOLS = ["checkpoint", "seal", "rewind", "keep_checkpoint"] satisfies ProtectedToolMatcher[];
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
 export const GOAL_PROOF_GRAPH_CUSTOM_TYPE = "goal_proof_graph_projection";
@@ -681,17 +689,6 @@ function completedRewindFromEntry(entry: SessionEntry): CompletedRewindState | u
 		stringProperty(details, "report")?.trim() ||
 		reportFromRewindReportContent(customMessageContentText(entry.content));
 	return report.length > 0 ? { report, startedAt, rewoundAt } : undefined;
-}
-
-function isSuccessfulCheckpointEntry(entry: SessionEntry): entry is SessionMessageEntry & {
-	message: { role: "toolResult"; toolName: "checkpoint"; isError?: false };
-} {
-	return (
-		entry.type === "message" &&
-		entry.message.role === "toolResult" &&
-		entry.message.toolName === "checkpoint" &&
-		entry.message.isError !== true
-	);
 }
 
 function checkpointStartedAtFromEntry(entry: SessionEntry): string | undefined {
@@ -13212,6 +13209,14 @@ export class AgentSession {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher, targetPlanMatcher] };
 	}
 
+	#withCheckpointShakeProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
+		const protectedConfig = this.#withPlanProtection(config);
+		return {
+			...protectedConfig,
+			protectedTools: [...protectedConfig.protectedTools, ...CHECKPOINT_LIFECYCLE_TOOLS],
+		};
+	}
+
 	#appendProviderUsageFloorReset(kind: string, data: Record<string, unknown> = {}): void {
 		this.sessionManager.appendCustomEntry(PROVIDER_USAGE_FLOOR_RESET_CUSTOM_TYPE, {
 			kind,
@@ -13452,7 +13457,7 @@ export class AgentSession {
 		}
 
 		const branchEntries = this.sessionManager.getBranch();
-		const config = this.#withPlanProtection({
+		const config = this.#withCheckpointShakeProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
 			// Skip entries summarized away by the latest compaction — shaking them
 			// only churns persisted history with no prompt/cache effect.
@@ -13813,6 +13818,7 @@ export class AgentSession {
 			if (compactionAbortController.signal.aborted) {
 				throw new CompactionCancelledError();
 			}
+			preserveData = this.#refreshCheckpointCompactionPreserveData(preserveData);
 			const goalCompactionRefresh = await this.#refreshGoalCompactionPreserveData(
 				preserveData,
 				compactionBoundaryBefore,
@@ -16768,6 +16774,17 @@ export class AgentSession {
 			preserveData = result?.preserveData;
 		}
 
+		const checkpointCompactionContext = buildCheckpointCompactionContext(
+			this.#checkpointState?.checkpointEntryId,
+			this.sessionManager.getBranch(),
+		);
+		if (checkpointCompactionContext) {
+			hookContext = hookContext
+				? [...hookContext, checkpointCompactionContext.context]
+				: [checkpointCompactionContext.context];
+			preserveData = { ...(preserveData ?? {}), ...checkpointCompactionContext.preserveData };
+		}
+
 		const goalCompactionContext = this.#buildGoalCompactionContext();
 		if (goalCompactionContext) {
 			hookContext = hookContext ? [...hookContext, goalCompactionContext.context] : [goalCompactionContext.context];
@@ -17630,6 +17647,7 @@ export class AgentSession {
 				return COMPACTION_CHECK_NONE;
 			}
 
+			preserveData = this.#refreshCheckpointCompactionPreserveData(preserveData);
 			const goalCompactionRefresh = await this.#refreshGoalCompactionPreserveData(
 				preserveData,
 				compactionBoundaryBefore,

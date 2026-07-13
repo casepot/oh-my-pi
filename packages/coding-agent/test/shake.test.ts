@@ -117,6 +117,32 @@ describe("AgentSession shake", () => {
 			expect(text).toContain("shaken");
 		});
 
+		it("preserves checkpoint lifecycle results under manual and automatic Shake policies", async () => {
+			const automaticConfig = {
+				...compactionModule.DEFAULT_SHAKE_CONFIG,
+				protectTokens: 0,
+				minSavings: 0,
+			};
+			for (const config of [undefined, automaticConfig]) {
+				for (const toolName of ["checkpoint", "seal", "rewind", "keep_checkpoint"]) {
+					seedHeavyToolResult(`${toolName}:`.padEnd(4000, "P"), toolName);
+				}
+				seedHeavyToolResult("B".repeat(4000));
+
+				const result = await session.shake("elide", config ? { config } : undefined);
+
+				expect(result.toolResultsDropped).toBe(1);
+				const latestResults = branchToolResults().slice(-5);
+				for (const lifecycleResult of latestResults.slice(0, 4)) {
+					expect(lifecycleResult.prunedAt).toBeUndefined();
+					expect(lifecycleResult.content[0]).toEqual(
+						expect.objectContaining({ type: "text", text: expect.not.stringContaining("artifact://") }),
+					);
+				}
+				expect(latestResults[4]?.prunedAt).toBeGreaterThan(0);
+			}
+		});
+
 		it("does not mutate session state when saving the recovery artifact fails", async () => {
 			seedHeavyToolResult("A".repeat(4000));
 			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
@@ -290,6 +316,60 @@ describe("AgentSession shake", () => {
 			seedHeavyToolResult("S".repeat(4000), "skill");
 			const result = await session.shake("elide");
 			expect(result.toolResultsDropped).toBe(0);
+		});
+	});
+
+	describe("checkpoint-aware context-full compaction", () => {
+		it("carries active checkpoint state through summarization, persistence, and context rebuild", async () => {
+			seedHeavyToolResult("Checkpoint created.", "checkpoint");
+			const checkpointEntry = sessionManager
+				.getBranch()
+				.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolName === "checkpoint",
+				);
+			if (checkpointEntry?.type !== "message" || checkpointEntry.message.role !== "toolResult") {
+				throw new Error("Expected checkpoint result");
+			}
+			checkpointEntry.message.details = { goal: "Preserve this investigation" };
+			session.setCheckpointState({
+				checkpointEntryId: checkpointEntry.id,
+				checkpointMessageCount: sessionManager.buildSessionContext().messages.length,
+				startedAt: checkpointEntry.timestamp,
+			});
+			seedHeavyToolResult("C".repeat(4000));
+			session.settings.set("compaction.keepRecentTokens", 1);
+			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+
+			let extraContext: string[] | undefined;
+			const compactSpy = vi
+				.spyOn(compactionModule, "compact")
+				.mockImplementation(async (preparation, _model, _resolver, _instructions, _signal, options) => {
+					extraContext = options?.extraContext;
+					return {
+						summary: "Checkpoint progress survived.",
+						shortSummary: undefined,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: {},
+					};
+				});
+
+			const result = await session.compact();
+
+			expect(compactSpy).toHaveBeenCalledTimes(1);
+			expect(extraContext?.join("\n")).toContain("Preserve this investigation");
+			expect(extraContext?.join("\n")).toContain("Describe progress neutrally");
+			expect(result.preserveData?.checkpointContinuation).toEqual({
+				schemaVersion: 1,
+				status: "active",
+				checkpointEntryId: checkpointEntry.id,
+				goal: "Preserve this investigation",
+			});
+			const summary = session.messages.find(message => message.role === "compactionSummary");
+			expect(summary?.role === "compactionSummary" ? summary.summary : "").toContain("## Active checkpoint");
 		});
 	});
 
@@ -708,6 +788,25 @@ describe("AgentSession shake", () => {
 			session.settings.set("compaction.thresholdTokens", 8_000);
 			session.settings.set("compaction.keepRecentTokens", 1);
 
+			seedHeavyToolResult("Checkpoint created.", "checkpoint");
+			const checkpointEntry = sessionManager
+				.getBranch()
+				.find(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolName === "checkpoint",
+				);
+			if (checkpointEntry?.type !== "message" || checkpointEntry.message.role !== "toolResult") {
+				throw new Error("Expected checkpoint result");
+			}
+			checkpointEntry.message.details = { goal: "Survive Shake fallback" };
+			session.setCheckpointState({
+				checkpointEntryId: checkpointEntry.id,
+				checkpointMessageCount: sessionManager.buildSessionContext().messages.length,
+				startedAt: checkpointEntry.timestamp,
+			});
+
 			const seedUser: AgentMessage = {
 				role: "user",
 				content: [{ type: "text", text: "seed" }],
@@ -731,18 +830,24 @@ describe("AgentSession shake", () => {
 			};
 			sessionManager.appendMessage(seedUser);
 			sessionManager.appendMessage(seedAssistant);
-			session.agent.replaceMessages([seedUser, seedAssistant]);
+			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
 
 			const shakeSpy = vi
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10 });
-			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
-				summary: "pre-prompt shake fallback compacted",
-				shortSummary: undefined,
-				firstKeptEntryId: preparation.firstKeptEntryId,
-				tokensBefore: preparation.tokensBefore,
-				details: {},
-			}));
+			let fallbackExtraContext: string[] | undefined;
+			const compactSpy = vi
+				.spyOn(compactionModule, "compact")
+				.mockImplementation(async (preparation, _model, _resolver, _instructions, _signal, options) => {
+					fallbackExtraContext = options?.extraContext;
+					return {
+						summary: "pre-prompt shake fallback compacted",
+						shortSummary: undefined,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: {},
+					};
+				});
 			vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
 
 			expect(session.getContextUsage({ contextWindow: 200_000 })?.tokens).toBe(1_000);
@@ -755,6 +860,18 @@ describe("AgentSession shake", () => {
 				event => event.type === "auto_compaction_start" && (event as { action?: string }).action === "context-full",
 			);
 			expect(fullStart).toBeDefined();
+			expect(fallbackExtraContext?.join("\n")).toContain("Survive Shake fallback");
+			const compactionEntry = sessionManager
+				.getBranch()
+				.find(entry => entry.type === "compaction" && entry.summary === "pre-prompt shake fallback compacted");
+			expect(
+				compactionEntry?.type === "compaction" ? compactionEntry.preserveData?.checkpointContinuation : undefined,
+			).toEqual({
+				schemaVersion: 1,
+				status: "active",
+				checkpointEntryId: checkpointEntry.id,
+				goal: "Survive Shake fallback",
+			});
 		});
 	});
 });
