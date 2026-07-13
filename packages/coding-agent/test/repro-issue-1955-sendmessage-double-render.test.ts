@@ -114,6 +114,7 @@ function createHarness(): Harness {
 		settings: { get: () => false },
 		session: sessionMock,
 		viewSession: {
+			agent: { state: { pendingToolCalls: new Set<string>() } },
 			buildTranscriptSessionContext: () => buildSessionContext(entries),
 			sessionManager: { getEntries: () => entries },
 		},

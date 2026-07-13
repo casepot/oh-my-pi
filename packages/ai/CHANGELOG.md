@@ -16,6 +16,36 @@
 - Fixed broker-backed auth reloads leaving session stickiness and usage-limit backoff attached to stale credential indices after login/logout or snapshot topology changes, allowing newly available sibling Codex accounts to be selected immediately.
 - Fixed Codex multi-account rotation and usage displays treating stale usage reports whose reset time had already elapsed or whose status contradicted remaining numeric quota as still exhausted, and made definitive preflight OAuth refresh failures disable the bad credential before stale access tokens are selected. These could leave a recovered sibling account blocked or repeatedly fail on another account's usage-limit/invalid-token state.
 - Fixed Codex SSE pre-response timeout handling so the first-event watchdog is cleared after response headers arrive instead of aborting long active response bodies later with a generic operation timeout.
+### Fixed
+
+- Fixed empty provider responses (e.g. "Cloud Code Assist API returned an empty response") being classified as non-retryable: `ProviderResponseError` with kind `empty-body` now carries the transient flag, so session retry and configured model-fallback chains engage instead of hard-failing the turn
+
+## [16.4.6] - 2026-07-12
+
+### Added
+
+- Added asynchronous `invalidateUsageCache` method to clear cached usage reports
+- Added support for cross-service usage cache invalidation between AuthStorage and AuthBroker
+
+### Fixed
+
+- Fixed OAuth credential resolution returning "No API key found" when every plan-eligible OpenAI Codex account was rate-limit blocked and the only unblocked account failed the model's plan gate: resolution now runs a last-resort ladder that first yields a plan-fitting account regardless of usage blocks (so callers get real usage-limit retry semantics), then tries every account with the plan filter dropped before reporting no credential
+
+## [16.4.5] - 2026-07-11
+
+### Fixed
+
+- Fixed an issue in GLM tool calling where missing or malformed argument closers (such as `<arg_value>` mistyped as `</arg_key>`) caused subsequent arguments to be swallowed or merged into a single field, affecting both in-band and native tool calling.
+
+## [16.4.3] - 2026-07-11
+
+### Fixed
+
+- Fixed auth database upgrades from schema v5 by creating the OAuth credential refresh-lease table before lease statements are prepared.
+- Fixed an issue in the Responses API where empty tool results were incorrectly serialized with a "(see attached image)" placeholder, causing models to look for non-existent attachments.
+- Fixed OpenAI Responses server non-streaming envelopes to always include the required "incomplete_details" field, using null for completed responses.
+- Preserved Cloud Code Assist tool schemas when mixed-type unions carry branch-local validation descriptions.
+
 ## [16.4.2] - 2026-07-10
 
 ### Fixed

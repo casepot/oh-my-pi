@@ -73,6 +73,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 		focusedAgentId: undefined,
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
+			agent: { state: { pendingToolCalls: new Set<string>() } },
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
 			extensionRunner: undefined,

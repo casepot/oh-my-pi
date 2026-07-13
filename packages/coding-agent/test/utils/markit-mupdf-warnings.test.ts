@@ -49,7 +49,7 @@ describe("markit MuPDF warnings", () => {
 
 		const result = await convertBufferWithMarkit(warningPdf(), ".pdf", undefined, { useCache: false });
 
-		expect(result.ok).toBe(true);
+		expect(result).toMatchObject({ ok: true });
 		expect(result.content).toContain("Tagged PDF repro text");
 		expect(consoleError).not.toHaveBeenCalled();
 		expect(

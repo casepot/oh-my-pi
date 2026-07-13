@@ -610,8 +610,8 @@ describe("goal runtime", () => {
 			agent: "task",
 			context: "Shared preference contract",
 			tasks: [
-				{ id: "backend-api", assignment: "Implement backend preference save." },
-				{ id: "ui-state", assignment: "Implement UI preference state." },
+				{ name: "backend-api", task: "Implement backend preference save." },
+				{ name: "ui-state", task: "Implement UI preference state." },
 			],
 		};
 		await harness.runtime.recordGoalWorkstreamTaskDispatch({

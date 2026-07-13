@@ -228,7 +228,7 @@ describe("runSubprocess request guards", () => {
 		});
 		mockCreateAgentSession(handle.session);
 
-		const result = await runSubprocess({ ...baseOptions, id: "subagent-steer-disabled", settings });
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-steer-default", settings });
 
 		expect(result.requests).toBe(5);
 		expect(result.termination.status).toBe("completed");

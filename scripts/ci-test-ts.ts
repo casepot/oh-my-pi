@@ -71,6 +71,13 @@ const codingAgentBucketPlans: Record<CodingAgentBucket, { label: string; paralle
 	native: { label: "native/tooling/browser/unit bucket", parallel: 1, chunkSize: 10 },
 };
 
+// MuPDF's Emscripten module cannot initialize inside Bun's isolated test-worker
+// realm (`Document` remains half-initialized). Run its logger regression as a
+// dedicated main-realm process without `--parallel`.
+const codingAgentDedicatedProcessTests: Record<string, true> = {
+	"test/utils/markit-mupdf-warnings.test.ts": true,
+};
+
 // Smaller workspace packages stay separate from native/TUI/integration suites so
 // their short TS suites can run together. CI still downloads the Linux x64 native
 // addon before this bucket: shared utility barrels may load native-backed modules.
@@ -112,6 +119,7 @@ const localOnlyWorkspacePackages = ["packages/mnemopi", "python/robomp/web"];
 // silently ignores unmatched filters when at least one other filter matches.)
 const repoScriptTests = [
 	"scripts/ci-concurrency.test.ts",
+	"scripts/ci-build-native.test.ts",
 	"scripts/ci-release-notes.test.ts",
 	"scripts/fix-dts-extensions.test.ts",
 	"scripts/link-omp.test.ts",
@@ -318,18 +326,36 @@ async function codingAgentTestCommands(bucket: CodingAgentBucket): Promise<TestC
 	}
 	const plan = codingAgentBucketPlans[bucket];
 	const chunkSize = plan.chunkSize ?? testFiles.length;
-	const chunkCount = Math.ceil(testFiles.length / chunkSize);
-	const commands: TestCommand[] = [];
-	for (let i = 0; i < testFiles.length; i += chunkSize) {
-		const chunk = testFiles.slice(i, i + chunkSize);
-		const chunkLabel = chunkCount > 1 ? ` chunk ${commands.length + 1}/${chunkCount}` : "";
-		commands.push({
-			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; parallel=${plan.parallel}${chunkLabel}; ${chunk.length} files)`,
-			cwd: "packages/coding-agent",
-			command: ["bun", "test", `--parallel=${plan.parallel}`, ...onlyFailuresArgs, ...chunk],
-		});
+	const chunks: string[][] = [];
+	let chunk: string[] = [];
+	const flushChunk = (): void => {
+		if (chunk.length === 0) return;
+		chunks.push(chunk);
+		chunk = [];
+	};
+	for (const testFile of testFiles) {
+		if (codingAgentDedicatedProcessTests[testFile] === true) {
+			flushChunk();
+			chunks.push([testFile]);
+			continue;
+		}
+		chunk.push(testFile);
+		if (chunk.length >= chunkSize) flushChunk();
 	}
-	return commands;
+	flushChunk();
+
+	return chunks.map((files, index) => {
+		const chunkLabel = chunks.length > 1 ? ` chunk ${index + 1}/${chunks.length}` : "";
+		const dedicated = files.length === 1 && codingAgentDedicatedProcessTests[files[0]!] === true;
+		const executionLabel = dedicated ? "main realm" : `parallel=${plan.parallel}`;
+		return {
+			label: `packages/coding-agent (${plan.label}; ${testFiles.length} files; ${executionLabel}${chunkLabel}; ${files.length} files)`,
+			cwd: "packages/coding-agent",
+			command: dedicated
+				? ["bun", "test", ...onlyFailuresArgs, ...files]
+				: ["bun", "test", `--parallel=${plan.parallel}`, ...onlyFailuresArgs, ...files],
+		};
+	});
 }
 
 async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
@@ -346,12 +372,13 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 						"--parallel=4",
 						...onlyFailuresArgs,
 						"scripts/ci-concurrency.test.ts",
+						"scripts/ci-build-native.test.ts",
 						"scripts/fix-dts-extensions.test.ts",
 					],
 				},
 			];
 		case "native":
-			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4, { smol: true }));
+			return nativeAndIntegrationPackages.map(pkg => workspaceTestCommand(pkg, 4));
 		case "coding-agent-singleton":
 			return await codingAgentTestCommands("singleton");
 		case "coding-agent-ui":

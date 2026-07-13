@@ -43,6 +43,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 		settings: { get: () => false },
 		session: {
+			agent: { state: { pendingToolCalls: new Set<string>() } },
 			retryAttempt: 0,
 			getToolByName: () => undefined,
 			buildTranscriptSessionContext: () => buildSessionContext([]),
@@ -134,6 +135,7 @@ describe("InteractiveMode.showStatus", () => {
 			chatContainer: new Container(),
 			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
+			viewSession: { isStreaming: false },
 			optimisticUserMessageSignature: "hello\u00001",
 		} as unknown as InteractiveModeContext;
 		const helpers = new UiHelpers(ctx);

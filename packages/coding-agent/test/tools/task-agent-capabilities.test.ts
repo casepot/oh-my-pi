@@ -104,7 +104,7 @@ describe("task agent capability descriptions", () => {
 		const agents = loadBundledAgents();
 
 		expect(isReadOnlyAgent(agentByName(agents, "scout"))).toBe(true);
-		for (const name of ["task", "sonic", "plan", "reviewer", "designer"]) {
+		for (const name of ["task", "sonic", "reviewer", "designer"]) {
 			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
 		}
 	});
@@ -114,7 +114,7 @@ describe("task agent capability descriptions", () => {
 
 		expect(agentByName(agents, "scout").readSummarize).toBe(false);
 		expect(agentByName(agents, "librarian").readSummarize).toBe(false);
-		for (const name of ["task", "sonic", "plan", "reviewer", "designer"]) {
+		for (const name of ["task", "sonic", "reviewer", "designer"]) {
 			expect(agentByName(agents, name).readSummarize).toBeUndefined();
 		}
 	});
@@ -175,7 +175,7 @@ describe("task agent capability descriptions", () => {
 		} as ToolSession;
 		const tool = await TaskTool.create(session);
 
-		await tool.execute("task-call", { agent: "task", assignment: "Inspect the target plan." });
+		await tool.execute("task-call", { agent: "task", task: "Inspect the target plan." });
 
 		const options = runSpy.mock.calls[0]?.[0];
 		expect(options?.agent.systemPrompt).toContain("Plan mode active");
@@ -255,7 +255,7 @@ describe("task agent capability descriptions", () => {
 			} as ToolSession;
 			const tool = await TaskTool.create(session);
 
-			await tool.execute("task-call", { agent: "task", assignment: "Execute the target plan." });
+			await tool.execute("task-call", { agent: "task", task: "Execute the target plan." });
 
 			const options = runSpy.mock.calls[0]?.[0];
 			expect(options?.targetPlanReference?.path).toBe(planFilePath);

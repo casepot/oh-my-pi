@@ -225,6 +225,7 @@ export type SymbolKey =
 	| "tool.debug"
 	| "tool.mcp"
 	| "tool.job"
+	| "tool.launch"
 	| "tool.task"
 	| "tool.todo"
 	| "tool.memory"
@@ -249,7 +250,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"status.disabled": "⦸",
 	"status.enabled": "●",
 	"status.running": "⟳",
-	"status.shadowed": "◌",
+	"status.shadowed": "○",
 	"status.aborted": "⏹",
 	"status.done": "•",
 	// Navigation
@@ -433,6 +434,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.debug": "🐞",
 	"tool.mcp": "🔌",
 	"tool.job": "⚙",
+	"tool.launch": "🚀",
 	"tool.task": "⇶",
 	"tool.todo": "☑",
 	"tool.memory": "🧠",
@@ -464,8 +466,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"status.enabled": "\uf111",
 	// pick:  | alt:   
 	"status.running": "\uf110",
-	// pick: ◐ | alt: ◑ ◒ ◓ ◔
-	"status.shadowed": "◐",
+	// pick:  (nf-fa-circle_o, pairs with status.enabled's nf-fa-circle) | alt: ◐ ◑
+	"status.shadowed": "\uf10c",
 	// pick:  | alt:  
 	"status.aborted": "\uf04d",
 	// pick: • | alt: ● ·
@@ -742,6 +744,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.debug": "\uEAD8",
 	"tool.mcp": "\uEB2D",
 	"tool.job": "\uEBA2",
+	"tool.launch": "\uF135",
 	"tool.task": "\uf4a0",
 	"tool.todo": "\uEAB3",
 	"tool.memory": "\uEACE",
@@ -946,6 +949,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.debug": "dbg",
 	"tool.mcp": "<>",
 	"tool.job": "job",
+	"tool.launch": "run",
 	"tool.task": ">>>",
 	"tool.todo": "[x]",
 	"tool.memory": "mem",

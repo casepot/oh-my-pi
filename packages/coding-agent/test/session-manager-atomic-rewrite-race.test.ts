@@ -8,6 +8,15 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import type { SessionTitleUpdate } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
+class CountingAtomicRewriteStorage extends MemorySessionStorage {
+	atomicWrites = 0;
+
+	override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
+		this.atomicWrites++;
+		await super.writeTextAtomic(path, content, options);
+	}
+}
+
 interface DetachableWriter extends SessionStorageWriter {
 	detach(): void;
 }
@@ -681,6 +690,31 @@ describe("SessionManager fence handoff across superseded rewrites", () => {
 });
 
 describe("SessionManager entry mutation transaction", () => {
+	it("skips mutation and storage rewrite when the preflight is false", async () => {
+		const storage = new CountingAtomicRewriteStorage();
+		const sessionManager = SessionManager.create("/cwd", "/sessions", storage);
+		sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+		await sessionManager.flush();
+		const writesBefore = storage.atomicWrites;
+		const entriesBefore = structuredClone(sessionManager.getEntries());
+		let mutationCalled = false;
+
+		const result = await sessionManager.mutateEntriesAtomicallyIf(
+			() => false,
+			() => {
+				mutationCalled = true;
+				sessionManager.appendCustomEntry("unexpected", {});
+				return "committed";
+			},
+		);
+
+		expect(result).toBeUndefined();
+		expect(mutationCalled).toBe(false);
+		expect(storage.atomicWrites).toBe(writesBefore);
+		expect(sessionManager.getEntries()).toEqual(entriesBefore);
+		await sessionManager.close();
+	});
+
 	it("restores the entry graph and leaf when a staged mutation fails", async () => {
 		const storage = new MemorySessionStorage();
 		const sessionManager = SessionManager.create("/cwd", "/sessions", storage);

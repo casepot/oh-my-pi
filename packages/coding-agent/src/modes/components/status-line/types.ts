@@ -68,6 +68,9 @@ export interface SegmentContext {
 		paused: boolean;
 		label?: string;
 	} | null;
+	vibeMode: {
+		enabled: boolean;
+	} | null;
 	collab: CollabStatus | null;
 	// Cached values for performance (computed once per render)
 	usageStats: {

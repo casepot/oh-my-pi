@@ -81,6 +81,7 @@ import { GrepTool } from "./grep";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool, isIrcEnabled } from "./irc";
 import { JobTool } from "./job";
+import { LaunchTool } from "./launch";
 import { LearnTool } from "./learn";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
@@ -120,6 +121,7 @@ export * from "./image-gen";
 export * from "./inspect-image";
 export * from "./irc";
 export * from "./job";
+export * from "./launch";
 export * from "./learn";
 export * from "./manage-skill";
 export * from "./memory-edit";
@@ -134,6 +136,7 @@ export * from "./search-tool-bm25";
 export * from "./ssh";
 export * from "./todo";
 export * from "./tts";
+export * from "./vibe";
 export * from "./write";
 export * from "./yield";
 
@@ -461,6 +464,7 @@ export type BuiltinToolLoadMode = "essential" | "discoverable";
 export const DEFAULT_ESSENTIAL_TOOL_NAMES: readonly string[] = [
 	"read",
 	"bash",
+	"launch",
 	"edit",
 	"write",
 	"glob",
@@ -520,6 +524,7 @@ export function filterInitialToolsForDiscoveryAll(
 export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
 	bash: s => new BashTool(s),
+	launch: s => new LaunchTool(s),
 	edit: s => new EditTool(s),
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),
@@ -762,6 +767,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "goal") return goalEnabled && goalModeActive;
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return session.settings.get("bash.enabled");
+		if (name === "launch") return session.settings.get("launch.enabled");
 		if (name === "eval") return allowEval;
 		if (name === "debug") return session.settings.get("debug.enabled");
 		if (name === "todo") return !includeYield && session.settings.get("todo.enabled");
@@ -774,6 +780,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;
+		if (name === "ask") return session.settings.get("ask.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "checkpoint" || name === "rewind" || name === "seal" || name === "keep_checkpoint") {
 			return session.settings.get("checkpoint.enabled");

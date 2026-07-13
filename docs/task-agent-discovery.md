@@ -14,6 +14,7 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 - [`src/prompts/agents/task.md`](../packages/coding-agent/src/prompts/agents/task.md)
 - [`src/prompts/tools/task.md`](../packages/coding-agent/src/prompts/tools/task.md)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
+- [`src/discovery/omp-extension-roots.ts`](../packages/coding-agent/src/discovery/omp-extension-roots.ts)
 - [`src/config.ts`](../packages/coding-agent/src/config.ts)
 - [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts)
 
@@ -35,7 +36,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
-- `read-summarize: false` (parsed as `readSummarize`) forces the subagent's `read` tool to return verbatim file content instead of structural summaries — `runSubprocess` applies it as a `read.summarize.enabled: false` override on the subagent's isolated settings (`src/task/executor.ts`). `explore` and `librarian` ship with it disabled. Defaults to enabled when the field is absent.
+- `read-summarize: false` (parsed as `readSummarize`) forces the subagent's `read` tool to return verbatim file content instead of structural summaries — `runSubprocess` applies it as a `read.summarize.enabled: false` override on the subagent's isolated settings (`src/task/executor.ts`). `scout` and `librarian` ship with it disabled. Defaults to enabled when the field is absent.
 
 ## Bundled agents
 
@@ -43,7 +44,7 @@ Bundled agents are embedded at build time (`src/task/agents.ts`) using text impo
 
 `EMBEDDED_AGENT_DEFS` defines:
 
-- `explore`, `plan`, `designer`, `reviewer`, `librarian`, `tester` from prompt files
+- `scout`, `designer`, `reviewer`, `librarian` from prompt files
 - `task` and `sonic` from shared `task.md` body plus injected frontmatter
 
 Loading path:
@@ -56,21 +57,23 @@ Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter thr
 
 ## Filesystem and plugin discovery
 
-`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from OMP-native roots and Claude plugin roots before appending bundled definitions. Cross-harness roots such as `.claude/agents`, `.codex/agents`, and `.gemini/agents` are intentionally skipped — their frontmatter schema is not the OMP task-agent contract (`TASK_AGENT_CONFIG_SOURCE = ".omp"` filters both dir lists).
+`discoverAgents(cwd, home)` (`src/task/discovery.ts`) merges agents from OMP-native config roots, OMP extension packages, and Claude marketplace plugins before appending bundled definitions. Direct cross-harness roots such as `.claude/agents`, `.codex/agents`, and `.gemini/agents` are intentionally skipped because their frontmatter schema is not the OMP task-agent contract (`TASK_AGENT_CONFIG_SOURCE = ".omp"` filters the native config-dir lists).
 
 ### Discovery inputs
 
 1. Nearest project `.omp` agents dir from `findAllNearestProjectConfigDirs("agents", cwd)` (filtered to `.omp`; first hit only)
 2. User `.omp` agents dir from `getConfigDirs("agents", { project: false })` (filtered to `.omp`; first hit only)
-3. Claude plugin roots (`listClaudePluginRoots(home, cwd)`) with `agents/` subdirs — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope
-4. Bundled agents (`loadBundledAgents()`)
+3. OMP extension-package `agents/` dirs from `listOmpExtensionRoots(...)` — only when `isProviderEnabled("omp-plugins")`; roots retain extension precedence: CLI roots, project `extensions:` settings, user `extensions:` settings, then installed npm/link plugins
+4. Claude marketplace plugin `agents/` dirs from `listClaudePluginRoots(home, cwd)` — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope
+5. Bundled agents from `loadBundledAgents()`
 
 ### Actual source order
 
 1. project `.omp/agents`
 2. user `~/.omp/agent/agents`
-3. plugin `agents/` dirs (project-scope first, then user-scope)
-4. bundled agents last
+3. OMP extension-package `agents/` dirs in `listOmpExtensionRoots(...)` order
+4. Claude marketplace plugin `agents/` dirs (project scope before user scope)
+5. bundled agents last
 
 ## Merge and collision rules
 
@@ -84,6 +87,7 @@ Implications:
 
 - Project `.omp` overrides user `.omp`.
 - Non-bundled agents override bundled agents with the same name.
+- Among extension and plugin roots, the first root in the source order wins.
 - Name matching is case-sensitive (`Task` and `task` are distinct).
 - Within one directory, markdown files are read in lexicographic filename order before dedup.
 
@@ -130,7 +134,7 @@ Runtime output schema precedence in `TaskTool.#runSpawn`:
 
 (`effectiveOutputSchema = effectiveAgent.output ?? this.session.outputSchema` — the task call itself never carries a schema; ad-hoc structured workflows go through the eval bridge's `agent(prompt, schema)`.)
 
-The model-facing prompt (`src/prompts/tools/task.md`) no longer carries the old structured-output mismatch warning; it tags read-only agents and warns against offloading reasoning to `explore`/`sonic` instead.
+The model-facing prompt (`src/prompts/tools/task.md`) no longer carries the old structured-output mismatch warning; it tags read-only agents and warns against offloading substantive implementation work to `scout`/`sonic`.
 
 ## Command discovery interaction
 
@@ -182,7 +186,7 @@ So deeper levels cannot spawn further tasks even if the agent definition include
 When parent plan mode is enabled, `TaskTool.#runSpawn` builds an `effectiveAgent` before launching subprocesses:
 
 - prepends the plan-mode subagent system prompt
-- restricts tools to `read`, `search`, `find`, `lsp`, and `web_search`, plus `ast_grep`/`report_finding` when the agent's own tool list declares them (`PLAN_MODE_AGENT_TOOL_ALLOWLIST`)
+- restricts tools to `read`, `grep`, `glob`, `lsp`, and `web_search`, plus `ast_grep`/`report_finding` when the agent's own tool list declares them (`PLAN_MODE_AGENT_TOOL_ALLOWLIST`)
 - clears child spawns
 
 The same `effectiveAgent` is used for subprocess launch, model/thinking overrides, and output-schema selection.

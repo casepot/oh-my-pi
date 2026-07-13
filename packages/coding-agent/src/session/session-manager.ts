@@ -1791,6 +1791,16 @@ export class SessionManager {
 		await this.#rewriteAtomically();
 	}
 	/**
+	 * Conditionally apply an atomic entry mutation. The predicate runs before
+	 * writer flush, journal snapshot cloning, or rewrite; false is a true no-op.
+	 * Existing unconditional callers continue using {@link mutateEntriesAtomically}.
+	 */
+	async mutateEntriesAtomicallyIf<T>(shouldMutate: () => boolean, mutate: () => T): Promise<T | undefined> {
+		if (!shouldMutate()) return undefined;
+		return this.mutateEntriesAtomically(mutate);
+	}
+
+	/**
 	 * Apply in-memory entry mutations and publish the complete journal once.
 	 * Appends performed by `mutate` stay behind the rewrite fence; failures restore
 	 * the prior entry graph and leaf without exposing a partial transaction.

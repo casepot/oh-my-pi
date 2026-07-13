@@ -148,8 +148,19 @@ export class IrcBus {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		this.#emitMessageCreated(message, opts?.origin ?? "api");
 		const ref = this.#registry.get(message.to);
-		if (!ref || ref.status === "aborted") {
-			return { to: message.to, outcome: "failed", error: `Unknown or terminated agent "${message.to}".` };
+		if (!ref) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Unknown agent "${message.to}" — check \`irc list\` for live peers.`,
+			};
+		}
+		if (ref.status === "aborted") {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: `Agent "${message.to}" was hard-aborted and cannot be messaged or revived. Its transcript remains readable at history://${message.to}.`,
+			};
 		}
 		// Advisor refs are observability-only transcripts, never messageable peers.
 		if (ref.kind === "advisor") {
@@ -220,14 +231,19 @@ export class IrcBus {
 	 * forever). Rejects when `signal` aborts. By default, already-buffered
 	 * mail satisfies the wait before registering a future waiter; callers that
 	 * need a strictly future reply can disable that drain. `onWaitStarted`
-	 * runs only when a future waiter is actually needed.
+	 * runs only when a future waiter is actually needed. When supplied,
+	 * `liveness` rejects the wait once no eligible running sender remains.
 	 */
 	async wait(
 		agentId: string,
 		filter: { from?: string },
 		timeoutMs: number,
 		signal?: AbortSignal,
-		options?: { drainPending?: boolean; onWaitStarted?: () => void },
+		options?: {
+			drainPending?: boolean;
+			onWaitStarted?: () => void;
+			liveness?: { registry: AgentRegistry; senderId: string };
+		},
 	): Promise<IrcMessage | null> {
 		if (signal?.aborted) {
 			throw signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted");
@@ -242,35 +258,49 @@ export class IrcBus {
 		const { promise, resolve, reject } = Promise.withResolvers<IrcMessage | null>();
 		let timer: NodeJS.Timeout | undefined;
 		let onAbort: (() => void) | undefined;
+		let unsubscribeLiveness: (() => void) | undefined;
 
-		const waiter: IrcWaiter = {
-			from: filter.from,
-			resolve: msg => {
-				cleanup();
-				resolve(msg);
-			},
-			cancel: () => {
-				cleanup();
-			},
+		const liveness = options?.liveness;
+		const livenessReason = filter.from
+			? `IRC wait aborted: agent "${filter.from}" is not running`
+			: "IRC wait aborted: no running peers remain";
+
+		const settle = (
+			outcome: { kind: "message"; msg: IrcMessage } | { kind: "timeout" } | { kind: "abort"; error: Error },
+		): void => {
+			cleanup();
+			if (outcome.kind === "message") {
+				resolve(outcome.msg);
+			} else if (outcome.kind === "timeout") {
+				resolve(null);
+			} else {
+				reject(outcome.error);
+			}
 		};
+
 		const cleanup = (): void => {
 			this.#removeWaiter(agentId, waiter);
 			clearTimeout(timer);
 			if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+			unsubscribeLiveness?.();
+		};
+
+		const waiter: IrcWaiter = {
+			from: filter.from,
+			resolve: msg => settle({ kind: "message", msg }),
+			cancel: () => cleanup(),
 		};
 
 		if (signal) {
-			onAbort = () => {
-				cleanup();
-				reject(signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted"));
-			};
+			onAbort = () =>
+				settle({
+					kind: "abort",
+					error: signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted"),
+				});
 			signal.addEventListener("abort", onAbort, { once: true });
 		}
 		if (timeoutMs > 0) {
-			timer = setTimeout(() => {
-				cleanup();
-				resolve(null);
-			}, timeoutMs);
+			timer = setTimeout(() => settle({ kind: "timeout" }), timeoutMs);
 			timer.unref?.();
 		}
 
@@ -285,6 +315,30 @@ export class IrcBus {
 		} catch (error) {
 			cleanup();
 			throw error;
+		}
+
+		if (liveness) {
+			const { registry, senderId } = liveness;
+			const hasLiveSender = (from?: string): boolean =>
+				registry
+					.listVisibleTo(senderId)
+					.some(ref => (ref.status === "running" || ref.status === "waiting") && (!from || ref.id === from));
+			const check = filter.from ? () => hasLiveSender(filter.from) : () => hasLiveSender();
+			unsubscribeLiveness = registry.onChange(event => {
+				// The waiting caller's own lifecycle transition is not peer
+				// liveness. Let an explicit abort/status change win that race.
+				if (event.ref.id === senderId) return;
+				if (!check()) {
+					settle({ kind: "abort", error: new Error(livenessReason) });
+				}
+			});
+			// Defer the initial empty-roster check so an already-queued caller
+			// abort can settle with its precise reason before generic liveness.
+			queueMicrotask(() => {
+				if (!check()) {
+					settle({ kind: "abort", error: new Error(livenessReason) });
+				}
+			});
 		}
 		return promise;
 	}

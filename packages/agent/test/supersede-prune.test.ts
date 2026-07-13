@@ -3,6 +3,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	previewSupersededToolResultPrune,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
@@ -202,7 +203,14 @@ describe("pruneSupersededToolResults — tail case", () => {
 		const [call2, result2] = readPair("src/foo.ts", FILE_CONTENT, T0 + 1_000);
 		const entries: SessionEntry[] = [call1, result1, call2, result2];
 
+		const preview = previewSupersededToolResultPrune(entries, cfg({ now: T0 + 1_000 }));
+		expect(preview.prunedCount).toBe(1);
+		expect(preview.tokensSaved).toBeGreaterThan(0);
+		expect(resultText(result1)).toBe(FILE_CONTENT);
+		expect(resultMessage(result1).prunedAt).toBeUndefined();
+
 		const result = pruneSupersededToolResults(entries, cfg({ now: T0 + 1_000 }));
+		expect(result).toEqual(preview);
 
 		expect(result.prunedCount).toBe(1);
 		expect(result.tokensSaved).toBeGreaterThan(0);

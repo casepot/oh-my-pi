@@ -236,16 +236,19 @@ function collectUselessResults(
 	return candidates;
 }
 
+interface SupersededToolResultPrunePlan {
+	candidates: SupersedeCandidate[];
+	result: PruneResult;
+}
+
 /**
- * Prune superseded tool results (e.g. stale `read` outputs replaced by a newer
- * read of the same file) and, when `pruneUseless` is set, results their tool
- * flagged contextually useless. Cheap, incremental, and prompt-cache-aware: a
- * candidate is pruned now only when the suffix after it is small (tail case —
- * the read→edit→read loop) or when the context has been idle long enough that
- * the provider cache is cold anyway (then all still-sent candidates flush).
- * Never mutates entries before `keepBoundaryId` (summarized away — not sent).
+ * Select superseded/useless results eligible for this pass and calculate their
+ * savings. Preview and mutation share this plan so they cannot drift.
  */
-export function pruneSupersededToolResults(entries: SessionEntry[], config: SupersedePruneConfig): PruneResult {
+function planSupersededToolResultPrune(
+	entries: SessionEntry[],
+	config: SupersedePruneConfig,
+): SupersededToolResultPrunePlan {
 	const toolCallsById = collectToolCallsById(entries);
 	const candidates = config.supersedeKey
 		? collectSupersededResults(entries, toolCallsById, config.supersedeKey, config.protectedTools)
@@ -255,7 +258,9 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 		candidates.push(...collectUselessResults(entries, toolCallsById, config.protectedTools, exclude));
 		candidates.sort((a, b) => a.index - b.index);
 	}
-	if (candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
+	if (candidates.length === 0) {
+		return { candidates: [], result: { prunedCount: 0, tokensSaved: 0 } };
+	}
 
 	const now = config.now ?? Date.now();
 	let lastMessageTimestamp: number | undefined;
@@ -268,15 +273,13 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 	}
 	const idle =
 		lastMessageTimestamp !== undefined && now - lastMessageTimestamp >= (config.idleFlushMs ?? DEFAULT_IDLE_FLUSH_MS);
-
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
-
-	let toPrune: SupersedeCandidate[];
+	let eligible: SupersedeCandidate[];
 	if (idle) {
 		// Provider cache is cold (idle exceeds the retention TTL), so re-writing
 		// the sent region costs nothing. Entries before the compaction boundary
 		// are summarized away and never sent — skip them to avoid pointless churn.
-		toPrune = candidates.filter(candidate => candidate.index >= boundaryIndex);
+		eligible = candidates.filter(candidate => candidate.index >= boundaryIndex);
 	} else {
 		const suffixTokenLimit = config.suffixTokenLimit ?? DEFAULT_SUFFIX_TOKEN_LIMIT;
 		// suffixTokens[i] = estimated tokens of all messages strictly after entry i.
@@ -284,20 +287,43 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 		// when that suffix is small (cheap-to-recache tail) and the candidate sits
 		// at/after the compaction boundary.
 		const suffixTokens = computeMessageSuffixTokens(entries);
-		toPrune = candidates.filter(
+		eligible = candidates.filter(
 			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
 		);
 	}
-	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
-	const prunedAt = Date.now();
 	let tokensSaved = 0;
-	for (const candidate of toPrune) {
-		candidate.message.content = [{ type: "text", text: candidate.notice }];
-		candidate.message.prunedAt = prunedAt;
+	for (const candidate of eligible) {
 		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
 	}
-	return { prunedCount: toPrune.length, tokensSaved };
+	return {
+		candidates: eligible,
+		result: { prunedCount: eligible.length, tokensSaved },
+	};
+}
+
+/**
+ * Compute the result of {@link pruneSupersededToolResults} without mutating entries.
+ */
+export function previewSupersededToolResultPrune(entries: SessionEntry[], config: SupersedePruneConfig): PruneResult {
+	return planSupersededToolResultPrune(entries, config).result;
+}
+
+/**
+ * Prune superseded tool results (e.g. stale `read` outputs replaced by a newer
+ * read of the same file) and, when `pruneUseless` is set, results their tool
+ * flagged contextually useless. Cheap, incremental, and prompt-cache-aware.
+ */
+export function pruneSupersededToolResults(entries: SessionEntry[], config: SupersedePruneConfig): PruneResult {
+	const plan = planSupersededToolResultPrune(entries, config);
+	if (plan.result.prunedCount === 0) return plan.result;
+
+	const prunedAt = Date.now();
+	for (const candidate of plan.candidates) {
+		candidate.message.content = [{ type: "text", text: candidate.notice }];
+		candidate.message.prunedAt = prunedAt;
+	}
+	return plan.result;
 }
 
 export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = DEFAULT_PRUNE_CONFIG): PruneResult {

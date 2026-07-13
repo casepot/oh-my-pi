@@ -421,6 +421,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 					enteredWaiting = true;
 					registry.setStatus(senderId, "waiting", statusDetail);
 				},
+				liveness: { registry, senderId },
 			});
 			if (!waited) {
 				const filterNote = from ? ` from ${from}` : "";
@@ -435,6 +436,11 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 				content: [{ type: "text", text: formatIncoming(waited) }],
 				details: { op: "wait", from: senderId, waited },
 			};
+		} catch (error) {
+			if (signal?.aborted) {
+				throw error;
+			}
+			return errorResult(error instanceof Error ? error.message : String(error), { op: "wait", from: senderId });
 		} finally {
 			if (enteredWaiting && registry.get(senderId)?.status === "waiting") {
 				registry.setStatus(senderId, "running");

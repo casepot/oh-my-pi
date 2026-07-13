@@ -24,6 +24,26 @@
 - Added provider-call maintenance hooks, materialized-context preflight/rematerialization, abort guards, event-consumption acknowledgements, and a visible `ContextMaintenanceError` lifecycle so embedders can fail closed before sending an unsafe continuation request.
 - Fixed remote compaction to classify caller cancellation separately from timeout, HTTP, malformed-response, and transport failures, preserving cancellation while allowing live remote failures to fall back locally with structured diagnostics.
 - Fixed V2 remote compaction to honor the configured timeout, avoid retrying full request timeouts, send Codex remote-compaction beta feature headers, and skip the V1 remote fallback after a V2 timeout so local fallback starts immediately.
+
+- Added automated image-dropping rescue tier to compaction dead-end recovery
+- Added visual warnings to the session timeline when compaction fails to free sufficient space
+
+### Changed
+
+- Improved compaction dead-end notifications with specific recovery instructions
+
+## [16.4.5] - 2026-07-11
+
+### Added
+
+- Added a process-global pause gate (`agentPauseGate`) to safely pause agent loops before model calls or tool executions, allowing them to be resumed later or aborted cleanly.
+
+## [16.4.3] - 2026-07-11
+
+### Fixed
+
+- Fixed an issue where skipped sibling tool results incorrectly reported that a queued user message caused the skip.
+
 ## [16.4.2] - 2026-07-10
 
 ### Fixed

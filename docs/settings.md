@@ -385,6 +385,31 @@ retry:
   maxDelayMs: 300000
   modelFallback: true
   fallbackRevertPolicy: cooldown-expiry
+  fallbackChains:
+    # Any role without an explicit chain inherits the "default" chain.
+    default:
+      - anthropic/claude-opus-4-5
+      - openai/gpt-5.5
+      - google/gemini-3-pro
+    # Per-role chains override the default (roles from `modelRoles`,
+    # including custom roles). Selectors accept an optional thinking
+    # suffix, e.g. openai/gpt-5.5:low.
+    smol:
+      - openai/gpt-5.5-mini
+      - anthropic/claude-haiku-4-5
+    # Model-selector keys (any key containing "/") attach the chain to the
+    # model itself: it applies whenever that model is active, no matter
+    # which role it is assigned to, and survives role reassignment.
+    google/gemini-3-pro:
+      - google-vertex/gemini-3-pro
+    # A `provider/*` KEY covers every model of a provider — current or
+    # future. A `provider/*` ENTRY keeps the failing model's id and swaps
+    # the provider: google-antigravity/x -> google/x -> google-vertex/x.
+    # Ids missing on the target provider are skipped (near-miss ids resolve
+    # fuzzily); exact model keys override the wildcard for a specific model.
+    google-antigravity/*:
+      - google/*
+      - google-vertex/*
 ```
 
 | Key | Type | Default | Notes |
@@ -394,8 +419,10 @@ retry:
 | `retry.baseDelayMs` | number | `500` | Initial backoff. |
 | `retry.maxDelayMs` | number | `300000` | Backoff ceiling (5 min). |
 | `retry.modelFallback` | boolean | `true` | Fall back to another model when one is unavailable. |
-| `retry.fallbackChains` | record | `{}` | Per-model fallback chains. |
-| `retry.fallbackRevertPolicy` | enum | `cooldown-expiry` | `cooldown-expiry`, `never`. |
+| `retry.fallbackChains` | record | `{}` | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` *entry* keeps the failing model's id and swaps the provider. The `default` chain covers every assigned role without its own chain. Unknown models/providers or malformed chains are reported as config warnings at startup. |
+| `retry.fallbackRevertPolicy` | enum | `cooldown-expiry` | `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually. |
+
+When the active model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default`. It skips models whose selectors are still cooling down and switches for the rest of the turn. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
 
 ### Tools and approvals
 
@@ -424,14 +451,13 @@ tools:
 | `tools.artifactTailBytes` | number | `20` | KB of tail kept inline on spill. |
 | `tools.artifactTailLines` | number | `500` | Max tail lines kept inline on spill. |
 
-Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `astEdit.enabled`, `astGrep.enabled`, `web_search.enabled`, `inspect_image.enabled`.
+Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `astEdit.enabled`, `astGrep.enabled`, `web_search.enabled`, `inspect_image.enabled`.
 
 ### Shell, eval, and LSP
 
 ```yaml
 bash:
   enabled: true
-  stripTrailingHeadTail: true
   autoBackground:
     enabled: false
     thresholdMs: 60000
@@ -455,7 +481,7 @@ lsp:
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `bash.enabled` | boolean | `true` | Enable the bash tool. |
-| `bash.stripTrailingHeadTail` | boolean | `true` | Strip trailing head/tail noise from output. |
+| `launch.enabled` | boolean | `true` | Enable the launch tool for shared long-running project processes. |
 | `bash.autoBackground.enabled` | boolean | `false` | Auto-background long-running commands. |
 | `bash.autoBackground.thresholdMs` | number | `60000` | Threshold before auto-backgrounding. |
 | `eval.py` | boolean | `true` | Python eval backend. `PI_PY=0` disables for the process. |
@@ -505,6 +531,7 @@ read:
 ```yaml
 compaction:
   enabled: true
+  allowModelFallbacks: false # opt in to role/large-context fallback models
   strategy: snapcompact     # context-full, handoff, shake, snapcompact, off
   midTurnEnabled: true      # check thresholds between tool-loop provider requests
   thresholdPercent: -1       # -1 = default reserve-based behavior
@@ -518,6 +545,7 @@ memory:
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `compaction.enabled` | boolean | `true` | Automatic conversation compaction. |
+| `compaction.allowModelFallbacks` | boolean | `false` | Allow configured role/large-context fallback models when the active model cannot compact. |
 | `compaction.midTurnEnabled` | boolean | `true` | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request. |
 | `compaction.strategy` | enum | `snapcompact` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
 | `compaction.thresholdPercent` | number | `-1` | Percent-of-context trigger; `-1` = reserve-based default. |
@@ -641,6 +669,25 @@ searxng:
 | `auth.broker.token` | string | _(unset)_ | Auth-broker token. Overridden by `OMP_AUTH_BROKER_TOKEN`. |
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
+
+### Discovery, MCP, and subagent fallback opt-ins
+
+User/home discovery and credential-based subagent model substitution are explicit opt-ins:
+
+```yaml
+discovery:
+  enableUserSources: false
+mcp:
+  enableUserConfig: false
+task:
+  fallbackToParentModelOnAuthFailure: false
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `discovery.enableUserSources` | boolean | `false` | Load user/home capability sources from OMP and compatible coding-tool directories. |
+| `mcp.enableUserConfig` | boolean | `false` | Load user/global MCP servers from home or installed plugin sources. |
+| `task.fallbackToParentModelOnAuthFailure` | boolean | `false` | When a configured subagent model has no working credentials, allow substitution with the authenticated parent-session model. |
 
 ### Other groups
 

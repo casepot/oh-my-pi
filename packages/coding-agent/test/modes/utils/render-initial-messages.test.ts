@@ -52,7 +52,12 @@ function makeEmptyContext(): SessionContext {
 /** Build a minimal InteractiveModeContext mock, returning spies for assertions. */
 function makeCtx(): {
 	ctx: InteractiveModeContext;
-	transcriptSpy: Mock<(options?: { collapseCompactedHistory?: boolean }) => SessionContext>;
+	transcriptSpy: Mock<
+		(options?: {
+			collapseCompactedHistory?: boolean;
+			keepDanglingToolCallIds?: ReadonlySet<string>;
+		}) => SessionContext
+	>;
 	llmContextSpy: Mock<() => SessionContext>;
 	renderSessionContextSpy: Mock<(...args: unknown[]) => void>;
 } {
@@ -65,8 +70,10 @@ function makeCtx(): {
 		pendingMessagesContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
+		settings: { get: () => true },
 		session: { buildTranscriptSessionContext: transcriptSpy },
 		viewSession: {
+			agent: { state: { pendingToolCalls: new Set<string>() } },
 			buildTranscriptSessionContext: transcriptSpy,
 			sessionManager: {
 				buildSessionContext: llmContextSpy,
@@ -151,6 +158,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 		focusedAgentId: undefined,
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
+			agent: { state: { pendingToolCalls: new Set<string>() } },
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
 			extensionRunner: undefined,
@@ -189,7 +197,10 @@ describe("UiHelpers.renderInitialMessages — transcript source", () => {
 
 		new UiHelpers(ctx).renderInitialMessages();
 
-		expect(transcriptSpy).toHaveBeenCalledWith({ collapseCompactedHistory: true });
+		expect(transcriptSpy).toHaveBeenCalledWith({
+			collapseCompactedHistory: true,
+			keepDanglingToolCallIds: new Set(),
+		});
 		expect(llmContextSpy).not.toHaveBeenCalled();
 		expect(renderSessionContextSpy).toHaveBeenCalledWith(transcript, {
 			updateFooter: true,

@@ -15,6 +15,7 @@ import {
 import { expandTilde } from "../../tools/path-utils";
 import { IrcBus, type IrcMessageCreatedEvent } from "../bus";
 import { IrcObserverSessionIndex } from "./attribution";
+import { ircObserverWorkerEnv } from "./env";
 import {
 	IRC_OBSERVER_MAX_QUEUE_BYTES,
 	IRC_OBSERVER_MAX_QUEUE_RECORDS,
@@ -30,20 +31,6 @@ import {
 } from "./protocol";
 
 const encoder = new TextEncoder();
-const ALLOWED_ENV = [
-	"PATH",
-	"HOME",
-	"TMPDIR",
-	"TMP",
-	"TEMP",
-	"LANG",
-	"LC_ALL",
-	"TZ",
-	"SYSTEMROOT",
-	"WINDIR",
-	"COMSPEC",
-	"PATHEXT",
-] as const;
 const NICK_RE = /^[A-Za-z][A-Za-z0-9_-]{0,29}$/;
 const ACCOUNT_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
@@ -79,15 +66,6 @@ export interface IrcObserverController {
 
 function sha256(value: string): string {
 	return new Bun.CryptoHasher("sha256").update(value).digest("hex");
-}
-
-function safeEnv(): Record<string, string> {
-	const result: Record<string, string> = {};
-	for (const key of ALLOWED_ENV) {
-		const value = process.env[key];
-		if (value !== undefined) result[key] = value;
-	}
-	return result;
 }
 
 async function readSecureFile(filePath: string, secret: boolean): Promise<string> {
@@ -537,7 +515,7 @@ export async function startIrcObserver(options: StartIrcObserverOptions): Promis
 		try {
 			const current = createWorkerSubprocess<IrcObserverWorkerOutbound>({
 				spawnCommand,
-				env: safeEnv(),
+				env: ircObserverWorkerEnv(),
 				exitLabel: "IRC observer worker",
 			});
 			const currentWorker = createWorkerHandle(current, message => current.proc.send(message));
@@ -613,31 +591,4 @@ export async function startIrcObserver(options: StartIrcObserverOptions): Promis
 		},
 		stop,
 	};
-}
-
-export async function smokeTestIrcObserverWorker(): Promise<void> {
-	const spawnCommand = resolveWorkerSpawnCmd(IRC_OBSERVER_WORKER_ARG);
-	if (!spawnCommand.cwd) spawnCommand.cwd = os.tmpdir();
-	const spawned = createWorkerSubprocess<IrcObserverWorkerOutbound>({
-		spawnCommand,
-		env: safeEnv(),
-		exitLabel: "IRC observer smoke worker",
-	});
-	const worker = createWorkerHandle<IrcObserverWorkerInbound, IrcObserverWorkerOutbound>(spawned, message =>
-		spawned.proc.send(message),
-	);
-	const id = Bun.randomUUIDv7();
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	const timer = setTimeout(() => reject(new Error("IRC observer smoke worker timed out")), 30_000);
-	const unsubscribe = worker.onMessage(message => {
-		if (message.type === "pong" && message.id === id) resolve();
-	});
-	try {
-		worker.send({ type: "ping", id });
-		await promise;
-	} finally {
-		clearTimeout(timer);
-		unsubscribe();
-		await worker.terminate();
-	}
 }

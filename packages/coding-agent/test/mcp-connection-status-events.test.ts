@@ -24,6 +24,7 @@ describe("MCPManager connection status events", () => {
 	it("emits connecting, connected, and failed updates for startup status", async () => {
 		const manager = new MCPManager(workDir);
 		const events: McpConnectionStatusEvent[] = [];
+		const connected = Promise.withResolvers<void>();
 		const success: MCPServerConfig = {
 			type: "stdio",
 			command: BUN_EXEC,
@@ -32,11 +33,13 @@ describe("MCPManager connection status events", () => {
 		const invalid: MCPServerConfig = { type: "stdio", command: "" };
 
 		try {
-			const result = await manager.connectServers({ alpha: success, broken: invalid }, {}, event =>
-				events.push(event),
-			);
+			const result = await manager.connectServers({ alpha: success, broken: invalid }, {}, event => {
+				events.push(event);
+				if (event.type === "connected" && event.serverName === "alpha") connected.resolve();
+			});
+			await connected.promise;
 
-			expect(result.connectedServers).toContain("alpha");
+			expect(manager.getConnectedServers()).toContain("alpha");
 			expect(result.errors.get("broken")).toBe('Server "broken": stdio server requires "command" field');
 			expect(events).toEqual([
 				{ type: "connecting", serverNames: ["alpha", "broken"] },

@@ -6,7 +6,7 @@
 
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
-import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, AgentIdentity, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
@@ -46,6 +46,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { normalizeToolNames } from "../tools/builtin-names";
 import { resolveEvalBackends } from "../tools/eval-backends";
@@ -62,6 +63,7 @@ import type { EventBus } from "../utils/event-bus";
 import { classifyProviderFailure, formatProviderFailure } from "../utils/provider-error-classifier";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { generateTaskLabel } from "./label";
 import { createSubagentTermination, formatRuntimePolicyPrompt, resolveSubagentRuntimePolicy } from "./runtime-policy";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
@@ -69,9 +71,7 @@ import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
-	oneLineLabel,
 	type ReviewFinding,
-	resolveSubagentDisplayName,
 	type SingleResult,
 	type SubagentRuntimePolicy,
 	type SubagentTerminalStatus,
@@ -393,8 +393,9 @@ export interface ExecutorOptions {
 	 * overall plan so subagents keep target scope distinct from parent-goal scope.
 	 */
 	targetPlanReference?: { path: string; content: string };
+	/** Pre-set UI label (e.g. eval bridge label). When absent, a tiny-model label is generated from the assignment. */
 	description?: string;
-	/** Specialist role/expertise for this spawn; drives the system-prompt preamble, display name, and telemetry identity. */
+	/** Specialist role/expertise for the system-prompt preamble and registry display name. */
 	role?: string;
 	index: number;
 	id: string;
@@ -414,7 +415,7 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
-	thinkingLevel?: ThinkingLevel;
+	thinkingLevel?: ConfiguredThinkingLevel;
 	outputSchema?: unknown;
 	/** Treat agent.tools/toolNames as an exact active-tool allowlist. */
 	strictToolNames?: boolean;
@@ -930,6 +931,10 @@ interface RunMonitorArgs {
 	task: string;
 	assignment?: string;
 	description?: string;
+	/** Parent model registry for tiny-model label generation; absent → skip labeling. */
+	modelRegistry?: ModelRegistry;
+	/** Parent settings for tiny-model label generation. */
+	settings?: Settings;
 	modelOverride?: string | string[];
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
@@ -1143,6 +1148,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		if (runtimeLimitExceeded) {
 			return `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`;
 		}
+
 		return resolveSignalAbortReason();
 	};
 	const PROGRESS_COALESCE_MS = 150;
@@ -1199,6 +1205,27 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			emitProgressNow();
 		}, PROGRESS_COALESCE_MS - elapsed);
 	};
+
+	// The task wire schema carries no description: when the caller didn't pre-set
+	// a UI label (e.g. the eval bridge's `label`), compress the assignment into a
+	// tiny-model one-sentence label off the spawn's critical path. Best-effort —
+	// a late label still lands via the finalize-time reads of `progress.description`;
+	// failures just leave the label unset.
+	const labelSource = assignment?.trim();
+	if (!args.description && args.modelRegistry && args.settings && labelSource) {
+		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id)
+			.then(label => {
+				if (!label || abortSignal.aborted || progress.description) return;
+				progress.description = label;
+				if (!resolved) scheduleProgress();
+			})
+			.catch(err => {
+				logger.debug("Subagent label generation failed", {
+					id,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
+	}
 
 	const getMessageContent = (message: unknown): unknown => {
 		if (!isRecord(message) || !("content" in message)) {
@@ -1926,7 +1953,6 @@ interface FinalizeRunArgs {
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
-	description?: string;
 	modelOverride?: string | string[];
 	outputSchema?: unknown;
 	signal?: AbortSignal;
@@ -2080,7 +2106,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SubprocessResul
 			parentToolCallId: args.parentToolCallId,
 			detached: args.detached,
 			agentSource: agent.source,
-			description: args.description,
+			description: progress.description,
 			status: termination.status,
 			sessionFile: args.sessionFile,
 			index,
@@ -2095,7 +2121,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SubprocessResul
 		agentSource: agent.source,
 		task,
 		assignment,
-		description: args.description,
+		description: progress.description,
 		lastIntent: progress.lastIntent,
 		exitCode,
 		output: truncatedOutput,
@@ -2123,6 +2149,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SubprocessResul
 	};
 }
 
+/**
+ * Settle a subagent's registry lifecycle after a run: terminal teardown for
+ * hard aborts, unregister for one-shot helpers, park for isolated runs, and
+ * idle + lifecycle adoption for kept-alive agents.
+ */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
 	session: AgentSession;
@@ -2218,6 +2249,128 @@ export async function finalizeSubagentLifecycle(args: {
 	});
 }
 
+/** Options for {@link runSubagentFollowUpTurn}. */
+export interface FollowUpTurnOptions {
+	/** Registry id of the (live or parked) subagent to continue. */
+	id: string;
+	/** Agent definition the session was originally spawned with (drives progress labels + finalize). */
+	agent: AgentDefinition;
+	/** The follow-up message; sent as the turn's user prompt. */
+	message: string;
+	index?: number;
+	description?: string;
+	signal?: AbortSignal;
+	onProgress?: (progress: AgentProgress) => void;
+	eventBus?: EventBus;
+	parentToolCallId?: string;
+	/** When set, the turn's raw output is (re)written to `<artifactsDir>/<id>.md` so `agent://<id>` tracks the latest turn. */
+	artifactsDir?: string;
+	/** Wall-clock cap in ms for this turn; 0 disables. */
+	maxRuntimeMs?: number;
+}
+
+/**
+ * Continue a previously spawned (keep-alive) subagent with one more monitored
+ * turn: revive it if parked, send `message` as a real prompt, drive it to
+ * `yield`, and finalize a {@link SingleResult} exactly like a first run.
+ *
+ * The session's full conversation history is retained (live session, or JSONL
+ * replay through the lifecycle reviver), so the turn sees all prior context.
+ * Unlike {@link runSubprocess}, the session is NOT torn down afterwards — it
+ * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
+ * revive), and an aborted turn only aborts the in-flight turn.
+ */
+export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+	const { id, agent, message, signal } = options;
+	const index = options.index ?? 0;
+	const startTime = Date.now();
+	const session = await AgentLifecycleManager.global().ensureLive(id);
+	const ref = AgentRegistry.global().get(id);
+	const sessionFile = ref?.sessionFile ?? undefined;
+	const artifactsDir = options.artifactsDir ?? FALLBACK_AGENT_ARTIFACTS_DIR;
+	await mkdir(artifactsDir, { recursive: true });
+	registerArtifactsDir(artifactsDir);
+	const followUpSettings = Settings.isolated({
+		"task.maxRuntimeMs": options.maxRuntimeMs ?? 0,
+		"task.softRequestBudget": 0,
+		"task.noProgressCycleLimit": 10,
+	});
+	const runtimePolicy = resolveSubagentRuntimePolicy({
+		settings: followUpSettings,
+		childDepth: 1,
+		maxRuntimeMs: options.maxRuntimeMs,
+		resumable: true,
+	});
+
+	const monitor = createSubagentRunMonitor({
+		index,
+		id,
+		agent,
+		task: message,
+		description: options.description,
+		signal,
+		onProgress: options.onProgress,
+		eventBus: options.eventBus,
+		parentToolCallId: options.parentToolCallId,
+		detached: true,
+		sessionFile,
+		requestBudget: runtimePolicy.request.advisory.afterAssistantTurns ?? 0,
+		requestBudgetNotice: runtimePolicy.request.advisory.mode === "advisory",
+		noProgressCycleLimit: runtimePolicy.stall.afterAssistantTurns ?? 0,
+		stallAction: runtimePolicy.stall.action,
+		maxRuntimeMs: runtimePolicy.wallClock.maxRuntimeMs ?? 0,
+	});
+
+	if (options.eventBus) {
+		options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id,
+			agent: agent.name,
+			parentToolCallId: options.parentToolCallId,
+			detached: true,
+			agentSource: agent.source,
+			description: options.description,
+			status: "started",
+			sessionFile,
+			index,
+		});
+	}
+
+	monitor.setActiveSession(session);
+	const unsubscribe = monitor.attach(session);
+	let outcome: DriveOutcome;
+	try {
+		outcome = await driveSessionToYield(session, monitor, message);
+	} finally {
+		try {
+			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
+		} catch {
+			// Ignore abort cleanup timeouts; the session stays adopted either way.
+		}
+		unsubscribe();
+		const active = monitor.takeActiveSession();
+		if (active) monitor.captureSalvage(active);
+		monitor.finish();
+	}
+
+	return finalizeRunResult({
+		monitor,
+		done: { ...outcome, abortReason: outcome.abortReasonText, durationMs: Date.now() - startTime },
+		index,
+		id,
+		agent,
+		task: message,
+		signal,
+		artifactsDir,
+		eventBus: options.eventBus,
+		parentToolCallId: options.parentToolCallId,
+		detached: true,
+		sessionFile,
+		startTime,
+		runtimePolicy,
+		resumable: true,
+	});
+}
+
 /**
  * Run a single agent in-process.
  */
@@ -2253,7 +2406,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<Subproces
 	// is the label-normalized form the registry/roster show, falling back to the
 	// agent type name when no role was given.
 	const subagentRole = options.role?.trim() || undefined;
-	const subagentDisplayName = resolveSubagentDisplayName(options.role, agent.name);
+	const subagentDisplayName = options.role?.replace(/\s+/g, " ").trim() || agent.name;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const executionResumable = options.keepAlive !== false && worktree === undefined;
@@ -2419,6 +2572,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<Subproces
 		task,
 		assignment,
 		description: options.description,
+		modelRegistry: options.modelRegistry,
+		settings,
 		modelOverride,
 		signal,
 		onProgress,
@@ -2608,7 +2763,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<Subproces
 					? formatModelSelectorValue(formatModelStringWithRouting(model), resolvedThinkingLevel)
 					: formatModelStringWithRouting(model);
 			}
-			const effectiveThinkingLevel = thinkingLevel ?? resolvedThinkingLevel;
+			// Precedence: explicit `:level` suffix on the resolved model pattern >
+			// agent-definition default (e.g. task's `auto`) > pattern-derived level.
+			const effectiveThinkingLevel = explicitThinkingLevel
+				? resolvedThinkingLevel
+				: (thinkingLevel ?? resolvedThinkingLevel);
 			resolvedAt = performance.now();
 
 			const effectiveCwd = worktree ?? cwd;
@@ -2637,8 +2796,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<Subproces
 			const subagentAgentIdentity: AgentIdentity | undefined = options.parentTelemetry
 				? {
 						id,
-						name: subagentDisplayName,
-						description: subagentRole ? oneLineLabel(subagentRole) : agent.description,
+						name: agent.name,
+						description: agent.description,
 					}
 				: undefined;
 			const subagentTelemetry: AgentTelemetryConfig | undefined =
@@ -2695,7 +2854,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<Subproces
 				systemPrompt: defaultPrompt => {
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
-						role: subagentRole ? oneLineLabel(subagentRole) : "",
 						context: options.context?.trim() ?? "",
 						planReference: options.planReference?.content ?? "",
 						planReferencePath: options.planReference?.path ?? "",
@@ -2724,7 +2882,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<Subproces
 				parentTaskPrefix: id,
 				parentAgentId: options.parentAgentId,
 				agentId: id,
-				agentDisplayName: subagentDisplayName,
+				agentDisplayName: agent.name,
 				enableLsp: lspEnabled,
 				skipPythonPreflight,
 				enableMCP,
@@ -3008,7 +3166,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<Subproces
 		agent,
 		task,
 		assignment,
-		description: options.description,
 		modelOverride,
 		outputSchema,
 		signal,
