@@ -50,3 +50,4 @@ analysis/post-run-isolation.json
 - Provider-error and cwd-mismatch attempts remain durable under `invalid-runs/` and are excluded from treatment outcomes.
 - The original contaminated experiment remains invalidated and is not used for comparative conclusions.
 - Hidden C12 conflicts with the checked-in `server_accepted: null` specification and masks its subsequent schema-hash assertion; interpret 20/21 as passing every hidden item outside C12.
+- Scoped Shake remains a historical experiment treatment. The current agent-facing `seal` path always uses report plus manifest; manual `/shake` and automatic Shake remain separate mechanical maintenance.

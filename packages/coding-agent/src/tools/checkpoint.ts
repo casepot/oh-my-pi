@@ -59,8 +59,7 @@ export const sealReportSchema = type({
 });
 
 const sealSchema = type({
-	strategy: type("'summary' | 'shake'").describe("compaction strategy"),
-	"report?": sealReportSchema,
+	report: sealReportSchema,
 });
 
 export type SealReport = typeof sealReportSchema.infer;
@@ -85,8 +84,7 @@ export interface RewindToolDetails {
 }
 export interface SealToolDetails {
 	disposition: "seal";
-	strategy: "summary" | "shake";
-	report?: SealReport;
+	report: SealReport;
 	meta?: OutputMeta;
 }
 
@@ -230,8 +228,7 @@ export class SealTool implements AgentTool<typeof sealSchema, SealToolDetails> {
 	readonly parameters = sealSchema;
 	readonly strict = true;
 	readonly loadMode = "discoverable";
-	readonly intent = (args: Partial<SealParams>): string =>
-		args.strategy ? `sealing checkpoint: ${args.strategy}` : "sealing checkpoint";
+	readonly intent = (): string => "sealing checkpoint";
 
 	constructor(private readonly session: ToolSession) {
 		this.description = prompt.render(sealDescription);
@@ -255,21 +252,12 @@ export class SealTool implements AgentTool<typeof sealSchema, SealToolDetails> {
 		if (!this.session.getCheckpointState?.()) {
 			throw new ToolError("No active checkpoint. Create a checkpoint before calling seal.");
 		}
-		let report: SealReport | undefined;
-		if (params.strategy === "summary") {
-			if (!params.report) throw new ToolError("Summary seal requires a structured report.");
-			report = normalizeSealReport(params.report);
-		}
+		const report = normalizeSealReport(params.report);
 		return toolResult<SealToolDetails>({
 			disposition: "seal",
-			strategy: params.strategy,
-			...(report ? { report } : {}),
+			report,
 		})
-			.text(
-				params.strategy === "summary"
-					? "Summary seal requested. Structured continuation report captured."
-					: "Shake seal requested. Checkpoint suffix selected for scoped compaction.",
-			)
+			.text("Seal requested. Structured continuation report captured.")
 			.done();
 	}
 }

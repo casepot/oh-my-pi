@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- Added context-span checkpoints with explicit rewind, scoped-Shake and semantic sealing, durable execution manifests, close-time todo preservation, and a no-compaction keep path.
+- Added context-span checkpoints with explicit rewind and semantic sealing, durable execution manifests, close-time todo preservation, and a no-compaction keep path.
 - Added a globally configured, fail-open IRC observer that exports attributed inter-agent traffic through a bounded supervised subprocess to private Ergo channels for encrypted Repartee viewing.
 - Added non-context goal context metrics and queryable proof-graph projection records for goal-mode storage/context sizing.
 - Added a reusable `plan-review` skill and target-planning prompt guidance for explicit planning review evidence.
@@ -28,6 +28,7 @@
 - Added goal-mode parent frames, bounded targets, checkpoint packets, checkpoint-resolution artifacts, and controller guidance so long goals can close evidence-backed targets without implying parent completion.
 
 ### Changed
+- Removed scoped Shake from agent-facing checkpoint sealing; `seal` now always requires a structured report and produces a runtime manifest, while manual `/shake` and automatic Shake remain mechanical context maintenance.
 - Changed subagent request budgets to disabled-by-default advisory notices with no hidden request cap, replacing request-count termination with an assistant-turn stall guard that pauses resumable shared runs, fails non-resumable one-shot/isolated runs, and exposes each spawn's exact policy snapshot in prompts, acknowledgments, and termination audit data.
 - Changed task, background-job, eval, RPC, IRC, and TUI subagent lifecycle transport to preserve exact termination reasons, resumability, recovery URIs, and distinct waiting, paused, idle, parked, and aborted states.
 - Changed the advisor prompt to use phase-aware product judgment without turning phases into workflow gates: planning shortens implementation, implementation keeps behavior ahead of proof scaffolds, verification seeks claim/risk-matched real signal, final handoff blocks only false completion, and both speed without correctness and correctness theater are failures.

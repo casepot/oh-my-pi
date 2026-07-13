@@ -1,6 +1,6 @@
 # seal
 
-> Accept an active checkpoint span and compact its active representation.
+> Accept a successful checkpoint span and replace its active trajectory with a structured report plus runtime manifest.
 
 ## Availability
 
@@ -13,8 +13,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `strategy` | `"summary" \| "shake"` | Yes | Semantic replacement or scoped payload elision. |
-| `report` | `SealReport` | For `summary` | Structured continuation handoff. Optional for `shake`. |
+| `report` | `SealReport` | Yes | Structured continuation handoff. |
 
 ```ts
 interface SealReport {
@@ -27,7 +26,7 @@ interface SealReport {
 }
 ```
 
-The schema is strict. `execute()` additionally rejects `strategy: "summary"` when `report` is absent.
+The schema is strict. `execute()` rejects blank report text.
 
 ## Output
 
@@ -36,25 +35,24 @@ Lifecycle handling recognizes these stable structured details:
 ```ts
 {
   disposition: "seal";
-  strategy: "summary" | "shake";
-  report?: SealReport;
+  report: SealReport;
 }
 ```
 
 The tool validates and requests closure; it does not mutate session history itself.
 
-## Strategy choice
+## Closure choice
 
-- `summary`: use only when the structured handoff can replace chronology without reducing continuation correctness.
-- `shake`: preserve chronology while eliding eligible heavy payloads strictly after the checkpoint boundary.
-- `keep_checkpoint`: use instead when exact detail remains necessary or outcomes are uncertain.
+- `seal`: accept verified successful work when the structured handoff can replace chronology.
+- `keep_checkpoint`: retain exact detail when outcomes remain uncertain or chronology is load-bearing.
+- Manual `/shake` and automatic Shake remain separate mechanical context-maintenance paths.
 
-Both seal strategies accept existing world effects and preserve close-time durable state. They do not prove correctness or roll back external effects.
+Seal accepts existing world effects and preserves close-time durable state. It does not prove correctness or roll back external effects.
 
 ## Errors
 
 - No active checkpoint.
-- Summary strategy without a structured report.
+- Blank report text.
 - Subagent call.
 
 A failed seal leaves the checkpoint open.

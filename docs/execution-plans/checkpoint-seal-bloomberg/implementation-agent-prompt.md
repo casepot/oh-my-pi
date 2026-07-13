@@ -113,7 +113,7 @@ The slice should make ledger state:
 - durably persisted;
 - deterministic on replay;
 - backward compatible with old sessions;
-- coherent through keep, rewind, summary seal, and scoped Shake;
+- protected from manual and automatic Shake maintenance;
 - included in atomic rewrite/rollback behavior;
 - compactly visible to the continuing model;
 - inspectable through an existing operator/RPC/UI surface;
@@ -169,8 +169,8 @@ The work should not regress:
 - raw continuation;
 - rewind;
 - keep;
-- summary seal;
-- scoped Shake;
+- seal;
+- manual and automatic Shake maintenance;
 - todo/orchestration state;
 - session replay;
 - atomic rollback;

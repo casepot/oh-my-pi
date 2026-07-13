@@ -51,29 +51,24 @@ describe("checkpoint lifecycle tool surface", () => {
 
 	it("returns stable seal and keep disposition details without mutating checkpoint state", async () => {
 		const session = makeSession();
-		const summary = await new SealTool(session).execute("seal-summary", { strategy: "summary", report });
-		const shake = await new SealTool(session).execute("seal-shake", { strategy: "shake" });
+		const seal = await new SealTool(session).execute("seal", { report });
 		const keep = await new KeepCheckpointTool(session).execute("keep", { reason: " Need exact chronology. " });
 
-		expect(summary.details).toEqual({ disposition: "seal", strategy: "summary", report });
-		expect(shake.details).toEqual({ disposition: "seal", strategy: "shake" });
+		expect(seal.details).toEqual({ disposition: "seal", report });
 		expect(keep.details).toEqual({ disposition: "keep", reason: "Need exact chronology." });
 		expect(session.getCheckpointState?.()).toEqual(activeCheckpoint);
 	});
 
-	it("requires an active checkpoint and a report for summary sealing", async () => {
-		await expect(new SealTool(makeSession()).execute("missing-report", { strategy: "summary" })).rejects.toThrow(
-			"Summary seal requires a structured report.",
-		);
+	it("requires an active checkpoint and a nonblank report", async () => {
+		expect(validateJsonSchemaValue(toolWireSchema(new SealTool(makeSession())), {}).success).toBe(false);
 		await expect(
 			new SealTool(makeSession()).execute("blank-report", {
-				strategy: "summary",
 				report: { ...report, outcome: "   " },
 			}),
 		).rejects.toThrow("cannot contain blank text");
-		await expect(
-			new SealTool(makeSession({ active: false })).execute("no-checkpoint", { strategy: "shake" }),
-		).rejects.toThrow("No active checkpoint");
+		await expect(new SealTool(makeSession({ active: false })).execute("no-checkpoint", { report })).rejects.toThrow(
+			"No active checkpoint",
+		);
 		await expect(
 			new KeepCheckpointTool(makeSession({ active: false })).execute("no-checkpoint", { reason: "Retain detail" }),
 		).rejects.toThrow("No active checkpoint");
@@ -97,9 +92,9 @@ describe("checkpoint lifecycle tool surface", () => {
 			expect(tool.loadMode).toBe("discoverable");
 			expect(tool.approval).toBe("read");
 		}
-		expect(
-			validateJsonSchemaValue(toolWireSchema(new SealTool(makeSession())), { strategy: "shake", extra: true })
-				.success,
-		).toBe(false);
+		expect(validateJsonSchemaValue(toolWireSchema(new SealTool(makeSession())), { report }).success).toBe(true);
+		expect(validateJsonSchemaValue(toolWireSchema(new SealTool(makeSession())), { strategy: "shake" }).success).toBe(
+			false,
+		);
 	});
 });

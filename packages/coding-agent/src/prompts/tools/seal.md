@@ -1,10 +1,8 @@
-Accept an active checkpoint span and compact its active representation.
+Accept a successful checkpoint span and replace its active trajectory with a structured report plus runtime manifest.
 
 <instruction>
 - Verify stable outcomes before sealing.
-- Choose `summary` only when the report can replace chronology.
-- Choose `shake` when chronology matters but heavy payloads do not.
-- `summary` requires `outcome`, `durableContext`, `decisions`, `verification`, `remaining`, and `next`.
+- Supply `outcome`, `durableContext`, `decisions`, `verification`, `remaining`, and `next`.
 - Record observed evidence separately from decisions and interpretation.
 - Retain unresolved work and risks in `remaining`.
 - Close-time durable orchestration state survives sealing.

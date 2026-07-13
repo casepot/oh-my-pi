@@ -9,15 +9,9 @@ A checkpoint marks the start of a bounded context span. It does not imply that t
 | Disposition | Meaning | Active-context result |
 | --- | --- | --- |
 | `rewind` | Abandon the trajectory but retain what was learned | Branch from checkpoint; replace span with report |
-| `seal` | Accept the trajectory as durable work and compact it | Preserve close-time durable state; compact span |
+| `seal` | Accept the trajectory as durable work and compact it | Report + manifest replace span; preserve close-time durable state |
 | `keep` | Retain the trajectory in full | Close marker; no compaction |
 
-`seal` supports two strategies:
-
-| Strategy | Behavior |
-| --- | --- |
-| `summary` | Replace eligible span content with an assistant-authored report plus a runtime-generated execution manifest |
-| `shake` | Preserve chronology but artifact-elide eligible heavy payloads within the span |
 
 The original detailed trajectory remains recoverable. Todo completion may suggest sealing but never triggers it automatically.
 
@@ -47,13 +41,12 @@ The implementation MUST:
 3. Preserve detailed evidence outside active context.
 4. Keep speculative rewind behavior backward compatible.
 5. Provide a no-compaction escape hatch.
-6. Support deterministic scoped Shake.
-7. Support semantic sealing with provenance stronger than an assistant summary alone.
-8. Keep todo integration explicit.
-9. Preserve authoritative instructions verbatim.
-10. Make state behavior predictable across all dispositions.
-11. Prevent open checkpoints from forcing unsafe compaction.
-12. Distinguish observed execution from assistant interpretation.
+6. Support semantic sealing with provenance stronger than an assistant summary alone.
+7. Keep todo integration explicit.
+8. Preserve authoritative instructions verbatim.
+9. Make state behavior predictable across all dispositions.
+10. Prevent open checkpoints from forcing unsafe compaction.
+11. Distinguish observed execution from assistant interpretation.
 
 ## Non-goals
 
@@ -61,27 +54,26 @@ The implementation MUST NOT:
 
 1. Roll back filesystem, process, browser, IRC, or network effects.
 2. Treat todo completion as proof that compaction is safe.
-3. automatically seal todo phases.
-4. delete the original session trajectory.
-5. summarize user, developer, or system instructions into assistant prose.
-6. represent a seal report as a user instruction.
-7. support nested checkpoints initially.
-8. automatically select a seal strategy initially.
-9. infer semantic correctness from a command exit code.
-10. preserve ephemeral edit anchors as durable phase state.
-11. create a second todo/phase state machine.
-12. recursively summarize previous seal reports during ordinary phase sealing.
-13. claim that process-memory jobs or pending actions survive a history rewrite.
+3. Automatically seal todo phases.
+4. Delete the original session trajectory.
+5. Summarize user, developer, or system instructions into assistant prose.
+6. Represent a seal report as a user instruction.
+7. Support nested checkpoints initially.
+8. Infer semantic correctness from a command exit code.
+9. Preserve ephemeral edit anchors as durable phase state.
+10. Create a second todo/phase state machine.
+11. Recursively summarize previous seal reports during ordinary phase sealing.
+12. Claim that process-memory jobs or pending actions survive a history rewrite.
 
 ## State model
 
-| Layer | Examples | Rewind | Summary seal | Shake seal | Keep |
-| --- | --- | --- | --- | --- | --- |
-| World | Files, processes, browser, network, IRC | Survives | Survives | Survives | Survives |
-| Durable orchestration | Todos, persisted goal state, MCP selection | Checkpoint state | Close state when goal mode is inactive; otherwise refused | Close state | Close state |
-| Runtime orchestration | Jobs, execution controllers, queues | Must be quiescent | Must be quiescent | Remains live | Remains live |
-| Evidence | Exact messages, calls, results | Retained sibling branch | Retained sibling branch | Artifact-backed in branch | Retained |
-| Active context | Current model-visible messages | Report replaces span | Report + manifest replace span | Payloads elided | Unchanged |
+| Layer | Examples | Rewind | Seal | Keep |
+| --- | --- | --- | --- | --- |
+| World | Files, processes, browser, network, IRC | Survives | Survives | Survives |
+| Durable orchestration | Todos, persisted goal state, MCP selection | Checkpoint state | Close state when goal mode is inactive; otherwise refused | Close state |
+| Runtime orchestration | Jobs, execution controllers, queues | Must be quiescent | Must be quiescent | Remains live |
+| Evidence | Exact messages, calls, results | Retained sibling branch | Retained sibling branch + raw artifact | Retained |
+| Active context | Current model-visible messages | Report replaces span | Report + manifest replace span | Unchanged |
 
 Context operations MUST NEVER imply that external effects rolled back merely because their messages left active context.
 
@@ -137,8 +129,7 @@ Purpose: accept the span’s resulting state and compact its active representati
 
 ```ts
 interface SealArgs {
-  strategy: "summary" | "shake";
-  report?: SealReport;
+  report: SealReport;
 }
 
 interface SealReport {
@@ -153,11 +144,10 @@ interface SealReport {
 
 Rules:
 
-- `summary` requires a nonempty structured report.
-- `shake` may omit the semantic report.
-- `summary` preserves close-time serializable orchestration state.
-- `shake` keeps the active branch and applies artifact-backed elision strictly after the checkpoint entry.
-- The tool returns a stable evidence reference and compression facts.
+- A nonempty structured report is required.
+- Seal preserves close-time serializable orchestration state.
+- The tool records a raw evidence artifact and runtime manifest.
+- The agent does not choose a compaction strategy.
 
 ### `keep_checkpoint`
 
@@ -184,8 +174,7 @@ Semantics:
 ```text
 closed --checkpoint--> open
 open --rewind-------> closed
-open --seal(summary)-> closed
-open --seal(shake)---> closed
+open --seal---------> closed
 open --keep----------> closed
 ```
 
@@ -226,12 +215,12 @@ Append a branch-local custom completion marker without moving the leaf:
 
 Rehydration recognizes it as completion of the newest preceding checkpoint.
 
-### Summary seal
+### Seal
 
 Before moving the leaf, capture close-time serializable state and the detailed-span evidence reference. Then:
 
 1. Validate quiescence, protected entries, and report content.
-2. Refuse summary sealing while goal mode is active; Shake seal and keep remain safe alternatives.
+2. Refuse sealing while goal mode is active; keep remains the safe alternative.
 3. Persist raw-span evidence.
 4. Generate the execution manifest.
 5. In one entry-journal transaction:
@@ -243,23 +232,8 @@ Before moving the leaf, capture close-time serializable state and the detailed-s
    - append the final hidden `checkpoint-seal` completion marker.
 6. Rebuild context, MCP selections, todo projection, advisors, and provider sessions through the history-rewrite path used by rewind.
 
-Only the final completion marker closes the checkpoint during replay. A partial report or manifest is never treated as completed. The detailed descendants remain in the session tree; summary sealing rewrites active history but does not delete evidence.
+Only the final completion marker closes the checkpoint during replay. A partial report or manifest is never treated as completed. Detailed descendants remain in the session tree; sealing rewrites active history but does not delete evidence.
 
-### Shake seal
-
-Do not move the leaf. Resolve the active checkpoint’s successful tool-result entry and select entries strictly after it:
-
-1. Resolve the boundary; fail closed if missing.
-2. Collect eligible regions only from the strict suffix.
-3. Persist originals in one recovery artifact.
-4. In one entry-journal transaction, apply replacements, append the provider usage reset, and append the hidden `checkpoint-seal` completion marker.
-5. Rebuild model context and reset provider/advisor replay state.
-
-Transaction failure restores the prior entry graph and leaf; replay never observes shaken content without its completion marker.
-
-The current inclusive `ShakeConfig.keepBoundaryId` MUST NOT be reused for checkpoint scoping because a missing ID silently widens to the full branch. Scoped Shake needs strict boundary resolution.
-
-Image dropping remains out of scope for scoped sealing until image mutation supports entry boundaries.
 
 ## Todo behavior
 
@@ -268,8 +242,7 @@ Todo remains owned by the todo subsystem.
 | Operation | Todo state after close |
 | --- | --- |
 | Rewind | State on checkpoint branch |
-| Summary seal | Exact close-time durable snapshot |
-| Shake seal | Existing close-time state |
+| Seal | Exact close-time durable snapshot |
 | Keep | Existing close-time state |
 
 A semantic seal SHOULD capture the current phases before branching and append a durable snapshot afterward. Existing replay strips completed and abandoned tasks during some navigation paths; seal restoration MUST preserve the close-time state required by the todo contract rather than silently losing terminal entries.
@@ -290,7 +263,7 @@ Todo completion MAY produce a UI suggestion when an associated checkpoint is ope
 
 ## Runtime quiescence
 
-Summary seal and rewind MUST fail while the span has non-serializable pending control flow:
+Seal and rewind MUST fail while the span has non-serializable pending control flow:
 
 - incomplete tool call;
 - pending apply/discard action;
@@ -300,13 +273,12 @@ Summary seal and rewind MUST fail while the span has non-serializable pending co
 - unread authoritative steering;
 - failed evidence persistence.
 
-Shake seal may preserve live runtime state but MUST NOT elide content required to identify pending work. Keep remains available.
 
-Process-memory jobs, tool-choice queues, yield queues, execution controllers, and message-delivery state are not restored from the journal. The implementation MUST NOT represent them as carried by summary sealing.
+Process-memory jobs, tool-choice queues, yield queues, execution controllers, and message-delivery state are not restored from the journal. The implementation MUST NOT represent them as carried by sealing.
 
 ## Protected content
 
-Summary sealing MUST preserve or safely rehydrate:
+Sealing MUST preserve or safely rehydrate:
 
 - system messages;
 - developer messages;
@@ -319,7 +291,7 @@ Summary sealing MUST preserve or safely rehydrate:
 - execution manifests;
 - checkpoint lifecycle entries required for reconstruction.
 
-Summary sealing rejects new user/developer messages and contextual entries that represent steering, approval, pending actions, IRC delivery, or `<system-directive>` content. Diagnostic notices and ordinary tool evidence may be summarized after quiescence and verification. A user MAY explicitly authorize consumption of one closure-only message by wrapping the entire message in `<checkpoint-seal-control>...</checkpoint-seal-control>`; messages containing `<system-directive>` remain protected. Deliberate general cross-yield spans remain out of scope.
+Sealing rejects new user/developer messages and contextual entries that represent steering, approval, pending actions, IRC delivery, or `<system-directive>` content. Diagnostic notices and ordinary tool evidence may be summarized after quiescence and verification. A user MAY explicitly authorize consumption of one closure-only message by wrapping the entire message in `<checkpoint-seal-control>...</checkpoint-seal-control>`; messages containing `<system-directive>` remain protected. Deliberate general cross-yield spans remain out of scope.
 
 Seal reports remain assistant-authored in provenance. They MUST NOT be inserted as synthetic user instructions. Manifest facts are runtime-generated and may use a distinct trusted wrapper.
 
@@ -389,10 +361,9 @@ Teach rejected-trajectory semantics, start-time todo restoration, and surviving 
 
 ### Seal
 
-Teach strategy choice:
+Teach successful compacted closure:
 
-- summary when the handoff can replace chronology;
-- shake when decisions remain useful but payloads do not;
+- the structured handoff replaces chronology;
 - verify stable outcomes first;
 - retain unresolved risks;
 - close-time todo state survives.
@@ -409,11 +380,9 @@ The UI SHOULD show:
 
 - open checkpoint goal;
 - selected close disposition;
-- seal strategy;
-- entry/token compression estimate;
 - changed-file and verification digest;
 - todo state carried/restored;
-- recovery link.
+- raw evidence recovery link.
 
 A semantic seal may render as a collapsed card with report, manifest, and detailed-branch actions. Rich rendering is optional for initial correctness; generic tool output must still expose the semantics.
 
@@ -426,7 +395,6 @@ A semantic seal may render as a collapsed card with report, manifest, and detail
 - Register new names in builtin names, factories, allowlists, discovery, and root tool docs.
 - Existing saved transcripts and branches remain readable.
 - Manual `/shake` and automatic Shake retain existing whole-history/latest-compaction behavior.
-- Scoped Shake is invoked only by seal.
 
 ## Initial limitations
 
@@ -434,11 +402,9 @@ A semantic seal may render as a collapsed card with report, manifest, and detail
 - no nesting;
 - no deliberate cross-yield checkpoint;
 - assistant-authored semantic reports;
-- no automatic strategy;
 - no automatic todo coupling;
-- no semantic seal with active jobs/actions;
-- no summary seal while goal mode is active;
-- no scoped image dropping;
+- no seal with active jobs/actions;
+- no seal while goal mode is active;
 - no recursive seal-report summarization;
 - no deletion of raw evidence.
 
@@ -462,7 +428,7 @@ Focused tests MUST prove:
 - raw descendants remain;
 - legacy persisted reports load.
 
-### Summary seal
+### Seal
 
 - eligible span leaves active context;
 - report and manifest enter context with correct provenance;
@@ -472,16 +438,6 @@ Focused tests MUST prove:
 - provider/advisor sessions reset;
 - partial persistence failure retains detailed branch.
 
-### Shake seal
-
-- pre-checkpoint entries are byte/deep equal;
-- checkpoint entry remains;
-- only post-checkpoint eligible content shakes;
-- missing boundary fails closed;
-- artifacts recover originals;
-- already-shaken content is idempotent;
-- rewrite failure rolls back mutations;
-- provider context rebuilds.
 
 ### Keep
 
@@ -491,12 +447,12 @@ Focused tests MUST prove:
 
 ## Rollout
 
-1. Add durable keep and scoped Shake seal.
+1. Add durable keep and semantic seal with report, manifest, todo snapshot, and recovery branch.
 2. Dogfood boundary selection and state semantics.
-3. Add summary seal with report, manifest, todo snapshot, and recovery branch.
-4. Review the completed Bloomberg CLI experiment in `experiment.md`, `results.md`, `quantitative-analysis.md`, and `qualitative-analysis.md`.
+3. Review the completed Bloomberg CLI experiment in `experiment.md`, `results.md`, `quantitative-analysis.md`, and `qualitative-analysis.md`.
+4. Remove scoped Shake from the agent-facing seal path; retain manual and automatic Shake as mechanical context maintenance.
 5. Repeat across independently generated seals and additional task archetypes before changing the default.
 
 ## Decision rule
 
-Preserve raw history as the safety default when trajectory detail is load-bearing. Offer report plus manifest explicitly under context pressure or branch fan-out. Use scoped Shake when chronology must remain visible or semantic sealing is unsuitable. Do not make semantic sealing automatic from this single task archetype; require broader task/seal evidence and evidence-calibrated finalization first.
+Preserve raw history with `keep_checkpoint` when trajectory detail is load-bearing. Use `seal` for verified successful work when the report plus manifest can replace chronology. Use `rewind` for abandoned trajectories. Manual `/shake` and automatic Shake remain separate context-maintenance mechanisms, not checkpoint dispositions.

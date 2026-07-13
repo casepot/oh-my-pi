@@ -707,8 +707,7 @@ function checkpointStartedAtFromEntry(entry: SessionEntry): string | undefined {
 type PendingCheckpointDisposition =
 	| { kind: "rewind"; report: string }
 	| { kind: "keep"; reason: string }
-	| { kind: "seal-summary"; report: SealReport }
-	| { kind: "seal-shake" };
+	| { kind: "seal-summary"; report: SealReport };
 
 interface CheckpointExecutionManifest {
 	checkpointEntryId: string | null;
@@ -764,9 +763,9 @@ function dispositionFromToolResult(message: AgentMessage): PendingCheckpointDisp
 		return { kind: "keep", reason: keep.reason.trim() };
 	}
 	const seal = toolResultDetails(message, "seal") as SealToolDetails | undefined;
-	if (seal?.disposition !== "seal") return undefined;
-	if (seal.strategy === "shake") return { kind: "seal-shake" };
-	if (seal.strategy === "summary" && seal.report) return { kind: "seal-summary", report: seal.report };
+	if (seal?.disposition === "seal" && seal.report) {
+		return { kind: "seal-summary", report: seal.report };
+	}
 	return undefined;
 }
 
@@ -15263,51 +15262,7 @@ export class AgentSession {
 			this.#checkpointState = undefined;
 			return;
 		}
-		if (disposition.kind === "seal-shake") {
-			if (!checkpointState.checkpointEntryId) {
-				throw new Error(
-					"Shake seal failed because the checkpoint boundary is missing; checkpoint remains open and active context is unchanged.",
-				);
-			}
-			const completedAt = new Date().toISOString();
-			await this.shake("elide", {
-				config: {
-					...AGGRESSIVE_SHAKE_CONFIG,
-					startAfterEntryId: checkpointState.checkpointEntryId,
-					protectedTools: [
-						...AGGRESSIVE_SHAKE_CONFIG.protectedTools,
-						"checkpoint",
-						"rewind",
-						"seal",
-						"keep_checkpoint",
-					],
-				},
-				onBeforeCommit: result => {
-					this.sessionManager.appendCustomMessageEntry(
-						"checkpoint-seal",
-						"",
-						false,
-						{
-							strategy: "shake",
-							startedAt: checkpointState.startedAt,
-							completedAt,
-							toolResultsDropped: result.toolResultsDropped,
-							blocksDropped: result.blocksDropped,
-							tokensFreed: result.tokensFreed,
-							artifactId: result.artifactId,
-						},
-						"agent",
-						false,
-					);
-				},
-			});
-			const sessionContext = this.buildDisplaySessionContext();
-			if (activeMessages) activeMessages.splice(0, activeMessages.length, ...sessionContext.messages);
-			this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
-			this.#checkpointState = undefined;
-			return;
-		}
-		await this.#applySummarySeal(disposition.report, activeMessages);
+		await this.#applySeal(disposition.report, activeMessages);
 	}
 
 	#checkpointGoal(checkpointEntryId: string | null): string {
@@ -15400,12 +15355,12 @@ export class AgentSession {
 		};
 	}
 
-	async #applySummarySeal(report: SealReport, activeMessages?: AgentMessage[]): Promise<void> {
+	async #applySeal(report: SealReport, activeMessages?: AgentMessage[]): Promise<void> {
 		const checkpointState = this.#checkpointState;
 		if (!checkpointState) return;
 		if (this.#goalModeState?.enabled) {
 			throw new Error(
-				"Summary seal refused because goal mode is active; checkpoint remains open and active context is unchanged. Use shake seal or keep_checkpoint.",
+				"Seal refused because goal mode is active; checkpoint remains open and active context is unchanged. Use keep_checkpoint.",
 			);
 		}
 		const ownerFilter = { ownerId: this.#agentId };
@@ -15420,7 +15375,7 @@ export class AgentSession {
 			this.#pendingIrcAsides.length > 0
 		) {
 			throw new Error(
-				"Summary seal refused because asynchronous work or queued delivery remains; checkpoint remains open. Wait, cancel, use shake seal, or keep_checkpoint.",
+				"Seal refused because asynchronous work or queued delivery remains; checkpoint remains open. Wait, cancel, or use keep_checkpoint.",
 			);
 		}
 		const branch = this.sessionManager.getBranch();
@@ -15460,7 +15415,7 @@ export class AgentSession {
 		});
 		if (authoritativeEntry) {
 			throw new Error(
-				"Summary seal refused because authoritative steering entered the checkpoint span; checkpoint remains open. Use shake seal or keep_checkpoint.",
+				"Seal refused because authoritative steering entered the checkpoint span; checkpoint remains open. Use keep_checkpoint.",
 			);
 		}
 		const todoStart = this.#cloneTodoPhases(getLatestTodoPhasesFromEntries(branch.slice(0, checkpointIndex + 1)));
@@ -15488,7 +15443,6 @@ export class AgentSession {
 					startedAt: checkpointState.startedAt,
 					completedAt,
 					disposition: "seal",
-					strategy: "summary",
 				});
 				this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: todoClose });
 				this.sessionManager.appendCustomMessageEntry(
@@ -15497,7 +15451,6 @@ export class AgentSession {
 					false,
 					{
 						disposition: "seal",
-						strategy: "summary",
 						startedAt: checkpointState.startedAt,
 						completedAt,
 						evidenceArtifact,
@@ -15528,7 +15481,6 @@ export class AgentSession {
 					false,
 					{
 						disposition: "seal",
-						strategy: "summary",
 						startedAt: checkpointState.startedAt,
 						completedAt,
 						evidenceArtifact,
@@ -16690,6 +16642,16 @@ export class AgentSession {
 			mismatches.push("goalStateRef.state.stateVersion:mismatch");
 		}
 		return mismatches;
+	}
+
+	#refreshCheckpointCompactionPreserveData(
+		preserveData: Record<string, unknown> | undefined,
+	): Record<string, unknown> | undefined {
+		const continuation = buildCheckpointContinuation(
+			this.#checkpointState?.checkpointEntryId,
+			this.sessionManager.getBranch(),
+		);
+		return mergeCheckpointCompactionPreserveData(preserveData, continuation);
 	}
 
 	async #refreshGoalCompactionPreserveData(

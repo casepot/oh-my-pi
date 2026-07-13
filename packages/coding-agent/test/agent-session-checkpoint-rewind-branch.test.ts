@@ -16,7 +16,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 const checkpointSchema = z.object({ goal: z.string() });
 const rewindSchema = z.object({ report: z.string() });
 const keepSchema = z.object({ reason: z.string() });
-const sealSchema = z.object({ strategy: z.string(), report: z.any().optional() });
+const sealSchema = z.object({ report: z.any() });
 
 const keepTool: AgentTool<typeof keepSchema> = {
 	name: "keep_checkpoint",
@@ -41,8 +41,7 @@ const sealTool: AgentTool<typeof sealSchema> = {
 			content: [{ type: "text" as const, text: "checkpoint sealed" }],
 			details: {
 				disposition: "seal" as const,
-				strategy: params.strategy,
-				...(params.report ? { report: params.report } : {}),
+				report: params.report,
 			},
 		};
 	},
@@ -563,83 +562,6 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(reloaded.getTodoPhases()).toEqual(terminalTodo);
 	});
 
-	it("shake-seals only the strict checkpoint suffix and persists recovery metadata", async () => {
-		const blobSchema = z.object({ label: z.string() });
-		const blobTool: AgentTool<typeof blobSchema> = {
-			name: "blob",
-			label: "Blob",
-			description: "Return a heavy payload",
-			parameters: blobSchema,
-			async execute(_toolCallId, params) {
-				return {
-					content: [{ type: "text" as const, text: `${params.label}:${"x".repeat(12_000)}` }],
-				};
-			},
-		};
-		const harness = await createHarness(
-			[
-				{
-					content: [{ type: "toolCall", id: "before", name: "blob", arguments: { label: "before" } }],
-					stopReason: "toolUse",
-				},
-				{ content: ["before done"], stopReason: "stop" },
-				{
-					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "shake" } }],
-					stopReason: "toolUse",
-				},
-				{
-					content: [{ type: "toolCall", id: "after", name: "blob", arguments: { label: "after" } }],
-					stopReason: "toolUse",
-				},
-				{
-					content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "shake" } }],
-					stopReason: "toolUse",
-				},
-				{ content: ["after done"], stopReason: "stop" },
-			],
-			[blobTool as AgentTool],
-		);
-
-		const terminalTodo = [{ name: "phase", tasks: [{ content: "shaken", status: "completed" as const }] }];
-		harness.session.setTodoPhases(terminalTodo);
-		harness.session.sessionManager.appendCustomEntry("user_todo_edit", { phases: terminalTodo });
-
-		await harness.session.prompt("create prefix");
-		await harness.session.prompt("shake suffix");
-
-		const blobResults = harness.session.sessionManager
-			.getBranch()
-			.filter(
-				entry =>
-					entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "blob",
-			);
-		expect(blobResults).toHaveLength(2);
-		const beforeText =
-			blobResults[0]?.type === "message" && blobResults[0].message.role === "toolResult"
-				? messageText(blobResults[0].message)
-				: "";
-		const afterText =
-			blobResults[1]?.type === "message" && blobResults[1].message.role === "toolResult"
-				? messageText(blobResults[1].message)
-				: "";
-		expect(beforeText).toStartWith("before:");
-		expect(afterText).toContain("[shaken");
-		const marker = harness.session.sessionManager
-			.getBranch()
-			.find(entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal");
-		expect(marker?.type).toBe("custom_message");
-		if (marker?.type !== "custom_message") throw new Error("Expected checkpoint seal marker");
-		expect(marker.details).toMatchObject({
-			strategy: "shake",
-			toolResultsDropped: 1,
-			artifactId: expect.any(String),
-		});
-		expect(harness.session.getCheckpointState()).toBeUndefined();
-		const reloaded = await createReloadedSession(harness);
-		expect(reloaded.getCheckpointState()).toBeUndefined();
-		expect(reloaded.getTodoPhases()).toEqual(terminalTodo);
-	});
-
 	it("summary-seals to report, manifest, raw evidence, and the exact close-time todo snapshot", async () => {
 		let lifecycleSession: AgentSession | undefined;
 		const completeSchema = z.object({});
@@ -675,7 +597,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 					stopReason: "toolUse",
 				},
 				{
-					content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "summary", report } }],
+					content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { report } }],
 					stopReason: "toolUse",
 				},
 				{ content: ["continued"], stopReason: "stop" },
@@ -704,10 +626,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 			entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal-manifest",
 		);
 		const completionIndex = branch.findLastIndex(
-			entry =>
-				entry.type === "custom_message" &&
-				entry.customType === "checkpoint-seal" &&
-				(entry.details as { strategy?: unknown } | undefined)?.strategy === "summary",
+			entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal",
 		);
 		expect(todoIndex).toBeGreaterThan(-1);
 		expect(reportIndex).toBeGreaterThan(todoIndex);
@@ -766,7 +685,7 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				stopReason: "toolUse",
 			},
 			{
-				content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "summary", report } }],
+				content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { report } }],
 				stopReason: "toolUse",
 			},
 		]);
@@ -787,60 +706,5 @@ describe("AgentSession checkpoint rewind branch context", () => {
 				.getBranch()
 				.some(entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal-report"),
 		).toBe(false);
-	});
-
-	it("fails a shake seal closed when its strict checkpoint boundary is missing", async () => {
-		let lifecycleSession: AgentSession | undefined;
-		const corruptSchema = z.object({});
-		const corruptTool: AgentTool<typeof corruptSchema> = {
-			name: "corrupt_boundary",
-			label: "Corrupt boundary",
-			description: "Test a missing persisted boundary",
-			parameters: corruptSchema,
-			async execute() {
-				if (!lifecycleSession) throw new Error("session unavailable");
-				lifecycleSession.setCheckpointState({
-					checkpointEntryId: "missing-entry",
-					checkpointMessageCount: 0,
-					startedAt: "2026-01-01T00:00:00.000Z",
-				});
-				return { content: [{ type: "text" as const, text: "boundary removed" }] };
-			},
-		};
-		const harness = await createHarness(
-			[
-				{
-					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "safe shake" } }],
-					stopReason: "toolUse",
-				},
-				{
-					content: [{ type: "toolCall", id: "corrupt", name: "corrupt_boundary", arguments: {} }],
-					stopReason: "toolUse",
-				},
-				{
-					content: [{ type: "toolCall", id: "seal", name: "seal", arguments: { strategy: "shake" } }],
-					stopReason: "toolUse",
-				},
-			],
-			[corruptTool as AgentTool],
-		);
-		lifecycleSession = harness.session;
-
-		await harness.session.prompt("shake safely");
-
-		expect(harness.session.getCheckpointState()?.checkpointEntryId).toBe("missing-entry");
-		expect(
-			harness.session.sessionManager
-				.getBranch()
-				.some(entry => entry.type === "custom_message" && entry.customType === "checkpoint-seal"),
-		).toBe(false);
-		expect(
-			harness.session.sessionManager
-				.getBranch()
-				.some(
-					entry =>
-						entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "seal",
-				),
-		).toBe(true);
 	});
 });

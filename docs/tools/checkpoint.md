@@ -35,8 +35,7 @@ The tool itself does not mutate history. Session lifecycle handling records the 
 ```text
 closed --checkpoint------> open
 open   --rewind----------> closed (abandon trajectory; retain report)
-open   --seal(summary)--> closed (accept work; semantic compaction)
-open   --seal(shake)----> closed (accept work; scoped payload elision)
+open   --seal------------> closed (accept work; report + manifest)
 open   --keep_checkpoint> closed (retain full trajectory)
 ```
 
